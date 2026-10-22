@@ -1,0 +1,103 @@
+{
+  "parameters": {
+    "name": "t1_std_lp",
+    "sense": 1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "obj",
+    "coefficients": [
+      {
+        "name": "x",
+        "value": 1
+      },
+      {
+        "name": "y",
+        "value": 4
+      },
+      {
+        "name": "z",
+        "value": 9
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "x",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 4,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "y",
+      "cat": "Continuous",
+      "lowBound": -1,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "z",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "c1",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x",
+          "value": 1
+        },
+        {
+          "name": "y",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -5
+    },
+    {
+      "name": "c2",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "x",
+          "value": 1
+        },
+        {
+          "name": "z",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -10
+    },
+    {
+      "name": "c3",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "y",
+          "value": -1
+        },
+        {
+          "name": "z",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -7
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

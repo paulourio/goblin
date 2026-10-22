@@ -1,0 +1,815 @@
+{
+  "parameters": {
+    "name": "t2_mkp_30",
+    "sense": -1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "total_value",
+    "coefficients": [
+      {
+        "name": "x_0000",
+        "value": 85.001
+      },
+      {
+        "name": "x_0001",
+        "value": 59.002
+      },
+      {
+        "name": "x_0002",
+        "value": 23.003
+      },
+      {
+        "name": "x_0003",
+        "value": 16.004
+      },
+      {
+        "name": "x_0004",
+        "value": 56.005
+      },
+      {
+        "name": "x_0005",
+        "value": 72.006
+      },
+      {
+        "name": "x_0006",
+        "value": 83.007
+      },
+      {
+        "name": "x_0007",
+        "value": 76.008
+      },
+      {
+        "name": "x_0008",
+        "value": 35.009
+      },
+      {
+        "name": "x_0009",
+        "value": 71.01
+      },
+      {
+        "name": "x_0010",
+        "value": 78.011
+      },
+      {
+        "name": "x_0011",
+        "value": 24.012
+      },
+      {
+        "name": "x_0012",
+        "value": 55.013
+      },
+      {
+        "name": "x_0013",
+        "value": 63.014
+      },
+      {
+        "name": "x_0014",
+        "value": 68.015
+      },
+      {
+        "name": "x_0015",
+        "value": 64.016
+      },
+      {
+        "name": "x_0016",
+        "value": 36.017
+      },
+      {
+        "name": "x_0017",
+        "value": 96.018
+      },
+      {
+        "name": "x_0018",
+        "value": 99.019
+      },
+      {
+        "name": "x_0019",
+        "value": 89.02
+      },
+      {
+        "name": "x_0020",
+        "value": 99.021
+      },
+      {
+        "name": "x_0021",
+        "value": 70.022
+      },
+      {
+        "name": "x_0022",
+        "value": 10.023
+      },
+      {
+        "name": "x_0023",
+        "value": 87.024
+      },
+      {
+        "name": "x_0024",
+        "value": 62.025
+      },
+      {
+        "name": "x_0025",
+        "value": 89.026
+      },
+      {
+        "name": "x_0026",
+        "value": 66.027
+      },
+      {
+        "name": "x_0027",
+        "value": 62.028
+      },
+      {
+        "name": "x_0028",
+        "value": 35.029
+      },
+      {
+        "name": "x_0029",
+        "value": 73.03
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "x_0000",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0001",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0002",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0003",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0004",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0005",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0006",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0007",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0008",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0009",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 10,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0010",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0011",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0012",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0013",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0014",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0015",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0016",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0017",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0018",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0019",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 10,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0020",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0021",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0022",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0023",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0024",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0025",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0026",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0027",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0028",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0029",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 10,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "res_000",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0000",
+          "value": 22
+        },
+        {
+          "name": "x_0001",
+          "value": 3
+        },
+        {
+          "name": "x_0004",
+          "value": 17
+        },
+        {
+          "name": "x_0006",
+          "value": 9
+        },
+        {
+          "name": "x_0008",
+          "value": 5
+        },
+        {
+          "name": "x_0009",
+          "value": 4
+        },
+        {
+          "name": "x_0012",
+          "value": 16
+        },
+        {
+          "name": "x_0013",
+          "value": 3
+        },
+        {
+          "name": "x_0014",
+          "value": 25
+        },
+        {
+          "name": "x_0017",
+          "value": 6
+        },
+        {
+          "name": "x_0018",
+          "value": 7
+        },
+        {
+          "name": "x_0020",
+          "value": 19
+        },
+        {
+          "name": "x_0022",
+          "value": 18
+        },
+        {
+          "name": "x_0024",
+          "value": 1
+        },
+        {
+          "name": "x_0026",
+          "value": 9
+        },
+        {
+          "name": "x_0028",
+          "value": 19
+        }
+      ],
+      "pi": null,
+      "constant": -85
+    },
+    {
+      "name": "res_001",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0000",
+          "value": 11
+        },
+        {
+          "name": "x_0001",
+          "value": 17
+        },
+        {
+          "name": "x_0002",
+          "value": 12
+        },
+        {
+          "name": "x_0005",
+          "value": 2
+        },
+        {
+          "name": "x_0007",
+          "value": 14
+        },
+        {
+          "name": "x_0008",
+          "value": 1
+        },
+        {
+          "name": "x_0010",
+          "value": 12
+        },
+        {
+          "name": "x_0011",
+          "value": 12
+        },
+        {
+          "name": "x_0012",
+          "value": 15
+        },
+        {
+          "name": "x_0013",
+          "value": 19
+        },
+        {
+          "name": "x_0016",
+          "value": 21
+        },
+        {
+          "name": "x_0019",
+          "value": 11
+        },
+        {
+          "name": "x_0023",
+          "value": 10
+        },
+        {
+          "name": "x_0024",
+          "value": 15
+        },
+        {
+          "name": "x_0025",
+          "value": 8
+        },
+        {
+          "name": "x_0027",
+          "value": 17
+        },
+        {
+          "name": "x_0028",
+          "value": 16
+        },
+        {
+          "name": "x_0029",
+          "value": 19
+        }
+      ],
+      "pi": null,
+      "constant": -117
+    },
+    {
+      "name": "res_002",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0001",
+          "value": 2
+        },
+        {
+          "name": "x_0002",
+          "value": 13
+        },
+        {
+          "name": "x_0004",
+          "value": 11
+        },
+        {
+          "name": "x_0006",
+          "value": 2
+        },
+        {
+          "name": "x_0008",
+          "value": 9
+        },
+        {
+          "name": "x_0011",
+          "value": 24
+        },
+        {
+          "name": "x_0013",
+          "value": 9
+        },
+        {
+          "name": "x_0014",
+          "value": 3
+        },
+        {
+          "name": "x_0017",
+          "value": 19
+        },
+        {
+          "name": "x_0018",
+          "value": 6
+        },
+        {
+          "name": "x_0020",
+          "value": 11
+        },
+        {
+          "name": "x_0022",
+          "value": 14
+        },
+        {
+          "name": "x_0023",
+          "value": 24
+        },
+        {
+          "name": "x_0025",
+          "value": 20
+        },
+        {
+          "name": "x_0026",
+          "value": 25
+        },
+        {
+          "name": "x_0029",
+          "value": 11
+        }
+      ],
+      "pi": null,
+      "constant": -94
+    },
+    {
+      "name": "res_003",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0002",
+          "value": 22
+        },
+        {
+          "name": "x_0003",
+          "value": 9
+        },
+        {
+          "name": "x_0004",
+          "value": 22
+        },
+        {
+          "name": "x_0006",
+          "value": 25
+        },
+        {
+          "name": "x_0009",
+          "value": 3
+        },
+        {
+          "name": "x_0013",
+          "value": 25
+        },
+        {
+          "name": "x_0015",
+          "value": 12
+        },
+        {
+          "name": "x_0016",
+          "value": 19
+        },
+        {
+          "name": "x_0018",
+          "value": 10
+        },
+        {
+          "name": "x_0021",
+          "value": 10
+        },
+        {
+          "name": "x_0022",
+          "value": 13
+        },
+        {
+          "name": "x_0023",
+          "value": 23
+        },
+        {
+          "name": "x_0024",
+          "value": 11
+        },
+        {
+          "name": "x_0025",
+          "value": 22
+        },
+        {
+          "name": "x_0027",
+          "value": 9
+        }
+      ],
+      "pi": null,
+      "constant": -97
+    },
+    {
+      "name": "res_004",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0000",
+          "value": 13
+        },
+        {
+          "name": "x_0004",
+          "value": 8
+        },
+        {
+          "name": "x_0005",
+          "value": 13
+        },
+        {
+          "name": "x_0008",
+          "value": 18
+        },
+        {
+          "name": "x_0009",
+          "value": 13
+        },
+        {
+          "name": "x_0010",
+          "value": 10
+        },
+        {
+          "name": "x_0014",
+          "value": 10
+        },
+        {
+          "name": "x_0016",
+          "value": 22
+        },
+        {
+          "name": "x_0017",
+          "value": 5
+        },
+        {
+          "name": "x_0019",
+          "value": 14
+        },
+        {
+          "name": "x_0020",
+          "value": 3
+        },
+        {
+          "name": "x_0021",
+          "value": 24
+        },
+        {
+          "name": "x_0022",
+          "value": 2
+        },
+        {
+          "name": "x_0024",
+          "value": 24
+        },
+        {
+          "name": "x_0028",
+          "value": 15
+        },
+        {
+          "name": "x_0029",
+          "value": 21
+        }
+      ],
+      "pi": null,
+      "constant": -114
+    },
+    {
+      "name": "res_005",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0003",
+          "value": 16
+        },
+        {
+          "name": "x_0005",
+          "value": 1
+        },
+        {
+          "name": "x_0007",
+          "value": 9
+        },
+        {
+          "name": "x_0008",
+          "value": 23
+        },
+        {
+          "name": "x_0009",
+          "value": 20
+        },
+        {
+          "name": "x_0010",
+          "value": 1
+        },
+        {
+          "name": "x_0011",
+          "value": 21
+        },
+        {
+          "name": "x_0013",
+          "value": 7
+        },
+        {
+          "name": "x_0016",
+          "value": 23
+        },
+        {
+          "name": "x_0017",
+          "value": 4
+        },
+        {
+          "name": "x_0021",
+          "value": 10
+        },
+        {
+          "name": "x_0023",
+          "value": 17
+        },
+        {
+          "name": "x_0024",
+          "value": 17
+        },
+        {
+          "name": "x_0026",
+          "value": 7
+        },
+        {
+          "name": "x_0028",
+          "value": 22
+        },
+        {
+          "name": "x_0029",
+          "value": 14
+        }
+      ],
+      "pi": null,
+      "constant": -115
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

@@ -1,0 +1,231 @@
+{
+  "parameters": {
+    "name": "t1_whiskas",
+    "sense": 1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "Cost",
+    "coefficients": [
+      {
+        "name": "Chicken",
+        "value": 0.013
+      },
+      {
+        "name": "Beef",
+        "value": 0.008
+      },
+      {
+        "name": "Mutton",
+        "value": 0.01
+      },
+      {
+        "name": "Rice",
+        "value": 0.002
+      },
+      {
+        "name": "Wheat",
+        "value": 0.005
+      },
+      {
+        "name": "Gel",
+        "value": 0.001
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "Chicken",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "Beef",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "Mutton",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "Rice",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "Wheat",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "Gel",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "Sum",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "Chicken",
+          "value": 1
+        },
+        {
+          "name": "Beef",
+          "value": 1
+        },
+        {
+          "name": "Mutton",
+          "value": 1
+        },
+        {
+          "name": "Rice",
+          "value": 1
+        },
+        {
+          "name": "Wheat",
+          "value": 1
+        },
+        {
+          "name": "Gel",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -100
+    },
+    {
+      "name": "Protein",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "Chicken",
+          "value": 0.1
+        },
+        {
+          "name": "Beef",
+          "value": 0.2
+        },
+        {
+          "name": "Mutton",
+          "value": 0.15
+        },
+        {
+          "name": "Wheat",
+          "value": 0.04
+        }
+      ],
+      "pi": null,
+      "constant": -8
+    },
+    {
+      "name": "Fat",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "Chicken",
+          "value": 0.08
+        },
+        {
+          "name": "Beef",
+          "value": 0.1
+        },
+        {
+          "name": "Mutton",
+          "value": 0.11
+        },
+        {
+          "name": "Rice",
+          "value": 0.01
+        },
+        {
+          "name": "Wheat",
+          "value": 0.01
+        }
+      ],
+      "pi": null,
+      "constant": -6
+    },
+    {
+      "name": "Fibre",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "Chicken",
+          "value": 0.001
+        },
+        {
+          "name": "Beef",
+          "value": 0.005
+        },
+        {
+          "name": "Mutton",
+          "value": 0.003
+        },
+        {
+          "name": "Rice",
+          "value": 0.1
+        },
+        {
+          "name": "Wheat",
+          "value": 0.15
+        }
+      ],
+      "pi": null,
+      "constant": -2
+    },
+    {
+      "name": "Salt",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "Chicken",
+          "value": 0.002
+        },
+        {
+          "name": "Beef",
+          "value": 0.005
+        },
+        {
+          "name": "Mutton",
+          "value": 0.007
+        },
+        {
+          "name": "Rice",
+          "value": 0.002
+        },
+        {
+          "name": "Wheat",
+          "value": 0.008
+        }
+      ],
+      "pi": null,
+      "constant": -0.4
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

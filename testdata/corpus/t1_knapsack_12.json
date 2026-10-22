@@ -1,0 +1,279 @@
+{
+  "parameters": {
+    "name": "t1_knapsack_12",
+    "sense": -1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "total_value",
+    "coefficients": [
+      {
+        "name": "x_0000",
+        "value": 68.001
+      },
+      {
+        "name": "x_0001",
+        "value": 15.002
+      },
+      {
+        "name": "x_0002",
+        "value": 90.003
+      },
+      {
+        "name": "x_0003",
+        "value": 17.004
+      },
+      {
+        "name": "x_0004",
+        "value": 83.005
+      },
+      {
+        "name": "x_0005",
+        "value": 85.006
+      },
+      {
+        "name": "x_0006",
+        "value": 89.007
+      },
+      {
+        "name": "x_0007",
+        "value": 29.008
+      },
+      {
+        "name": "x_0008",
+        "value": 88.009
+      },
+      {
+        "name": "x_0009",
+        "value": 47.01
+      },
+      {
+        "name": "x_0010",
+        "value": 88.011
+      },
+      {
+        "name": "x_0011",
+        "value": 37.012
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "x_0000",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0001",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0002",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0003",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0004",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0005",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0006",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0007",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0008",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 5,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0009",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": 10,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0010",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0011",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "res_000",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0000",
+          "value": 22
+        },
+        {
+          "name": "x_0002",
+          "value": 5
+        },
+        {
+          "name": "x_0003",
+          "value": 21
+        },
+        {
+          "name": "x_0004",
+          "value": 8
+        },
+        {
+          "name": "x_0006",
+          "value": 12
+        },
+        {
+          "name": "x_0008",
+          "value": 9
+        },
+        {
+          "name": "x_0009",
+          "value": 21
+        },
+        {
+          "name": "x_0010",
+          "value": 1
+        },
+        {
+          "name": "x_0011",
+          "value": 8
+        }
+      ],
+      "pi": null,
+      "constant": -52
+    },
+    {
+      "name": "res_001",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0001",
+          "value": 23
+        },
+        {
+          "name": "x_0003",
+          "value": 6
+        },
+        {
+          "name": "x_0004",
+          "value": 10
+        },
+        {
+          "name": "x_0007",
+          "value": 13
+        },
+        {
+          "name": "x_0008",
+          "value": 22
+        },
+        {
+          "name": "x_0010",
+          "value": 1
+        },
+        {
+          "name": "x_0011",
+          "value": 19
+        }
+      ],
+      "pi": null,
+      "constant": -49
+    },
+    {
+      "name": "res_002",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0001",
+          "value": 9
+        },
+        {
+          "name": "x_0002",
+          "value": 3
+        },
+        {
+          "name": "x_0005",
+          "value": 25
+        },
+        {
+          "name": "x_0008",
+          "value": 9
+        },
+        {
+          "name": "x_0009",
+          "value": 7
+        },
+        {
+          "name": "x_0010",
+          "value": 15
+        },
+        {
+          "name": "x_0011",
+          "value": 21
+        }
+      ],
+      "pi": null,
+      "constant": -39
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

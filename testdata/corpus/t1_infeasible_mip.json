@@ -1,0 +1,59 @@
+{
+  "parameters": {
+    "name": "t1_infeasible_mip",
+    "sense": 1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "obj",
+    "coefficients": [
+      {
+        "name": "x",
+        "value": 1
+      },
+      {
+        "name": "y",
+        "value": 1
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "x",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "y",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "parity",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x",
+          "value": 2
+        },
+        {
+          "name": "y",
+          "value": 2
+        }
+      ],
+      "pi": null,
+      "constant": -3
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

@@ -1,0 +1,91 @@
+{
+  "parameters": {
+    "name": "t1_furniture",
+    "sense": -1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "Profit",
+    "coefficients": [
+      {
+        "name": "Tables",
+        "value": 45
+      },
+      {
+        "name": "Chairs",
+        "value": 20
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "Tables",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "Chairs",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 100,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "Wood",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "Tables",
+          "value": 20
+        },
+        {
+          "name": "Chairs",
+          "value": 5
+        }
+      ],
+      "pi": null,
+      "constant": -400
+    },
+    {
+      "name": "Labor",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "Tables",
+          "value": 10
+        },
+        {
+          "name": "Chairs",
+          "value": 15
+        }
+      ],
+      "pi": null,
+      "constant": -450
+    },
+    {
+      "name": "Demand",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "Tables",
+          "value": 1
+        },
+        {
+          "name": "Chairs",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -10
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

@@ -1,0 +1,1003 @@
+{
+  "parameters": {
+    "name": "t2_gap_45",
+    "sense": 1,
+    "status": 0,
+    "sol_status": 0
+  },
+  "objective": {
+    "name": "cost",
+    "coefficients": [
+      {
+        "name": "x_0_0",
+        "value": 47
+      },
+      {
+        "name": "x_0_1",
+        "value": 46.001
+      },
+      {
+        "name": "x_0_2",
+        "value": 27.002
+      },
+      {
+        "name": "x_0_3",
+        "value": 38.003
+      },
+      {
+        "name": "x_0_4",
+        "value": 42.004
+      },
+      {
+        "name": "x_0_5",
+        "value": 23.005
+      },
+      {
+        "name": "x_0_6",
+        "value": 27.006
+      },
+      {
+        "name": "x_0_7",
+        "value": 39.007
+      },
+      {
+        "name": "x_1_0",
+        "value": 26.008
+      },
+      {
+        "name": "x_1_1",
+        "value": 12.009
+      },
+      {
+        "name": "x_1_2",
+        "value": 28.01
+      },
+      {
+        "name": "x_1_3",
+        "value": 48.011
+      },
+      {
+        "name": "x_1_4",
+        "value": 20.012
+      },
+      {
+        "name": "x_1_5",
+        "value": 47.013
+      },
+      {
+        "name": "x_1_6",
+        "value": 39.014
+      },
+      {
+        "name": "x_1_7",
+        "value": 44.015
+      },
+      {
+        "name": "x_2_0",
+        "value": 18.016
+      },
+      {
+        "name": "x_2_1",
+        "value": 13.017
+      },
+      {
+        "name": "x_2_2",
+        "value": 29.018
+      },
+      {
+        "name": "x_2_3",
+        "value": 38.019
+      },
+      {
+        "name": "x_2_4",
+        "value": 15.02
+      },
+      {
+        "name": "x_2_5",
+        "value": 44.021
+      },
+      {
+        "name": "x_2_6",
+        "value": 14.022
+      },
+      {
+        "name": "x_2_7",
+        "value": 35.023
+      },
+      {
+        "name": "x_3_0",
+        "value": 26.024
+      },
+      {
+        "name": "x_3_1",
+        "value": 24.025
+      },
+      {
+        "name": "x_3_2",
+        "value": 32.026
+      },
+      {
+        "name": "x_3_3",
+        "value": 35.027
+      },
+      {
+        "name": "x_3_4",
+        "value": 35.028
+      },
+      {
+        "name": "x_3_5",
+        "value": 12.029
+      },
+      {
+        "name": "x_3_6",
+        "value": 48.03
+      },
+      {
+        "name": "x_3_7",
+        "value": 22.031
+      },
+      {
+        "name": "x_4_0",
+        "value": 16.032
+      },
+      {
+        "name": "x_4_1",
+        "value": 18.033
+      },
+      {
+        "name": "x_4_2",
+        "value": 27.034
+      },
+      {
+        "name": "x_4_3",
+        "value": 45.035
+      },
+      {
+        "name": "x_4_4",
+        "value": 36.036
+      },
+      {
+        "name": "x_4_5",
+        "value": 32.037
+      },
+      {
+        "name": "x_4_6",
+        "value": 49.038
+      },
+      {
+        "name": "x_4_7",
+        "value": 37.039
+      },
+      {
+        "name": "ot_0",
+        "value": 25
+      },
+      {
+        "name": "ot_1",
+        "value": 25.1
+      },
+      {
+        "name": "ot_2",
+        "value": 25.2
+      },
+      {
+        "name": "ot_3",
+        "value": 25.3
+      },
+      {
+        "name": "ot_4",
+        "value": 25.4
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "x_0_0",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_1",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_2",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_3",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_4",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_5",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_6",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_0_7",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_0",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_1",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_2",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_3",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_4",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_5",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_6",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_1_7",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_0",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_1",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_2",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_3",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_4",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_5",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_6",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_2_7",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_0",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_1",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_2",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_3",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_4",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_5",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_6",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_3_7",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_0",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_1",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_2",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_3",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_4",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_5",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_6",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "x_4_7",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 1,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "ot_0",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 15,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "ot_1",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 15,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "ot_2",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 15,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "ot_3",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 15,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "ot_4",
+      "cat": "Integer",
+      "lowBound": -0,
+      "upBound": 15,
+      "varValue": null,
+      "dj": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "task_0",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_0",
+          "value": 1
+        },
+        {
+          "name": "x_1_0",
+          "value": 1
+        },
+        {
+          "name": "x_2_0",
+          "value": 1
+        },
+        {
+          "name": "x_3_0",
+          "value": 1
+        },
+        {
+          "name": "x_4_0",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_1",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_1",
+          "value": 1
+        },
+        {
+          "name": "x_1_1",
+          "value": 1
+        },
+        {
+          "name": "x_2_1",
+          "value": 1
+        },
+        {
+          "name": "x_3_1",
+          "value": 1
+        },
+        {
+          "name": "x_4_1",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_2",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_2",
+          "value": 1
+        },
+        {
+          "name": "x_1_2",
+          "value": 1
+        },
+        {
+          "name": "x_2_2",
+          "value": 1
+        },
+        {
+          "name": "x_3_2",
+          "value": 1
+        },
+        {
+          "name": "x_4_2",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_3",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_3",
+          "value": 1
+        },
+        {
+          "name": "x_1_3",
+          "value": 1
+        },
+        {
+          "name": "x_2_3",
+          "value": 1
+        },
+        {
+          "name": "x_3_3",
+          "value": 1
+        },
+        {
+          "name": "x_4_3",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_4",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_4",
+          "value": 1
+        },
+        {
+          "name": "x_1_4",
+          "value": 1
+        },
+        {
+          "name": "x_2_4",
+          "value": 1
+        },
+        {
+          "name": "x_3_4",
+          "value": 1
+        },
+        {
+          "name": "x_4_4",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_5",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_5",
+          "value": 1
+        },
+        {
+          "name": "x_1_5",
+          "value": 1
+        },
+        {
+          "name": "x_2_5",
+          "value": 1
+        },
+        {
+          "name": "x_3_5",
+          "value": 1
+        },
+        {
+          "name": "x_4_5",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_6",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_6",
+          "value": 1
+        },
+        {
+          "name": "x_1_6",
+          "value": 1
+        },
+        {
+          "name": "x_2_6",
+          "value": 1
+        },
+        {
+          "name": "x_3_6",
+          "value": 1
+        },
+        {
+          "name": "x_4_6",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "task_7",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "x_0_7",
+          "value": 1
+        },
+        {
+          "name": "x_1_7",
+          "value": 1
+        },
+        {
+          "name": "x_2_7",
+          "value": 1
+        },
+        {
+          "name": "x_3_7",
+          "value": 1
+        },
+        {
+          "name": "x_4_7",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -1
+    },
+    {
+      "name": "agent_cap_0",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_0_0",
+          "value": 12
+        },
+        {
+          "name": "x_0_1",
+          "value": 5
+        },
+        {
+          "name": "x_0_2",
+          "value": 9
+        },
+        {
+          "name": "x_0_3",
+          "value": 8
+        },
+        {
+          "name": "x_0_4",
+          "value": 10
+        },
+        {
+          "name": "x_0_5",
+          "value": 10
+        },
+        {
+          "name": "x_0_6",
+          "value": 7
+        },
+        {
+          "name": "x_0_7",
+          "value": 13
+        },
+        {
+          "name": "ot_0",
+          "value": -1
+        }
+      ],
+      "pi": null,
+      "constant": -12
+    },
+    {
+      "name": "agent_cap_1",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_1_0",
+          "value": 12
+        },
+        {
+          "name": "x_1_1",
+          "value": 10
+        },
+        {
+          "name": "x_1_2",
+          "value": 9
+        },
+        {
+          "name": "x_1_3",
+          "value": 10
+        },
+        {
+          "name": "x_1_4",
+          "value": 12
+        },
+        {
+          "name": "x_1_5",
+          "value": 8
+        },
+        {
+          "name": "x_1_6",
+          "value": 8
+        },
+        {
+          "name": "x_1_7",
+          "value": 6
+        },
+        {
+          "name": "ot_1",
+          "value": -1
+        }
+      ],
+      "pi": null,
+      "constant": -12
+    },
+    {
+      "name": "agent_cap_2",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_2_0",
+          "value": 7
+        },
+        {
+          "name": "x_2_1",
+          "value": 4
+        },
+        {
+          "name": "x_2_2",
+          "value": 7
+        },
+        {
+          "name": "x_2_3",
+          "value": 6
+        },
+        {
+          "name": "x_2_4",
+          "value": 11
+        },
+        {
+          "name": "x_2_5",
+          "value": 6
+        },
+        {
+          "name": "x_2_6",
+          "value": 8
+        },
+        {
+          "name": "x_2_7",
+          "value": 10
+        },
+        {
+          "name": "ot_2",
+          "value": -1
+        }
+      ],
+      "pi": null,
+      "constant": -10
+    },
+    {
+      "name": "agent_cap_3",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_3_0",
+          "value": 5
+        },
+        {
+          "name": "x_3_1",
+          "value": 11
+        },
+        {
+          "name": "x_3_2",
+          "value": 4
+        },
+        {
+          "name": "x_3_3",
+          "value": 10
+        },
+        {
+          "name": "x_3_4",
+          "value": 13
+        },
+        {
+          "name": "x_3_5",
+          "value": 6
+        },
+        {
+          "name": "x_3_6",
+          "value": 8
+        },
+        {
+          "name": "x_3_7",
+          "value": 6
+        },
+        {
+          "name": "ot_3",
+          "value": -1
+        }
+      ],
+      "pi": null,
+      "constant": -10
+    },
+    {
+      "name": "agent_cap_4",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "x_4_0",
+          "value": 4
+        },
+        {
+          "name": "x_4_1",
+          "value": 12
+        },
+        {
+          "name": "x_4_2",
+          "value": 10
+        },
+        {
+          "name": "x_4_3",
+          "value": 12
+        },
+        {
+          "name": "x_4_4",
+          "value": 9
+        },
+        {
+          "name": "x_4_5",
+          "value": 5
+        },
+        {
+          "name": "x_4_6",
+          "value": 10
+        },
+        {
+          "name": "x_4_7",
+          "value": 7
+        },
+        {
+          "name": "ot_4",
+          "value": -1
+        }
+      ],
+      "pi": null,
+      "constant": -11
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}
