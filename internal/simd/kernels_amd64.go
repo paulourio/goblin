@@ -30,14 +30,14 @@ func Dot64(a, b []float64) float64 {
 	var s0, s1, s2, s3 float64
 	i := 0
 	for ; i+4 <= n; i += 4 {
-		s0 += a[i] * b[i]
-		s1 += a[i+1] * b[i+1]
-		s2 += a[i+2] * b[i+2]
-		s3 += a[i+3] * b[i+3]
+		s0 += float64(a[i] * b[i])
+		s1 += float64(a[i+1] * b[i+1])
+		s2 += float64(a[i+2] * b[i+2])
+		s3 += float64(a[i+3] * b[i+3])
 	}
 	sum := (s0 + s1) + (s2 + s3)
 	for ; i < n; i++ {
-		sum += a[i] * b[i]
+		sum += float64(a[i] * b[i])
 	}
 	return sum
 }
@@ -60,7 +60,7 @@ func dot64AVX2(a, b []float64) float64 {
 	sum := (lo.GetElem(0) + lo.GetElem(1)) + (hi.GetElem(0) + hi.GetElem(1))
 
 	for ; i < n; i++ {
-		sum += a[i] * b[i]
+		sum += float64(a[i] * b[i])
 	}
 	return sum
 }
@@ -84,13 +84,13 @@ func Axpy64(dst, src []float64, alpha float64) {
 	}
 	i := 0
 	for ; i+4 <= n; i += 4 {
-		dst[i] += alpha * src[i]
-		dst[i+1] += alpha * src[i+1]
-		dst[i+2] += alpha * src[i+2]
-		dst[i+3] += alpha * src[i+3]
+		dst[i] += float64(alpha * src[i])
+		dst[i+1] += float64(alpha * src[i+1])
+		dst[i+2] += float64(alpha * src[i+2])
+		dst[i+3] += float64(alpha * src[i+3])
 	}
 	for ; i < n; i++ {
-		dst[i] += alpha * src[i]
+		dst[i] += float64(alpha * src[i])
 	}
 }
 
@@ -123,7 +123,7 @@ func axpy64AVX2(dst, src []float64, alpha float64) {
 		vd.Add(vs.Mul(valpha)).StoreArray(d0)
 	}
 	for ; i < n; i++ {
-		dst[i] += alpha * src[i]
+		dst[i] += float64(alpha * src[i])
 	}
 }
 

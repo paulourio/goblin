@@ -34,7 +34,7 @@ The function [`Model.Compile()`](../compiled.go) produces an immutable [`Compile
 - **Internal Minimization Normalization**: Every problem is normalized internally to minimization via `ObjMin[j] = Sense * ObjCoeffs[j]`. User-facing objectives and bounds convert back through `ObjectiveFromMin` and `EvaluateObjective`.
 
 ### Pooled Solver Workspaces (`Workspace`)
-To avoid heap allocations during Branch-and-Bound node evaluation, [`AcquireWorkspace`](../workspace.go) and [`ReleaseWorkspace`](../workspace.go) manage a `sync.Pool` of pre-allocated [`Workspace`](../workspace.go) structs. Each `Workspace` owns the basis arrays (`Basis`, `BasicRow`, `Status`), working bounds and costs (`LB`, `UB`, `Cost`, `WorkCost`), primal/dual iterate vectors (`X`, `XB`, `Y`, `Dj`, `DSE`), tableau and transformation buffers (`Rho`, `FCol`, `Tau`, `TabRow`, `TabRowIdx`, `TabRowMark`), and the reusable [`LUFactorization`](../lu.go).
+To reuse numerical buffers across solves and Branch-and-Bound node re-optimizations, [`AcquireWorkspace`](../workspace.go) and [`ReleaseWorkspace`](../workspace.go) manage a `sync.Pool` of pre-allocated [`Workspace`](../workspace.go) structs. Each `Workspace` owns the basis arrays (`Basis`, `BasicRow`, `Status`), working bounds and costs (`LB`, `UB`, `Cost`, `WorkCost`), primal/dual iterate vectors (`X`, `XB`, `Y`, `Dj`, `DSE`), tableau and transformation buffers (`Rho`, `FCol`, `Tau`, `TabRow`, `TabRowIdx`, `TabRowMark`), and the reusable [`LUFactorization`](../lu.go).
 
 ---
 

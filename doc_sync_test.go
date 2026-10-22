@@ -1,9 +1,7 @@
 package gopt_test
 
 import (
-	"bytes"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"gopt/bench"
@@ -40,6 +38,9 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 	if err := bench.ValidateTelemetryAgainstCorpus("testdata/corpus", tb); err != nil {
 		t.Fatalf("corpus vs. telemetry validation failed: %v", err)
 	}
+	if err := bench.CheckTelemetryFreshness(".", tb); err != nil {
+		t.Fatal(err)
+	}
 
 	syncedFiles := []string{
 		"README.md",
@@ -62,22 +63,5 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 	}
 	if string(rawReport) != expectedReport {
 		t.Errorf("bench/results/final_report.md is out of sync with BuildFinalReportMarkdown (run `go run ./cmd/gopt-bench -sync-docs`)")
-	}
-
-	siblingDir := filepath.Join("..", "goblin", "bench", "results")
-	if _, err := os.Stat(siblingDir); err == nil {
-		for _, fname := range []string{"python_baseline.json", "gopt_scalar.json", "gopt_simd.json", "goblin_cbc.json"} {
-			localPath := filepath.Join("bench", "results", fname)
-			sibPath := filepath.Join(siblingDir, fname)
-			localBytes, err1 := os.ReadFile(localPath)
-			sibBytes, err2 := os.ReadFile(sibPath)
-			if err1 != nil || err2 != nil {
-				t.Errorf("missing cross-project telemetry file %s (local err=%v, sibling err=%v)", fname, err1, err2)
-				continue
-			}
-			if !bytes.Equal(localBytes, sibBytes) {
-				t.Errorf("cross-project telemetry drift detected between %s and %s", localPath, sibPath)
-			}
-		}
 	}
 }

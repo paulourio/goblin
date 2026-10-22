@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import atexit
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import glob
 import importlib.metadata
 import json
@@ -30,20 +29,26 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 
 # Support running directly from the workspace with the sibling PuLP checkout/venv.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 for _cand_site in sorted(
-    glob.glob(os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages"))
+    glob.glob(
+        os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
+    )
 ):
     if _cand_site not in sys.path:
         sys.path.insert(0, _cand_site)
 _VENDORED_PULP = os.path.join(_REPO_ROOT, "pulp")
-if os.path.isdir(os.path.join(_VENDORED_PULP, "pulp")) and _VENDORED_PULP not in sys.path:
+if (
+    os.path.isdir(os.path.join(_VENDORED_PULP, "pulp"))
+    and _VENDORED_PULP not in sys.path
+):
     sys.path.insert(0, _VENDORED_PULP)
 
-import pulp  # noqa: E402
+import pulp
 
 _WORKER_MIP_SOLVER: Any = None
 _WORKER_LP_SOLVER: Any = None
@@ -51,6 +56,7 @@ _WORKER_TMPDIR: tempfile.TemporaryDirectory[str] | None = None
 _WORKER_PULP_VERSION: str = "unknown"
 _WORKER_CBC_PATH: str = ""
 _WORKER_CBC_VERSION: str = "unknown"
+_WORKER_SPAWN_FLOOR_MS: float = 0.0
 
 
 def _detect_pulp_version() -> str:
@@ -59,7 +65,7 @@ def _detect_pulp_version() -> str:
         return str(ver)
     try:
         return importlib.metadata.version("PuLP")
-    except Exception:
+    except importlib.metadata.PackageNotFoundError:
         return "unknown"
 
 
@@ -82,8 +88,8 @@ def _detect_cbc_version(cbc_path: str) -> str:
         for s in lines:
             if "CBC" in s or "Coin" in s:
                 return s
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"[python_baseline] CBC version probe failed: {exc}", file=sys.stderr)
     return "unknown"
 
 
@@ -114,7 +120,6 @@ def _make_cbc_solver(mip: bool = True) -> tuple[Any, str]:
     candidates = [
         os.environ.get("CBC_BIN", ""),
         shutil.which("cbc") or "",
-        "/home/ff/dev/motif/.venv/lib/python3.14/site-packages/pulp/solverdir/cbc/linux/i64/cbc",
         os.path.abspath(os.path.join(_REPO_ROOT, "Cbc", "dist", "bin", "cbc")),
     ]
     for cand in candidates:
@@ -132,10 +137,71 @@ def _cleanup_worker() -> None:
         _WORKER_TMPDIR = None
 
 
+_SPAWN_FLOOR_MODEL: dict[str, Any] = {
+    "parameters": {"name": "spawn_floor", "sense": 1, "status": 0, "sol_status": 0},
+    "objective": {"name": "obj", "coefficients": [{"name": "x", "value": 1}]},
+    "variables": [
+        {
+            "name": "x",
+            "cat": "Integer",
+            "lowBound": 0,
+            "upBound": 10,
+            "varValue": None,
+            "dj": None,
+        }
+    ],
+    "constraints": [
+        {
+            "name": "c",
+            "sense": 1,
+            "coefficients": [{"name": "x", "value": 1}],
+            "pi": None,
+            "constant": -1,
+        }
+    ],
+    "sos1": [],
+    "sos2": [],
+}
+
+
+def _cpu_affinity() -> str:
+    """Return the CPUs this process may run on, compressed into ranges (for example 2 or 0-13)."""
+    if not hasattr(os, "sched_getaffinity"):
+        return "unknown"
+    cpus = sorted(os.sched_getaffinity(0))
+    ranges: list[str] = []
+    start = prev = cpus[0]
+    for c in [*cpus[1:], -1]:
+        if c != prev + 1:
+            ranges.append(str(start) if start == prev else f"{start}-{prev}")
+            start = c
+        prev = c
+    return ",".join(ranges)
+
+
+def _measure_spawn_floor(repeats: int = 15) -> float:
+    """Median wall time (ms) of prob.solve() on a 1-variable, 1-row MILP (min x, x >= 1).
+
+    The solve of such a model is trivial, so this measures the fixed cost of the PuLP + CBC
+    subprocess path (MPS write, process spawn, CBC start-up, .sol parsing). Reports subtract
+    it to separate interface overhead from solver work. The model is built with fromDict,
+    the same construction path as the benchmark instances.
+    """
+    times: list[float] = []
+    for k in range(repeats + 2):
+        _, prob = pulp.LpProblem.fromDict(json.loads(json.dumps(_SPAWN_FLOOR_MODEL)))
+        t0 = time.perf_counter()
+        prob.solve(_WORKER_MIP_SOLVER)
+        if k >= 2:
+            times.append((time.perf_counter() - t0) * 1000.0)
+    return statistics.median(times)
+
+
 def _init_worker(warmup_json_path: str) -> None:
     """Warm up Python interpreter, PuLP classes, allocator pages, temp dir, and CBC binary."""
     global _WORKER_MIP_SOLVER, _WORKER_LP_SOLVER, _WORKER_TMPDIR
     global _WORKER_PULP_VERSION, _WORKER_CBC_PATH, _WORKER_CBC_VERSION
+    global _WORKER_SPAWN_FLOOR_MS
     _WORKER_MIP_SOLVER, cbc_path = _make_cbc_solver(mip=True)
     _WORKER_LP_SOLVER, _ = _make_cbc_solver(mip=False)
     _WORKER_PULP_VERSION = _detect_pulp_version()
@@ -155,6 +221,7 @@ def _init_worker(warmup_json_path: str) -> None:
             prob.solve(_WORKER_MIP_SOLVER)
             _, prob_lp = pulp.LpProblem.fromDict(json.loads(raw))
             prob_lp.solve(_WORKER_LP_SOLVER)
+    _WORKER_SPAWN_FLOOR_MS = _measure_spawn_floor()
 
 
 def _load_trial_lines(json_path: str, n_trials: int) -> list[str]:
@@ -178,7 +245,6 @@ def _load_trial_lines(json_path: str, n_trials: int) -> list[str]:
 def benchmark_single_json(
     json_path: str, warmup: int = 2, trials: int = 11
 ) -> dict[str, Any]:
-    global _WORKER_MIP_SOLVER, _WORKER_LP_SOLVER, _WORKER_TMPDIR
     if _WORKER_MIP_SOLVER is None:
         _init_worker(json_path)
 
@@ -212,7 +278,9 @@ def benchmark_single_json(
     mps_path = os.path.join(_WORKER_TMPDIR.name, f"{pid}_check.mps")
 
     for run_idx in range(warmup + trials):
-        raw_payload = canonical_raw if run_idx < warmup else trial_lines[run_idx - warmup]
+        raw_payload = (
+            canonical_raw if run_idx < warmup else trial_lines[run_idx - warmup]
+        )
 
         t0 = time.perf_counter()
         data = json.loads(raw_payload)
@@ -292,13 +360,19 @@ def benchmark_single_json(
         "pulp_version": _WORKER_PULP_VERSION,
         "cbc_path": _WORKER_CBC_PATH,
         "cbc_version": _WORKER_CBC_VERSION,
+        "cbc_spawn_floor_ms": _WORKER_SPAWN_FLOOR_MS,
+        "cpu_affinity": _cpu_affinity(),
+        "t_solve_trials_ms": t_solve_list,
+        "t_total_trials_ms": t_total_list,
         "t_parse_median_ms": statistics.median(t_parse_list),
         "t_build_median_ms": statistics.median(t_build_list),
         "t_format_median_ms": statistics.median(t_format_list),
         "t_solve_median_ms": statistics.median(t_solve_list),
         "t_total_median_ms": statistics.median(t_total_list),
         "t_total_mean_ms": statistics.mean(t_total_list),
-        "t_total_sd_ms": statistics.stdev(t_total_list) if len(t_total_list) > 1 else 0.0,
+        "t_total_sd_ms": statistics.stdev(t_total_list)
+        if len(t_total_list) > 1
+        else 0.0,
     }
 
 
@@ -313,6 +387,12 @@ def main() -> None:
     parser.add_argument("--out-json", required=True)
     parser.add_argument("--trials", type=int, default=11)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--require-cbc-version",
+        default="2.10.3",
+        help="abort unless every worker ran this CBC version (empty string disables the check); "
+        "set CBC_BIN to select the binary",
+    )
     args = parser.parse_args()
 
     json_files = sorted(glob.glob(os.path.join(args.corpus_dir, "*.json")))
@@ -342,10 +422,18 @@ def main() -> None:
         ordered[pid] = res
         print(
             f"[Python PuLP+CBC] {res['id']:18s} | vars={res['num_vars']:5d} rows={res['num_constraints']:4d} "
-            f"| status={res['status']:10s} | obj={str(res['objective']):14s} "
+            f"| status={res['status']:10s} | obj={res['objective']!s:14s} "
             f"| build={res['t_build_median_ms']:6.2f}ms format={res['t_format_median_ms']:6.2f}ms "
             f"solve={res['t_solve_median_ms']:7.2f}ms total={res['t_total_median_ms']:7.2f}ms"
         )
+
+    if args.require_cbc_version:
+        seen = {str(res["cbc_version"]) for res in ordered.values()}
+        if any(not v.startswith(args.require_cbc_version) for v in seen):
+            sys.exit(
+                f"CBC version mismatch: required {args.require_cbc_version}, measured {sorted(seen)}; "
+                "set CBC_BIN to the intended binary or pass --require-cbc-version ''"
+            )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out_json)), exist_ok=True)
     with open(args.out_json, "w", encoding="utf-8") as f:

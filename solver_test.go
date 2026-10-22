@@ -1,14 +1,17 @@
 package gopt_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"gopt"
 	"gopt/bench"
+	"gopt/format"
 )
 
 func TestPuLPCanonicalLPsAndMIPs(t *testing.T) {
@@ -129,6 +132,89 @@ func TestFullCorpusMILPParityWithCBC(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAllTrialParity solves every randomized trial instance in testdata/corpus/trials and
+// compares status and objective with the frozen CBC 2.10.3 reference (python_baseline.json)
+// and with goblin's in-process CBC results (goblin_cbc.json), and checks each gopt solution
+// for feasibility independently of either reference.
+func TestAllTrialParity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("solves all 293 trial instances; skipped with -short")
+	}
+	var pyRef map[string]bench.PythonBaselineEntry
+	raw, err := os.ReadFile("bench/results/python_baseline.json")
+	if err != nil {
+		t.Fatalf("read python baseline: %v", err)
+	}
+	if err := json.Unmarshal(raw, &pyRef); err != nil {
+		t.Fatal(err)
+	}
+	var goblinRef map[string]bench.ProblemBenchResult
+	raw, err = os.ReadFile("bench/results/goblin_cbc.json")
+	if err != nil {
+		t.Fatalf("read goblin telemetry: %v", err)
+	}
+	if err := json.Unmarshal(raw, &goblinRef); err != nil {
+		t.Fatal(err)
+	}
+
+	solved := 0
+	for _, c := range bench.BuildCorpus() {
+		lines, err := os.ReadFile(filepath.Join("testdata", "corpus", "trials", c.ID+".jsonl"))
+		if err != nil {
+			t.Fatalf("%s: %v", c.ID, err)
+		}
+		py := pyRef[c.ID]
+		gb := goblinRef[c.ID]
+		for k, line := range bytes.Split(bytes.TrimSpace(lines), []byte("\n")) {
+			doc, err := format.ParsePuLPJSON(line)
+			if err != nil {
+				t.Fatalf("%s[%d]: %v", c.ID, k, err)
+			}
+			m, err := format.BuildModelFromPuLPJSON(doc)
+			if err != nil {
+				t.Fatalf("%s[%d]: %v", c.ID, k, err)
+			}
+			p, err := m.CompileChecked()
+			if err != nil {
+				t.Fatalf("%s[%d]: %v", c.ID, k, err)
+			}
+			opts := gopt.DefaultOptions()
+			opts.TimeLimit = 30 * time.Second
+			res := gopt.SolveCompiled(p, opts)
+			solved++
+
+			if k >= len(py.TrialObjectives) {
+				t.Fatalf("%s[%d]: no CBC reference for this trial", c.ID, k)
+			}
+			want := py.TrialObjectives[k]
+			if want == nil {
+				if res.Status == gopt.StatusOptimal {
+					t.Errorf("%s[%d]: gopt Optimal %.8g, CBC reported no optimum (%s)", c.ID, k, res.Objective, py.Status)
+				}
+				continue
+			}
+			if res.Status != gopt.StatusOptimal {
+				t.Errorf("%s[%d]: gopt %v, CBC Optimal %.8g", c.ID, k, res.Status, *want)
+				continue
+			}
+			if d := math.Abs(res.Objective-*want) / max(1.0, math.Abs(*want)); d > 1e-5 {
+				t.Errorf("%s[%d]: gopt %.8g, CBC %.8g (rel %.1e)", c.ID, k, res.Objective, *want, d)
+			}
+			if k < len(gb.TrialObjectives) {
+				if d := math.Abs(res.Objective-gb.TrialObjectives[k]) / max(1.0, math.Abs(gb.TrialObjectives[k])); d > 1e-5 {
+					t.Errorf("%s[%d]: gopt %.8g, goblin %.8g (rel %.1e)", c.ID, k, res.Objective, gb.TrialObjectives[k], d)
+				}
+			}
+			if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP); bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
+				t.Errorf("%s[%d]: infeasible solution: bound=%.1e row=%.1e int=%.1e", c.ID, k, bV, rV, iV)
+			}
+		}
+	}
+	if solved != 293 {
+		t.Fatalf("solved %d trial instances, want 293", solved)
 	}
 }
 

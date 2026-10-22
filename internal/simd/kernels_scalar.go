@@ -8,6 +8,10 @@ import "math"
 func UsingHardwareSIMD() bool { return false }
 
 // Dot64 computes the dot product sum_i (a[i] * b[i]) using 4-way loop unrolling.
+//
+// Lane k accumulates indices i ≡ k (mod 4) and the lanes are combined as (s0+s1)+(s2+s3),
+// matching the AVX2 kernel. Each product is converted to float64 before accumulation so the
+// compiler cannot fuse it into an FMA, keeping both paths bit-identical on every GOAMD64 level.
 func Dot64(a, b []float64) float64 {
 	n := min(len(a), len(b))
 	if n == 0 {
@@ -19,19 +23,23 @@ func Dot64(a, b []float64) float64 {
 	var s0, s1, s2, s3 float64
 	i := 0
 	for ; i+4 <= n; i += 4 {
-		s0 += a[i] * b[i]
-		s1 += a[i+1] * b[i+1]
-		s2 += a[i+2] * b[i+2]
-		s3 += a[i+3] * b[i+3]
+		s0 += float64(a[i] * b[i])
+		s1 += float64(a[i+1] * b[i+1])
+		s2 += float64(a[i+2] * b[i+2])
+		s3 += float64(a[i+3] * b[i+3])
 	}
 	sum := (s0 + s1) + (s2 + s3)
 	for ; i < n; i++ {
-		sum += a[i] * b[i]
+		sum += float64(a[i] * b[i])
 	}
 	return sum
 }
 
 // Axpy64 computes dst[i] += alpha * src[i] using 4-way loop unrolling.
+//
+// The explicit float64 conversions round each product before the addition, which by the Go
+// specification forbids fusing them into an FMA; results are therefore bit-identical to the
+// unfused AVX2 VMULPD + VADDPD path on every GOAMD64 level.
 func Axpy64(dst, src []float64, alpha float64) {
 	if alpha == 0 {
 		return
@@ -45,13 +53,13 @@ func Axpy64(dst, src []float64, alpha float64) {
 
 	i := 0
 	for ; i+4 <= n; i += 4 {
-		dst[i] += alpha * src[i]
-		dst[i+1] += alpha * src[i+1]
-		dst[i+2] += alpha * src[i+2]
-		dst[i+3] += alpha * src[i+3]
+		dst[i] += float64(alpha * src[i])
+		dst[i+1] += float64(alpha * src[i+1])
+		dst[i+2] += float64(alpha * src[i+2])
+		dst[i+3] += float64(alpha * src[i+3])
 	}
 	for ; i < n; i++ {
-		dst[i] += alpha * src[i]
+		dst[i] += float64(alpha * src[i])
 	}
 }
 

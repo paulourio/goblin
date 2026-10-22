@@ -23,7 +23,7 @@ Linear expressions (`Expr`) combine variable-coefficient pairs (`Term`) with an 
 
 ## 2. Model Validation and Sparse Matrix Compilation (`Model.Compile`)
 
-Calling [`Model.Validate()`](../model.go) or [`Model.CompileChecked()`](../compiled.go) checks that all variable bounds, objective terms, and constraint terms reference `Var` handles owned by the receiver `Model`, contain finite (`non-NaN`, `non-Inf`) coefficients, and use unique variable names. If an invalid model is passed directly to `Solve()` or `SolveCompiled()`, the solver returns `StatusUndefined`.
+Calling [`Model.Validate()`](../model.go) or [`Model.CompileChecked()`](../compiled.go) checks that all variable bounds, objective terms, and constraint terms reference `Var` handles owned by the receiver `Model`, contain finite (`non-NaN`, `non-Inf`) coefficients, use unique variable names, and use a valid `ConstraintSense` (`LessEqual`, `Equal`, or `GreaterEqual`). If an invalid model is passed directly to `Solve()` or `SolveCompiled()`, the solver returns `StatusUndefined`. Bounds that become empty after integer rounding (for example an integer variable on `[0.5, 0.7]`) are not a validation error; the solver reports `StatusInfeasible`.
 
 Calling [`Model.Compile()`](../compiled.go) freezes the algebraic model into an immutable [`CompiledProblem`](../compiled.go):
 1. **Term Deduplication and Cancellation**: Within each constraint row, duplicate references to the same `Var` are summed in preallocated accumulator slices (`rowAcc`, `touched`, `inTouched`), and entries with $|a_{i,j}| \le 10^{-15}$ are dropped.
@@ -32,6 +32,20 @@ Calling [`Model.Compile()`](../compiled.go) freezes the algebraic model into an 
 4. **Integer Column Indexing**: All `Binary` and `Integer` variable indices are collected into `IntCols`, setting `IsMIP = len(IntCols) > 0`.
 
 Once compiled, a single `*CompiledProblem` can be solved repeatedly with different `Options` or across concurrent goroutines via [`SolveCompiled(p, opts...)`](../solve.go).
+
+### Solver Options
+
+Start from [`DefaultOptions()`](../solve.go) and override fields. A zero-value `Options{}` is valid but minimal: presolve, cuts, and heuristics are off, the node and iteration budgets are unlimited, and both gap tolerances are zero.
+
+```go
+opts := gopt.DefaultOptions()
+opts.TimeLimit = 5 * time.Second
+opts.MaxNodes = 10000 // StatusNodeLimit when exceeded
+opts.MaxIter = 200000 // total simplex iterations; StatusIterationLimit when exceeded
+res := gopt.SolveCompiled(p, opts)
+```
+
+Whenever a limit stops a MILP search after the root LP has been solved, `Result.BestBound` is a valid global bound and `Result.Values` holds the best incumbent found, if any.
 
 ---
 

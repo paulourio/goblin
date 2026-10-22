@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -47,6 +49,40 @@ func meanSDDurationMS(d []time.Duration) (mean, sd float64) {
 	}
 	sd = math.Sqrt(sq / float64(len(d)-1))
 	return mean, sd
+}
+
+func durationsMS(d []time.Duration) []float64 {
+	out := make([]float64, len(d))
+	for i, v := range d {
+		out[i] = float64(v.Nanoseconds()) / 1e6
+	}
+	return out
+}
+
+// gitProvenance returns the HEAD commit of the working tree and whether tracked or untracked
+// files differ from it, so every telemetry file can be traced to the code that produced it.
+func gitProvenance() (commit string, dirty bool) {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "unknown", true
+	}
+	status, err := exec.Command("git", "status", "--porcelain").Output()
+	return strings.TrimSpace(string(out)), err != nil || len(bytes.TrimSpace(status)) > 0
+}
+
+// cpuAffinity returns the Cpus_allowed_list of the current process (Linux), so telemetry
+// records whether the run was pinned to specific cores.
+func cpuAffinity() string {
+	raw, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(line, "Cpus_allowed_list:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return "unknown"
 }
 
 func loadTrialPayloads(corpusDir, id string, nTrials int) ([][]byte, error) {
@@ -143,6 +179,9 @@ func syncAllDocs(corpusDir, pyPath, scalarPath, simdPath, reportPath string, che
 	if err := bench.ValidateTelemetryAgainstCorpus(corpusDir, tb); err != nil {
 		return err
 	}
+	if err := bench.CheckTelemetryFreshness(".", tb); err != nil {
+		return err
+	}
 	if reportPath != "" {
 		rendered, err := bench.BuildFinalReportMarkdown(tb)
 		if err != nil {
@@ -232,6 +271,15 @@ func main() {
 
 	cases := bench.BuildCorpus()
 	results := make(map[string]bench.ProblemBenchResult, len(cases))
+	gitCommit, gitDirty := gitProvenance()
+	fingerprint, err := bench.SourceFingerprint(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
+		os.Exit(1)
+	}
+	if gitDirty && *outPath != "" {
+		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
+	}
 
 	nWorkers := max(1, *workers)
 	fmt.Printf("=== GOPT WARM-STATE MULTI-TRIAL BENCHMARK SUITE (SIMD=%v, Workers=%d) ===\n\n", simd.UsingHardwareSIMD(), nWorkers)
@@ -418,28 +466,35 @@ func main() {
 					idx:          idx,
 					canonicalRes: canonicalRes,
 					res: bench.ProblemBenchResult{
-						ID:              c.ID,
-						Tier:            c.Tier,
-						NumVars:         canonicalCompiled.NumVars,
-						NumConstraints:  canonicalCompiled.NumConstraints,
-						IsMIP:           canonicalCompiled.IsMIP,
-						SIMDEnabled:     simd.UsingHardwareSIMD(),
-						TrialObjectives: trialObjs,
-						TParseMS:        goParseMS,
-						TBuildMS:        goBuildMS,
-						TCompileMS:      goCompileMS,
-						TMPSWriteMS:     medianDurationMS(tMPS),
-						TSolveMS:        goSolveMS,
-						TTotalMS:        goTotalMS,
-						TTotalMeanMS:    goMeanMS,
-						TTotalSDMS:      goSDMS,
-						RootLPTimeMS:    medianDurationMS(lpTimes),
-						RootLPIters:     canonicalRootLP.Iterations,
-						RootLPObj:       canonicalRootLP.Objective,
-						CP4Baseline:     cp4,
-						CP5Presolve:     cp5,
-						CP6Cuts:         cp6,
-						CP7Full:         cp7,
+						ID:                c.ID,
+						Tier:              c.Tier,
+						NumVars:           canonicalCompiled.NumVars,
+						NumConstraints:    canonicalCompiled.NumConstraints,
+						IsMIP:             canonicalCompiled.IsMIP,
+						SIMDEnabled:       simd.UsingHardwareSIMD(),
+						TrialObjectives:   trialObjs,
+						TParseMS:          goParseMS,
+						TBuildMS:          goBuildMS,
+						TCompileMS:        goCompileMS,
+						TMPSWriteMS:       medianDurationMS(tMPS),
+						TSolveMS:          goSolveMS,
+						TTotalMS:          goTotalMS,
+						TTotalMeanMS:      goMeanMS,
+						TTotalSDMS:        goSDMS,
+						TSolveTrialsMS:    durationsMS(tSolve),
+						TTotalTrialsMS:    durationsMS(tTotal),
+						GitCommit:         gitCommit,
+						GitDirty:          gitDirty,
+						GoVersion:         runtime.Version(),
+						SourceFingerprint: fingerprint,
+						CPUAffinity:       cpuAffinity(),
+						RootLPTimeMS:      medianDurationMS(lpTimes),
+						RootLPIters:       canonicalRootLP.Iterations,
+						RootLPObj:         canonicalRootLP.Objective,
+						CP4Baseline:       cp4,
+						CP5Presolve:       cp5,
+						CP6Cuts:           cp6,
+						CP7Full:           cp7,
 					},
 				}
 			}
