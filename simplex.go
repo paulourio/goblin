@@ -13,6 +13,8 @@ const (
 	dualTol   = 1e-7
 	pivotTol  = 1e-8
 	harrisTol = 1e-9
+	// minScaledPrimalTol floors the column-normalized primal tolerance of structural columns.
+	minScaledPrimalTol = 1e-12
 )
 
 // LPResult holds the result of an LP relaxation solve.
@@ -43,6 +45,33 @@ type LPSolver struct {
 	Deadline  time.Time
 	luValid   bool
 	dualValid bool
+	// colTol holds the primal feasibility tolerance of each structural column (see feasTol).
+	colTol []float64
+}
+
+// feasTol returns the primal feasibility tolerance of variable k. A value error e in a
+// structural x_k perturbs some row activity by up to e*max_i|a_ik|, so structural columns are
+// measured in column-normalized units: primalTol / max(1, max_i|a_ik|), floored at
+// minScaledPrimalTol. Without this, a basic big-M indicator resting 5e-8 outside its bound
+// (inside an absolute 1e-7 tolerance) shifts its row by 0.05 once the value is reported.
+// Slack columns are unit columns and use primalTol.
+func (s *LPSolver) feasTol(k int) float64 {
+	if k < len(s.colTol) {
+		return s.colTol[k]
+	}
+	return primalTol
+}
+
+func columnFeasTolerances(p *CompiledProblem) []float64 {
+	tol := make([]float64, p.NumVars)
+	for j := range p.NumVars {
+		norm := 1.0
+		for k := p.ColPtr[j]; k < p.ColPtr[j+1]; k++ {
+			norm = max(norm, math.Abs(p.ColVal[k]))
+		}
+		tol[j] = max(primalTol/norm, minScaledPrimalTol)
+	}
+	return tol
 }
 
 func (s *LPSolver) timeExpired() bool {
@@ -60,6 +89,7 @@ func NewLPSolver(p *CompiledProblem, ws *Workspace) *LPSolver {
 		Prob:    p,
 		WS:      ws,
 		MaxIter: max(2000, 20*(p.NumVars+p.NumConstraints)),
+		colTol:  columnFeasTolerances(p),
 	}
 	s.InitCrashBasis()
 	return s
@@ -204,7 +234,14 @@ func (s *LPSolver) SetStructuralBounds(lb, ub []float64) {
 	}
 }
 
+// AddCut appends the cutting plane sum_k val[k]*x[colIdx[k]] <= rhs to the LP relaxation.
+// The new row's slack enters the basis, so the current basis stays primal-degenerate-feasible
+// for all existing rows and the next Solve warm-starts with the dual simplex.
 func (s *LPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
+	s.addCutRows([]dynamicRow{s.newCutRow(colIdx, val, rhs)})
+}
+
+func (s *LPSolver) newCutRow(colIdx []int, val []float64, rhs float64) dynamicRow {
 	p := s.Prob
 	n := p.NumVars
 	dr := dynamicRow{
@@ -218,16 +255,29 @@ func (s *LPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 			dr.Dense[col] = val[k]
 		}
 	}
-	s.ExtraRows = append(s.ExtraRows, dr)
+	return dr
+}
 
-	oldM := s.WS.M
-	newM := oldM + 1
+// addCutRows appends a batch of cut rows with a single workspace resize. Dual steepest-edge
+// weights of existing rows are preserved: appending rows whose slacks are basic leaves the
+// existing rows of B^{-1} unchanged, so their weights ||e_r^T B^{-1}||^2 remain exact.
+func (s *LPSolver) addCutRows(rows []dynamicRow) {
+	if len(rows) == 0 {
+		return
+	}
+	p := s.Prob
+	n := p.NumVars
+	s.ExtraRows = append(s.ExtraRows, rows...)
+
 	ws := s.WS
+	oldM := ws.M
+	newM := oldM + len(rows)
 
 	savedBasis := slices.Clone(ws.Basis[:oldM])
 	savedStatus := slices.Clone(ws.Status[:n+oldM])
 	savedLB := slices.Clone(ws.LB[:n])
 	savedUB := slices.Clone(ws.UB[:n])
+	savedDSE := slices.Clone(ws.DSE[:oldM])
 
 	ws.EnsureSize(n, newM)
 	for j := range n {
@@ -240,42 +290,28 @@ func (s *LPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 	for i := range oldM {
 		slackOld := n + i
 		ws.Cost[slackOld] = 0
-		if i < p.NumConstraints {
-			switch p.RowSense[i] {
-			case LessEqual:
-				ws.LB[slackOld] = 0
-				ws.UB[slackOld] = math.Inf(1)
-			case GreaterEqual:
-				ws.LB[slackOld] = math.Inf(-1)
-				ws.UB[slackOld] = 0
-			case Equal:
-				ws.LB[slackOld] = 0
-				ws.UB[slackOld] = 0
-			}
-		} else {
-			ws.LB[slackOld] = 0
-			ws.UB[slackOld] = math.Inf(1)
-		}
+		ws.LB[slackOld], ws.UB[slackOld] = s.slackBounds(i)
 		ws.BasicRow[slackOld] = -1
 		ws.Status[slackOld] = savedStatus[slackOld]
 	}
-
-	newSlack := n + oldM
-	ws.Cost[newSlack] = 0
-	ws.LB[newSlack] = 0
-	ws.UB[newSlack] = math.Inf(1)
-	ws.Status[newSlack] = statusBasic
 
 	for i := range oldM {
 		bVar := savedBasis[i]
 		ws.Basis[i] = bVar
 		ws.BasicRow[bVar] = i
 		ws.Status[bVar] = statusBasic
+		ws.DSE[i] = savedDSE[i]
+	}
+	for i := oldM; i < newM; i++ {
+		newSlack := n + i
+		ws.Cost[newSlack] = 0
+		ws.LB[newSlack] = 0
+		ws.UB[newSlack] = math.Inf(1)
+		ws.Status[newSlack] = statusBasic
+		ws.Basis[i] = newSlack
+		ws.BasicRow[newSlack] = i
 		ws.DSE[i] = 1.0
 	}
-	ws.Basis[oldM] = newSlack
-	ws.BasicRow[newSlack] = oldM
-	ws.DSE[oldM] = 1.0
 
 	for k := range n + newM {
 		if ws.Status[k] != statusBasic {
@@ -284,6 +320,80 @@ func (s *LPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 	}
 	s.luValid = false
 	s.dualValid = false
+}
+
+// lpSnapshot captures the basis and bound state of an LPSolver so that a batch of
+// cutting planes can be rolled back if the re-solve fails.
+type lpSnapshot struct {
+	numExtra int
+	basis    []int
+	status   []varBasisStatus
+	lb, ub   []float64
+	dse      []float64
+}
+
+func (s *LPSolver) snapshot() lpSnapshot {
+	ws := s.WS
+	n := s.Prob.NumVars
+	m := s.TotalRows()
+	return lpSnapshot{
+		numExtra: len(s.ExtraRows),
+		basis:    slices.Clone(ws.Basis[:m]),
+		status:   slices.Clone(ws.Status[:n+m]),
+		lb:       slices.Clone(ws.LB[:n]),
+		ub:       slices.Clone(ws.UB[:n]),
+		dse:      slices.Clone(ws.DSE[:m]),
+	}
+}
+
+// restore rolls the solver back to snap, discarding any cut rows added after it was taken.
+func (s *LPSolver) restore(snap lpSnapshot) {
+	p := s.Prob
+	n := p.NumVars
+	s.ExtraRows = s.ExtraRows[:snap.numExtra]
+	m := s.TotalRows()
+	ws := s.WS
+	ws.EnsureSize(n, m)
+	for j := range n {
+		ws.LB[j] = snap.lb[j]
+		ws.UB[j] = snap.ub[j]
+		ws.Cost[j] = p.ObjMin[j]
+		ws.BasicRow[j] = -1
+	}
+	for i := range m {
+		slack := n + i
+		ws.Cost[slack] = 0
+		ws.LB[slack], ws.UB[slack] = s.slackBounds(i)
+		ws.BasicRow[slack] = -1
+	}
+	copy(ws.Status[:n+m], snap.status)
+	for i := range m {
+		ws.Basis[i] = snap.basis[i]
+		ws.BasicRow[snap.basis[i]] = i
+		ws.DSE[i] = snap.dse[i]
+	}
+	for k := range n + m {
+		if ws.Status[k] != statusBasic {
+			ws.X[k] = nonBasicValue(ws.Status[k], ws.LB[k], ws.UB[k])
+		}
+	}
+	s.luValid = false
+	s.dualValid = false
+}
+
+// slackBounds returns the bounds of the slack of row i (a_i x + s_i = rhs_i).
+func (s *LPSolver) slackBounds(i int) (lb, ub float64) {
+	if i >= s.Prob.NumConstraints {
+		return 0, math.Inf(1)
+	}
+	switch s.Prob.RowSense[i] {
+	case GreaterEqual:
+		return math.Inf(-1), 0
+	case Equal:
+		return 0, 0
+	default:
+		return 0, math.Inf(1)
+	}
 }
 
 func (s *LPSolver) fillColumn(colVar int, dst []float64) {
@@ -761,11 +871,12 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 			bVar := ws.Basis[r]
 			val := ws.XB[r]
 			lb, ub := ws.LB[bVar], ws.UB[bVar]
+			tol := s.feasTol(bVar)
 			var viol, dir float64
-			if val < lb-primalTol {
+			if val < lb-tol {
 				viol = lb - val
 				dir = 1.0
-			} else if val > ub+primalTol {
+			} else if val > ub+tol {
 				viol = val - ub
 				dir = -1.0
 			}
@@ -1074,20 +1185,21 @@ func (s *LPSolver) solveTwoPhasePrimalWithLimit(maxIter int) (Status, int) {
 		}
 
 		clear(ws.WorkCost)
-		maxViol := 0.0
+		anyInfeasible := false
 		for i := range m {
 			bVar := ws.Basis[i]
 			val := ws.XB[i]
-			if val < ws.LB[bVar]-primalTol {
+			tol := s.feasTol(bVar)
+			if val < ws.LB[bVar]-tol {
 				ws.WorkCost[bVar] = -1.0
-				maxViol = max(maxViol, ws.LB[bVar]-val)
-			} else if val > ws.UB[bVar]+primalTol {
+				anyInfeasible = true
+			} else if val > ws.UB[bVar]+tol {
 				ws.WorkCost[bVar] = 1.0
-				maxViol = max(maxViol, val-ws.UB[bVar])
+				anyInfeasible = true
 			}
 		}
 
-		if maxViol <= primalTol {
+		if !anyInfeasible {
 			if len(ws.LU.etas) > 0 {
 				if err := s.factorizeBasis(); err != nil {
 					return StatusNumericalError, totalIter
@@ -1236,7 +1348,8 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 		d := enterDir * ws.FCol[i]
 
 		if phase1 {
-			if val < lb-primalTol {
+			tol := s.feasTol(bVar)
+			if val < lb-tol {
 				if d < -pivotTol && !math.IsInf(ub, 1) {
 					theta := (ub - val) / (-d)
 					if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
@@ -1255,7 +1368,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 					}
 				}
 				continue
-			} else if val > ub+primalTol {
+			} else if val > ub+tol {
 				if d > pivotTol && !math.IsInf(lb, -1) {
 					theta := (val - lb) / d
 					if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
@@ -1299,7 +1412,10 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 	if leaveRow == -1 {
 		if math.IsInf(maxTheta, 1) {
 			if phase1 {
-				return StatusOptimal
+				// An improving phase-1 direction that no infeasible basic variable blocks
+				// cannot occur in exact arithmetic (an infeasible basic would block at its
+				// bound); it signals pivots below tolerance, not an infeasibility proof.
+				return StatusNumericalError
 			}
 			return StatusUnbounded
 		}

@@ -65,6 +65,10 @@ func (s ConstraintSense) String() string {
 	}
 }
 
+func (s ConstraintSense) valid() bool {
+	return s == LessEqual || s == Equal || s == GreaterEqual
+}
+
 // Status represents the termination status of a solve call, matching PuLP's LpSolveStatus codes.
 type Status int8
 
@@ -223,7 +227,7 @@ func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
 		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
 			ub = math.Floor(ub + 1e-12)
 		}
-		if lb >= 0 && ub <= 1 {
+		if lb >= 0 && ub <= 1 && lb <= ub {
 			cat = Binary
 		}
 	}
@@ -353,6 +357,9 @@ func (m *Model) AddConstraint(name string, c Constraint) {
 	if name == "" {
 		name = fmt.Sprintf("_C%d", len(m.constraints)+1)
 	}
+	if !c.Sense.valid() {
+		m.recordErr(fmt.Errorf("constraint %q has invalid sense %d", name, int8(c.Sense)))
+	}
 	// Normalize: Expr + Constant (<=, =, >=) RHS  =>  Terms (<=, =, >=) RHS - Expr.Constant
 	rhs := c.RHS - c.Expr.Constant
 	termsCopy := make([]Term, len(c.Expr.Terms))
@@ -398,6 +405,9 @@ func (m *Model) Validate() error {
 		}
 	}
 	for _, c := range m.constraints {
+		if !c.sense.valid() {
+			return fmt.Errorf("constraint %q has invalid sense %d", c.name, int8(c.sense))
+		}
 		if math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) {
 			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
 		}

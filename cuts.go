@@ -217,7 +217,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 		simd.Scale64(structCoeffs, -1.0)
 		cutRHS := -rhs
 
-		if cut, ok := finalizeCut(structCoeffs, cutRHS, lpPrimal); ok {
+		if cut, ok := finalizeCut(p, structCoeffs, cutRHS, lpPrimal); ok {
 			cuts = append(cuts, cut)
 		}
 	}
@@ -409,7 +409,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 			continue
 		}
 
-		if cut, ok := finalizeCut(denseCut, finalRHS, lpPrimal); ok {
+		if cut, ok := finalizeCut(p, denseCut, finalRHS, lpPrimal); ok {
 			cuts = append(cuts, cut)
 		}
 	}
@@ -497,7 +497,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				clear(denseCut)
 				denseCut[col] = 1.0
 				denseCut[binCol] = -effUB
-				if cut, ok := finalizeCut(denseCut, 0, lpPrimal); ok {
+				if cut, ok := finalizeCut(p, denseCut, 0, lpPrimal); ok {
 					cuts = append(cuts, cut)
 				}
 			}
@@ -633,7 +633,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					remDem -= nd.demand
 				}
 
-				if cut, ok := finalizeCut(denseCut, -cumDem, lpPrimal); ok {
+				if cut, ok := finalizeCut(p, denseCut, -cumDem, lpPrimal); ok {
 					cuts = append(cuts, cut)
 				}
 			}
@@ -765,7 +765,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					}
 				}
 			}
-			if cut, ok := finalizeCut(denseCut, cutRHS, lpPrimal); ok {
+			if cut, ok := finalizeCut(p, denseCut, cutRHS, lpPrimal); ok {
 				cuts = append(cuts, cut)
 			}
 		}
@@ -774,19 +774,31 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	return cuts
 }
 
-func finalizeCut(dense []float64, rhs float64, lpPrimal []float64) (cutPlane, bool) {
+// finalizeCut converts the dense cut dense*x <= rhs into a normalized sparse cut row.
+// Coefficients with magnitude in (0, cutDropTol] are removed; to keep the cut valid, the
+// largest possible value of each dropped term -a_j*x_j over the global bounds of x_j is added
+// to the right-hand side, and the cut is rejected if that bound is infinite.
+func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []float64) (cutPlane, bool) {
+	const cutDropTol = 1e-11
 	norm2 := 0.0
 	maxAbs := 0.0
 	minAbs := math.Inf(1)
 	nnz := 0
 
-	for _, v := range dense {
+	for j, v := range dense {
 		av := math.Abs(v)
-		if av > 1e-11 {
+		if av > cutDropTol {
 			norm2 += v * v
 			maxAbs = max(maxAbs, av)
 			minAbs = min(minAbs, av)
 			nnz++
+		} else if v != 0 {
+			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
+			lo := min(v*p.VarLB[j], v*p.VarUB[j])
+			if math.IsInf(lo, 0) || math.IsNaN(lo) {
+				return cutPlane{}, false
+			}
+			rhs -= lo
 		}
 	}
 	if nnz == 0 || maxAbs/minAbs > maxCutDynamism {
@@ -800,7 +812,7 @@ func finalizeCut(dense []float64, rhs float64, lpPrimal []float64) (cutPlane, bo
 	val := make([]float64, 0, nnz)
 	act := 0.0
 	for j, v := range dense {
-		if math.Abs(v) > 1e-11 {
+		if math.Abs(v) > cutDropTol {
 			sv := v * invNorm
 			colIdx = append(colIdx, j)
 			val = append(val, sv)

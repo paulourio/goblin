@@ -3,15 +3,32 @@ package gopt
 import "time"
 
 // Options configures the gopt LP and MILP solver.
+//
+// Start from DefaultOptions and override individual fields. The zero value is a valid but
+// minimal configuration: presolve, cuts, and heuristics are disabled, the node and iteration
+// budgets are unlimited, and both gap tolerances are zero (prove exact optimality).
 type Options struct {
-	EnablePresolve   bool
-	EnableCuts       bool
+	// EnablePresolve runs MIP presolve and node-level bound propagation.
+	EnablePresolve bool
+	// EnableCuts runs root cutting-plane rounds (GMI, lifted covers, flow/VUB, MIR).
+	EnableCuts bool
+	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
 	EnableHeuristics bool
-	MaxNodes         int
-	MaxCutPasses     int
-	RelGapTol        float64
-	AbsGapTol        float64
-	TimeLimit        time.Duration
+	// MaxNodes limits the number of explored branch-and-bound nodes (0 = unlimited).
+	// Exceeding it returns StatusNodeLimit with a valid global bound.
+	MaxNodes int
+	// MaxCutPasses limits the number of root cut rounds (0 disables cutting).
+	MaxCutPasses int
+	// MaxIter limits the total simplex iterations reported in Result.Iterations
+	// (0 = unlimited). Exceeding it returns StatusIterationLimit; for MILPs whose root LP
+	// was solved, BestBound remains a valid global bound.
+	MaxIter int
+	// RelGapTol is the relative optimality gap at which the search stops.
+	RelGapTol float64
+	// AbsGapTol is the absolute optimality gap at which the search stops.
+	AbsGapTol float64
+	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
+	TimeLimit time.Duration
 }
 
 // DefaultOptions returns the recommended production solver options.

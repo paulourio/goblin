@@ -1,0 +1,385 @@
+{
+ "doc": {
+  "constraints": [
+   {
+    "coefficients": [
+     {
+      "name": "x0_0",
+      "value": 1
+     },
+     {
+      "name": "x1_0",
+      "value": 1
+     },
+     {
+      "name": "x2_0",
+      "value": 1
+     },
+     {
+      "name": "x3_0",
+      "value": 1
+     }
+    ],
+    "constant": -0.05,
+    "name": "d0",
+    "pi": 5.000037,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_1",
+      "value": 1
+     },
+     {
+      "name": "x1_1",
+      "value": 1
+     },
+     {
+      "name": "x2_1",
+      "value": 1
+     },
+     {
+      "name": "x3_1",
+      "value": 1
+     }
+    ],
+    "constant": -0.01,
+    "name": "d1",
+    "pi": 4.000026,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_2",
+      "value": 1
+     },
+     {
+      "name": "x1_2",
+      "value": 1
+     },
+     {
+      "name": "x2_2",
+      "value": 1
+     },
+     {
+      "name": "x3_2",
+      "value": 1
+     }
+    ],
+    "constant": -0.01,
+    "name": "d2",
+    "pi": 1.000037,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_0",
+      "value": 1
+     },
+     {
+      "name": "x0_1",
+      "value": 1
+     },
+     {
+      "name": "x0_2",
+      "value": 1
+     },
+     {
+      "name": "y0",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub0",
+    "pi": 0.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x1_0",
+      "value": 1
+     },
+     {
+      "name": "x1_1",
+      "value": 1
+     },
+     {
+      "name": "x1_2",
+      "value": 1
+     },
+     {
+      "name": "y1",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub1",
+    "pi": -3.7e-05,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x2_0",
+      "value": 1
+     },
+     {
+      "name": "x2_1",
+      "value": 1
+     },
+     {
+      "name": "x2_2",
+      "value": 1
+     },
+     {
+      "name": "y2",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub2",
+    "pi": 0.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x3_0",
+      "value": 1
+     },
+     {
+      "name": "x3_1",
+      "value": 1
+     },
+     {
+      "name": "x3_2",
+      "value": 1
+     },
+     {
+      "name": "y3",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub3",
+    "pi": -2.6e-05,
+    "sense": -1
+   }
+  ],
+  "objective": {
+   "coefficients": [
+    {
+     "name": "y0",
+     "value": 14
+    },
+    {
+     "name": "y1",
+     "value": 37
+    },
+    {
+     "name": "y2",
+     "value": 7
+    },
+    {
+     "name": "y3",
+     "value": 26
+    },
+    {
+     "name": "x0_0",
+     "value": 15
+    },
+    {
+     "name": "x0_1",
+     "value": 11
+    },
+    {
+     "name": "x0_2",
+     "value": 6
+    },
+    {
+     "name": "x1_0",
+     "value": 5
+    },
+    {
+     "name": "x1_1",
+     "value": 8
+    },
+    {
+     "name": "x1_2",
+     "value": 1
+    },
+    {
+     "name": "x2_0",
+     "value": 10
+    },
+    {
+     "name": "x2_1",
+     "value": 16
+    },
+    {
+     "name": "x2_2",
+     "value": 4
+    },
+    {
+     "name": "x3_0",
+     "value": 8
+    },
+    {
+     "name": "x3_1",
+     "value": 4
+    },
+    {
+     "name": "x3_2",
+     "value": 4
+    }
+   ],
+   "name": "OBJ"
+  },
+  "parameters": {
+   "name": "bigm282",
+   "sense": 1,
+   "sol_status": 0,
+   "status": -1
+  },
+  "sos1": [],
+  "sos2": [],
+  "variables": [
+   {
+    "cat": "Continuous",
+    "dj": 9.999963,
+    "lowBound": 0,
+    "name": "x0_0",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 6.999974,
+    "lowBound": 0,
+    "name": "x0_1",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 4.999963,
+    "lowBound": 0,
+    "name": "x0_2",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x1_0",
+    "upBound": null,
+    "varValue": 0.05
+   },
+   {
+    "cat": "Continuous",
+    "dj": 4.000011,
+    "lowBound": 0,
+    "name": "x1_1",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x1_2",
+    "upBound": null,
+    "varValue": 0.01
+   },
+   {
+    "cat": "Continuous",
+    "dj": 4.999963,
+    "lowBound": 0,
+    "name": "x2_0",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 11.999974,
+    "lowBound": 0,
+    "name": "x2_1",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 2.999963,
+    "lowBound": 0,
+    "name": "x2_2",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 2.999989,
+    "lowBound": 0,
+    "name": "x3_0",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x3_1",
+    "upBound": null,
+    "varValue": 0.01
+   },
+   {
+    "cat": "Continuous",
+    "dj": 2.999989,
+    "lowBound": 0,
+    "name": "x3_2",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 14.0,
+    "lowBound": 0,
+    "name": "y0",
+    "upBound": 1,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "y1",
+    "upBound": 1,
+    "varValue": 6e-08
+   },
+   {
+    "cat": "Integer",
+    "dj": 7.0,
+    "lowBound": 0,
+    "name": "y2",
+    "upBound": 1,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "y3",
+    "upBound": 1,
+    "varValue": 1e-08
+   }
+  ]
+ },
+ "expected_objective": 7.7,
+ "expected_status": "Optimal",
+ "id": "bigm282",
+ "provenance": "CBC 2.10.3 reports Infeasible in all preprocess modes; optimum verified feasible by PuLP-side evaluation"
+}

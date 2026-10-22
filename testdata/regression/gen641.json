@@ -1,0 +1,289 @@
+{
+ "doc": {
+  "constraints": [
+   {
+    "coefficients": [
+     {
+      "name": "x1",
+      "value": 5
+     },
+     {
+      "name": "x2",
+      "value": -6
+     },
+     {
+      "name": "x3",
+      "value": 6.25
+     },
+     {
+      "name": "x8",
+      "value": 1
+     },
+     {
+      "name": "x9",
+      "value": -8
+     }
+    ],
+    "constant": 4.5,
+    "name": "c0",
+    "pi": -0.125,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x1",
+      "value": 1
+     },
+     {
+      "name": "x3",
+      "value": -3.5
+     },
+     {
+      "name": "x6",
+      "value": -7.5
+     },
+     {
+      "name": "x8",
+      "value": 1.5
+     },
+     {
+      "name": "x10",
+      "value": -4.5
+     }
+    ],
+    "constant": -5.0,
+    "name": "c1",
+    "pi": -0.13333333,
+    "sense": 0
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0",
+      "value": -3
+     },
+     {
+      "name": "x1",
+      "value": -6
+     },
+     {
+      "name": "x4",
+      "value": -3.75
+     },
+     {
+      "name": "x6",
+      "value": 5.25
+     },
+     {
+      "name": "x7",
+      "value": 8
+     },
+     {
+      "name": "x9",
+      "value": -4
+     }
+    ],
+    "constant": -22.5,
+    "name": "c2",
+    "pi": -0.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x6",
+      "value": 1
+     }
+    ],
+    "constant": -50,
+    "name": "bnd_up_6",
+    "pi": -0.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x6",
+      "value": 1
+     }
+    ],
+    "constant": 50,
+    "name": "bnd_lo_6",
+    "pi": -0.0,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x9",
+      "value": 1
+     }
+    ],
+    "constant": -50,
+    "name": "bnd_up_9",
+    "pi": -0.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x9",
+      "value": 1
+     }
+    ],
+    "constant": 50,
+    "name": "bnd_lo_9",
+    "pi": -0.0,
+    "sense": 1
+   }
+  ],
+  "objective": {
+   "coefficients": [
+    {
+     "name": "x0",
+     "value": 3
+    },
+    {
+     "name": "x1",
+     "value": 7
+    },
+    {
+     "name": "x2",
+     "value": 3
+    },
+    {
+     "name": "x3",
+     "value": -3
+    },
+    {
+     "name": "x5",
+     "value": -8
+    },
+    {
+     "name": "x6",
+     "value": 1
+    },
+    {
+     "name": "x7",
+     "value": 2
+    },
+    {
+     "name": "x8",
+     "value": 5
+    },
+    {
+     "name": "x9",
+     "value": 1
+    },
+    {
+     "name": "x10",
+     "value": -2
+    }
+   ],
+   "name": "OBJ"
+  },
+  "parameters": {
+   "name": "gen641",
+   "sense": -1,
+   "sol_status": 0,
+   "status": -1
+  },
+  "sos1": [],
+  "sos2": [],
+  "variables": [
+   {
+    "cat": "Integer",
+    "dj": 3.0,
+    "lowBound": 1,
+    "name": "x0",
+    "upBound": 4,
+    "varValue": 4.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 7.7583333,
+    "lowBound": 0,
+    "name": "x1",
+    "upBound": 12.0,
+    "varValue": 12.0
+   },
+   {
+    "cat": "Integer",
+    "dj": -2.6,
+    "lowBound": 0,
+    "name": "x10",
+    "upBound": 1,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 2.25,
+    "lowBound": 0,
+    "name": "x2",
+    "upBound": 1,
+    "varValue": 1.0
+   },
+   {
+    "cat": "Integer",
+    "dj": -2.6854167,
+    "lowBound": 1,
+    "name": "x3",
+    "upBound": 6,
+    "varValue": 1.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x4",
+    "upBound": 3,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": -8.0,
+    "lowBound": -3.5,
+    "name": "x5",
+    "upBound": 7.25,
+    "varValue": -3.5
+   },
+   {
+    "cat": "Continuous",
+    "dj": -0.0,
+    "lowBound": 0,
+    "name": "x6",
+    "upBound": null,
+    "varValue": 0.66666667
+   },
+   {
+    "cat": "Integer",
+    "dj": 2.0,
+    "lowBound": 0,
+    "name": "x7",
+    "upBound": 1,
+    "varValue": 1.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 5.325,
+    "lowBound": 0,
+    "name": "x8",
+    "upBound": 1,
+    "varValue": 1.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": -0.0,
+    "lowBound": null,
+    "name": "x9",
+    "upBound": 12.0,
+    "varValue": 8.21875
+   }
+  ]
+ },
+ "expected_objective": 139.885416667,
+ "expected_status": "Optimal",
+ "id": "gen641",
+ "provenance": "CBC 2.10.3 reports Infeasible unless preprocess off; optimum verified feasible by PuLP-side evaluation"
+}

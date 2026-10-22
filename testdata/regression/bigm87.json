@@ -1,0 +1,473 @@
+{
+ "doc": {
+  "constraints": [
+   {
+    "coefficients": [
+     {
+      "name": "x0_0",
+      "value": 1
+     },
+     {
+      "name": "x1_0",
+      "value": 1
+     },
+     {
+      "name": "x2_0",
+      "value": 1
+     },
+     {
+      "name": "x3_0",
+      "value": 1
+     }
+    ],
+    "constant": -1.0,
+    "name": "d0",
+    "pi": 10.0,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_1",
+      "value": 1
+     },
+     {
+      "name": "x1_1",
+      "value": 1
+     },
+     {
+      "name": "x2_1",
+      "value": 1
+     },
+     {
+      "name": "x3_1",
+      "value": 1
+     }
+    ],
+    "constant": -0.2,
+    "name": "d1",
+    "pi": 9.0,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_2",
+      "value": 1
+     },
+     {
+      "name": "x1_2",
+      "value": 1
+     },
+     {
+      "name": "x2_2",
+      "value": 1
+     },
+     {
+      "name": "x3_2",
+      "value": 1
+     }
+    ],
+    "constant": -0.05,
+    "name": "d2",
+    "pi": 17.0,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_3",
+      "value": 1
+     },
+     {
+      "name": "x1_3",
+      "value": 1
+     },
+     {
+      "name": "x2_3",
+      "value": 1
+     },
+     {
+      "name": "x3_3",
+      "value": 1
+     }
+    ],
+    "constant": -3.0,
+    "name": "d3",
+    "pi": 4.0,
+    "sense": 1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x0_0",
+      "value": 1
+     },
+     {
+      "name": "x0_1",
+      "value": 1
+     },
+     {
+      "name": "x0_2",
+      "value": 1
+     },
+     {
+      "name": "x0_3",
+      "value": 1
+     },
+     {
+      "name": "y0",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub0",
+    "pi": -12.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x1_0",
+      "value": 1
+     },
+     {
+      "name": "x1_1",
+      "value": 1
+     },
+     {
+      "name": "x1_2",
+      "value": 1
+     },
+     {
+      "name": "x1_3",
+      "value": 1
+     },
+     {
+      "name": "y1",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub1",
+    "pi": 0.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x2_0",
+      "value": 1
+     },
+     {
+      "name": "x2_1",
+      "value": 1
+     },
+     {
+      "name": "x2_2",
+      "value": 1
+     },
+     {
+      "name": "x2_3",
+      "value": 1
+     },
+     {
+      "name": "y2",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub2",
+    "pi": -11.0,
+    "sense": -1
+   },
+   {
+    "coefficients": [
+     {
+      "name": "x3_0",
+      "value": 1
+     },
+     {
+      "name": "x3_1",
+      "value": 1
+     },
+     {
+      "name": "x3_2",
+      "value": 1
+     },
+     {
+      "name": "x3_3",
+      "value": 1
+     },
+     {
+      "name": "y3",
+      "value": -1000000.0
+     }
+    ],
+    "constant": 0.0,
+    "name": "vub3",
+    "pi": -7.0,
+    "sense": -1
+   }
+  ],
+  "objective": {
+   "coefficients": [
+    {
+     "name": "y0",
+     "value": 23
+    },
+    {
+     "name": "y1",
+     "value": 37
+    },
+    {
+     "name": "y2",
+     "value": 17
+    },
+    {
+     "name": "y3",
+     "value": 16
+    },
+    {
+     "name": "x0_0",
+     "value": 19
+    },
+    {
+     "name": "x0_1",
+     "value": 20
+    },
+    {
+     "name": "x0_2",
+     "value": 5
+    },
+    {
+     "name": "x0_3",
+     "value": 11
+    },
+    {
+     "name": "x1_0",
+     "value": 10
+    },
+    {
+     "name": "x1_1",
+     "value": 9
+    },
+    {
+     "name": "x1_2",
+     "value": 17
+    },
+    {
+     "name": "x1_3",
+     "value": 4
+    },
+    {
+     "name": "x2_0",
+     "value": 20
+    },
+    {
+     "name": "x2_1",
+     "value": 7
+    },
+    {
+     "name": "x2_2",
+     "value": 6
+    },
+    {
+     "name": "x2_3",
+     "value": 10
+    },
+    {
+     "name": "x3_0",
+     "value": 9
+    },
+    {
+     "name": "x3_1",
+     "value": 2
+    },
+    {
+     "name": "x3_2",
+     "value": 14
+    },
+    {
+     "name": "x3_3",
+     "value": 19
+    }
+   ],
+   "name": "OBJ"
+  },
+  "parameters": {
+   "name": "bigm87",
+   "sense": 1,
+   "sol_status": 1,
+   "status": 1
+  },
+  "sos1": [],
+  "sos2": [],
+  "variables": [
+   {
+    "cat": "Continuous",
+    "dj": 21.0,
+    "lowBound": 0,
+    "name": "x0_0",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 23.0,
+    "lowBound": 0,
+    "name": "x0_1",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x0_2",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 19.0,
+    "lowBound": 0,
+    "name": "x0_3",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x1_0",
+    "upBound": null,
+    "varValue": 1.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x1_1",
+    "upBound": null,
+    "varValue": 0.2
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x1_2",
+    "upBound": null,
+    "varValue": 0.05
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x1_3",
+    "upBound": null,
+    "varValue": 3.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 21.0,
+    "lowBound": 0,
+    "name": "x2_0",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 9.0,
+    "lowBound": 0,
+    "name": "x2_1",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x2_2",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 17.0,
+    "lowBound": 0,
+    "name": "x2_3",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 6.0,
+    "lowBound": 0,
+    "name": "x3_0",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 0.0,
+    "lowBound": 0,
+    "name": "x3_1",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 4.0,
+    "lowBound": 0,
+    "name": "x3_2",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Continuous",
+    "dj": 22.0,
+    "lowBound": 0,
+    "name": "x3_3",
+    "upBound": null,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": -11999977.0,
+    "lowBound": 0,
+    "name": "y0",
+    "upBound": 1,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": 37.0,
+    "lowBound": 0,
+    "name": "y1",
+    "upBound": 1,
+    "varValue": 1.0
+   },
+   {
+    "cat": "Integer",
+    "dj": -10999983.0,
+    "lowBound": 0,
+    "name": "y2",
+    "upBound": 1,
+    "varValue": 0.0
+   },
+   {
+    "cat": "Integer",
+    "dj": -6999984.0,
+    "lowBound": 0,
+    "name": "y3",
+    "upBound": 1,
+    "varValue": 0.0
+   }
+  ]
+ },
+ "expected_objective": 61.65,
+ "expected_status": "Optimal",
+ "id": "bigm87",
+ "provenance": "CBC 2.10.3 agrees; pre-fix gopt without presolve accepted a basic big-M indicator 5e-8 outside its bound"
+}
