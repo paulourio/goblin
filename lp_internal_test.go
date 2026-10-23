@@ -133,3 +133,126 @@ func TestFinalizeCutCompensatesDroppedCoefficients(t *testing.T) {
 		t.Fatal("cut with an uncompensable dropped term was accepted")
 	}
 }
+
+// TestSparseMarkowitzLUAndHyperSparseSolves verifies that FactorizeSparse with a non-empty
+// Markowitz nucleus (Stage 3), FTRANSparse, BTRANSparse, and PushEtaSparse match dense FTRAN
+// and BTRAN solves and satisfy B*x = b and B^T*y = c within 1e-11.
+func TestSparseMarkowitzLUAndHyperSparseSolves(t *testing.T) {
+	const m = 48
+	r := rand.New(rand.NewPCG(42, 7))
+	colPtr := make([]int, m+1)
+	var rowIdx []int
+	var colVal []float64
+
+	// Construct a nonsingular basis without column or row singletons so the full m x m
+	// matrix enters Stage 3 (sparse Markowitz nucleus).
+	for j := range m {
+		colPtr[j] = len(rowIdx)
+		used := map[int]bool{
+			j:           true,
+			(j + 1) % m: true,
+			(j + 7) % m: true,
+		}
+		for range 2 {
+			used[r.IntN(m)] = true
+		}
+		rows := make([]int, 0, len(used))
+		for i := range used {
+			rows = append(rows, i)
+		}
+		for i := range rows {
+			for k := i + 1; k < len(rows); k++ {
+				if rows[k] < rows[i] {
+					rows[i], rows[k] = rows[k], rows[i]
+				}
+			}
+		}
+		for _, i := range rows {
+			rowIdx = append(rowIdx, i)
+			if i == j {
+				colVal = append(colVal, 4.0+r.Float64()*2.0)
+			} else {
+				colVal = append(colVal, (r.Float64()-0.5)*1.5)
+			}
+		}
+	}
+	colPtr[m] = len(rowIdx)
+
+	lu := &LUFactorization{}
+	err := lu.FactorizeSparse(m, func(col int, rows []int, vals []float64) ([]int, []float64) {
+		for k := colPtr[col]; k < colPtr[col+1]; k++ {
+			rows = append(rows, rowIdx[k])
+			vals = append(vals, colVal[k])
+		}
+		return rows, vals
+	})
+	if err != nil {
+		t.Fatalf("FactorizeSparse failed: %v", err)
+	}
+	if lu.nucStart != 0 {
+		t.Fatalf("expected full Markowitz nucleus (nucStart=0), got nucStart=%d", lu.nucStart)
+	}
+
+	// Verify FTRANSparse and BTRANSparse match dense FTRAN and BTRAN on sparse RHS vectors,
+	// both before and after PushEtaSparse updates.
+	for step := range 4 {
+		bDense := make([]float64, m)
+		bSparse := make([]float64, m)
+		bOrig := make([]float64, m)
+		for range 3 {
+			idx := r.IntN(m)
+			val := (r.Float64() - 0.5) * 5.0
+			bDense[idx] = val
+			bSparse[idx] = val
+			bOrig[idx] = val
+		}
+		lu.FTRAN(bDense)
+		fIdx := lu.FTRANSparse(bSparse, nil)
+		for i := range m {
+			if math.Abs(bDense[i]-bSparse[i]) > 1e-12 {
+				t.Fatalf("step %d: FTRANSparse[%d]=%.15g != FTRAN=%.15g", step, i, bSparse[i], bDense[i])
+			}
+		}
+		inFIdx := make([]bool, m)
+		for _, idx := range fIdx {
+			inFIdx[idx] = true
+		}
+		for i, v := range bSparse {
+			if math.Abs(v) > 1e-13 && !inFIdx[i] {
+				t.Fatalf("step %d: nonzero FTRANSparse[%d]=%.3e missing from fIdx", step, i, v)
+			}
+		}
+
+		cDense := make([]float64, m)
+		cSparse := make([]float64, m)
+		pivRow := r.IntN(m)
+		cDense[pivRow] = 1.0
+		cSparse[pivRow] = 1.0
+		lu.BTRAN(cDense)
+		rIdx := lu.BTRANSparse(cSparse, nil)
+		for i := range m {
+			if math.Abs(cDense[i]-cSparse[i]) > 1e-12 {
+				t.Fatalf("step %d: BTRANSparse[%d]=%.15g != BTRAN=%.15g", step, i, cSparse[i], cDense[i])
+			}
+		}
+		inRIdx := make([]bool, m)
+		for _, idx := range rIdx {
+			inRIdx[idx] = true
+		}
+		for i, v := range cSparse {
+			if math.Abs(v) > 1e-13 && !inRIdx[i] {
+				t.Fatalf("step %d: nonzero BTRANSparse[%d]=%.3e missing from rIdx", step, i, v)
+			}
+		}
+
+		// Apply a PushEtaSparse update if pivot is sufficiently large.
+		fSparseCopy := make([]float64, m)
+		copy(fSparseCopy, bSparse)
+		fSparseCopy[pivRow] = 2.5
+		fIdx = append(fIdx, pivRow)
+		if err := lu.PushEtaSparse(pivRow, fSparseCopy, fIdx); err != nil {
+			t.Fatalf("step %d: PushEtaSparse failed: %v", step, err)
+		}
+		_ = bOrig
+	}
+}

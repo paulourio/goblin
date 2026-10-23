@@ -3,13 +3,12 @@ package gopt
 import (
 	"fmt"
 	"math"
-
-	"gopt/internal/simd"
 )
 
 const (
-	luPivotTol    = 1e-11
-	maxEtaUpdates = 56
+	luPivotTol     = 1e-11
+	luMarkowitzTol = 0.1
+	maxEtaUpdates  = 56
 )
 
 type etaVector struct {
@@ -20,37 +19,70 @@ type etaVector struct {
 }
 
 // LUFactorization maintains P * B * Q = L * U with triangular singleton pre-ordering,
-// partial pivoting on the active nucleus, and column-spike product-form-of-the-inverse (PFI) eta updates.
+// sparse Markowitz threshold pivoting on the active nucleus, pre-permuted CSR/CSC
+// triangular factors, and product-form-of-the-inverse (PFI) eta updates.
 type LUFactorization struct {
 	m          int
 	numColSing int
 	nucStart   int
-	nucStride  int
-	lu         []float64
+
 	uDiag      []float64
+	uInvDiag   []float64
 	perm       []int
 	invPerm    []int
 	colPerm    []int
 	invColPerm []int
-	lFirst     []int
-	lLast      []int
-	uFirst     []int
-	uLast      []int
-	bColPtr    []int
-	bRowIdx    []int
-	bVal       []float64
-	bRowPtr    []int
-	bColIdx    []int
-	bRowVal    []float64
-	rowDeg     []int
-	colDeg     []int
-	rowDone    []bool
-	colDone    []bool
-	workInt    []int
-	etas       []etaVector
-	etaPool    []float64
-	etaIdx     []int
-	work       []float64
+
+	// Unified unit-lower-triangular factor L in pivot coordinates [0..m-1] (CSC + CSR)
+	lColPtr []int
+	lRowIdx []int
+	lColVal []float64
+	lRowPtr []int
+	lColIdx []int
+	lRowVal []float64
+
+	// Unified upper-triangular factor U (off-diagonal) in pivot coordinates [0..m-1] (CSC + CSR)
+	uColPtr []int
+	uRowIdx []int
+	uColVal []float64
+	uRowPtr []int
+	uColIdx []int
+	uRowVal []float64
+
+	// Input basis in CSC and CSR
+	bColPtr []int
+	bRowIdx []int
+	bVal    []float64
+	bRowPtr []int
+	bColIdx []int
+	bRowVal []float64
+
+	rowDeg  []int
+	colDeg  []int
+	rowDone []bool
+	colDone []bool
+	workInt []int
+	work    []float64
+
+	// Reusable buffers for sparse Markowitz nucleus elimination
+	nucRows    []int
+	nucCols    []int
+	nucPivRow  []int
+	nucPivCol  []int
+	nucRowDone []bool
+	nucColDone []bool
+	nucRCols   [][]int
+	nucRVals   [][]float64
+	nucCRows   [][]int
+	nucCVals   [][]float64
+	nucWorkPos []int
+	rowSingQ   []int
+	colSingQ   []int
+	remCols    []int
+
+	etas    []etaVector
+	etaPool []float64
+	etaIdx  []int
 }
 
 func newLUFactorization(m int) *LUFactorization {
@@ -63,17 +95,17 @@ func (f *LUFactorization) Reset(m int) {
 	f.m = m
 	f.numColSing = 0
 	f.nucStart = 0
-	f.nucStride = 0
 	if cap(f.perm) < m {
 		f.uDiag = make([]float64, m)
+		f.uInvDiag = make([]float64, m)
 		f.perm = make([]int, m)
 		f.invPerm = make([]int, m)
 		f.colPerm = make([]int, m)
 		f.invColPerm = make([]int, m)
-		f.lFirst = make([]int, m)
-		f.lLast = make([]int, m)
-		f.uFirst = make([]int, m)
-		f.uLast = make([]int, m)
+		f.lColPtr = make([]int, m+1)
+		f.lRowPtr = make([]int, m+1)
+		f.uColPtr = make([]int, m+1)
+		f.uRowPtr = make([]int, m+1)
 		f.bColPtr = make([]int, m+1)
 		f.bRowPtr = make([]int, m+1)
 		f.rowDeg = make([]int, m)
@@ -84,14 +116,15 @@ func (f *LUFactorization) Reset(m int) {
 		f.work = make([]float64, m)
 	} else {
 		f.uDiag = f.uDiag[:m]
+		f.uInvDiag = f.uInvDiag[:m]
 		f.perm = f.perm[:m]
 		f.invPerm = f.invPerm[:m]
 		f.colPerm = f.colPerm[:m]
 		f.invColPerm = f.invColPerm[:m]
-		f.lFirst = f.lFirst[:m]
-		f.lLast = f.lLast[:m]
-		f.uFirst = f.uFirst[:m]
-		f.uLast = f.uLast[:m]
+		f.lColPtr = f.lColPtr[:m+1]
+		f.lRowPtr = f.lRowPtr[:m+1]
+		f.uColPtr = f.uColPtr[:m+1]
+		f.uRowPtr = f.uRowPtr[:m+1]
 		f.bColPtr = f.bColPtr[:m+1]
 		f.bRowPtr = f.bRowPtr[:m+1]
 		f.rowDeg = f.rowDeg[:m]
@@ -107,7 +140,7 @@ func (f *LUFactorization) Reset(m int) {
 }
 
 func (f *LUFactorization) NeedsRefactor() bool {
-	return len(f.etas) >= maxEtaUpdates
+	return len(f.etas) >= maxEtaUpdates || len(f.etaIdx) >= max(16384, 24*f.m)
 }
 
 func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64)) error {
@@ -203,12 +236,13 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 				break
 			}
 		}
-		if pivRow == -1 || math.Abs(pivVal) < 1e-7 {
+		if pivRow == -1 || math.Abs(pivVal) < luPivotTol {
 			continue
 		}
 		f.perm[k] = pivRow
 		f.colPerm[k] = col
 		f.uDiag[k] = pivVal
+		f.uInvDiag[k] = 1.0 / pivVal
 		f.rowDone[pivRow] = true
 		f.colDone[col] = true
 		k++
@@ -247,12 +281,26 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 				break
 			}
 		}
-		if pivCol == -1 || math.Abs(pivVal) < 1e-7 {
+		if pivCol == -1 || math.Abs(pivVal) < luPivotTol {
+			continue
+		}
+		colMax := 0.0
+		for p := f.bColPtr[pivCol]; p < f.bColPtr[pivCol+1]; p++ {
+			r2 := f.bRowIdx[p]
+			if !f.rowDone[r2] {
+				av := math.Abs(f.bVal[p])
+				if av > colMax {
+					colMax = av
+				}
+			}
+		}
+		if math.Abs(pivVal) < luMarkowitzTol*colMax {
 			continue
 		}
 		f.perm[k] = r
 		f.colPerm[k] = pivCol
 		f.uDiag[k] = pivVal
+		f.uInvDiag[k] = 1.0 / pivVal
 		f.rowDone[r] = true
 		f.colDone[pivCol] = true
 		k++
@@ -268,22 +316,15 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 	}
 	nucStart := k
 	f.nucStart = nucStart
+	nNuc := m - nucStart
 
-	// Stage 3: Active nucleus (nucStart .. m-1).
-	kr := nucStart
-	for r := range m {
-		if !f.rowDone[r] {
-			f.perm[kr] = r
-			kr++
+	// Stage 3: Sparse Markowitz LU on the nNuc x nNuc active nucleus.
+	if nNuc > 0 {
+		if err := f.factorizeNucleusSparse(m, nucStart, nNuc); err != nil {
+			return err
 		}
 	}
-	kc := nucStart
-	for c := range m {
-		if !f.colDone[c] {
-			f.colPerm[kc] = c
-			kc++
-		}
-	}
+
 	for i, r := range f.perm {
 		f.invPerm[r] = i
 	}
@@ -291,110 +332,488 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		f.invColPerm[c] = j
 	}
 
-	nNuc := m - nucStart
-	if nNuc == 0 {
-		return nil
-	}
+	// Build unified L (CSC + CSR) and U (CSR + CSC) in pivot coordinates [0..m-1].
+	f.assembleFactors(m, numColSing, nucStart, nNuc)
+	return nil
+}
 
-	nucStride := (nNuc + 7) &^ 7
-	f.nucStride = nucStride
-	reqLU := nNuc * nucStride
-	if cap(f.lu) < reqLU {
-		f.lu = make([]float64, reqLU)
+func (f *LUFactorization) ensureNucleusBuffers(nNuc int) {
+	if cap(f.nucRows) < nNuc {
+		f.nucRows = make([]int, nNuc)
+		f.nucCols = make([]int, nNuc)
+		f.nucPivRow = make([]int, nNuc)
+		f.nucPivCol = make([]int, nNuc)
+		f.nucRowDone = make([]bool, nNuc)
+		f.nucColDone = make([]bool, nNuc)
+		f.nucRCols = make([][]int, nNuc)
+		f.nucRVals = make([][]float64, nNuc)
+		f.nucCRows = make([][]int, nNuc)
+		f.nucCVals = make([][]float64, nNuc)
+		f.nucWorkPos = make([]int, nNuc)
 	} else {
-		f.lu = f.lu[:reqLU]
-		clear(f.lu)
+		f.nucRows = f.nucRows[:nNuc]
+		f.nucCols = f.nucCols[:nNuc]
+		f.nucPivRow = f.nucPivRow[:nNuc]
+		f.nucPivCol = f.nucPivCol[:nNuc]
+		f.nucRowDone = f.nucRowDone[:nNuc]
+		f.nucColDone = f.nucColDone[:nNuc]
+		clear(f.nucRowDone)
+		clear(f.nucColDone)
+		f.nucRCols = f.nucRCols[:nNuc]
+		f.nucRVals = f.nucRVals[:nNuc]
+		f.nucCRows = f.nucCRows[:nNuc]
+		f.nucCVals = f.nucCVals[:nNuc]
+		f.nucWorkPos = f.nucWorkPos[:nNuc]
 	}
-	lu := f.lu
+	for i := range nNuc {
+		f.nucWorkPos[i] = -1
+		f.nucRCols[i] = f.nucRCols[i][:0]
+		f.nucRVals[i] = f.nucRVals[i][:0]
+		f.nucCRows[i] = f.nucCRows[i][:0]
+		f.nucCVals[i] = f.nucCVals[i][:0]
+	}
+}
 
-	for nr := range nNuc {
-		f.lFirst[nr] = -1
-		f.lLast[nr] = -1
-		f.uFirst[nr] = -1
-		f.uLast[nr] = -1
+func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
+	f.ensureNucleusBuffers(nNuc)
+
+	nr := 0
+	for r := range m {
+		if !f.rowDone[r] {
+			f.nucRows[nr] = r
+			f.invPerm[r] = nr
+			nr++
+		}
+	}
+	nc := 0
+	for c := range m {
+		if !f.colDone[c] {
+			f.nucCols[nc] = c
+			f.invColPerm[c] = nc
+			nc++
+		}
 	}
 
-	// Scatter sparse nonzeros of the nucleus block into the compact nNuc x nucStride buffer.
-	for nc := range nNuc {
-		c := f.colPerm[nucStart+nc]
+	rCols := f.nucRCols
+	rVals := f.nucRVals
+	cRows := f.nucCRows
+	cVals := f.nucCVals
+
+	for ncIdx := range nNuc {
+		c := f.nucCols[ncIdx]
 		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
 			v := f.bVal[p]
 			if math.Abs(v) <= 1e-16 {
 				continue
 			}
-			row := f.invPerm[f.bRowIdx[p]]
-			if row >= nucStart {
-				lu[(row-nucStart)*nucStride+nc] = v
+			r := f.bRowIdx[p]
+			if !f.rowDone[r] {
+				nrIdx := f.invPerm[r]
+				rCols[nrIdx] = append(rCols[nrIdx], ncIdx)
+				rVals[nrIdx] = append(rVals[nrIdx], v)
+				cRows[ncIdx] = append(cRows[ncIdx], nrIdx)
+				cVals[ncIdx] = append(cVals[ncIdx], v)
 			}
 		}
 	}
 
-	// Dense Gaussian elimination with partial pivoting strictly on the nNuc x nNuc nucleus.
+	colSingQ := f.colSingQ[:0]
+	rowSingQ := f.rowSingQ[:0]
+	remCols := f.remCols[:0]
+	for i := range nNuc {
+		remCols = append(remCols, i)
+		if len(cRows[i]) == 1 {
+			colSingQ = append(colSingQ, i)
+		}
+		if len(rCols[i]) == 1 {
+			rowSingQ = append(rowSingQ, i)
+		}
+	}
+	colSingHead := 0
+	rowSingHead := 0
+	workPos := f.nucWorkPos
+
 	for nk := range nNuc {
-		bestRow := nk
-		bestVal := math.Abs(lu[nk*nucStride+nk])
-		for nr := nk + 1; nr < nNuc; nr++ {
-			v := math.Abs(lu[nr*nucStride+nk])
-			if v > bestVal {
-				bestVal = v
-				bestRow = nr
-			}
-		}
-		if bestVal < luPivotTol {
-			return fmt.Errorf("singular basis at step %d (max pivot %.3e)", nucStart+nk, bestVal)
-		}
+		pivNR := -1
+		pivNC := -1
+		pivVal := 0.0
 
-		if bestRow != nk {
-			f.perm[nucStart+nk], f.perm[nucStart+bestRow] = f.perm[nucStart+bestRow], f.perm[nucStart+nk]
-			f.lFirst[nk], f.lFirst[bestRow] = f.lFirst[bestRow], f.lFirst[nk]
-			f.lLast[nk], f.lLast[bestRow] = f.lLast[bestRow], f.lLast[nk]
-			rowK := lu[nk*nucStride : nk*nucStride+nNuc]
-			rowBest := lu[bestRow*nucStride : bestRow*nucStride+nNuc]
-			for nc := range nNuc {
-				rowK[nc], rowBest[nc] = rowBest[nc], rowK[nc]
+		// 1. Check column singletons inside the nucleus (Markowitz cost 0).
+		for colSingHead < len(colSingQ) {
+			candC := colSingQ[colSingHead]
+			colSingHead++
+			if f.nucColDone[candC] || len(cRows[candC]) != 1 {
+				continue
+			}
+			candR := cRows[candC][0]
+			v := cVals[candC][0]
+			if !f.nucRowDone[candR] && math.Abs(v) >= luPivotTol {
+				pivNR = candR
+				pivNC = candC
+				pivVal = v
+				break
 			}
 		}
 
-		pivVal := lu[nk*nucStride+nk]
-		invPiv := 1.0 / pivVal
-
-		firstCol := -1
-		lastCol := -1
-		for nc := nk + 1; nc < nNuc; nc++ {
-			if math.Abs(lu[nk*nucStride+nc]) > 1e-16 {
-				if firstCol == -1 {
-					firstCol = nc
+		// 2. Check row singletons inside the nucleus (Markowitz cost 0, subject to column threshold).
+		if pivNR == -1 {
+			for rowSingHead < len(rowSingQ) {
+				candR := rowSingQ[rowSingHead]
+				rowSingHead++
+				if f.nucRowDone[candR] || len(rCols[candR]) != 1 {
+					continue
 				}
-				lastCol = nc
+				candC := rCols[candR][0]
+				v := rVals[candR][0]
+				if f.nucColDone[candC] || math.Abs(v) < luPivotTol {
+					continue
+				}
+				colMax := 0.0
+				for _, cv := range cVals[candC] {
+					av := math.Abs(cv)
+					if av > colMax {
+						colMax = av
+					}
+				}
+				if math.Abs(v) >= luMarkowitzTol*colMax {
+					pivNR = candR
+					pivNC = candC
+					pivVal = v
+					break
+				}
 			}
 		}
-		f.uFirst[nk] = firstCol
-		f.uLast[nk] = lastCol
 
-		for nr := nk + 1; nr < nNuc; nr++ {
-			aik := lu[nr*nucStride+nk]
+		// 3. Markowitz threshold search across remaining active columns.
+		if pivNR == -1 {
+			bestMerit := int(1<<30 - 1)
+			bestAbs := 0.0
+			checkedCols := 0
+
+			w := 0
+			for _, candC := range remCols {
+				if f.nucColDone[candC] {
+					continue
+				}
+				remCols[w] = candC
+				w++
+			}
+			remCols = remCols[:w]
+
+			for _, candC := range remCols {
+				cDeg := len(cRows[candC])
+				if cDeg == 0 {
+					return fmt.Errorf("singular basis at nucleus step %d (empty column)", nk)
+				}
+				if cDeg-1 > bestMerit && pivNR != -1 {
+					continue
+				}
+				colMax := 0.0
+				vals := cVals[candC]
+				rows := cRows[candC]
+				for _, v := range vals {
+					av := math.Abs(v)
+					if av > colMax {
+						colMax = av
+					}
+				}
+				if colMax < luPivotTol {
+					continue
+				}
+				thresh := max(luPivotTol, luMarkowitzTol*colMax)
+				for idx, candR := range rows {
+					v := vals[idx]
+					av := math.Abs(v)
+					if av < thresh {
+						continue
+					}
+					rDeg := len(rCols[candR])
+					merit := (rDeg - 1) * (cDeg - 1)
+					if merit < bestMerit || (merit == bestMerit && av > bestAbs) {
+						bestMerit = merit
+						bestAbs = av
+						pivNR = candR
+						pivNC = candC
+						pivVal = v
+					}
+				}
+				checkedCols++
+				if pivNR != -1 && (bestMerit <= 1 || (checkedCols >= 6 && bestMerit <= 4) || checkedCols >= 16) {
+					break
+				}
+			}
+
+			// Fallback: maximum absolute entry across all active columns.
+			if pivNR == -1 {
+				for _, candC := range remCols {
+					vals := cVals[candC]
+					rows := cRows[candC]
+					for idx, candR := range rows {
+						av := math.Abs(vals[idx])
+						if av > bestAbs {
+							bestAbs = av
+							pivNR = candR
+							pivNC = candC
+							pivVal = vals[idx]
+						}
+					}
+				}
+				if pivNR == -1 || math.Abs(pivVal) < luPivotTol {
+					return fmt.Errorf("singular basis at step %d (max pivot %.3e)", nucStart+nk, bestAbs)
+				}
+			}
+		}
+
+		gk := nucStart + nk
+		f.perm[gk] = f.nucRows[pivNR]
+		f.colPerm[gk] = f.nucCols[pivNC]
+		f.uDiag[gk] = pivVal
+		f.uInvDiag[gk] = 1.0 / pivVal
+		f.nucPivRow[nk] = pivNR
+		f.nucPivCol[nk] = pivNC
+		f.nucRowDone[pivNR] = true
+		f.nucColDone[pivNC] = true
+
+		// Remove pivot entry from pivot row and pivot col.
+		removeEntry(rCols, rVals, pivNR, pivNC)
+		removeEntry(cRows, cVals, pivNC, pivNR)
+
+		pivRCols := rCols[pivNR]
+		pivRVals := rVals[pivNR]
+		for _, c := range pivRCols {
+			removeEntry(cRows, cVals, c, pivNR)
+			if len(cRows[c]) == 1 {
+				colSingQ = append(colSingQ, c)
+			}
+		}
+
+		pivCRows := cRows[pivNC]
+		pivCVals := cVals[pivNC]
+		invPiv := 1.0 / pivVal
+		lWrite := 0
+
+		for idx, r := range pivCRows {
+			aik := pivCVals[idx]
+			removeEntry(rCols, rVals, r, pivNC)
 			if math.Abs(aik) <= 1e-16 {
-				lu[nr*nucStride+nk] = 0
+				if len(rCols[r]) == 1 {
+					rowSingQ = append(rowSingQ, r)
+				}
 				continue
 			}
 			mult := aik * invPiv
-			lu[nr*nucStride+nk] = mult
-			if f.lFirst[nr] == -1 {
-				f.lFirst[nr] = nk
+			pivCRows[lWrite] = r
+			pivCVals[lWrite] = mult
+			lWrite++
+
+			if len(pivRCols) == 0 {
+				if len(rCols[r]) == 1 {
+					rowSingQ = append(rowSingQ, r)
+				}
+				continue
 			}
-			f.lLast[nr] = nk
-			if firstCol != -1 {
-				pivSlice := lu[nk*nucStride+firstCol : nk*nucStride+lastCol+1]
-				targetSlice := lu[nr*nucStride+firstCol : nr*nucStride+lastCol+1]
-				simd.Axpy64(targetSlice, pivSlice, -mult)
+
+			rc := rCols[r]
+			rv := rVals[r]
+			for p, c := range rc {
+				workPos[c] = p
+			}
+			for p, c := range pivRCols {
+				delta := -mult * pivRVals[p]
+				pos := workPos[c]
+				if pos >= 0 {
+					newV := rv[pos] + delta
+					rv[pos] = newV
+					updateEntry(cRows[c], cVals[c], r, newV)
+				} else if math.Abs(delta) > 1e-16 {
+					workPos[c] = len(rc)
+					rc = append(rc, c)
+					rv = append(rv, delta)
+					cRows[c] = append(cRows[c], r)
+					cVals[c] = append(cVals[c], delta)
+				}
+			}
+
+			w := 0
+			for p, c := range rc {
+				workPos[c] = -1
+				v := rv[p]
+				if math.Abs(v) > 1e-16 {
+					rc[w] = c
+					rv[w] = v
+					w++
+				} else {
+					removeEntry(cRows, cVals, c, r)
+					if len(cRows[c]) == 1 {
+						colSingQ = append(colSingQ, c)
+					}
+				}
+			}
+			rCols[r] = rc[:w]
+			rVals[r] = rv[:w]
+			if w == 1 {
+				rowSingQ = append(rowSingQ, r)
+			}
+		}
+		cRows[pivNC] = pivCRows[:lWrite]
+		cVals[pivNC] = pivCVals[:lWrite]
+	}
+
+	f.colSingQ = colSingQ[:0]
+	f.rowSingQ = rowSingQ[:0]
+	f.remCols = remCols[:0]
+	return nil
+}
+
+func removeEntry(idxLists [][]int, valLists [][]float64, listID, target int) {
+	idxs := idxLists[listID]
+	vals := valLists[listID]
+	for i, id := range idxs {
+		if id == target {
+			last := len(idxs) - 1
+			idxs[i] = idxs[last]
+			vals[i] = vals[last]
+			idxLists[listID] = idxs[:last]
+			valLists[listID] = vals[:last]
+			return
+		}
+	}
+}
+
+func updateEntry(idxs []int, vals []float64, target int, newVal float64) {
+	for i, id := range idxs {
+		if id == target {
+			vals[i] = newVal
+			return
+		}
+	}
+}
+
+func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
+	// 1. Assemble L in CSC (columns 0..m-1)
+	f.lRowIdx = f.lRowIdx[:0]
+	f.lColVal = f.lColVal[:0]
+	clear(f.rowDeg)
+
+	for k := range numColSing {
+		f.lColPtr[k] = 0
+	}
+	for k := numColSing; k < nucStart; k++ {
+		f.lColPtr[k] = len(f.lRowIdx)
+		c := f.colPerm[k]
+		invD := f.uInvDiag[k]
+		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
+			v := f.bVal[p]
+			if math.Abs(v) <= 1e-16 {
+				continue
+			}
+			i := f.invPerm[f.bRowIdx[p]]
+			if i > k {
+				mult := v * invD
+				f.lRowIdx = append(f.lRowIdx, i)
+				f.lColVal = append(f.lColVal, mult)
+				f.rowDeg[i]++
 			}
 		}
 	}
-
-	for nr := range nNuc {
-		f.invPerm[f.perm[nucStart+nr]] = nucStart + nr
+	for nk := range nNuc {
+		k := nucStart + nk
+		f.lColPtr[k] = len(f.lRowIdx)
+		pivNC := f.nucPivCol[nk]
+		rows := f.nucCRows[pivNC]
+		vals := f.nucCVals[pivNC]
+		for p, nr := range rows {
+			i := f.invPerm[f.nucRows[nr]]
+			f.lRowIdx = append(f.lRowIdx, i)
+			f.lColVal = append(f.lColVal, vals[p])
+			f.rowDeg[i]++
+		}
 	}
-	return nil
+	f.lColPtr[m] = len(f.lRowIdx)
+
+	// Transpose L CSC -> L CSR
+	lNNZ := len(f.lRowIdx)
+	f.lRowPtr[0] = 0
+	for i := range m {
+		f.lRowPtr[i+1] = f.lRowPtr[i] + f.rowDeg[i]
+		f.workInt[i] = f.lRowPtr[i]
+	}
+	if cap(f.lColIdx) < lNNZ {
+		f.lColIdx = make([]int, lNNZ)
+		f.lRowVal = make([]float64, lNNZ)
+	} else {
+		f.lColIdx = f.lColIdx[:lNNZ]
+		f.lRowVal = f.lRowVal[:lNNZ]
+	}
+	for k := numColSing; k < m; k++ {
+		for p := f.lColPtr[k]; p < f.lColPtr[k+1]; p++ {
+			i := f.lRowIdx[p]
+			pos := f.workInt[i]
+			f.lColIdx[pos] = k
+			f.lRowVal[pos] = f.lColVal[p]
+			f.workInt[i] = pos + 1
+		}
+	}
+
+	// 2. Assemble U in CSR (rows 0..m-1)
+	f.uColIdx = f.uColIdx[:0]
+	f.uRowVal = f.uRowVal[:0]
+	clear(f.colDeg)
+
+	for i := range numColSing {
+		f.uRowPtr[i] = len(f.uColIdx)
+		r := f.perm[i]
+		for p := f.bRowPtr[r]; p < f.bRowPtr[r+1]; p++ {
+			j := f.invColPerm[f.bColIdx[p]]
+			if j > i {
+				v := f.bRowVal[p]
+				f.uColIdx = append(f.uColIdx, j)
+				f.uRowVal = append(f.uRowVal, v)
+				f.colDeg[j]++
+			}
+		}
+	}
+	for i := numColSing; i < nucStart; i++ {
+		f.uRowPtr[i] = len(f.uColIdx)
+	}
+	for nk := range nNuc {
+		i := nucStart + nk
+		f.uRowPtr[i] = len(f.uColIdx)
+		pivNR := f.nucPivRow[nk]
+		cols := f.nucRCols[pivNR]
+		vals := f.nucRVals[pivNR]
+		for p, nc := range cols {
+			j := f.invColPerm[f.nucCols[nc]]
+			f.uColIdx = append(f.uColIdx, j)
+			f.uRowVal = append(f.uRowVal, vals[p])
+			f.colDeg[j]++
+		}
+	}
+	f.uRowPtr[m] = len(f.uColIdx)
+
+	// Transpose U CSR -> U CSC
+	uNNZ := len(f.uColIdx)
+	f.uColPtr[0] = 0
+	for j := range m {
+		f.uColPtr[j+1] = f.uColPtr[j] + f.colDeg[j]
+		f.workInt[j] = f.uColPtr[j]
+	}
+	if cap(f.uRowIdx) < uNNZ {
+		f.uRowIdx = make([]int, uNNZ)
+		f.uColVal = make([]float64, uNNZ)
+	} else {
+		f.uRowIdx = f.uRowIdx[:uNNZ]
+		f.uColVal = f.uColVal[:uNNZ]
+	}
+	for i := range m {
+		for p := f.uRowPtr[i]; p < f.uRowPtr[i+1]; p++ {
+			j := f.uColIdx[p]
+			pos := f.workInt[j]
+			f.uRowIdx[pos] = i
+			f.uColVal[pos] = f.uRowVal[p]
+			f.workInt[j] = pos + 1
+		}
+	}
 }
 
 func (f *LUFactorization) FTRAN(rhs []float64) {
@@ -407,77 +826,35 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 		w[i] = rhs[f.perm[i]]
 	}
 
-	numColSing := f.numColSing
-	nucStart := f.nucStart
-
-	// Stage 2: Row singletons (lower-triangular block numColSing .. nucStart-1).
-	for k := numColSing; k < nucStart; k++ {
+	// Solve unit lower-triangular L * y = P * rhs
+	for k := f.numColSing; k < m; k++ {
 		wk := w[k]
+		if wk == 0 {
+			continue
+		}
 		if math.Abs(wk) <= 1e-16 {
 			w[k] = 0
 			continue
 		}
-		wk /= f.uDiag[k]
-		w[k] = wk
-		c := f.colPerm[k]
-		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
-			i := f.invPerm[f.bRowIdx[p]]
-			if i > k {
-				w[i] -= f.bVal[p] * wk
-			}
+		for p := f.lColPtr[k]; p < f.lColPtr[k+1]; p++ {
+			w[f.lRowIdx[p]] -= f.lColVal[p] * wk
 		}
 	}
 
-	// Stage 3: Active nucleus (nucStart .. m-1).
-	nNuc := m - nucStart
-	if nNuc > 0 {
-		nucStride := f.nucStride
-		lu := f.lu
-		wNuc := w[nucStart:m]
-		for nr := 1; nr < nNuc; nr++ {
-			lf := f.lFirst[nr]
-			if lf != -1 {
-				end := f.lLast[nr] + 1
-				row := lu[nr*nucStride+lf : nr*nucStride+end]
-				wNuc[nr] -= simd.Dot64(row, wNuc[lf:end])
-			}
+	// Solve upper-triangular U * x = y
+	for j := m - 1; j >= 0; j-- {
+		wj := w[j]
+		if wj == 0 {
+			continue
 		}
-		for nr := nNuc - 1; nr >= 0; nr-- {
-			sum := wNuc[nr]
-			uf := f.uFirst[nr]
-			if uf != -1 {
-				end := f.uLast[nr] + 1
-				row := lu[nr*nucStride+uf : nr*nucStride+end]
-				sum -= simd.Dot64(row, wNuc[uf:end])
-			}
-			if math.Abs(sum) > 1e-16 {
-				wNuc[nr] = sum / lu[nr*nucStride+nr]
-			} else {
-				wNuc[nr] = 0
-			}
+		if math.Abs(wj) <= 1e-16 {
+			w[j] = 0
+			continue
 		}
-	}
-
-	// Stage 1: Column singletons (upper-triangular prefix 0 .. numColSing-1).
-	if numColSing > 0 {
-		for j := m - 1; j >= 0; j-- {
-			wj := w[j]
-			if math.Abs(wj) <= 1e-16 {
-				w[j] = 0
-				continue
-			}
-			if j < numColSing {
-				wj /= f.uDiag[j]
-				w[j] = wj
-			}
-			c := f.colPerm[j]
-			limit := min(j, numColSing)
-			for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
-				i := f.invPerm[f.bRowIdx[p]]
-				if i < limit {
-					w[i] -= f.bVal[p] * wj
-				}
-			}
+		wj *= f.uInvDiag[j]
+		w[j] = wj
+		for p := f.uColPtr[j]; p < f.uColPtr[j+1]; p++ {
+			w[f.uRowIdx[p]] -= f.uColVal[p] * wj
 		}
 	}
 
@@ -486,14 +863,37 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 	}
 	for _, eta := range f.etas {
 		pr := eta.pivotRow
-		xp := rhs[pr] * eta.pivotInv
+		xp := rhs[pr]
+		if xp == 0 {
+			continue
+		}
+		if math.Abs(xp) <= 1e-16 {
+			rhs[pr] = 0
+			continue
+		}
+		xp *= eta.pivotInv
 		rhs[pr] = xp
-		if xp != 0 {
-			for k, idx := range eta.idx {
-				rhs[idx] -= eta.val[k] * xp
-			}
+		for k, idx := range eta.idx {
+			rhs[idx] -= eta.val[k] * xp
 		}
 	}
+}
+
+// FTRANSparse solves B * x = rhs in place and appends the indices i with |x[i]| > 1e-15 to nzIdx.
+func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
+	f.FTRAN(rhs)
+	nzIdx = nzIdx[:0]
+	for i, v := range rhs {
+		if v == 0 {
+			continue
+		}
+		if math.Abs(v) > 1e-15 {
+			nzIdx = append(nzIdx, i)
+		} else {
+			rhs[i] = 0
+		}
+	}
+	return nzIdx
 }
 
 func (f *LUFactorization) BTRAN(rhs []float64) {
@@ -516,87 +916,58 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 		w[k] = rhs[f.colPerm[k]]
 	}
 
-	numColSing := f.numColSing
-	nucStart := f.nucStart
-
-	// Stage 1: Column singletons (0 .. numColSing-1).
-	for i := range numColSing {
+	// Solve U^T * z = Q^T * rhs
+	for i := range m {
 		wi := w[i]
+		if wi == 0 {
+			continue
+		}
 		if math.Abs(wi) <= 1e-16 {
 			w[i] = 0
 			continue
 		}
-		wi /= f.uDiag[i]
+		wi *= f.uInvDiag[i]
 		w[i] = wi
-		r := f.perm[i]
-		for p := f.bRowPtr[r]; p < f.bRowPtr[r+1]; p++ {
-			j := f.invColPerm[f.bColIdx[p]]
-			if j > i {
-				w[j] -= f.bRowVal[p] * wi
-			}
+		for p := f.uRowPtr[i]; p < f.uRowPtr[i+1]; p++ {
+			w[f.uColIdx[p]] -= f.uRowVal[p] * wi
 		}
 	}
 
-	// Stage 3: Active nucleus (nucStart .. m-1).
-	nNuc := m - nucStart
-	if nNuc > 0 {
-		nucStride := f.nucStride
-		lu := f.lu
-		wNuc := w[nucStart:m]
-		for nk := range nNuc {
-			wk := wNuc[nk]
-			if math.Abs(wk) <= 1e-16 {
-				wNuc[nk] = 0
-				continue
-			}
-			wk /= lu[nk*nucStride+nk]
-			wNuc[nk] = wk
-			uf := f.uFirst[nk]
-			if uf != -1 {
-				end := f.uLast[nk] + 1
-				simd.Axpy64(wNuc[uf:end], lu[nk*nucStride+uf:nk*nucStride+end], -wk)
-			}
+	// Solve unit upper-triangular L^T * y = z
+	for i := m - 1; i >= f.numColSing; i-- {
+		wi := w[i]
+		if wi == 0 {
+			continue
 		}
-		for nk := nNuc - 1; nk >= 1; nk-- {
-			wk := wNuc[nk]
-			if math.Abs(wk) <= 1e-16 {
-				wNuc[nk] = 0
-				continue
-			}
-			lf := f.lFirst[nk]
-			if lf != -1 {
-				end := f.lLast[nk] + 1
-				simd.Axpy64(wNuc[lf:end], lu[nk*nucStride+lf:nk*nucStride+end], -wk)
-			}
+		if math.Abs(wi) <= 1e-16 {
+			w[i] = 0
+			continue
 		}
-	}
-
-	// Stage 2: Row singletons (nucStart-1 down to numColSing).
-	if nucStart > numColSing {
-		for i := m - 1; i >= numColSing; i-- {
-			wi := w[i]
-			if math.Abs(wi) <= 1e-16 {
-				w[i] = 0
-				continue
-			}
-			if i < nucStart {
-				wi /= f.uDiag[i]
-				w[i] = wi
-			}
-			r := f.perm[i]
-			limit := min(i, nucStart)
-			for p := f.bRowPtr[r]; p < f.bRowPtr[r+1]; p++ {
-				k := f.invColPerm[f.bColIdx[p]]
-				if k >= numColSing && k < limit {
-					w[k] -= f.bRowVal[p] * wi
-				}
-			}
+		for p := f.lRowPtr[i]; p < f.lRowPtr[i+1]; p++ {
+			w[f.lColIdx[p]] -= f.lRowVal[p] * wi
 		}
 	}
 
 	for i := range m {
 		rhs[f.perm[i]] = w[i]
 	}
+}
+
+// BTRANSparse solves B^T * y = rhs in place and appends the indices i with |y[i]| > 1e-16 to nzIdx.
+func (f *LUFactorization) BTRANSparse(rhs []float64, nzIdx []int) []int {
+	f.BTRAN(rhs)
+	nzIdx = nzIdx[:0]
+	for i, v := range rhs {
+		if v == 0 {
+			continue
+		}
+		if math.Abs(v) > 1e-16 {
+			nzIdx = append(nzIdx, i)
+		} else {
+			rhs[i] = 0
+		}
+	}
+	return nzIdx
 }
 
 func (f *LUFactorization) PushEta(pivotRow int, fCol []float64) error {
@@ -610,6 +981,31 @@ func (f *LUFactorization) PushEta(pivotRow int, fCol []float64) error {
 		if i != pivotRow && math.Abs(v) > 1e-15 {
 			f.etaIdx = append(f.etaIdx, i)
 			f.etaPool = append(f.etaPool, v)
+		}
+	}
+	f.etas = append(f.etas, etaVector{
+		pivotRow: pivotRow,
+		pivotInv: 1.0 / piv,
+		idx:      f.etaIdx[startIdx:],
+		val:      f.etaPool[startVal:],
+	})
+	return nil
+}
+
+func (f *LUFactorization) PushEtaSparse(pivotRow int, fCol []float64, fColIdx []int) error {
+	piv := fCol[pivotRow]
+	if math.Abs(piv) < luPivotTol {
+		return fmt.Errorf("tiny eta pivot %.3e at row %d", piv, pivotRow)
+	}
+	startVal := len(f.etaPool)
+	startIdx := len(f.etaIdx)
+	for _, i := range fColIdx {
+		if i != pivotRow {
+			v := fCol[i]
+			if math.Abs(v) > 1e-15 {
+				f.etaIdx = append(f.etaIdx, i)
+				f.etaPool = append(f.etaPool, v)
+			}
 		}
 	}
 	f.etas = append(f.etas, etaVector{

@@ -8,21 +8,21 @@ The `gopt` engine combines a revised dual and two-phase primal simplex LP solver
 
 The LP solver maintains a nonsingular basis $B \in \mathbb{R}^{m \times m}$ whose columns are drawn from the $n$ structural columns and the $m$ unit slack columns.
 
-### Singleton Peeling and Dense-Nucleus LU
+### Singleton Peeling and Sparse Markowitz LU
 [`LUFactorization.FactorizeSparse`](../lu.go) permutes $B$ into the block form
 
 $$P B Q = \begin{pmatrix} U_{11} & B_{12} & B_{13} \\ 0 & L_{22} & 0 \\ 0 & B_{32} & N_{33} \end{pmatrix}$$
 
-1. **Stage 1, column singletons** (positions $0 \dots s_1 - 1$): repeatedly pivots on a column with exactly one nonzero among the remaining rows. Those columns have no entries in later rows, so $U_{11}$ is upper triangular.
-2. **Stage 2, row singletons** (positions $s_1 \dots s_2 - 1$): repeatedly pivots on a row with exactly one remaining column. Those rows have no nucleus entries, so $L_{22}$ is lower triangular and the block to its right is zero.
-3. **Stage 3, dense nucleus** ($n_{\text{nuc}} = m - s_2$): the remaining submatrix is scattered into a row-major buffer with stride `(nNuc + 7) &^ 7` and factorized by Gaussian elimination with partial pivoting, $O(n_{\text{nuc}}^3)$. Each row records the column envelope of its $L$ and $U$ entries (`lFirst`/`lLast`, `uFirst`/`uLast`) so that updates and solves touch only that span.
+1. **Stage 1, column singletons** (positions $0 \dots s_1 - 1$): repeatedly pivots on a column with one nonzero among the remaining rows (`|pivVal| >= 1e-7`). Those columns have no entries in later rows, so $U_{11}$ is upper triangular and $L_{11} = I$.
+2. **Stage 2, row singletons** (positions $s_1 \dots s_2 - 1$): repeatedly pivots on a row with one remaining column whose entry satisfies both the floor $|p| \ge 10^{-7}$ and the column threshold $|p| \ge 0.1 \max_i |B_{i,q}|$. Because the block to the right of $L_{22}$ is zero, factoring $\begin{pmatrix} L_{22} \\ B_{32} \end{pmatrix} = \begin{pmatrix} \hat{L}_{22} \\ \hat{L}_{32} \end{pmatrix} D_2$ places the unit multipliers in $\hat{L}$ and the pivot values $D_2$ on the diagonal of $U_{22}$.
+3. **Stage 3, sparse Markowitz nucleus** ($n_{\text{nuc}} = m - s_2$): [`factorizeNucleusSparse`](../lu.go) maintains active sparse rows (`nucRowIdx`/`nucRowVal`) and columns (`nucColIdx`/`nucColVal`) with dynamic degree arrays. At each step it checks for a threshold-stable row singleton, a column singleton, or the entry minimizing the Markowitz product $(r_i - 1)(c_j - 1)$ among candidates satisfying $|u_{ij}| \ge 0.1 \max_r |u_{rj}|$ and $|u_{ij}| \ge 10^{-11}$, then updates the active submatrix by sparse outer-product elimination.
 
-Singleton pivots smaller than $10^{-7}$ are deferred to the nucleus; a nucleus pivot below $10^{-11}$ reports a singular basis, after which the solver restarts from the slack basis.
+After factorization, all three stages are assembled into unified pre-permuted CSR and CSC factors (`lRowPtr`/`lColPtr` for unit lower-triangular $L$, `uRowPtr`/`uColPtr` and `uInvDiag` for upper-triangular $U$) indexed directly in elimination order $0 \dots m-1$.
 
-### `FTRAN` and `BTRAN`
-- **`FTRAN` ($B x = b$)**: forward substitution through $L_{22}$ (eliminating into $B_{32}$), the nucleus solves $L y = \tilde b$ and $U x = y$ with `simd.Dot64` over row envelopes, backward substitution through $U_{11}$, and finally the eta file in order.
-- **`BTRAN` ($B^T \pi = c$)**: the eta file in reverse, forward substitution through $U_{11}^T$, the nucleus solves $U^T z = \tilde c$ and $L^T w = z$ with `simd.Axpy64`, and backward substitution through $L_{22}^T$.
-- **Updates**: each basis change appends a product-form (PFI) eta column. After `maxEtaUpdates = 56` updates, or when a pivot fails, the basis is refactorized.
+### `FTRAN`, `BTRAN`, and Hyper-Sparse Solves
+- **`FTRAN` ($B x = b$) and `FTRANSparse`**: permutes $b$ into elimination order, solves $L y = P b$ by column-wise zero-skipping elimination (`lColPtr`), solves $U z = y$ by backward column sweep (`uColPtr` and `uInvDiag`), unpermutes $x = Q z$, and applies the PFI eta file in order. When the initial right-hand side has at most $m / 4$ nonzeros, `FTRANSparse` tracks the nonzero support and returns `FColIdx` so callers update and clear only touched rows.
+- **`BTRAN` ($B^T \pi = c$) and `BTRANSparse`**: applies the eta file in reverse, permutes into column-elimination order, solves $U^T z = Q^T c$ by forward column sweep (`uColPtr`), solves $L^T w = z$ by backward row sweep (`lRowPtr`), and unpermutes $\pi = P^T w$. `BTRANSparse` tracks the nonzero support and returns `RhoIdx`.
+- **Updates**: [`PushEtaSparse`](../lu.go) appends a product-form (PFI) eta column directly from `FColIdx`. After `maxEtaUpdates = 56` updates, or when a pivot fails, the basis is refactorized.
 
 ---
 
@@ -37,9 +37,9 @@ A basic variable $x_k$ is primal infeasible when it leaves $[l_k, u_k]$ by more 
 Nonbasic structurals start at the bound favoured by their cost, with the slack basis $B = I$. When the reduced costs are dual feasible within $\epsilon_d = 10^{-7}$, [`LPSolver.Solve`](../simplex.go) runs [`runDualSimplexLoop`](../simplex.go); otherwise, or if the dual loop ends without a verified optimum, it runs [`solveTwoPhasePrimalWithLimit`](../simplex.go).
 
 ### Dual Simplex
-1. **Leaving row**: the infeasible basic row maximizing $\text{infeas}_r^2 / w_r$, with dual steepest-edge weights $w_r$ updated by the Forrest-Goldfarb recurrence and clamped to $[10^{-4}, 10^{12}]$. Appending cut rows keeps existing weights, since the existing rows of $B^{-1}$ do not change when a basic slack row is added.
-2. **Pivot row** (`ComputeTableauRow`): $\rho = B^{-T} e_r$, then $\bar a_{r} = \rho^T [A \; I]$. For $n \le 256$ the structural part uses the precompiled dense rows; otherwise it accumulates sparse CSR rows for which $|\rho_i| > 10^{-16}$ and records the touched columns in `TabRowIdx`.
-3. **Ratio test**: a Harris two-pass test. Pass 1 computes $\theta_{\max} = \min (|d_k| + 10^{-9}) / |\bar a_{r,k}|$; pass 2 picks, among candidates within $\theta_{\max}$, the largest $|\bar a_{r,k}|$, preferring columns whose bound span can absorb the leaving row's violation.
+1. **Leaving row**: the infeasible basic row maximizing $\text{infeas}_r^2 / w_r$, with dual steepest-edge weights $w_r$ updated over `FColIdx` by the Forrest-Goldfarb recurrence (`FTRAN(Tau)` is skipped when `len(FColIdx) <= 1`) and clamped to $[10^{-4}, 10^{12}]$. Appending cut rows keeps existing weights, since the existing rows of $B^{-1}$ do not change when a basic slack row is added.
+2. **Pivot row** (`ComputeTableauRow`): computes $\rho = B^{-T} e_r$ via `BTRANSparse(Rho, RhoIdx)`, then accumulates $\bar a_{r} = \rho^T [A \; I]$ over `RhoIdx` and records the nonbasic support in `TabRowIdx`.
+3. **Ratio test and Bound-Flipping Ratio Test (`selectDualBFRT`)**: Pass 1 computes $\theta_{\max} = \min (|d_k| + 10^{-9}) / |\bar a_{r,k}|$; Pass 2 picks, among candidates within $\theta_{\max}$, the largest $|\bar a_{r,k}|$, preferring columns whose bound span absorbs the leaving row's violation and breaking near-ties (`1e-11`) by minimum basis row load (`colBasisLoad` via `RowBasicDeg` on non-degenerate steps, or static column degree and index on degenerate steps). When the Pass-2 winner is boxed, cannot absorb the violation alone, and has a positive dual step (`cands[0].ratio > 1e-7`), `selectDualBFRT` sorts breakpoints and flips boxed nonbasic variables not in equality rows (`!colHasEq[k]`, up to 64 per pivot) to their opposite bounds, updating $x_B$ via one batched `FTRANSparse(Tau, TauIdx)`.
 4. **Infeasibility**: if no column is eligible after a fresh refactorization, the LP is reported infeasible.
 
 ### Two-Phase Primal Simplex
@@ -52,7 +52,7 @@ Phase I minimizes the sum of bound violations of basic variables with a composit
 With `GOEXPERIMENT=simd` on `amd64`, [`kernels_amd64.go`](../internal/simd/kernels_amd64.go) implements `Dot64` and `Axpy64` with `archsimd.Float64x4` for slices of length 256 or more; shorter slices run the same 4-way scalar loops as [`kernels_scalar.go`](../internal/simd/kernels_scalar.go).
 
 - **Bit-identical results**: the vector code uses separate `VMULPD` and `VADDPD`, never FMA. The scalar code converts each product to `float64` before adding it, which by the Go specification forbids FMA contraction. Both reduce four lanes over $i \bmod 4$ as $(s_0 + s_1) + (s_2 + s_3)$. [`kernels_test.go`](../internal/simd/kernels_test.go) checks bit equality on both sides of the 256 threshold, and it passes with `GOAMD64=v3`, where FMA is available.
-- **Reach**: dense tableau rows exist only for $n \le 256$, so most AVX2 calls come from length-$m$ dual updates and nucleus rows of 256 or more. Below `n + m = 256` both builds run the same scalar kernels, so timing differences there come from the two binaries and from run-to-run variation. The paired timing comparison is in [`benchmarks.md`](benchmarks.md#5-default-build-vs-goexperimentsimd).
+- **Reach**: dense tableau rows exist only for $n \le 256$, and sparse dual iterations update `Y` and `Dj` over `RhoIdx` and `TabRowIdx` when the support is sparse, so AVX2 calls occur only on dense dual updates of length 256 or more. Below `n + m = 256` both builds run the same scalar kernels, so timing differences there come from the two binaries and from run-to-run variation. The paired timing comparison is in [`benchmarks.md`](benchmarks.md#5-default-build-vs-goexperimentsimd).
 
 ---
 
@@ -106,7 +106,7 @@ An LP point is integral when every integer variable is within $10^{-6}$ of an in
 
 ## Known Limitations
 
-- **LP scale**: the dense nucleus factorization costs $O(n_{\text{nuc}}^2)$ memory and $O(n_{\text{nuc}}^3)$ time, the eta file grows by a dense column per pivot, Phase II uses full Dantzig pricing, and the dual ratio test has no bound flipping. LPs with thousands of rows and non-triangular bases are therefore markedly slower than in CLP or HiGHS.
+- **LP updates and primal fallback**: while basis factorization uses a three-stage singleton and sparse Markowitz LU with `FTRANSparse`/`BTRANSparse` and dual bound flipping (`selectDualBFRT`), basis updates between refactorizations use a product-form (PFI) eta file rather than Forrest-Tomlin $U$-updates, and the Phase II primal fallback uses full Dantzig pricing.
 - **Scaling**: there is no row or column equilibration; only the primal feasibility tolerance is normalized by column magnitude.
 - **Cuts at the root only**: cuts are separated at the root node, using global bounds, and kept for the whole tree.
 - **Reference solver**: parity is checked against CBC 2.10.3, which itself returns wrong answers on some instances (see [`testdata/regression`](../testdata/regression)); `bench/difftest_cbc.py` verifies disagreements independently before blaming either solver.
