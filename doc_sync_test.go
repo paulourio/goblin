@@ -1,10 +1,10 @@
-package gopt_test
+package goblin_test
 
 import (
 	"os"
 	"testing"
 
-	"gopt/bench"
+	"github.com/paulourio/goblin/bench"
 )
 
 func TestDocumentationAndBenchmarkSync(t *testing.T) {
@@ -28,8 +28,8 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 
 	tb, err := bench.LoadTelemetryBundle(
 		"bench/results/python_baseline.json",
-		"bench/results/gopt_scalar.json",
-		"bench/results/gopt_simd.json",
+		"bench/results/goblin_scalar.json",
+		"bench/results/goblin_simd.json",
 	)
 	if err != nil {
 		t.Fatalf("failed to load canonical benchmark telemetry: %v", err)
@@ -62,6 +62,6 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 		t.Fatalf("read final_report.md: %v", err)
 	}
 	if string(rawReport) != expectedReport {
-		t.Errorf("bench/results/final_report.md is out of sync with BuildFinalReportMarkdown (run `go run ./cmd/gopt-bench -sync-docs`)")
+		t.Errorf("bench/results/final_report.md is out of sync with BuildFinalReportMarkdown (run `go run ./cmd/goblin-bench -sync-docs`)")
 	}
 }

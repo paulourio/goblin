@@ -21,7 +21,7 @@ var fingerprintInputs = []struct {
 	{dir: "format", recursive: false},
 	{dir: "internal", recursive: true},
 	{dir: "bench", recursive: false},
-	{dir: filepath.Join("cmd", "gopt-bench"), recursive: false},
+	{dir: filepath.Join("cmd", "goblin-bench"), recursive: false},
 }
 
 // fingerprintExcluded lists bench files that only render documents and do not influence
@@ -33,7 +33,7 @@ var fingerprintExcluded = map[string]bool{
 
 // SourceFingerprint returns a SHA-256 digest (first 16 hex digits) over go.mod and every
 // non-test Go source that influences benchmark telemetry, relative to the module root.
-// gopt-bench stores it in each telemetry entry, and the documentation gate rejects
+// goblin-bench stores it in each telemetry entry, and the documentation gate rejects
 // telemetry whose fingerprint differs from the current tree, so published timings always
 // describe the code that is checked in.
 func SourceFingerprint(root string) (string, error) {
@@ -77,7 +77,7 @@ func SourceFingerprint(root string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
-// CheckTelemetryFreshness fails when the gopt telemetry was produced by sources other than
+// CheckTelemetryFreshness fails when the goblin telemetry was produced by sources other than
 // those currently under root.
 func CheckTelemetryFreshness(root string, tb *TelemetryBundle) error {
 	pv, err := telemetryProvenance(tb)
@@ -90,7 +90,7 @@ func CheckTelemetryFreshness(root string, tb *TelemetryBundle) error {
 	}
 	if pv.fingerprint != cur {
 		return fmt.Errorf("benchmark telemetry is stale: measured with source fingerprint %s, current tree is %s; "+
-			"re-run gopt-bench for both builds and -sync-docs", pv.fingerprint, cur)
+			"re-run goblin-bench for all configurations and -sync-docs", pv.fingerprint, cur)
 	}
 	return nil
 }

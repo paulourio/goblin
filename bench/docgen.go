@@ -43,7 +43,7 @@ type PythonBaselineEntry struct {
 	CPUAffinity string `json:"cpu_affinity,omitempty"`
 }
 
-// CheckpointMetrics captures Solver-Core performance for a specific solver configuration.
+// CheckpointMetrics captures Solver-Core timings and counts for one solver setup.
 type CheckpointMetrics struct {
 	Status     string  `json:"status"`
 	Objective  float64 `json:"objective"`
@@ -61,6 +61,7 @@ type ProblemBenchResult struct {
 	NumVars         int               `json:"num_vars"`
 	NumConstraints  int               `json:"num_constraints"`
 	IsMIP           bool              `json:"is_mip"`
+	Backend         string            `json:"backend,omitempty"`
 	SIMDEnabled     bool              `json:"simd_enabled"`
 	TrialObjectives []float64         `json:"trial_objectives,omitempty"`
 	TParseMS        float64           `json:"t_parse_ms"`
@@ -100,9 +101,8 @@ type TelemetryBundle struct {
 	SIMD   map[string]ProblemBenchResult
 }
 
-// LoadTelemetryBundle reads the Python, Go scalar, and Go SIMD telemetry files plus the
-// goblin (in-process CBC) telemetry stored next to the scalar file, when present. All
-// inputs live inside this repository so that rendered documents depend on no sibling tree.
+// LoadTelemetryBundle reads the Python, pure-Go scalar, and pure-Go SIMD telemetry files plus the
+// in-process CBC backend telemetry (goblin_cbc.json) stored next to the scalar file, when present.
 func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle, error) {
 	var pyMap map[string]PythonBaselineEntry
 	if err := readJSON(pyPath, &pyMap); err != nil {
@@ -119,7 +119,7 @@ func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle,
 	goblinPath := filepath.Join(filepath.Dir(scalarPath), "goblin_cbc.json")
 	if _, err := os.Stat(goblinPath); err == nil {
 		if err := readJSON(goblinPath, &goblinMap); err != nil {
-			return nil, fmt.Errorf("goblin telemetry: %w", err)
+			return nil, fmt.Errorf("goblin cbc telemetry: %w", err)
 		}
 	}
 	return &TelemetryBundle{
@@ -143,9 +143,9 @@ func readJSON(path string, dst any) error {
 
 // ValidateTelemetryAgainstCorpus verifies that every problem in BuildCorpus() exists in
 // testdata/corpus and in all telemetry maps with matching dimensions, that the telemetry
-// carries consistent provenance, and that every gopt build (and goblin, when present)
-// agrees with the Python CBC reference on status, canonical objective, and every per-trial
-// objective (CheckParity). Rendered parity columns are therefore backed by this gate.
+// carries consistent provenance, and that every goblin build (scalar, SIMD, and CBC when
+// present) agrees with the Python CBC reference on status, canonical objective, and every per-trial
+// objective. Rendered parity columns are therefore backed by this gate.
 func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error {
 	cases := BuildCorpus()
 	if len(tb.Python) != len(cases) {
@@ -195,8 +195,8 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 	return nil
 }
 
-// CheckParity compares the scalar and SIMD gopt telemetry (and goblin, when present) for id
-// against the Python CBC reference and returns one description per disagreement.
+// CheckParity compares the scalar, SIMD, and CBC goblin telemetry (when present) for id
+// against the Python CBC reference and returns one message per mismatch.
 func CheckParity(tb *TelemetryBundle, id string) []string {
 	py, ok := tb.Python[id]
 	if !ok {
@@ -209,7 +209,7 @@ func CheckParity(tb *TelemetryBundle, id string) []string {
 	}{
 		{label: "scalar"},
 		{label: "simd"},
-		{label: "goblin"},
+		{label: "cbc"},
 	}
 	builds[0].res, builds[0].ok = tb.Scalar[id]
 	builds[1].res, builds[1].ok = tb.SIMD[id]
@@ -218,7 +218,7 @@ func CheckParity(tb *TelemetryBundle, id string) []string {
 	var out []string
 	for i, b := range builds {
 		if !b.ok {
-			if i < 2 {
+			if i < minRequiredBuilds {
 				out = append(out, fmt.Sprintf("%s/%s: missing telemetry", id, b.label))
 			}
 			continue
@@ -246,11 +246,21 @@ func CheckParity(tb *TelemetryBundle, id string) []string {
 	return out
 }
 
-const parityRelTol = 1e-5
+const (
+	parityRelTol      = 1e-5
+	minRequiredBuilds = 2
+	madTimeHorizon    = 6
+	geoMeanMinFloor   = 1e-6
+	evenMedianHalf    = 0.5
+	zCrit975          = 1.96
+	minPairedSamples  = 2
+	minNetSolveMS     = 0.001
+	syncedDocPerm     = 0o644
+)
 
 func relDiff(a, b float64) float64 { return math.Abs(a-b) / max(1.0, math.Abs(b)) }
 
-// provenance summarizes the code version that produced the gopt telemetry.
+// provenance summarizes the code version that produced the goblin telemetry.
 type provenance struct {
 	commit      string
 	dirty       bool
@@ -259,14 +269,18 @@ type provenance struct {
 	affinity    map[string]bool
 }
 
-// telemetryProvenance requires every scalar and SIMD entry to carry the same git commit
+// telemetryProvenance requires every scalar, SIMD, and CBC entry to carry the same git commit
 // and source fingerprint.
 func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 	pv := provenance{affinity: map[string]bool{}}
-	for _, m := range []map[string]ProblemBenchResult{tb.Scalar, tb.SIMD} {
+	maps := []map[string]ProblemBenchResult{tb.Scalar, tb.SIMD}
+	if len(tb.Goblin) > 0 {
+		maps = append(maps, tb.Goblin)
+	}
+	for _, m := range maps {
 		for id, r := range m {
 			if r.GitCommit == "" || r.SourceFingerprint == "" {
-				return pv, fmt.Errorf("telemetry entry %q lacks git_commit/source_fingerprint provenance (re-run gopt-bench)", id)
+				return pv, fmt.Errorf("telemetry entry %q lacks git_commit/source_fingerprint provenance (re-run goblin-bench)", id)
 			}
 			if pv.commit == "" {
 				pv.commit, pv.goVersion, pv.fingerprint = r.GitCommit, r.GoVersion, r.SourceFingerprint
@@ -283,30 +297,21 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 }
 
 func madDimensions(id string) (g, i, t int, ok bool) {
-	switch id {
-	case "t1_mad_g2_i4", "t1_mad_rand_g2_i4":
-		return 2, 4, 6, true
-	case "t2_mad_g2_i8", "t2_mad_rand_g2_i8":
-		return 2, 8, 6, true
-	case "t2_mad_g3_i9", "t2_mad_rand_g3_i9":
-		return 3, 9, 6, true
-	case "t2_mad_g4_i12":
-		return 4, 12, 6, true
-	case "t3_mad_g5_i20":
-		return 5, 20, 6, true
-	case "t3_mad_g6_i30":
-		return 6, 30, 6, true
-	case "t3_mad_g10_i100":
-		return 10, 100, 6, true
-	case "t3_mad_g4_i1000":
-		return 4, 1000, 6, true
-	default:
+	if !strings.Contains(id, "_mad_") {
 		return 0, 0, 0, false
 	}
+	idx := strings.Index(id, "_g")
+	if idx < 0 {
+		return 0, 0, 0, false
+	}
+	if _, err := fmt.Sscanf(id[idx:], "_g%d_i%d", &g, &i); err != nil {
+		return 0, 0, 0, false
+	}
+	return g, i, madTimeHorizon, true
 }
 
 // isPlantedMAD reports whether id belongs to the structured MAD family whose planted
-// zero-weight design yields a zero integrality gap (BuildMADAllocation).
+// zero-weight design yields a zero root LP gap (BuildMADAllocation).
 func isPlantedMAD(id string) bool {
 	_, _, _, ok := madDimensions(id)
 	return ok && !strings.Contains(id, "_mad_rand_")
@@ -318,7 +323,7 @@ func geoMean(vals []float64) float64 {
 	}
 	sumLog := 0.0
 	for _, v := range vals {
-		sumLog += math.Log(max(v, 1e-6))
+		sumLog += math.Log(max(v, geoMeanMinFloor))
 	}
 	return math.Exp(sumLog / float64(len(vals)))
 }
@@ -333,7 +338,7 @@ func medianMinMax(vals []float64) (med, minV, maxV float64) {
 	if n%2 == 1 {
 		med = cp[n/2]
 	} else {
-		med = 0.5 * (cp[n/2-1] + cp[n/2])
+		med = evenMedianHalf * (cp[n/2-1] + cp[n/2])
 	}
 	return med, cp[0], cp[n-1]
 }
@@ -348,7 +353,7 @@ func tCrit975(df int) float64 {
 	if df < len(table) {
 		return table[df]
 	}
-	return 1.96
+	return zCrit975
 }
 
 // pairedRatio returns the geometric-mean ratio a[k]/b[k] over paired trials and its 95%
@@ -369,7 +374,7 @@ func pairedRatio(a, b []float64) (gm, lo, hi float64, n int) {
 		mean += v
 	}
 	mean /= float64(n)
-	if n < 2 {
+	if n < minPairedSamples {
 		return math.Exp(mean), math.Inf(-1), math.Inf(1), n
 	}
 	ss := 0.0
@@ -400,7 +405,7 @@ func formatCP67(cp CheckpointMetrics, bold bool) string {
 
 // pyNetSolveMS is the Python solve time with the CBC subprocess spawn floor removed.
 func pyNetSolveMS(py PythonBaselineEntry) float64 {
-	return max(py.TSolveMedianMS-py.CBCSpawnFloorMS, 0.001)
+	return max(py.TSolveMedianMS-py.CBCSpawnFloorMS, minNetSolveMS)
 }
 
 func parityCell(tb *TelemetryBundle, id string) string {
@@ -431,13 +436,13 @@ const simdReachSize = 256
 // are negative controls: an interval excluding 1 there is noise, never a SIMD effect.
 func simdVerdict(size int, lo, hi float64, n int) (reach, verdict string) {
 	if size < simdReachSize {
-		if n >= 2 && (lo > 1 || hi < 1) {
+		if n >= minPairedSamples && (lo > 1 || hi < 1) {
 			return "no (control)", "identical source; interval excludes 1 (build/run effect)"
 		}
 		return "no (control)", "identical source"
 	}
 	switch {
-	case n < 2:
+	case n < minPairedSamples:
 		return "possible", "insufficient trials"
 	case lo > 1:
 		return "possible", "SIMD faster"
@@ -447,15 +452,15 @@ func simdVerdict(size int, lo, hi float64, n int) (reach, verdict string) {
 	return "possible", "no detectable effect"
 }
 
-// goblinDescription states exactly which CBC build and option mapping produced goblin_cbc.json.
-const goblinDescription = "COIN-OR CBC/CLP `master` (commit `c1c171ec`, built in `../Cbc`), linked in-process through `cgo`. " +
-	"goblin maps gopt's default options onto CBC with two deliberate differences: `MaxCutPasses = 12` becomes " +
-	"`passC = 30` and `MaxNodes = 50000` becomes unlimited. It is therefore not a like-for-like configuration and " +
+// cbcBackendDescription states which CBC build and flag mapping produced goblin_cbc.json.
+const cbcBackendDescription = "COIN-OR CBC/CLP `master` (commit `c1c171ec`, vendored in `third_party/Cbc`), linked in-process through `cgo` (`goblin.WithCBC()`). " +
+	"The C++ backend maps default settings onto CBC with two deliberate differences: `MaxCutPasses = 12` becomes " +
+	"`passC = 30` and `MaxNodes = 50000` becomes unlimited. It is therefore not a like-for-like setup and " +
 	"not the CBC 2.10.3 binary used by the Python baseline."
 
 // RenderBlock produces the markdown snippet for a named generated block marker.
 //
-// All headline timings use the scalar build, which is the default `go build`. The
+// All headline timings use the default pure-Go scalar backend (`goblin` default). The
 // GOEXPERIMENT=simd build is compared to it only in SIMD_EFFECT_TABLE, with paired statistics.
 func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 	cases := BuildCorpus()
@@ -468,9 +473,9 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			filter func(c CorpusCase) bool
 		}
 		groups := []groupSpec{
-			{"Tier 1: Canonical (`N <= 22`)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
-			{"Tier 2: Target p90 (`30 <= N <= 76`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
-			{"Tier 3: Large Tail (`135 <= N <= 4028`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
+			{"Tier 1: Canonical (`N <= 26`)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
+			{"Tier 2: Target p90 (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
+			{"Tier 3: Large Tail (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
 			{"Tier 3 non-MAD MILPs", func(c CorpusCase) bool {
 				_, _, _, isMAD := madDimensions(c.ID)
 				return c.Tier == "tier3_large" && !isMAD
@@ -478,10 +483,10 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			{"Planted-gap MAD family (zero integrality gap by construction)", func(c CorpusCase) bool { return isPlantedMAD(c.ID) }},
 			{"Random-weight MAD (negative controls)", func(c CorpusCase) bool { return strings.Contains(c.ID, "_mad_rand_") }},
 			{"**All families except planted-gap MAD**", func(c CorpusCase) bool { return !isPlantedMAD(c.ID) }},
-			{"All corpus families", func(c CorpusCase) bool { return true }},
+			{"All corpus families", func(_ CorpusCase) bool { return true }},
 		}
 
-		b.WriteString("| Workload Subset | Families | Py Total GeoMean (ms) | Py Net-of-Spawn GeoMean (ms) | goblin GeoMean (ms) | gopt GeoMean (ms) | `Py / gopt` GeoMean | `Py / gopt` Median [Min-Max] | `Py net / gopt` GeoMean | `gopt / goblin` |\n")
+		b.WriteString("| Workload Subset | Families | Py Total GeoMean (ms) | Py Net-of-Spawn GeoMean (ms) | `goblin (CBC)` GeoMean (ms) | `goblin (Go)` GeoMean (ms) | `Py / goblin (Go)` GeoMean | `Py / goblin (Go)` Median [Min-Max] | `Py net / goblin (Go)` GeoMean | `goblin (Go) / CBC` |\n")
 		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		for _, grp := range groups {
 			var pyVals, pyNetVals, gbVals, goVals, speedups []float64
@@ -492,7 +497,7 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 				py := tb.Python[c.ID]
 				goT := tb.Scalar[c.ID].TTotalMS
 				pyVals = append(pyVals, py.TTotalMedianMS)
-				pyNetVals = append(pyNetVals, max(py.TTotalMedianMS-py.CBCSpawnFloorMS, 0.001))
+				pyNetVals = append(pyNetVals, max(py.TTotalMedianMS-py.CBCSpawnFloorMS, minNetSolveMS))
 				if gb, ok := tb.Goblin[c.ID]; ok && gb.TTotalMS > 0 {
 					gbVals = append(gbVals, gb.TTotalMS)
 				}
@@ -532,7 +537,7 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			sm := tb.SIMD[c.ID]
 			size := sm.NumVars + sm.NumConstraints
 			_, lo, hi, n := pairedRatio(tb.Scalar[c.ID].TSolveTrialsMS, sm.TSolveTrialsMS)
-			if n < 2 {
+			if n < minPairedSamples {
 				continue
 			}
 			excludesOne := lo > 1 || hi < 1
@@ -557,7 +562,7 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			faster, slower, reachable-faster-slower, reachable)
 
 	case "MAD_PIPELINE_TABLE":
-		b.WriteString("| Problem ID | $G$ | $I$ | $T$ | Vars | Rows | Optimal Obj | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / gopt` | Parity |\n")
+		b.WriteString("| Problem ID | $G$ | $I$ | $T$ | Vars | Rows | Optimal Obj | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / goblin (Go)` | Parity |\n")
 		b.WriteString("| :--- | --: | ---: | --: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
 		for _, c := range cases {
 			g, i, t, ok := madDimensions(c.ID)
@@ -577,8 +582,54 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 				py.TTotalMedianMS/sc.TTotalMS, parityCell(tb, c.ID))
 		}
 
+	case "MAD_CBC_GAP_TABLE":
+		b.WriteString("| Problem ID | $G \\times I$ ($N \\times M$) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Py Net Solve (ms) | Go Total (ms) | CBC Total (ms) | Total (`Go / CBC`) |\n")
+		b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+		for _, c := range cases {
+			g, i, _, ok := madDimensions(c.ID)
+			if !ok {
+				continue
+			}
+			py := tb.Python[c.ID]
+			sc := tb.Scalar[c.ID]
+			gb := tb.Goblin[c.ID]
+			lpRatio := sc.RootLPTimeMS / max(gb.RootLPTimeMS, geoMeanMinFloor)
+			totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ ($%d \\times %d$) | %.3f (%d) | %.3f (%d) | %.2fx | %.2f (%d / %d) | %.2f (%d / %d) | %.2f | %.2f | %.2f | **%.2fx** |\n",
+				c.ID, g, i, sc.NumVars, sc.NumConstraints,
+				sc.RootLPTimeMS, sc.RootLPIters,
+				gb.RootLPTimeMS, gb.RootLPIters,
+				lpRatio,
+				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
+				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
+				pyNetSolveMS(py),
+				sc.TTotalMS, gb.TTotalMS, totRatio)
+		}
+
+	case "NON_MAD_CBC_GAP_TABLE":
+		b.WriteString("| Problem ID | $N \\times M$ | Go CP5 +Presolve (ms / nodes) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Total Mean $\\pm$ SD (ms) | CBC Total Mean $\\pm$ SD (ms) | Total Median (`Go / CBC`) |\n")
+		b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+		gapIDs := []string{"t3_mkp_200", "t2_mkp_50", "t2_binpack_44", "t3_cflp_300", "t3_sched_1000"}
+		for _, id := range gapIDs {
+			sc, ok := tb.Scalar[id]
+			if !ok {
+				continue
+			}
+			gb := tb.Goblin[id]
+			totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | %s | %s | %.2f (%d / %d) | %.2f (%d / %d) | $%.2f \\pm %.2f$ | $%.2f \\pm %.2f$ | **%.2fx** |\n",
+				id, sc.NumVars, sc.NumConstraints,
+				formatCP45(sc.CP5Presolve),
+				formatCP67(sc.CP6Cuts, false),
+				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
+				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
+				sc.TTotalMeanMS, sc.TTotalSDMS,
+				gb.TTotalMeanMS, gb.TTotalSDMS,
+				totRatio)
+		}
+
 	case "MAD_STATS_TABLE":
-		b.WriteString("| Problem ID | $G \\times I$ | Python `PuLP + CBC` Total (Mean $\\pm$ SD [95% CI], ms) | `gopt` Scalar Total (Mean $\\pm$ SD [95% CI], ms) | `gopt` SIMD Total (Mean $\\pm$ SD [95% CI], ms) |\n")
+		b.WriteString("| Problem ID | $G \\times I$ | Python `PuLP + CBC` Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` Scalar Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\\pm$ SD [95% CI], ms) |\n")
 		b.WriteString("| :--- | :---: | ---: | ---: | ---: |\n")
 		for _, c := range cases {
 			g, i, _, ok := madDimensions(c.ID)
@@ -621,7 +672,7 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 		}
 
 	case "FULL_PIPELINE_TABLE":
-		b.WriteString("| Problem ID | Vars | Rows | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / gopt` | Parity |\n")
+		b.WriteString("| Problem ID | Vars | Rows | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / goblin (Go)` | Parity |\n")
 		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
 		for _, c := range cases {
 			py := tb.Python[c.ID]
@@ -652,12 +703,12 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 		if pv.dirty {
 			base = fmt.Sprintf("working tree on top of commit `%s`", pv.commit)
 		}
-		fmt.Fprintf(&b, "- **gopt telemetry source**: fingerprint `%s` (%s), `%s`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources\n",
+		fmt.Fprintf(&b, "- **goblin telemetry source**: fingerprint `%s` (%s), `%s`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources.\n",
 			pv.fingerprint, base, pv.goVersion)
-		fmt.Fprintf(&b, "- **CPU affinity**: gopt %s; Python + CBC %s\n", affinityList(pv.affinity), affinityList(map[string]bool{anyPy.CPUAffinity: true}))
-		fmt.Fprintf(&b, "- **Python reference**: PuLP `%s`, CBC `%s` (`%s`)\n", anyPy.PuLPVersion, anyPy.CBCVersion, filepath.Base(anyPy.CBCPath))
-		fmt.Fprintf(&b, "- **CBC subprocess spawn floor**: %.2f ms median (`prob.solve()` on a 1-variable MILP); the \"Net of Spawn\" columns subtract it\n", floorMed)
-		fmt.Fprintf(&b, "- **goblin**: %s\n", goblinDescription)
+		fmt.Fprintf(&b, "- **CPU affinity**: goblin %s; Python + CBC %s.\n", affinityList(pv.affinity), affinityList(map[string]bool{anyPy.CPUAffinity: true}))
+		fmt.Fprintf(&b, "- **Python reference**: PuLP `%s`, CBC `%s` (`%s`).\n", anyPy.PuLPVersion, anyPy.CBCVersion, filepath.Base(anyPy.CBCPath))
+		fmt.Fprintf(&b, "- **CBC subprocess spawn floor**: %.2f ms median (`prob.solve()` on a 1-variable MILP); the \"Net of Spawn\" columns subtract it.\n", floorMed)
+		fmt.Fprintf(&b, "- **goblin `WithCBC()` backend**: %s\n", cbcBackendDescription)
 
 	default:
 		return "", fmt.Errorf("unknown generated block %q", blockName)
@@ -720,25 +771,28 @@ func SyncMarkdownFile(path string, tb *TelemetryBundle, checkOnly bool) error {
 	}
 	if checkOnly {
 		if orig != synced {
-			return fmt.Errorf("%s is out of sync with canonical benchmark JSON telemetry (run `go run ./cmd/gopt-bench -sync-docs`)", path)
+			return fmt.Errorf("%s is out of sync with canonical benchmark JSON telemetry (run `go run ./cmd/goblin-bench -sync-docs`)", path)
 		}
 		return nil
 	}
 	if orig != synced {
-		return os.WriteFile(path, []byte(synced), 0o644)
+		return os.WriteFile(path, []byte(synced), syncedDocPerm)
 	}
 	return nil
 }
 
 // BuildFinalReportMarkdown constructs the full bench/results/final_report.md content with generated markers.
 func BuildFinalReportMarkdown(tb *TelemetryBundle) (string, error) {
-	tpl := `# ` + "`gopt`" + ` vs. Python (` + "`PuLP + COIN-OR CBC`" + `) Benchmark Report
+	tpl := `# ` + "`goblin`" + ` vs. Python (` + "`PuLP + COIN-OR CBC`" + `) Benchmark Report
 
 ## 1. Experimental Setup and Provenance
 
-- **CPU**: ` + "`13th Gen Intel(R) Core(TM) i9-13900K`" + ` (x86_64, 30 logical CPUs exposed by ` + "`lscpu`" + `, AVX2 + FMA)
-- **Default build**: ` + "`go build`" + ` with the pure-Go scalar kernels. All headline timings use this build.
-- **Experimental build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels only for slices of length 256 or more; see section 4.
+` + "```bash\ngo run ./cmd/goblin-bench -check-docs\n```" + `
+
+- **CPU**: ` + "`13th Gen Intel(R) Core(TM) i9-13900K`" + ` (x86_64, 30 logical CPUs exposed by ` + "`lscpu`" + `, AVX2 + FMA).
+- **Default pure-Go backend**: ` + "`goblin`" + ` default (` + "`BackendGo`" + `, scalar kernels or ` + "`WithoutSIMD()`" + `). All headline ` + "`goblin (Go)`" + ` timings use this setup.
+- **Experimental SIMD build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels only for slices of length 256 or more; see section 4.
+- **Optional C++ backend**: ` + "`goblin.WithCBC()`" + ` (` + "`BackendCBC`" + `), driving in-process COIN-OR CBC/CLP through ` + "`cgo`" + ` under the same unified ` + "`goblin`" + ` API.
 - **Python baseline**: Python 3.14 + ` + "`PuLP`" + ` + ` + "`COIN-OR CBC`" + ` subprocess (` + "`threads=1`" + `). Its solve time includes MPS writing, process spawn, and ` + "`.sol`" + ` parsing.
 - **Corpus**: 31 deterministic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state.
 
@@ -755,11 +809,11 @@ The planted-gap MAD family is constructed so that a root heuristic closes the ga
 ## 3. End-to-End Pipeline Comparison (` + "`JSON -> Solution`" + `)
 
 Pipeline stages measured per instance (median across trials after warmup):
-1. **Prep (` + "`t_parse + t_build + t_format/t_compile`" + `)**: JSON unmarshaling, model construction, and MPS formatting (Python) or ` + "`Model.Compile()`" + ` matrix compilation (Go).
-2. **Solve (` + "`t_solve`" + `)**: CBC subprocess execution and ` + "`.sol`" + ` parsing (Python) vs. in-memory ` + "`gopt.SolveCompiled`" + ` (Go).
+1. **Prep (` + "`t_parse + t_build + t_format/t_compile`" + `)**: JSON unmarshaling, model construction, and MPS formatting (Python) or ` + "`Model.Compile()`" + ` matrix assembly (Go).
+2. **Solve (` + "`t_solve`" + `)**: CBC subprocess execution and ` + "`.sol`" + ` parsing (Python) vs. in-memory ` + "`goblin.SolveCompiled`" + ` (Go).
 3. **Total (` + "`t_total`" + `)**: Complete end-to-end latency from raw JSON bytes to verified primal solution.
 
-The Parity column is computed by ` + "`bench.CheckParity`" + `: status, canonical objective, and every per-trial objective of both gopt builds (and goblin) must match CBC within a relative tolerance of 1e-5, and ` + "`ValidateTelemetryAgainstCorpus`" + ` rejects the telemetry otherwise.
+The Parity column is computed by ` + "`bench.CheckParity`" + `: status, canonical objective, and every per-trial objective of all ` + "`goblin`" + ` builds (` + "`scalar`" + `, ` + "`simd`" + `, and ` + "`cbc`" + `) must match CBC within a relative tolerance of 1e-5, and ` + "`ValidateTelemetryAgainstCorpus`" + ` rejects the telemetry otherwise.
 
 <!-- BEGIN GENERATED:FULL_PIPELINE_TABLE -->
 <!-- END GENERATED:FULL_PIPELINE_TABLE -->
@@ -774,14 +828,14 @@ Ratios are geometric means of per-trial ` + "`scalar / SIMD`" + ` solve times ov
 <!-- BEGIN GENERATED:SIMD_EFFECT_TABLE -->
 <!-- END GENERATED:SIMD_EFFECT_TABLE -->
 
-## 5. Solver-Core Checkpoint Progression (default build)
+## 5. Solver-Core Checkpoint Progression (default pure-Go backend)
 
 Progression across checkpoints on pre-compiled ` + "`CompiledProblem`" + ` instances:
 - **CP2/3 (Root LP)**: Revised Dual and Two-Phase Primal Simplex.
 - **CP4 (Base B&B)**: Branch-and-Bound with pseudocost/strong branching (` + "`Presolve=off, Cuts=off, Heuristics=off`" + `).
 - **CP5 (+Presolve)**: Savelsbergh bound tightening, GCD reduction, and node propagation (` + "`Presolve=on, Cuts=off, Heuristics=off`" + `).
 - **CP6 (+Cuts)**: GMI, lifted 0-1 knapsack covers, flow/VUB and $(l, S)$ cuts, and single-row MIR cuts (` + "`Presolve=on, Cuts=on, Heuristics=off`" + `).
-- **CP7 (Full ` + "`gopt`" + `)**: Full Branch-and-Cut with Propagated Rounding, Root Sub-MIP, and Fractional Diving (` + "`Presolve=on, Cuts=on, Heuristics=on`" + `).
+- **CP7 (Full ` + "`goblin`" + `)**: Full Branch-and-Cut with Propagated Rounding, Root Sub-MIP, and Fractional Diving (` + "`Presolve=on, Cuts=on, Heuristics=on`" + `).
 
 <!-- BEGIN GENERATED:FULL_CHECKPOINT_TABLE -->
 <!-- END GENERATED:FULL_CHECKPOINT_TABLE -->

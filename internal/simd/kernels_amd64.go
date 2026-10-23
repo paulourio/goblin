@@ -2,31 +2,41 @@
 
 // Package simd provides hardware-accelerated AVX2/FMA vector kernels via Go 1.27's
 // simd/archsimd package, paired with a pure-Go scalar fallback when built without
-// GOEXPERIMENT=simd.
+// GOEXPERIMENT=simd or when SIMD is disabled at runtime via Option.
 package simd
 
 import (
 	"math"
 	"simd/archsimd"
+	"sync/atomic"
 	"unsafe"
 )
 
-// UsingHardwareSIMD returns true when compiled with GOEXPERIMENT=simd on amd64.
-func UsingHardwareSIMD() bool { return true }
+var simdDisabled atomic.Bool
 
-// Dot64 computes the dot product sum_i (a[i] * b[i]).
-// Slices of length < 256 use 4-way scalar accumulators without YMM transition overhead;
-// slices of length >= 256 dispatch to 256-bit AVX2 vector accumulators with identical reduction order.
-func Dot64(a, b []float64) float64 {
+// HardwareSIMDAvailable returns true when compiled with GOEXPERIMENT=simd on amd64.
+func HardwareSIMDAvailable() bool { return true }
+
+// SetDisabled toggles the process-wide SIMD disable flag.
+func SetDisabled(disabled bool) { simdDisabled.Store(disabled) }
+
+// IsDisabled reports whether SIMD has been disabled via SetDisabled.
+func IsDisabled() bool { return simdDisabled.Load() }
+
+// UsingHardwareSIMD returns true when compiled with GOEXPERIMENT=simd on amd64 and not disabled.
+func UsingHardwareSIMD() bool { return !simdDisabled.Load() }
+
+// UsingHardwareSIMDWith reports whether hardware SIMD is active given a per-solve disable flag.
+func UsingHardwareSIMDWith(disable bool) bool { return !disable && !simdDisabled.Load() }
+
+// Dot64Scalar computes the dot product sum_i (a[i] * b[i]) using 4-way scalar loop unrolling.
+func Dot64Scalar(a, b []float64) float64 {
 	n := min(len(a), len(b))
 	if n == 0 {
 		return 0
 	}
 	a = a[:n]
 	b = b[:n]
-	if n >= 256 {
-		return dot64AVX2(a, b)
-	}
 	var s0, s1, s2, s3 float64
 	i := 0
 	for ; i+4 <= n; i += 4 {
@@ -40,6 +50,25 @@ func Dot64(a, b []float64) float64 {
 		sum += float64(a[i] * b[i])
 	}
 	return sum
+}
+
+// Dot64 computes the dot product sum_i (a[i] * b[i]).
+// Slices of length < 256 use 4-way scalar accumulators without YMM transition overhead;
+// slices of length >= 256 dispatch to 256-bit AVX2 vector accumulators with identical reduction order.
+func Dot64(a, b []float64) float64 {
+	if simdDisabled.Load() {
+		return Dot64Scalar(a, b)
+	}
+	n := min(len(a), len(b))
+	if n == 0 {
+		return 0
+	}
+	a = a[:n]
+	b = b[:n]
+	if n >= 256 {
+		return dot64AVX2(a, b)
+	}
+	return Dot64Scalar(a, b)
 }
 
 func dot64AVX2(a, b []float64) float64 {
@@ -65,10 +94,37 @@ func dot64AVX2(a, b []float64) float64 {
 	return sum
 }
 
+// Axpy64Scalar computes dst[i] += alpha * src[i] using 4-way scalar loop unrolling.
+func Axpy64Scalar(dst, src []float64, alpha float64) {
+	if alpha == 0 {
+		return
+	}
+	n := min(len(dst), len(src))
+	if n == 0 {
+		return
+	}
+	dst = dst[:n]
+	src = src[:n]
+	i := 0
+	for ; i+4 <= n; i += 4 {
+		dst[i] += float64(alpha * src[i])
+		dst[i+1] += float64(alpha * src[i+1])
+		dst[i+2] += float64(alpha * src[i+2])
+		dst[i+3] += float64(alpha * src[i+3])
+	}
+	for ; i < n; i++ {
+		dst[i] += float64(alpha * src[i])
+	}
+}
+
 // Axpy64 computes dst[i] += alpha * src[i].
 // Slices of length < 256 use 4-way scalar unrolling without YMM transition overhead;
 // slices of length >= 256 dispatch to 256-bit AVX2 vector instructions.
 func Axpy64(dst, src []float64, alpha float64) {
+	if simdDisabled.Load() {
+		Axpy64Scalar(dst, src, alpha)
+		return
+	}
 	if alpha == 0 {
 		return
 	}
@@ -82,16 +138,7 @@ func Axpy64(dst, src []float64, alpha float64) {
 		axpy64AVX2(dst, src, alpha)
 		return
 	}
-	i := 0
-	for ; i+4 <= n; i += 4 {
-		dst[i] += float64(alpha * src[i])
-		dst[i+1] += float64(alpha * src[i+1])
-		dst[i+2] += float64(alpha * src[i+2])
-		dst[i+3] += float64(alpha * src[i+3])
-	}
-	for ; i < n; i++ {
-		dst[i] += float64(alpha * src[i])
-	}
+	Axpy64Scalar(dst, src, alpha)
 }
 
 func axpy64AVX2(dst, src []float64, alpha float64) {
@@ -127,8 +174,30 @@ func axpy64AVX2(dst, src []float64, alpha float64) {
 	}
 }
 
+// Scale64Scalar computes dst[i] *= alpha using 4-way scalar loop unrolling.
+func Scale64Scalar(dst []float64, alpha float64) {
+	n := len(dst)
+	if n == 0 || alpha == 1 {
+		return
+	}
+	i := 0
+	for ; i+4 <= n; i += 4 {
+		dst[i] *= alpha
+		dst[i+1] *= alpha
+		dst[i+2] *= alpha
+		dst[i+3] *= alpha
+	}
+	for ; i < n; i++ {
+		dst[i] *= alpha
+	}
+}
+
 // Scale64 computes dst[i] *= alpha using AVX2 vector multiplication.
 func Scale64(dst []float64, alpha float64) {
+	if simdDisabled.Load() {
+		Scale64Scalar(dst, alpha)
+		return
+	}
 	n := len(dst)
 	if n == 0 || alpha == 1 {
 		return
@@ -152,8 +221,20 @@ func Scale64(dst []float64, alpha float64) {
 	}
 }
 
+// AbsMax64Scalar returns max_i |x[i]| using a scalar loop.
+func AbsMax64Scalar(x []float64) float64 {
+	var res float64
+	for _, v := range x {
+		res = max(res, math.Abs(v))
+	}
+	return res
+}
+
 // AbsMax64 returns max_i |x[i]| using AVX2 Abs and Max instructions.
 func AbsMax64(x []float64) float64 {
+	if simdDisabled.Load() {
+		return AbsMax64Scalar(x)
+	}
 	n := len(x)
 	if n == 0 {
 		return 0
@@ -173,11 +254,26 @@ func AbsMax64(x []float64) float64 {
 	return res
 }
 
+// RowActivityBoundsFiniteScalar computes minimum and maximum row activity using a scalar loop.
+func RowActivityBoundsFiniteScalar(row, lb, ub []float64) (minAct, maxAct float64) {
+	n := min(len(row), min(len(lb), len(ub)))
+	for i := range n {
+		p1 := row[i] * lb[i]
+		p2 := row[i] * ub[i]
+		minAct += min(p1, p2)
+		maxAct += max(p1, p2)
+	}
+	return minAct, maxAct
+}
+
 // RowActivityBoundsFinite computes the minimum and maximum row activity
 // minAct = sum_j min(row[j]*lb[j], row[j]*ub[j]) and
 // maxAct = sum_j max(row[j]*lb[j], row[j]*ub[j])
 // assuming all lb[j] and ub[j] are finite.
 func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
+	if simdDisabled.Load() {
+		return RowActivityBoundsFiniteScalar(row, lb, ub)
+	}
 	n := min(len(row), min(len(lb), len(ub)))
 	if n == 0 {
 		return 0, 0

@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"gopt/internal/simd"
+	"github.com/paulourio/goblin/internal/simd"
 )
 
 // kernelSizes covers the scalar-only range, the n = 256 dispatch threshold, and AVX2 vector
@@ -46,6 +46,22 @@ func TestDot64BitParity(t *testing.T) {
 		if math.Float64bits(got) != math.Float64bits(want) {
 			t.Fatalf("n=%d (hardware=%v): Dot64=%v, reference=%v", n, simd.UsingHardwareSIMD(), got, want)
 		}
+		gotScalar := simd.Dot64Scalar(a, b)
+		if math.Float64bits(gotScalar) != math.Float64bits(want) {
+			t.Fatalf("n=%d: Dot64Scalar=%v, reference=%v", n, gotScalar, want)
+		}
+	}
+}
+
+func TestRuntimeSIMDDisableToggle(t *testing.T) {
+	defer simd.SetDisabled(false)
+	simd.SetDisabled(true)
+	if !simd.IsDisabled() || simd.UsingHardwareSIMD() || simd.UsingHardwareSIMDWith(false) {
+		t.Fatalf("expected SIMD disabled when SetDisabled(true)")
+	}
+	simd.SetDisabled(false)
+	if simd.UsingHardwareSIMDWith(true) {
+		t.Fatalf("expected UsingHardwareSIMDWith(true) to report false")
 	}
 }
 

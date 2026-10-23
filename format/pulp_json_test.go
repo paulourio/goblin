@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"gopt"
-	"gopt/format"
+	"github.com/paulourio/goblin"
+	"github.com/paulourio/goblin/format"
 )
 
 func TestPuLPJSONRoundTrip(t *testing.T) {
@@ -48,7 +48,7 @@ func TestPuLPJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromPuLPJSON failed: %v", err)
 	}
-	if m.Sense() != gopt.Maximize {
+	if m.Sense() != goblin.Maximize {
 		t.Fatalf("expected Maximize sense, got %v", m.Sense())
 	}
 	p := m.Compile()

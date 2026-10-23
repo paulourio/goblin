@@ -1,4 +1,4 @@
-package gopt
+package goblin
 
 import (
 	"math"
@@ -9,8 +9,31 @@ import (
 // also prebuilds a contiguous SIMD-aligned dense row matrix.
 const DenseThreshold = 256
 
-// CompiledProblem is an immutable, flat matrix representation of an LP/MILP problem
-// optimized for cache locality, SIMD row operations, and zero-allocation solver workspaces.
+const (
+	bitsPerWord       = 64
+	wordBitMask       = bitsPerWord - 1
+	simdRowAlign      = 8
+	simdRowAlignMask  = simdRowAlign - 1
+	defaultTouchedCap = 64
+	compileZeroTol    = 1e-15
+)
+
+// cbcInfinity matches COIN_DBL_MAX (DBL_MAX) used by COIN-OR Clp and Cbc for unbounded sides.
+const cbcInfinity = math.MaxFloat64
+
+func clampCBCBound(v float64) float64 {
+	if math.IsInf(v, -1) || v < -cbcInfinity {
+		return -cbcInfinity
+	}
+	if math.IsInf(v, 1) || v > cbcInfinity {
+		return cbcInfinity
+	}
+	return v
+}
+
+// CompiledProblem is an immutable, flat matrix layout of an LP or MILP model
+// built for cache locality, SIMD row sweeps, pooled solver workspaces,
+// and zero-copy C++ COIN-OR CBC / OsiClpSolverInterface calls.
 type CompiledProblem struct {
 	Name       string
 	Sense      Sense
@@ -30,13 +53,14 @@ type CompiledProblem struct {
 	// Bitmasks for fast integer/binary checks (each uint64 covers 64 variables).
 	BinaryMask  []uint64
 	IntegerMask []uint64
-	IntCols     []int // Indices of all Binary or Integer variables
+	IntCols     []int   // Indices of all Binary or Integer variables
+	IntCols32   []int32 // 32-bit indices for direct C++ CBC setInteger calls
 
-	// Objective in minimization form: internal solver always minimizes ObjMin[j]*x[j].
+	// Normalized objective: the internal solver always minimizes ObjMin[j]*x[j].
 	// Original objective value = Sense * (sum_j ObjMin[j]*x[j]) + ObjConstant.
 	ObjName     string
 	ObjCoeffs   []float64 // Original objective coefficients as specified
-	ObjMin      []float64 // Objective coefficients normalized for minimization
+	ObjMin      []float64 // Objective coefficients normalized for minimizing
 	ObjConstant float64
 
 	// Constraint metadata (length = NumConstraints)
@@ -56,13 +80,21 @@ type CompiledProblem struct {
 	RowIdx []int
 	ColVal []float64
 
-	// Contiguous SIMD-padded dense representation when NumVars <= DenseThreshold.
+	// Pre-clamped and 32-bit-indexed CSC arrays for zero-copy C++ OsiClpSolverInterface::loadProblem
+	ColPtr32 []int32
+	RowIdx32 []int32
+	ColLBClp []float64
+	ColUBClp []float64
+	RowLBClp []float64
+	RowUBClp []float64
+
+	// Contiguous SIMD-padded dense rows when NumVars <= DenseThreshold.
 	// RowStride is NumVars rounded up to a multiple of 8 float64s (64 bytes).
 	RowStride int
 	DenseRows []float64
 }
 
-// CompileChecked validates the Model and returns a CompiledProblem or the first validation error.
+// CompileChecked validates the Model and returns a CompiledProblem or the first check error.
 func (m *Model) CompileChecked() (*CompiledProblem, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
@@ -77,7 +109,7 @@ func (m *Model) Compile() *CompiledProblem {
 	n := len(m.vars)
 	mc := len(m.constraints)
 
-	numWords := (n + 63) / 64
+	numWords := (n + wordBitMask) / bitsPerWord
 	p := &CompiledProblem{
 		Name:           m.name,
 		Sense:          m.sense,
@@ -101,6 +133,10 @@ func (m *Model) Compile() *CompiledProblem {
 		RowLB:          make([]float64, mc),
 		RowUB:          make([]float64, mc),
 		RowPtr:         make([]int, mc+1),
+		ColLBClp:       make([]float64, n),
+		ColUBClp:       make([]float64, n),
+		RowLBClp:       make([]float64, mc),
+		RowUBClp:       make([]float64, mc),
 	}
 
 	for j, v := range m.vars {
@@ -108,12 +144,15 @@ func (m *Model) Compile() *CompiledProblem {
 		p.VarLB[j] = v.lb
 		p.VarUB[j] = v.ub
 		p.VarCat[j] = v.cat
+		p.ColLBClp[j] = clampCBCBound(v.lb)
+		p.ColUBClp[j] = clampCBCBound(v.ub)
 		if v.cat != Continuous {
 			p.IsMIP = true
-			p.IntegerMask[j/64] |= 1 << (uint(j) % 64)
+			p.IntegerMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			p.IntCols = append(p.IntCols, j)
+			p.IntCols32 = append(p.IntCols32, int32(j))
 			if v.cat == Binary {
-				p.BinaryMask[j/64] |= 1 << (uint(j) % 64)
+				p.BinaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			}
 		}
 	}
@@ -137,13 +176,13 @@ func (m *Model) Compile() *CompiledProblem {
 	// If n <= DenseThreshold, allocate SIMD-aligned dense rows (multiple of 8 float64s)
 	useDense := n > 0 && n <= DenseThreshold
 	if useDense {
-		p.RowStride = (n + 7) &^ 7
+		p.RowStride = (n + simdRowAlignMask) &^ simdRowAlignMask
 		p.DenseRows = make([]float64, mc*p.RowStride)
 	}
 
 	// Scratch buffers for deduplicating terms in each constraint row
 	rowAcc := make([]float64, n)
-	touched := make([]int, 0, min(n, 64))
+	touched := make([]int, 0, min(n, defaultTouchedCap))
 	inTouched := make([]bool, n)
 
 	totalNNZ := 0
@@ -169,6 +208,8 @@ func (m *Model) Compile() *CompiledProblem {
 			p.RowLB[i] = c.rhs
 			p.RowUB[i] = c.rhs
 		}
+		p.RowLBClp[i] = clampCBCBound(p.RowLB[i])
+		p.RowUBClp[i] = clampCBCBound(p.RowUB[i])
 
 		touched = touched[:0]
 		for _, t := range c.terms {
@@ -193,7 +234,7 @@ func (m *Model) Compile() *CompiledProblem {
 			val := rowAcc[col]
 			rowAcc[col] = 0
 			inTouched[col] = false
-			if math.Abs(val) <= 1e-15 {
+			if math.Abs(val) <= compileZeroTol {
 				continue
 			}
 			p.ColIdx = append(p.ColIdx, col)
@@ -208,7 +249,9 @@ func (m *Model) Compile() *CompiledProblem {
 	// Build CSC (Compressed Sparse Column) transpose from CSR
 	nnz := len(p.ColIdx)
 	p.ColPtr = make([]int, n+1)
+	p.ColPtr32 = make([]int32, n+1)
 	p.RowIdx = make([]int, nnz)
+	p.RowIdx32 = make([]int32, nnz)
 	p.ColVal = make([]float64, nnz)
 
 	for _, col := range p.ColIdx {
@@ -216,6 +259,7 @@ func (m *Model) Compile() *CompiledProblem {
 	}
 	for j := range n {
 		p.ColPtr[j+1] += p.ColPtr[j]
+		p.ColPtr32[j+1] = int32(p.ColPtr[j+1])
 	}
 	writePos := make([]int, n)
 	copy(writePos, p.ColPtr[:n])
@@ -224,6 +268,7 @@ func (m *Model) Compile() *CompiledProblem {
 			col := p.ColIdx[k]
 			pos := writePos[col]
 			p.RowIdx[pos] = i
+			p.RowIdx32[pos] = int32(i)
 			p.ColVal[pos] = p.RowVal[k]
 			writePos[col]++
 		}
@@ -232,7 +277,7 @@ func (m *Model) Compile() *CompiledProblem {
 	return p
 }
 
-// ObjectiveFromMin converts an internal minimization objective value back to the
+// ObjectiveFromMin converts an internal minimized objective value back to the
 // user's original sense and adds ObjConstant.
 func (p *CompiledProblem) ObjectiveFromMin(minObj float64) float64 {
 	if p.Sense == Maximize {
@@ -241,7 +286,7 @@ func (p *CompiledProblem) ObjectiveFromMin(minObj float64) float64 {
 	return minObj + p.ObjConstant
 }
 
-// EvaluateObjective computes the original objective function value for primal vector x.
+// EvaluateObjective computes the original objective value for primal vector x.
 func (p *CompiledProblem) EvaluateObjective(x []float64) float64 {
 	sum := p.ObjConstant
 	for j := 0; j < p.NumVars && j < len(x); j++ {
@@ -250,7 +295,7 @@ func (p *CompiledProblem) EvaluateObjective(x []float64) float64 {
 	return sum
 }
 
-// MaxViolation computes the maximum bound, constraint, and integrality violation of x.
+// MaxViolation computes the largest bound, row, and integer residual of x.
 func (p *CompiledProblem) MaxViolation(x []float64, checkIntegrality bool) (boundViol, rowViol, intViol float64) {
 	if len(x) < p.NumVars {
 		return math.Inf(1), math.Inf(1), math.Inf(1)

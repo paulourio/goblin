@@ -8,7 +8,7 @@ import (
 	"io"
 	"math"
 
-	"gopt"
+	"github.com/paulourio/goblin"
 )
 
 // PuLPJSON represents the native JSON schema produced by PuLP's LpProblem.toJson / toDict
@@ -63,7 +63,7 @@ type PuLPConstraint struct {
 	Constant     float64           `json:"constant"`
 }
 
-// ParsePuLPJSON decodes a PuLP JSON payload from bytes without building a gopt.Model yet.
+// ParsePuLPJSON decodes a PuLP JSON payload from bytes without building a goblin.Model yet.
 func ParsePuLPJSON(data []byte) (*PuLPJSON, error) {
 	var doc PuLPJSON
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -72,15 +72,15 @@ func ParsePuLPJSON(data []byte) (*PuLPJSON, error) {
 	return &doc, nil
 }
 
-// BuildModelFromPuLPJSON constructs a *gopt.Model from a decoded PuLPJSON structure.
-func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gopt.Model, error) {
-	sense := gopt.Minimize
+// BuildModelFromPuLPJSON constructs a *goblin.Model from a decoded PuLPJSON structure.
+func BuildModelFromPuLPJSON(doc *PuLPJSON) (*goblin.Model, error) {
+	sense := goblin.Minimize
 	if doc.Parameters.Sense == -1 {
-		sense = gopt.Maximize
+		sense = goblin.Maximize
 	}
-	m := gopt.NewModel(doc.Parameters.Name, sense)
+	m := goblin.NewModel(doc.Parameters.Name, sense)
 
-	varMap := make(map[string]gopt.Var, len(doc.Variables))
+	varMap := make(map[string]goblin.Var, len(doc.Variables))
 	for _, v := range doc.Variables {
 		lb := math.Inf(-1)
 		if v.LowBound != nil {
@@ -90,58 +90,58 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gopt.Model, error) {
 		if v.UpBound != nil {
 			ub = *v.UpBound
 		}
-		var cat gopt.VarCategory
+		var cat goblin.VarCategory
 		switch v.Cat {
 		case "Binary":
-			cat = gopt.Binary
+			cat = goblin.Binary
 		case "Integer":
 			if lb >= 0 && ub <= 1 {
-				cat = gopt.Binary
+				cat = goblin.Binary
 			} else {
-				cat = gopt.Integer
+				cat = goblin.Integer
 			}
 		default:
-			cat = gopt.Continuous
+			cat = goblin.Continuous
 		}
 		id := m.AddVar(v.Name, lb, ub, cat)
 		varMap[v.Name] = id
 	}
 
-	objTerms := make([]gopt.Term, 0, len(doc.Objective.Coefficients))
+	objTerms := make([]goblin.Term, 0, len(doc.Objective.Coefficients))
 	for _, c := range doc.Objective.Coefficients {
 		vid, ok := varMap[c.Name]
 		if !ok {
 			return nil, fmt.Errorf("objective references unknown variable %q", c.Name)
 		}
-		objTerms = append(objTerms, gopt.Term{Var: vid, Coeff: c.Value})
+		objTerms = append(objTerms, goblin.Term{Var: vid, Coeff: c.Value})
 	}
 	objName := ""
 	if doc.Objective.Name != nil {
 		objName = *doc.Objective.Name
 	}
-	m.SetObjectiveNamed(objName, gopt.Expr{Terms: objTerms})
+	m.SetObjectiveNamed(objName, goblin.Expr{Terms: objTerms})
 
 	for _, c := range doc.Constraints {
-		terms := make([]gopt.Term, 0, len(c.Coefficients))
+		terms := make([]goblin.Term, 0, len(c.Coefficients))
 		for _, coeff := range c.Coefficients {
 			vid, ok := varMap[coeff.Name]
 			if !ok {
 				return nil, fmt.Errorf("constraint %q references unknown variable %q", c.Name, coeff.Name)
 			}
-			terms = append(terms, gopt.Term{Var: vid, Coeff: coeff.Value})
+			terms = append(terms, goblin.Term{Var: vid, Coeff: coeff.Value})
 		}
-		var csense gopt.ConstraintSense
+		var csense goblin.ConstraintSense
 		switch c.Sense {
 		case -1:
-			csense = gopt.LessEqual
+			csense = goblin.LessEqual
 		case 1:
-			csense = gopt.GreaterEqual
+			csense = goblin.GreaterEqual
 		default:
-			csense = gopt.Equal
+			csense = goblin.Equal
 		}
 		rhs := -c.Constant
-		m.AddConstraint(c.Name, gopt.Constraint{
-			Expr:  gopt.Expr{Terms: terms},
+		m.AddConstraint(c.Name, goblin.Constraint{
+			Expr:  goblin.Expr{Terms: terms},
 			Sense: csense,
 			RHS:   rhs,
 		})
@@ -150,8 +150,8 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gopt.Model, error) {
 	return m, nil
 }
 
-// FromPuLPJSON reads a PuLP JSON document from r and returns a *gopt.Model.
-func FromPuLPJSON(r io.Reader) (*gopt.Model, error) {
+// FromPuLPJSON reads a PuLP JSON document from r and returns a *goblin.Model.
+func FromPuLPJSON(r io.Reader) (*goblin.Model, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -163,7 +163,7 @@ func FromPuLPJSON(r io.Reader) (*gopt.Model, error) {
 	return BuildModelFromPuLPJSON(doc)
 }
 
-func toPuLPJSONDoc(p *gopt.CompiledProblem) PuLPJSON {
+func toPuLPJSONDoc(p *goblin.CompiledProblem) PuLPJSON {
 	doc := PuLPJSON{
 		Parameters: PuLPParameters{
 			Name:  p.Name,
@@ -196,7 +196,7 @@ func toPuLPJSONDoc(p *gopt.CompiledProblem) PuLPJSON {
 			ubPtr = &v
 		}
 		catStr := "Continuous"
-		if p.VarCat[j] == gopt.Integer || p.VarCat[j] == gopt.Binary {
+		if p.VarCat[j] == goblin.Integer || p.VarCat[j] == goblin.Binary {
 			// PuLP stores both Binary and Integer as "Integer" with [0, 1] bounds in toDict()
 			catStr = "Integer"
 		}
@@ -228,8 +228,8 @@ func toPuLPJSONDoc(p *gopt.CompiledProblem) PuLPJSON {
 }
 
 // ToPuLPJSON serializes a CompiledProblem into PuLP's native JSON schema so both
-// Python PuLP (LpProblem.fromJson) and gopt can consume the exact same JSON file.
-func ToPuLPJSON(p *gopt.CompiledProblem, w io.Writer) error {
+// Python PuLP (LpProblem.fromJson) and goblin can consume the exact same JSON file.
+func ToPuLPJSON(p *goblin.CompiledProblem, w io.Writer) error {
 	doc := toPuLPJSONDoc(p)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -237,7 +237,7 @@ func ToPuLPJSON(p *gopt.CompiledProblem, w io.Writer) error {
 }
 
 // ToPuLPJSONCompact serializes a CompiledProblem into a single-line compact PuLP JSON record.
-func ToPuLPJSONCompact(p *gopt.CompiledProblem, w io.Writer) error {
+func ToPuLPJSONCompact(p *goblin.CompiledProblem, w io.Writer) error {
 	doc := toPuLPJSONDoc(p)
 	enc := json.NewEncoder(w)
 	return enc.Encode(&doc)

@@ -469,5 +469,5 @@
  "expected_objective": 61.65,
  "expected_status": "Optimal",
  "id": "bigm87",
- "provenance": "CBC 2.10.3 agrees; pre-fix gopt without presolve accepted a basic big-M indicator 5e-8 outside its bound"
+ "provenance": "CBC 2.10.3 agrees; pre-fix goblin without presolve accepted a basic big-M indicator 5e-8 outside its bound"
 }

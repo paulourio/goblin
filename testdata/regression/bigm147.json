@@ -469,5 +469,5 @@
  "expected_objective": 25.29,
  "expected_status": "Optimal",
  "id": "bigm147",
- "provenance": "CBC 2.10.3 agrees; pre-fix gopt reported Optimal 33.54 (silently discarded nodes)"
+ "provenance": "CBC 2.10.3 agrees; pre-fix goblin reported Optimal 33.54 (silently discarded nodes)"
 }

@@ -1,4 +1,27 @@
-__pycache__/
-*.pyc
+# Go binaries & test artifacts
+/goblin-bench
+/goblin-difftest
 *.test
 *.prof
+*.out
+*.so
+*.a
+*.o
+
+# Vendored COIN-OR CBC install prefix (populated by scripts/build_cbc.sh)
+/third_party/Cbc/dist/
+
+# Python caches & virtual environments
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.venv/
+
+# Editor & OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

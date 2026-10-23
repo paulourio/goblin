@@ -1,6 +1,7 @@
-// Package gopt provides an idiomatic pure-Go linear and mixed-integer linear
-// programming (MILP) modeling API and branch-and-cut solver.
-package gopt
+// Package goblin provides an idiomatic Go linear and mixed-integer linear
+// programming (MILP) modeling API and branch-and-cut solver with selectable
+// pure-Go and C++ COIN-OR CBC/CLP backends.
+package goblin
 
 import (
 	"fmt"
@@ -114,8 +115,14 @@ func (s Status) String() string {
 // (upper 32 bits encode the owning Model ID; lower 32 bits encode the 0-based variable index).
 type Var uint64
 
+const (
+	varModelShift    = 32
+	defaultModelCap  = 64
+	intBoundRoundTol = 1e-12
+)
+
 func makeVar(modelID uint32, idx int) Var {
-	return Var(uint64(modelID)<<32 | uint64(uint32(idx)))
+	return Var(uint64(modelID)<<varModelShift | uint64(uint32(idx)))
 }
 
 // Index returns the 0-based column index of v within its parent Model.
@@ -124,7 +131,7 @@ func (v Var) Index() int {
 }
 
 func (v Var) modelID() uint32 {
-	return uint32(v >> 32)
+	return uint32(v >> varModelShift)
 }
 
 // varDef holds the internal specification of a decision variable.
@@ -169,8 +176,8 @@ func NewModel(name string, sense Sense) *Model {
 		id:        nextModelID.Add(1),
 		name:      name,
 		sense:     sense,
-		vars:      make([]varDef, 0, 64),
-		varByName: make(map[string]Var, 64),
+		vars:      make([]varDef, 0, defaultModelCap),
+		varByName: make(map[string]Var, defaultModelCap),
 	}
 }
 
@@ -215,17 +222,17 @@ func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
 			ub = 1
 		}
 		if !math.IsNaN(lb) {
-			lb = math.Ceil(lb - 1e-12)
+			lb = math.Ceil(lb - intBoundRoundTol)
 		}
 		if !math.IsNaN(ub) {
-			ub = math.Floor(ub + 1e-12)
+			ub = math.Floor(ub + intBoundRoundTol)
 		}
 	case Integer:
 		if !math.IsInf(lb, 0) && !math.IsNaN(lb) {
-			lb = math.Ceil(lb - 1e-12)
+			lb = math.Ceil(lb - intBoundRoundTol)
 		}
 		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
-			ub = math.Floor(ub + 1e-12)
+			ub = math.Floor(ub + intBoundRoundTol)
 		}
 		if lb >= 0 && ub <= 1 && lb <= ub {
 			cat = Binary
@@ -314,17 +321,17 @@ func (m *Model) SetVarBounds(v Var, lb, ub float64) {
 			ub = 1
 		}
 		if !math.IsNaN(lb) {
-			lb = math.Ceil(lb - 1e-12)
+			lb = math.Ceil(lb - intBoundRoundTol)
 		}
 		if !math.IsNaN(ub) {
-			ub = math.Floor(ub + 1e-12)
+			ub = math.Floor(ub + intBoundRoundTol)
 		}
 	case Integer:
 		if !math.IsInf(lb, 0) && !math.IsNaN(lb) {
-			lb = math.Ceil(lb - 1e-12)
+			lb = math.Ceil(lb - intBoundRoundTol)
 		}
 		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
-			ub = math.Floor(ub + 1e-12)
+			ub = math.Floor(ub + intBoundRoundTol)
 		}
 	}
 	m.vars[idx].lb = lb

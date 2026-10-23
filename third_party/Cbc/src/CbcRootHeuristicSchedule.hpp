@@ -1,0 +1,80 @@
+// Copyright (C) 2026, Haroldo Gambini Santos and others.
+// All Rights Reserved.
+// This code is licensed under the terms of the Eclipse Public License (EPL).
+
+#ifndef CbcRootHeuristicSchedule_H
+#define CbcRootHeuristicSchedule_H
+
+#include <atomic>
+#include <vector>
+#include "CbcConfig.h"
+#include "OsiCuts.hpp"
+
+class CbcModel;
+class CbcHeuristic;
+
+/** Two-phase parallel heuristic schedule for root node.
+ *
+ *  Phase 1 (constructive): runs diving, FPump, rounding, greedy in parallel.
+ *  Stops as soon as maxSolutionsPhase1 solutions are found.
+ *
+ *  Phase 2 (improvement): runs RINS, DINS, Combine, Proximity in parallel.
+ *  Only executes if Phase 1 found at least one solution.
+ *
+ *  Uses std::atomic abort flags and ClpAbortHandler for fast cancellation.
+ */
+class CBCLIB_EXPORT CbcRootHeuristicSchedule {
+public:
+  CbcRootHeuristicSchedule(CbcModel &model);
+  ~CbcRootHeuristicSchedule();
+
+  /// Run the two-phase schedule. Returns number of solutions found.
+  int run(bool afterCuts = false);
+
+  /// Add the default v5 diving schedule to the model
+  void addDefaultDivingConfigs();
+
+  /// Parameters
+  void setMaxSolutionsPhase1(int n) { maxSolutionsPhase1_ = n; }
+  void setNumThreads(int n) { numThreads_ = n; }
+
+  int maxSolutionsPhase1() const { return maxSolutionsPhase1_; }
+  int numThreads() const { return numThreads_; }
+
+  /// Conflict cut parameters
+  void setConflictMinViolation(double v) { conflictMinViol_ = v; }
+  void setConflictMaxSize(int n) { conflictMaxSize_ = n; }
+  void setConflictMaxCuts(int n) { conflictMaxCuts_ = n; }
+  void setConflictAutoAdd(bool v) { conflictAutoAdd_ = v; }
+  bool conflictAutoAdd() const { return conflictAutoAdd_; }
+  int conflictMaxCuts() const { return conflictMaxCuts_; }
+
+  /// Conflict cuts collected from all diving heuristics
+  const OsiCuts &conflictCuts() const { return conflictCuts_; }
+  int numConflictCuts() const { return conflictCuts_.sizeRowCuts(); }
+
+private:
+  /// Run constructive heuristics. Returns number of solutions found.
+  int runPhase1(std::vector<CbcHeuristic *> &heuristics);
+
+  /// Run improvement heuristics. Returns number of solutions found.
+  int runPhase2(std::vector<CbcHeuristic *> &heuristics);
+
+  /// Run a set of heuristics in parallel with early termination.
+  /// Returns number of solutions found.
+  int runParallel(std::vector<CbcHeuristic *> &heuristics,
+    int maxSolutions);
+
+  CbcModel &model_;
+  std::atomic<bool> stopFlag_;
+  int maxSolutionsPhase1_;
+  int numThreads_;
+  int solutionsFound_;
+  OsiCuts conflictCuts_;
+  double conflictMinViol_;
+  int conflictMaxSize_;
+  int conflictMaxCuts_;
+  bool conflictAutoAdd_;
+};
+
+#endif

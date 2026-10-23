@@ -573,5 +573,5 @@
  "expected_objective": 11.35,
  "expected_status": "Optimal",
  "id": "bigm122",
- "provenance": "CBC 2.10.3 agrees; pre-fix gopt reported NumericalError (near-integral big-M root)"
+ "provenance": "CBC 2.10.3 agrees; pre-fix goblin reported NumericalError (near-integral big-M root)"
 }

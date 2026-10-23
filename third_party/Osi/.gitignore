@@ -1,0 +1,21 @@
+# Ignore VS files
+*.suo
+*.db
+*.bak
+*.user
+**/.vs/
+**/MSVisualStudio/**/Release/
+**/MSVisualStudio/**/ReleaseParallel/
+**/MSVisualStudio/**/Debug/
+autom4te.cache
+*.Plo
+*.a
+*.la
+*.lai
+*.lo
+*.o
+
+# Ignore files created during unit tests
+**/MSVisualStudio/**/*.mps
+**/MSVisualStudio/**/*.lp
+**/MSVisualStudio/**/*.out

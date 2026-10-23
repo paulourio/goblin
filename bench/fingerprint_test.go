@@ -21,14 +21,14 @@ func TestSourceFingerprintScope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module gopt\n")
-	write("solver.go", "package gopt\n")
-	write("solver_test.go", "package gopt\n")
+	write("go.mod", "module github.com/paulourio/goblin\n")
+	write("solver.go", "package goblin\n")
+	write("solver_test.go", "package goblin\n")
 	write("format/mps.go", "package format\n")
 	write("internal/simd/k.go", "package simd\n")
 	write("bench/corpus.go", "package bench\n")
 	write("bench/docgen.go", "package bench\n")
-	write("cmd/gopt-bench/main.go", "package main\n")
+	write("cmd/goblin-bench/main.go", "package main\n")
 	write("cmd/other/main.go", "package main\n")
 
 	fp := func() string {
@@ -47,7 +47,7 @@ func TestSourceFingerprintScope(t *testing.T) {
 			t.Fatalf("editing %s changed the fingerprint", rel)
 		}
 	}
-	for _, rel := range []string{"solver.go", "format/mps.go", "internal/simd/k.go", "bench/corpus.go", "cmd/gopt-bench/main.go", "go.mod"} {
+	for _, rel := range []string{"solver.go", "format/mps.go", "internal/simd/k.go", "bench/corpus.go", "cmd/goblin-bench/main.go", "go.mod"} {
 		write(rel, "package x // edited "+rel+"\n")
 		got := fp()
 		if got == base {

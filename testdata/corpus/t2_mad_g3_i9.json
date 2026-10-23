@@ -33,6 +33,10 @@
         "value": 1
       },
       {
+        "name": "r_00",
+        "value": 1
+      },
+      {
         "name": "z_01_00",
         "value": 1
       },
@@ -57,6 +61,10 @@
         "value": 1
       },
       {
+        "name": "r_01",
+        "value": 1
+      },
+      {
         "name": "z_02_00",
         "value": 1
       },
@@ -78,6 +86,10 @@
       },
       {
         "name": "z_02_05",
+        "value": 1
+      },
+      {
+        "name": "r_02",
         "value": 1
       }
     ]
@@ -205,6 +217,22 @@
     },
     {
       "name": "m_00",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": null,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "n_00",
+      "cat": "Integer",
+      "lowBound": 1,
+      "upBound": null,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "r_00",
       "cat": "Continuous",
       "lowBound": 0,
       "upBound": null,
@@ -340,6 +368,22 @@
       "dj": null
     },
     {
+      "name": "n_01",
+      "cat": "Integer",
+      "lowBound": 1,
+      "upBound": null,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "r_01",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": null,
+      "varValue": null,
+      "dj": null
+    },
+    {
       "name": "x_02_00",
       "cat": "Integer",
       "lowBound": -0,
@@ -466,6 +510,22 @@
       "upBound": null,
       "varValue": null,
       "dj": null
+    },
+    {
+      "name": "n_02",
+      "cat": "Integer",
+      "lowBound": 1,
+      "upBound": null,
+      "varValue": null,
+      "dj": null
+    },
+    {
+      "name": "r_02",
+      "cat": "Continuous",
+      "lowBound": 0,
+      "upBound": null,
+      "varValue": null,
+      "dj": null
     }
   ],
   "constraints": [
@@ -475,27 +535,27 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": -1154
+          "value": -1200
         },
         {
           "name": "x_00_01",
-          "value": -1697
+          "value": -1800
         },
         {
           "name": "x_00_02",
-          "value": -2040
+          "value": -2100
         },
         {
           "name": "x_00_03",
-          "value": -1053
+          "value": -1100
         },
         {
           "name": "x_00_04",
-          "value": -1724
+          "value": -1800
         },
         {
           "name": "x_00_05",
-          "value": -1621
+          "value": -1700
         },
         {
           "name": "x_00_06",
@@ -507,7 +567,7 @@
         },
         {
           "name": "x_00_08",
-          "value": -7000
+          "value": -7100
         },
         {
           "name": "z_00_00",
@@ -527,27 +587,27 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": 1154
+          "value": 1200
         },
         {
           "name": "x_00_01",
-          "value": 1697
+          "value": 1800
         },
         {
           "name": "x_00_02",
-          "value": 2040
+          "value": 2100
         },
         {
           "name": "x_00_03",
-          "value": 1053
+          "value": 1100
         },
         {
           "name": "x_00_04",
-          "value": 1724
+          "value": 1800
         },
         {
           "name": "x_00_05",
-          "value": 1621
+          "value": 1700
         },
         {
           "name": "x_00_06",
@@ -559,7 +619,7 @@
         },
         {
           "name": "x_00_08",
-          "value": 7000
+          "value": 7100
         },
         {
           "name": "z_00_00",
@@ -579,39 +639,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": -1034
+          "value": -1000
         },
         {
           "name": "x_00_01",
-          "value": -1457
+          "value": -1500
         },
         {
           "name": "x_00_02",
-          "value": -1680
+          "value": -1800
         },
         {
           "name": "x_00_03",
-          "value": -933
+          "value": -900
         },
         {
           "name": "x_00_04",
-          "value": -1484
+          "value": -1500
         },
         {
           "name": "x_00_05",
-          "value": -1261
+          "value": -1400
         },
         {
           "name": "x_00_06",
-          "value": -5300
+          "value": -5400
         },
         {
           "name": "x_00_07",
-          "value": -6600
+          "value": -6700
         },
         {
           "name": "x_00_08",
-          "value": -7900
+          "value": -8000
         },
         {
           "name": "z_00_01",
@@ -631,39 +691,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": 1034
+          "value": 1000
         },
         {
           "name": "x_00_01",
-          "value": 1457
+          "value": 1500
         },
         {
           "name": "x_00_02",
-          "value": 1680
+          "value": 1800
         },
         {
           "name": "x_00_03",
-          "value": 933
+          "value": 900
         },
         {
           "name": "x_00_04",
-          "value": 1484
+          "value": 1500
         },
         {
           "name": "x_00_05",
-          "value": 1261
+          "value": 1400
         },
         {
           "name": "x_00_06",
-          "value": 5300
+          "value": 5400
         },
         {
           "name": "x_00_07",
-          "value": 6600
+          "value": 6700
         },
         {
           "name": "x_00_08",
-          "value": 7900
+          "value": 8000
         },
         {
           "name": "z_00_01",
@@ -683,39 +743,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": -1046
+          "value": -1100
         },
         {
           "name": "x_00_01",
-          "value": -1397
+          "value": -1500
         },
         {
           "name": "x_00_02",
-          "value": -1452
+          "value": -1500
         },
         {
           "name": "x_00_03",
-          "value": -945
+          "value": -1000
         },
         {
           "name": "x_00_04",
-          "value": -1424
+          "value": -1500
         },
         {
           "name": "x_00_05",
-          "value": -1033
+          "value": -1100
         },
         {
           "name": "x_00_06",
-          "value": -5336
+          "value": -5400
         },
         {
           "name": "x_00_07",
-          "value": -6840
+          "value": -6900
         },
         {
           "name": "x_00_08",
-          "value": -8536
+          "value": -8600
         },
         {
           "name": "z_00_02",
@@ -735,39 +795,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": 1046
+          "value": 1100
         },
         {
           "name": "x_00_01",
-          "value": 1397
+          "value": 1500
         },
         {
           "name": "x_00_02",
-          "value": 1452
+          "value": 1500
         },
         {
           "name": "x_00_03",
-          "value": 945
+          "value": 1000
         },
         {
           "name": "x_00_04",
-          "value": 1424
+          "value": 1500
         },
         {
           "name": "x_00_05",
-          "value": 1033
+          "value": 1100
         },
         {
           "name": "x_00_06",
-          "value": 5336
+          "value": 5400
         },
         {
           "name": "x_00_07",
-          "value": 6840
+          "value": 6900
         },
         {
           "name": "x_00_08",
-          "value": 8536
+          "value": 8600
         },
         {
           "name": "z_00_02",
@@ -787,39 +847,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": -1086
+          "value": -1100
         },
         {
           "name": "x_00_01",
-          "value": -1573
+          "value": -1700
         },
         {
           "name": "x_00_02",
-          "value": -1912
+          "value": -2000
         },
         {
           "name": "x_00_03",
-          "value": -985
+          "value": -1000
         },
         {
           "name": "x_00_04",
-          "value": -1600
+          "value": -1700
         },
         {
           "name": "x_00_05",
-          "value": -1493
+          "value": -1600
         },
         {
           "name": "x_00_06",
-          "value": -5376
+          "value": -5500
         },
         {
           "name": "x_00_07",
-          "value": -6728
+          "value": -6800
         },
         {
           "name": "x_00_08",
-          "value": -7976
+          "value": -8200
         },
         {
           "name": "z_00_03",
@@ -839,39 +899,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": 1086
+          "value": 1100
         },
         {
           "name": "x_00_01",
-          "value": 1573
+          "value": 1700
         },
         {
           "name": "x_00_02",
-          "value": 1912
+          "value": 2000
         },
         {
           "name": "x_00_03",
-          "value": 985
+          "value": 1000
         },
         {
           "name": "x_00_04",
-          "value": 1600
+          "value": 1700
         },
         {
           "name": "x_00_05",
-          "value": 1493
+          "value": 1600
         },
         {
           "name": "x_00_06",
-          "value": 5376
+          "value": 5500
         },
         {
           "name": "x_00_07",
-          "value": 6728
+          "value": 6800
         },
         {
           "name": "x_00_08",
-          "value": 7976
+          "value": 8200
         },
         {
           "name": "z_00_03",
@@ -891,39 +951,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": -1078
+          "value": -1100
         },
         {
           "name": "x_00_01",
-          "value": -1509
+          "value": -1500
         },
         {
           "name": "x_00_02",
-          "value": -1712
+          "value": -1800
         },
         {
           "name": "x_00_03",
-          "value": -977
+          "value": -1000
         },
         {
           "name": "x_00_04",
-          "value": -1536
+          "value": -1500
         },
         {
           "name": "x_00_05",
-          "value": -1293
+          "value": -1400
         },
         {
           "name": "x_00_06",
-          "value": -5452
+          "value": -5500
         },
         {
           "name": "x_00_07",
-          "value": -6976
+          "value": -7100
         },
         {
           "name": "x_00_08",
-          "value": -8556
+          "value": -8600
         },
         {
           "name": "z_00_04",
@@ -943,39 +1003,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": 1078
+          "value": 1100
         },
         {
           "name": "x_00_01",
-          "value": 1509
+          "value": 1500
         },
         {
           "name": "x_00_02",
-          "value": 1712
+          "value": 1800
         },
         {
           "name": "x_00_03",
-          "value": 977
+          "value": 1000
         },
         {
           "name": "x_00_04",
-          "value": 1536
+          "value": 1500
         },
         {
           "name": "x_00_05",
-          "value": 1293
+          "value": 1400
         },
         {
           "name": "x_00_06",
-          "value": 5452
+          "value": 5500
         },
         {
           "name": "x_00_07",
-          "value": 6976
+          "value": 7100
         },
         {
           "name": "x_00_08",
-          "value": 8556
+          "value": 8600
         },
         {
           "name": "z_00_04",
@@ -995,39 +1055,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": -1070
+          "value": -1100
         },
         {
           "name": "x_00_01",
-          "value": -1469
+          "value": -1600
         },
         {
           "name": "x_00_02",
-          "value": -1548
+          "value": -1600
         },
         {
           "name": "x_00_03",
-          "value": -969
+          "value": -1000
         },
         {
           "name": "x_00_04",
-          "value": -1496
+          "value": -1600
         },
         {
           "name": "x_00_05",
-          "value": -1129
+          "value": -1200
         },
         {
           "name": "x_00_06",
-          "value": -5528
+          "value": -5600
         },
         {
           "name": "x_00_07",
-          "value": -7176
+          "value": -7300
         },
         {
           "name": "x_00_08",
-          "value": -9064
+          "value": -9300
         },
         {
           "name": "z_00_05",
@@ -1047,39 +1107,39 @@
       "coefficients": [
         {
           "name": "x_00_00",
-          "value": 1070
+          "value": 1100
         },
         {
           "name": "x_00_01",
-          "value": 1469
+          "value": 1600
         },
         {
           "name": "x_00_02",
-          "value": 1548
+          "value": 1600
         },
         {
           "name": "x_00_03",
-          "value": 969
+          "value": 1000
         },
         {
           "name": "x_00_04",
-          "value": 1496
+          "value": 1600
         },
         {
           "name": "x_00_05",
-          "value": 1129
+          "value": 1200
         },
         {
           "name": "x_00_06",
-          "value": 5528
+          "value": 5600
         },
         {
           "name": "x_00_07",
-          "value": 7176
+          "value": 7300
         },
         {
           "name": "x_00_08",
-          "value": 9064
+          "value": 9300
         },
         {
           "name": "z_00_05",
@@ -1099,27 +1159,27 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": -1154
+          "value": -1200
         },
         {
           "name": "x_01_01",
-          "value": -1697
+          "value": -1800
         },
         {
           "name": "x_01_02",
-          "value": -2040
+          "value": -2100
         },
         {
           "name": "x_01_03",
-          "value": -1053
+          "value": -1100
         },
         {
           "name": "x_01_04",
-          "value": -1724
+          "value": -1800
         },
         {
           "name": "x_01_05",
-          "value": -1621
+          "value": -1700
         },
         {
           "name": "x_01_06",
@@ -1131,7 +1191,7 @@
         },
         {
           "name": "x_01_08",
-          "value": -7000
+          "value": -7100
         },
         {
           "name": "z_01_00",
@@ -1151,27 +1211,27 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": 1154
+          "value": 1200
         },
         {
           "name": "x_01_01",
-          "value": 1697
+          "value": 1800
         },
         {
           "name": "x_01_02",
-          "value": 2040
+          "value": 2100
         },
         {
           "name": "x_01_03",
-          "value": 1053
+          "value": 1100
         },
         {
           "name": "x_01_04",
-          "value": 1724
+          "value": 1800
         },
         {
           "name": "x_01_05",
-          "value": 1621
+          "value": 1700
         },
         {
           "name": "x_01_06",
@@ -1183,7 +1243,7 @@
         },
         {
           "name": "x_01_08",
-          "value": 7000
+          "value": 7100
         },
         {
           "name": "z_01_00",
@@ -1203,39 +1263,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": -1034
+          "value": -1000
         },
         {
           "name": "x_01_01",
-          "value": -1457
+          "value": -1500
         },
         {
           "name": "x_01_02",
-          "value": -1680
+          "value": -1800
         },
         {
           "name": "x_01_03",
-          "value": -933
+          "value": -900
         },
         {
           "name": "x_01_04",
-          "value": -1484
+          "value": -1500
         },
         {
           "name": "x_01_05",
-          "value": -1261
+          "value": -1400
         },
         {
           "name": "x_01_06",
-          "value": -5300
+          "value": -5400
         },
         {
           "name": "x_01_07",
-          "value": -6600
+          "value": -6700
         },
         {
           "name": "x_01_08",
-          "value": -7900
+          "value": -8000
         },
         {
           "name": "z_01_01",
@@ -1255,39 +1315,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": 1034
+          "value": 1000
         },
         {
           "name": "x_01_01",
-          "value": 1457
+          "value": 1500
         },
         {
           "name": "x_01_02",
-          "value": 1680
+          "value": 1800
         },
         {
           "name": "x_01_03",
-          "value": 933
+          "value": 900
         },
         {
           "name": "x_01_04",
-          "value": 1484
+          "value": 1500
         },
         {
           "name": "x_01_05",
-          "value": 1261
+          "value": 1400
         },
         {
           "name": "x_01_06",
-          "value": 5300
+          "value": 5400
         },
         {
           "name": "x_01_07",
-          "value": 6600
+          "value": 6700
         },
         {
           "name": "x_01_08",
-          "value": 7900
+          "value": 8000
         },
         {
           "name": "z_01_01",
@@ -1307,39 +1367,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": -1046
+          "value": -1100
         },
         {
           "name": "x_01_01",
-          "value": -1397
+          "value": -1500
         },
         {
           "name": "x_01_02",
-          "value": -1452
+          "value": -1500
         },
         {
           "name": "x_01_03",
-          "value": -945
+          "value": -1000
         },
         {
           "name": "x_01_04",
-          "value": -1424
+          "value": -1500
         },
         {
           "name": "x_01_05",
-          "value": -1033
+          "value": -1100
         },
         {
           "name": "x_01_06",
-          "value": -5336
+          "value": -5400
         },
         {
           "name": "x_01_07",
-          "value": -6840
+          "value": -6900
         },
         {
           "name": "x_01_08",
-          "value": -8536
+          "value": -8600
         },
         {
           "name": "z_01_02",
@@ -1359,39 +1419,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": 1046
+          "value": 1100
         },
         {
           "name": "x_01_01",
-          "value": 1397
+          "value": 1500
         },
         {
           "name": "x_01_02",
-          "value": 1452
+          "value": 1500
         },
         {
           "name": "x_01_03",
-          "value": 945
+          "value": 1000
         },
         {
           "name": "x_01_04",
-          "value": 1424
+          "value": 1500
         },
         {
           "name": "x_01_05",
-          "value": 1033
+          "value": 1100
         },
         {
           "name": "x_01_06",
-          "value": 5336
+          "value": 5400
         },
         {
           "name": "x_01_07",
-          "value": 6840
+          "value": 6900
         },
         {
           "name": "x_01_08",
-          "value": 8536
+          "value": 8600
         },
         {
           "name": "z_01_02",
@@ -1411,39 +1471,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": -1086
+          "value": -1100
         },
         {
           "name": "x_01_01",
-          "value": -1573
+          "value": -1700
         },
         {
           "name": "x_01_02",
-          "value": -1912
+          "value": -2000
         },
         {
           "name": "x_01_03",
-          "value": -985
+          "value": -1000
         },
         {
           "name": "x_01_04",
-          "value": -1600
+          "value": -1700
         },
         {
           "name": "x_01_05",
-          "value": -1493
+          "value": -1600
         },
         {
           "name": "x_01_06",
-          "value": -5376
+          "value": -5500
         },
         {
           "name": "x_01_07",
-          "value": -6728
+          "value": -6800
         },
         {
           "name": "x_01_08",
-          "value": -7976
+          "value": -8200
         },
         {
           "name": "z_01_03",
@@ -1463,39 +1523,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": 1086
+          "value": 1100
         },
         {
           "name": "x_01_01",
-          "value": 1573
+          "value": 1700
         },
         {
           "name": "x_01_02",
-          "value": 1912
+          "value": 2000
         },
         {
           "name": "x_01_03",
-          "value": 985
+          "value": 1000
         },
         {
           "name": "x_01_04",
-          "value": 1600
+          "value": 1700
         },
         {
           "name": "x_01_05",
-          "value": 1493
+          "value": 1600
         },
         {
           "name": "x_01_06",
-          "value": 5376
+          "value": 5500
         },
         {
           "name": "x_01_07",
-          "value": 6728
+          "value": 6800
         },
         {
           "name": "x_01_08",
-          "value": 7976
+          "value": 8200
         },
         {
           "name": "z_01_03",
@@ -1515,39 +1575,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": -1078
+          "value": -1100
         },
         {
           "name": "x_01_01",
-          "value": -1509
+          "value": -1500
         },
         {
           "name": "x_01_02",
-          "value": -1712
+          "value": -1800
         },
         {
           "name": "x_01_03",
-          "value": -977
+          "value": -1000
         },
         {
           "name": "x_01_04",
-          "value": -1536
+          "value": -1500
         },
         {
           "name": "x_01_05",
-          "value": -1293
+          "value": -1400
         },
         {
           "name": "x_01_06",
-          "value": -5452
+          "value": -5500
         },
         {
           "name": "x_01_07",
-          "value": -6976
+          "value": -7100
         },
         {
           "name": "x_01_08",
-          "value": -8556
+          "value": -8600
         },
         {
           "name": "z_01_04",
@@ -1567,39 +1627,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": 1078
+          "value": 1100
         },
         {
           "name": "x_01_01",
-          "value": 1509
+          "value": 1500
         },
         {
           "name": "x_01_02",
-          "value": 1712
+          "value": 1800
         },
         {
           "name": "x_01_03",
-          "value": 977
+          "value": 1000
         },
         {
           "name": "x_01_04",
-          "value": 1536
+          "value": 1500
         },
         {
           "name": "x_01_05",
-          "value": 1293
+          "value": 1400
         },
         {
           "name": "x_01_06",
-          "value": 5452
+          "value": 5500
         },
         {
           "name": "x_01_07",
-          "value": 6976
+          "value": 7100
         },
         {
           "name": "x_01_08",
-          "value": 8556
+          "value": 8600
         },
         {
           "name": "z_01_04",
@@ -1619,39 +1679,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": -1070
+          "value": -1100
         },
         {
           "name": "x_01_01",
-          "value": -1469
+          "value": -1600
         },
         {
           "name": "x_01_02",
-          "value": -1548
+          "value": -1600
         },
         {
           "name": "x_01_03",
-          "value": -969
+          "value": -1000
         },
         {
           "name": "x_01_04",
-          "value": -1496
+          "value": -1600
         },
         {
           "name": "x_01_05",
-          "value": -1129
+          "value": -1200
         },
         {
           "name": "x_01_06",
-          "value": -5528
+          "value": -5600
         },
         {
           "name": "x_01_07",
-          "value": -7176
+          "value": -7300
         },
         {
           "name": "x_01_08",
-          "value": -9064
+          "value": -9300
         },
         {
           "name": "z_01_05",
@@ -1671,39 +1731,39 @@
       "coefficients": [
         {
           "name": "x_01_00",
-          "value": 1070
+          "value": 1100
         },
         {
           "name": "x_01_01",
-          "value": 1469
+          "value": 1600
         },
         {
           "name": "x_01_02",
-          "value": 1548
+          "value": 1600
         },
         {
           "name": "x_01_03",
-          "value": 969
+          "value": 1000
         },
         {
           "name": "x_01_04",
-          "value": 1496
+          "value": 1600
         },
         {
           "name": "x_01_05",
-          "value": 1129
+          "value": 1200
         },
         {
           "name": "x_01_06",
-          "value": 5528
+          "value": 5600
         },
         {
           "name": "x_01_07",
-          "value": 7176
+          "value": 7300
         },
         {
           "name": "x_01_08",
-          "value": 9064
+          "value": 9300
         },
         {
           "name": "z_01_05",
@@ -1723,27 +1783,27 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": -1154
+          "value": -1200
         },
         {
           "name": "x_02_01",
-          "value": -1697
+          "value": -1800
         },
         {
           "name": "x_02_02",
-          "value": -2040
+          "value": -2100
         },
         {
           "name": "x_02_03",
-          "value": -1053
+          "value": -1100
         },
         {
           "name": "x_02_04",
-          "value": -1724
+          "value": -1800
         },
         {
           "name": "x_02_05",
-          "value": -1621
+          "value": -1700
         },
         {
           "name": "x_02_06",
@@ -1755,7 +1815,7 @@
         },
         {
           "name": "x_02_08",
-          "value": -7000
+          "value": -7100
         },
         {
           "name": "z_02_00",
@@ -1775,27 +1835,27 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": 1154
+          "value": 1200
         },
         {
           "name": "x_02_01",
-          "value": 1697
+          "value": 1800
         },
         {
           "name": "x_02_02",
-          "value": 2040
+          "value": 2100
         },
         {
           "name": "x_02_03",
-          "value": 1053
+          "value": 1100
         },
         {
           "name": "x_02_04",
-          "value": 1724
+          "value": 1800
         },
         {
           "name": "x_02_05",
-          "value": 1621
+          "value": 1700
         },
         {
           "name": "x_02_06",
@@ -1807,7 +1867,7 @@
         },
         {
           "name": "x_02_08",
-          "value": 7000
+          "value": 7100
         },
         {
           "name": "z_02_00",
@@ -1827,39 +1887,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": -1034
+          "value": -1000
         },
         {
           "name": "x_02_01",
-          "value": -1457
+          "value": -1500
         },
         {
           "name": "x_02_02",
-          "value": -1680
+          "value": -1800
         },
         {
           "name": "x_02_03",
-          "value": -933
+          "value": -900
         },
         {
           "name": "x_02_04",
-          "value": -1484
+          "value": -1500
         },
         {
           "name": "x_02_05",
-          "value": -1261
+          "value": -1400
         },
         {
           "name": "x_02_06",
-          "value": -5300
+          "value": -5400
         },
         {
           "name": "x_02_07",
-          "value": -6600
+          "value": -6700
         },
         {
           "name": "x_02_08",
-          "value": -7900
+          "value": -8000
         },
         {
           "name": "z_02_01",
@@ -1879,39 +1939,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": 1034
+          "value": 1000
         },
         {
           "name": "x_02_01",
-          "value": 1457
+          "value": 1500
         },
         {
           "name": "x_02_02",
-          "value": 1680
+          "value": 1800
         },
         {
           "name": "x_02_03",
-          "value": 933
+          "value": 900
         },
         {
           "name": "x_02_04",
-          "value": 1484
+          "value": 1500
         },
         {
           "name": "x_02_05",
-          "value": 1261
+          "value": 1400
         },
         {
           "name": "x_02_06",
-          "value": 5300
+          "value": 5400
         },
         {
           "name": "x_02_07",
-          "value": 6600
+          "value": 6700
         },
         {
           "name": "x_02_08",
-          "value": 7900
+          "value": 8000
         },
         {
           "name": "z_02_01",
@@ -1931,39 +1991,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": -1046
+          "value": -1100
         },
         {
           "name": "x_02_01",
-          "value": -1397
+          "value": -1500
         },
         {
           "name": "x_02_02",
-          "value": -1452
+          "value": -1500
         },
         {
           "name": "x_02_03",
-          "value": -945
+          "value": -1000
         },
         {
           "name": "x_02_04",
-          "value": -1424
+          "value": -1500
         },
         {
           "name": "x_02_05",
-          "value": -1033
+          "value": -1100
         },
         {
           "name": "x_02_06",
-          "value": -5336
+          "value": -5400
         },
         {
           "name": "x_02_07",
-          "value": -6840
+          "value": -6900
         },
         {
           "name": "x_02_08",
-          "value": -8536
+          "value": -8600
         },
         {
           "name": "z_02_02",
@@ -1983,39 +2043,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": 1046
+          "value": 1100
         },
         {
           "name": "x_02_01",
-          "value": 1397
+          "value": 1500
         },
         {
           "name": "x_02_02",
-          "value": 1452
+          "value": 1500
         },
         {
           "name": "x_02_03",
-          "value": 945
+          "value": 1000
         },
         {
           "name": "x_02_04",
-          "value": 1424
+          "value": 1500
         },
         {
           "name": "x_02_05",
-          "value": 1033
+          "value": 1100
         },
         {
           "name": "x_02_06",
-          "value": 5336
+          "value": 5400
         },
         {
           "name": "x_02_07",
-          "value": 6840
+          "value": 6900
         },
         {
           "name": "x_02_08",
-          "value": 8536
+          "value": 8600
         },
         {
           "name": "z_02_02",
@@ -2035,39 +2095,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": -1086
+          "value": -1100
         },
         {
           "name": "x_02_01",
-          "value": -1573
+          "value": -1700
         },
         {
           "name": "x_02_02",
-          "value": -1912
+          "value": -2000
         },
         {
           "name": "x_02_03",
-          "value": -985
+          "value": -1000
         },
         {
           "name": "x_02_04",
-          "value": -1600
+          "value": -1700
         },
         {
           "name": "x_02_05",
-          "value": -1493
+          "value": -1600
         },
         {
           "name": "x_02_06",
-          "value": -5376
+          "value": -5500
         },
         {
           "name": "x_02_07",
-          "value": -6728
+          "value": -6800
         },
         {
           "name": "x_02_08",
-          "value": -7976
+          "value": -8200
         },
         {
           "name": "z_02_03",
@@ -2087,39 +2147,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": 1086
+          "value": 1100
         },
         {
           "name": "x_02_01",
-          "value": 1573
+          "value": 1700
         },
         {
           "name": "x_02_02",
-          "value": 1912
+          "value": 2000
         },
         {
           "name": "x_02_03",
-          "value": 985
+          "value": 1000
         },
         {
           "name": "x_02_04",
-          "value": 1600
+          "value": 1700
         },
         {
           "name": "x_02_05",
-          "value": 1493
+          "value": 1600
         },
         {
           "name": "x_02_06",
-          "value": 5376
+          "value": 5500
         },
         {
           "name": "x_02_07",
-          "value": 6728
+          "value": 6800
         },
         {
           "name": "x_02_08",
-          "value": 7976
+          "value": 8200
         },
         {
           "name": "z_02_03",
@@ -2139,39 +2199,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": -1078
+          "value": -1100
         },
         {
           "name": "x_02_01",
-          "value": -1509
+          "value": -1500
         },
         {
           "name": "x_02_02",
-          "value": -1712
+          "value": -1800
         },
         {
           "name": "x_02_03",
-          "value": -977
+          "value": -1000
         },
         {
           "name": "x_02_04",
-          "value": -1536
+          "value": -1500
         },
         {
           "name": "x_02_05",
-          "value": -1293
+          "value": -1400
         },
         {
           "name": "x_02_06",
-          "value": -5452
+          "value": -5500
         },
         {
           "name": "x_02_07",
-          "value": -6976
+          "value": -7100
         },
         {
           "name": "x_02_08",
-          "value": -8556
+          "value": -8600
         },
         {
           "name": "z_02_04",
@@ -2191,39 +2251,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": 1078
+          "value": 1100
         },
         {
           "name": "x_02_01",
-          "value": 1509
+          "value": 1500
         },
         {
           "name": "x_02_02",
-          "value": 1712
+          "value": 1800
         },
         {
           "name": "x_02_03",
-          "value": 977
+          "value": 1000
         },
         {
           "name": "x_02_04",
-          "value": 1536
+          "value": 1500
         },
         {
           "name": "x_02_05",
-          "value": 1293
+          "value": 1400
         },
         {
           "name": "x_02_06",
-          "value": 5452
+          "value": 5500
         },
         {
           "name": "x_02_07",
-          "value": 6976
+          "value": 7100
         },
         {
           "name": "x_02_08",
-          "value": 8556
+          "value": 8600
         },
         {
           "name": "z_02_04",
@@ -2243,39 +2303,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": -1070
+          "value": -1100
         },
         {
           "name": "x_02_01",
-          "value": -1469
+          "value": -1600
         },
         {
           "name": "x_02_02",
-          "value": -1548
+          "value": -1600
         },
         {
           "name": "x_02_03",
-          "value": -969
+          "value": -1000
         },
         {
           "name": "x_02_04",
-          "value": -1496
+          "value": -1600
         },
         {
           "name": "x_02_05",
-          "value": -1129
+          "value": -1200
         },
         {
           "name": "x_02_06",
-          "value": -5528
+          "value": -5600
         },
         {
           "name": "x_02_07",
-          "value": -7176
+          "value": -7300
         },
         {
           "name": "x_02_08",
-          "value": -9064
+          "value": -9300
         },
         {
           "name": "z_02_05",
@@ -2295,39 +2355,39 @@
       "coefficients": [
         {
           "name": "x_02_00",
-          "value": 1070
+          "value": 1100
         },
         {
           "name": "x_02_01",
-          "value": 1469
+          "value": 1600
         },
         {
           "name": "x_02_02",
-          "value": 1548
+          "value": 1600
         },
         {
           "name": "x_02_03",
-          "value": 969
+          "value": 1000
         },
         {
           "name": "x_02_04",
-          "value": 1496
+          "value": 1600
         },
         {
           "name": "x_02_05",
-          "value": 1129
+          "value": 1200
         },
         {
           "name": "x_02_06",
-          "value": 5528
+          "value": 5600
         },
         {
           "name": "x_02_07",
-          "value": 7176
+          "value": 7300
         },
         {
           "name": "x_02_08",
-          "value": 9064
+          "value": 9300
         },
         {
           "name": "z_02_05",
@@ -2336,6 +2396,126 @@
         {
           "name": "m_02",
           "value": -1
+        }
+      ],
+      "pi": null,
+      "constant": -0
+    },
+    {
+      "name": "round_pos_00",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "m_00",
+          "value": -1
+        },
+        {
+          "name": "n_00",
+          "value": 100
+        },
+        {
+          "name": "r_00",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -0
+    },
+    {
+      "name": "round_neg_00",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "m_00",
+          "value": 1
+        },
+        {
+          "name": "n_00",
+          "value": -100
+        },
+        {
+          "name": "r_00",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -0
+    },
+    {
+      "name": "round_pos_01",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "m_01",
+          "value": -1
+        },
+        {
+          "name": "n_01",
+          "value": 100
+        },
+        {
+          "name": "r_01",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -0
+    },
+    {
+      "name": "round_neg_01",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "m_01",
+          "value": 1
+        },
+        {
+          "name": "n_01",
+          "value": -100
+        },
+        {
+          "name": "r_01",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -0
+    },
+    {
+      "name": "round_pos_02",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "m_02",
+          "value": -1
+        },
+        {
+          "name": "n_02",
+          "value": 100
+        },
+        {
+          "name": "r_02",
+          "value": 1
+        }
+      ],
+      "pi": null,
+      "constant": -0
+    },
+    {
+      "name": "round_neg_02",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "m_02",
+          "value": 1
+        },
+        {
+          "name": "n_02",
+          "value": -100
+        },
+        {
+          "name": "r_02",
+          "value": 1
         }
       ],
       "pi": null,

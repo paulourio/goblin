@@ -1,14 +1,36 @@
-package gopt
+package goblin
 
 import "time"
 
-// Options configures the gopt LP and MILP solver.
+// Backend selects the underlying LP and MILP solver engine.
+type Backend uint8
+
+const (
+	// BackendGo uses goblin's pure-Go Revised Dual/Primal Simplex and Branch-and-Cut solver (default).
+	BackendGo Backend = iota
+	// BackendCBC uses in-process C++ bindings (cgo) to the COIN-OR CBC and CLP libraries.
+	BackendCBC
+)
+
+func (b Backend) String() string {
+	switch b {
+	case BackendCBC:
+		return "CBC"
+	default:
+		return "Go"
+	}
+}
+
+// Options configures the goblin LP and MILP solver.
 //
-// Start from DefaultOptions and override individual fields. The zero value is a valid but
-// minimal configuration: presolve, cuts, and heuristics are disabled, the node and iteration
-// budgets are unlimited, and both gap tolerances are zero (prove exact optimality).
+// Callers may configure Solve / SolveCompiled via functional constructors (such as
+// WithBackend, WithCBC, WithSIMD, WithTimeLimit) or pass a bulk struct in a single call.
 type Options struct {
-	// EnablePresolve runs MIP presolve and node-level bound propagation.
+	// Backend selects the solver engine (BackendGo by default, or BackendCBC).
+	Backend Backend
+	// DisableSIMD forces the pure-Go scalar kernels even when compiled with GOEXPERIMENT=simd.
+	DisableSIMD bool
+	// EnablePresolve runs MIP presolve and node-level bound tightening.
 	EnablePresolve bool
 	// EnableCuts runs root cutting-plane rounds (GMI, lifted covers, flow/VUB, MIR).
 	EnableCuts bool
@@ -19,35 +41,134 @@ type Options struct {
 	MaxNodes int
 	// MaxCutPasses limits the number of root cut rounds (0 disables cutting).
 	MaxCutPasses int
-	// MaxIter limits the total simplex iterations reported in Result.Iterations
+	// MaxIter limits the total simplex pivots reported in the result counter
 	// (0 = unlimited). Exceeding it returns StatusIterationLimit; for MILPs whose root LP
 	// was solved, BestBound remains a valid global bound.
 	MaxIter int
-	// RelGapTol is the relative optimality gap at which the search stops.
+	// RelGapTol is the relative MIP gap at which the search stops.
 	RelGapTol float64
-	// AbsGapTol is the absolute optimality gap at which the search stops.
+	// AbsGapTol is the absolute MIP gap at which the search stops.
 	AbsGapTol float64
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
 }
 
-// DefaultOptions returns the recommended production solver options.
+const (
+	defaultMaxNodes        = 50000
+	defaultMaxCutPasses    = 12
+	defaultRelGapTol       = 1e-6
+	defaultAbsGapTol       = 1e-6
+	defaultPresolveMaxPass = 6
+)
+
+// DefaultOptions returns the default solver settings (pure-Go backend, presolve, cuts, and heuristics enabled).
 func DefaultOptions() Options {
 	return Options{
+		Backend:          BackendGo,
 		EnablePresolve:   true,
 		EnableCuts:       true,
 		EnableHeuristics: true,
-		MaxNodes:         50000,
-		MaxCutPasses:     12,
-		RelGapTol:        1e-6,
-		AbsGapTol:        1e-6,
+		MaxNodes:         defaultMaxNodes,
+		MaxCutPasses:     defaultMaxCutPasses,
+		RelGapTol:        defaultRelGapTol,
+		AbsGapTol:        defaultAbsGapTol,
 	}
 }
 
-// Result contains the solution status, objective value, variable assignments,
-// and solver telemetry returned by Solve / SolveCompiled.
+// Option mutates a solver settings struct before Solve or SolveCompiled runs.
+type Option func(*Options)
+
+// ApplyOptions folds a slice of functional modifiers onto the default solver settings.
+func ApplyOptions(opts ...Option) Options {
+	cfg := DefaultOptions()
+	for _, fn := range opts {
+		if fn != nil {
+			fn(&cfg)
+		}
+	}
+	return cfg
+}
+
+// WithOptions overwrites the solver settings with the supplied struct.
+func WithOptions(o Options) Option {
+	return func(cfg *Options) { *cfg = o }
+}
+
+// WithBackend selects the solver backend (BackendGo or BackendCBC).
+func WithBackend(b Backend) Option {
+	return func(cfg *Options) { cfg.Backend = b }
+}
+
+// WithCBC selects the in-process C++ COIN-OR CBC/CLP backend (shorthand for WithBackend(BackendCBC)).
+func WithCBC() Option {
+	return func(cfg *Options) { cfg.Backend = BackendCBC }
+}
+
+// WithPureGo selects the pure-Go solver backend (shorthand for WithBackend(BackendGo)).
+func WithPureGo() Option {
+	return func(cfg *Options) { cfg.Backend = BackendGo }
+}
+
+// WithSIMD enables or disables hardware SIMD vector kernels at runtime when built with GOEXPERIMENT=simd.
+func WithSIMD(enabled bool) Option {
+	return func(cfg *Options) { cfg.DisableSIMD = !enabled }
+}
+
+// WithoutSIMD disables hardware SIMD vector kernels, forcing the pure-Go scalar path.
+func WithoutSIMD() Option {
+	return func(cfg *Options) { cfg.DisableSIMD = true }
+}
+
+// WithPresolve enables or disables MIP presolve and node bound tightening.
+func WithPresolve(enabled bool) Option {
+	return func(cfg *Options) { cfg.EnablePresolve = enabled }
+}
+
+// WithCuts enables or disables root cutting-plane rounds.
+func WithCuts(enabled bool) Option {
+	return func(cfg *Options) { cfg.EnableCuts = enabled }
+}
+
+// WithHeuristics enables or disables primal heuristics.
+func WithHeuristics(enabled bool) Option {
+	return func(cfg *Options) { cfg.EnableHeuristics = enabled }
+}
+
+// WithMaxNodes sets the maximum number of branch-and-bound nodes (0 = unlimited).
+func WithMaxNodes(n int) Option {
+	return func(cfg *Options) { cfg.MaxNodes = n }
+}
+
+// WithMaxCutPasses sets the maximum number of root cutting-plane rounds (0 disables cutting).
+func WithMaxCutPasses(n int) Option {
+	return func(cfg *Options) { cfg.MaxCutPasses = n }
+}
+
+// WithMaxIter sets the maximum total simplex pivots (0 = unlimited).
+func WithMaxIter(n int) Option {
+	return func(cfg *Options) { cfg.MaxIter = n }
+}
+
+// WithRelGapTol sets the relative MIP gap threshold.
+func WithRelGapTol(tol float64) Option {
+	return func(cfg *Options) { cfg.RelGapTol = tol }
+}
+
+// WithAbsGapTol sets the absolute MIP gap threshold.
+func WithAbsGapTol(tol float64) Option {
+	return func(cfg *Options) { cfg.AbsGapTol = tol }
+}
+
+// WithTimeLimit sets the wall-clock time limit for the solve.
+func WithTimeLimit(d time.Duration) Option {
+	return func(cfg *Options) { cfg.TimeLimit = d }
+}
+
+// Result holds the terminal status, objective value, primal and dual vectors,
+// and search counters returned by Solve and SolveCompiled.
 type Result struct {
 	modelID      uint32
+	Backend      Backend
 	Status       Status
 	Objective    float64
 	BestBound    float64
@@ -62,7 +183,7 @@ type Result struct {
 	SolveTime    time.Duration
 }
 
-// Value returns the solution value of variable v.
+// Value returns the primal value of variable v in the incumbent vector.
 func (r *Result) Value(v Var) float64 {
 	idx := v.Index()
 	if (r.modelID == 0 || v.modelID() == 0 || v.modelID() == r.modelID) && idx >= 0 && idx < len(r.Values) {
@@ -71,25 +192,28 @@ func (r *Result) Value(v Var) float64 {
 	return 0
 }
 
-// Solve compiles and solves the Model using DefaultOptions (or the first provided Options).
-func (m *Model) Solve(opts ...Options) Result {
+// Solve compiles and solves the Model, applying any supplied functional modifiers to the default settings.
+func (m *Model) Solve(opts ...Option) Result {
 	p := m.Compile()
 	return SolveCompiled(p, opts...)
 }
 
-// SolveCompiled solves a pre-compiled CompiledProblem using Branch-and-Cut.
-func SolveCompiled(p *CompiledProblem, opts ...Options) Result {
+// SolveCompiled solves a pre-compiled CompiledProblem using the selected backend
+// (pure-Go Branch-and-Cut by default, or COIN-OR CBC/CLP when WithCBC() / WithBackend(BackendCBC) is passed).
+func SolveCompiled(p *CompiledProblem, opts ...Option) Result {
 	start := time.Now()
+	opt := ApplyOptions(opts...)
 	if p == nil || p.InvalidErr != nil {
 		return Result{
+			Backend:   opt.Backend,
 			Status:    StatusUndefined,
 			SolveTime: time.Since(start),
 		}
 	}
-	opt := DefaultOptions()
-	if len(opts) > 0 {
-		opt = opts[0]
+	if opt.Backend == BackendCBC {
+		return solveCBC(p, opt, start)
 	}
+
 	var deadline time.Time
 	if opt.TimeLimit > 0 {
 		deadline = start.Add(opt.TimeLimit)
@@ -97,10 +221,11 @@ func SolveCompiled(p *CompiledProblem, opts ...Options) Result {
 
 	workProb := p
 	if opt.EnablePresolve && p.IsMIP {
-		preRes := presolveWithDeadline(p, 6, deadline)
+		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline)
 		if preRes.TimedOut {
 			return Result{
 				modelID:   p.modelID,
+				Backend:   BackendGo,
 				Status:    StatusTimeLimit,
 				SolveTime: time.Since(start),
 			}
@@ -108,6 +233,7 @@ func SolveCompiled(p *CompiledProblem, opts ...Options) Result {
 		if preRes.Infeasible {
 			return Result{
 				modelID:   p.modelID,
+				Backend:   BackendGo,
 				Status:    StatusInfeasible,
 				SolveTime: time.Since(start),
 			}
@@ -115,5 +241,7 @@ func SolveCompiled(p *CompiledProblem, opts ...Options) Result {
 		workProb = preRes.Reduced
 	}
 
-	return solveBranchAndCut(workProb, opt, start)
+	res := solveBranchAndCut(workProb, opt, start)
+	res.Backend = BackendGo
+	return res
 }

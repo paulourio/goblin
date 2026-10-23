@@ -1,4 +1,4 @@
-package gopt
+package goblin
 
 import (
 	"container/heap"
@@ -7,9 +7,26 @@ import (
 	"time"
 )
 
-// incumbentTol is the absolute bound, row, and integrality violation tolerated when a
-// rounded LP point is accepted as an incumbent.
-const incumbentTol = 1e-5
+// incumbentTol is the largest bound, row, or integer residual allowed when a
+// rounded LP point becomes an incumbent.
+const (
+	incumbentTol        = 1e-5
+	nodeQueueCmpTol     = 1e-7
+	maxRootCutsCap      = 60
+	minRootCutsFloor    = 15
+	rootCutsRowDiv      = 3
+	minCutRoundImprov   = 1e-3
+	maxStagnantCutRound = 2
+	minPseudoCostInit   = 1e-2
+	pseudoCostObjScale  = 0.1
+	initNodeQueueCap    = 256
+	minPseudoScoreFloor = 1e-4
+	pseudoTieScale      = 1e-6
+	strongBranchCandCap = 5
+	strongBranchInfeas  = 1e4
+	strongBranchMaxIter = 25
+	intSnapTol          = 1e-4
+)
 
 type boundDelta struct {
 	col int
@@ -23,9 +40,9 @@ type searchNode struct {
 	depth      int
 	id         int
 	deltas     []boundDelta
-	// up reports whether the last branching decision raised the variable's lower bound.
+	// up is true on an upward branch.
 	up bool
-	// brDist is the distance from the parent's LP value to the new bound (pseudocost unit).
+	// brDist is the step from the parent's LP value to the child bound.
 	brDist float64
 }
 
@@ -33,10 +50,10 @@ type nodeQueue []*searchNode
 
 func (pq nodeQueue) Len() int { return len(pq) }
 func (pq nodeQueue) Less(i, j int) bool {
-	if math.Abs(pq[i].lowerBound-pq[j].lowerBound) > 1e-7 {
+	if math.Abs(pq[i].lowerBound-pq[j].lowerBound) > nodeQueueCmpTol {
 		return pq[i].lowerBound < pq[j].lowerBound
 	}
-	if math.Abs(pq[i].estimate-pq[j].estimate) > 1e-7 {
+	if math.Abs(pq[i].estimate-pq[j].estimate) > nodeQueueCmpTol {
 		return pq[i].estimate < pq[j].estimate
 	}
 	return pq[i].depth > pq[j].depth
@@ -94,6 +111,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 
 	lpSolver := NewLPSolver(p, ws)
 	lpSolver.Deadline = deadline
+	lpSolver.DisableSIMD = opts.DisableSIMD
 	defaultLPIter := lpSolver.MaxIter
 
 	totalLPIters := 0
@@ -178,6 +196,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 		defer ReleaseWorkspace(heurWS)
 		heurSolver = NewLPSolver(p, heurWS)
 		heurSolver.Deadline = deadline
+		heurSolver.DisableSIMD = opts.DisableSIMD
 		heurSolver.CopyRootBasisFrom(lpSolver)
 
 		if !timeExpired() {
@@ -222,8 +241,8 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 	hitIterLimit := false
 	if opts.EnableCuts && opts.MaxCutPasses > 0 {
 		stagnantRounds := 0
-		maxCutsPerRound := min(60, max(15, p.NumConstraints/3))
-		for pass := 0; pass < opts.MaxCutPasses; pass++ {
+		maxCutsPerRound := min(maxRootCutsCap, max(minRootCutsFloor, p.NumConstraints/rootCutsRowDiv))
+		for range opts.MaxCutPasses {
 			if timeExpired() {
 				break
 			}
@@ -248,9 +267,9 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 			nextRes := lpSolver.Solve()
 			totalLPIters += nextRes.Iterations
 			if nextRes.Status != StatusOptimal {
-				// Valid cuts cannot make a feasible relaxation infeasible, and a failed re-solve
-				// leaves no usable LP state. Roll the round back so that branch-and-bound starts
-				// from the last relaxation that was solved to optimality.
+				// Valid cuts never make a feasible LP infeasible, and a failed re-solve
+				// leaves no usable basis. Roll the round back so branch-and-bound starts
+				// from the last optimal LP state.
 				lpSolver.restore(snap)
 				switch {
 				case nextRes.Status == StatusTimeLimit:
@@ -274,9 +293,9 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 			}
 
 			improvement := (curLPRes.ObjectiveMin - prevObj) / max(1.0, math.Abs(prevObj))
-			if improvement < 1e-3 {
+			if improvement < minCutRoundImprov {
 				stagnantRounds++
-				if stagnantRounds >= 2 {
+				if stagnantRounds >= maxStagnantCutRound {
 					break
 				}
 			} else {
@@ -327,11 +346,11 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 
 	pCosts := make([]pseudoCost, n)
 	for _, j := range p.IntCols {
-		objMag := max(1e-2, math.Abs(p.ObjMin[j])*0.1)
+		objMag := max(minPseudoCostInit, math.Abs(p.ObjMin[j])*pseudoCostObjScale)
 		pCosts[j] = pseudoCost{downSum: objMag, upSum: objMag}
 	}
 
-	pq := make(nodeQueue, 0, 256)
+	pq := make(nodeQueue, 0, initNodeQueueCap)
 	heap.Init(&pq)
 
 	curLB := slices.Clone(p.VarLB)
@@ -424,7 +443,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 			}
 
 			if opts.EnablePresolve {
-				if !propagateBounds(p, curLB, curUB, 2) {
+				if !propagateBounds(p, curLB, curUB, nodePropPasses) {
 					continue
 				}
 			}
@@ -483,13 +502,13 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 			bVar, bVal := selectBranchVar(p, lpSolver, nodeRes, curLB, curUB, pCosts, node.depth, &totalLPIters, iterLeft)
 			if bVar == -1 {
 				// The LP point is integral within intFeasTol, yet its rounding violates the
-				// constraints (typical with big-M rows). Branch on the integer variable furthest
-				// from integrality so the subtree is explored instead of discarded.
+				// rows (typical with big-M constraints). Branch on the integer variable furthest
+				// from an integer so the subtree is explored instead of discarded.
 				bVar, bVal = selectNearIntegralBranchVar(p, nodeRes.Primal, curLB, curUB)
 			}
 			if bVar == -1 {
-				// Nothing can be branched on: keep the node's bound so that the final status
-				// cannot claim optimality over an unexplored region.
+				// Nothing can be branched on: keep the node's bound so the final status
+				// never claims an optimal proof over an unexplored region.
 				unsolvedMinBound = min(unsolvedMinBound, nodeRes.ObjectiveMin)
 				if hitLPLimitStatus == StatusNotSolved {
 					hitLPLimitStatus = StatusNumericalError
@@ -510,7 +529,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 			)
 
 			frac := bVal - math.Floor(bVal)
-			if frac >= 0.5 {
+			if frac >= halfFracTarget {
 				plungeNode = cUp
 				heap.Push(&pq, cDown)
 			} else {
@@ -592,7 +611,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 	}
 }
 
-// solveNodeLP solves the node relaxation with bounds (lb, ub), retrying once from a fresh
+// solveNodeLP solves the node LP with bounds (lb, ub), retrying once from a fresh
 // crash basis when the warm-started solve fails. stop is StatusTimeLimit or
 // StatusIterationLimit when the node could not be evaluated because a global resource limit
 // was reached, and StatusNotSolved otherwise.
@@ -705,8 +724,8 @@ func selectBranchVar(
 		pc := pCosts[col]
 		dEst := f * pc.avgDown()
 		uEst := (1.0 - f) * pc.avgUp()
-		score := max(dEst, 1e-4) * max(uEst, 1e-4)
-		score += 1e-6 * (0.5 - math.Abs(f-0.5)) * (1.0 + math.Abs(p.ObjMin[col]))
+		score := max(dEst, minPseudoScoreFloor) * max(uEst, minPseudoScoreFloor)
+		score += pseudoTieScale * (halfFracTarget - math.Abs(f-halfFracTarget)) * (1.0 + math.Abs(p.ObjMin[col]))
 		cands = append(cands, cand{col: col, val: v, dEst: dEst, uEst: uEst, score: score})
 	}
 
@@ -722,7 +741,7 @@ func selectBranchVar(
 			return 1
 		})
 
-		sbLimit := min(5, len(cands))
+		sbLimit := min(strongBranchCandCap, len(cands))
 		savedMaxIter := lpSolver.MaxIter
 
 		// childGain scores one strong-branching child. Only optimal re-solves yield a valid
@@ -731,17 +750,17 @@ func selectBranchVar(
 		childGain := func(res LPResult, est, dist float64, pc *pseudoCost, up bool) float64 {
 			switch res.Status {
 			case StatusOptimal:
-				g := max(1e-4, res.ObjectiveMin-lpRes.ObjectiveMin)
+				g := max(minPseudoScoreFloor, res.ObjectiveMin-lpRes.ObjectiveMin)
 				pc.record(up, g, dist)
 				return g
 			case StatusInfeasible:
-				return 1e4
+				return strongBranchInfeas
 			default:
 				return est
 			}
 		}
 
-		for idx := 0; idx < sbLimit; idx++ {
+		for idx := range sbLimit {
 			if lpSolver.timeExpired() {
 				break
 			}
@@ -755,7 +774,7 @@ func selectBranchVar(
 			cl := math.Ceil(v)
 			origL, origU := curLB[col], curUB[col]
 
-			sbIter := min(25, iterLeft())
+			sbIter := min(strongBranchMaxIter, iterLeft())
 			if sbIter <= 0 {
 				break
 			}
@@ -766,7 +785,7 @@ func selectBranchVar(
 			*totalIters += resDown.Iterations
 			curUB[col] = origU
 
-			sbIter = min(25, iterLeft())
+			sbIter = min(strongBranchMaxIter, iterLeft())
 			if sbIter <= 0 {
 				break
 			}
@@ -779,7 +798,7 @@ func selectBranchVar(
 
 			dGain := childGain(resDown, c.dEst, v-fl, &pCosts[col], false)
 			uGain := childGain(resUp, c.uEst, cl-v, &pCosts[col], true)
-			c.score = max(dGain, 1e-4) * max(uGain, 1e-4)
+			c.score = max(dGain, minPseudoScoreFloor) * max(uGain, minPseudoScoreFloor)
 		}
 
 		lpSolver.MaxIter = savedMaxIter
@@ -803,7 +822,7 @@ func selectBranchVar(
 func selectNearIntegralBranchVar(p *CompiledProblem, x, curLB, curUB []float64) (int, float64) {
 	best, bestDist := -1, 0.0
 	for _, col := range p.IntCols {
-		if curUB[col]-curLB[col] < 0.5 {
+		if curUB[col]-curLB[col] < halfFracTarget {
 			continue
 		}
 		v := x[col]
@@ -817,8 +836,7 @@ func selectNearIntegralBranchVar(p *CompiledProblem, x, curLB, curUB []float64) 
 	return best, x[best]
 }
 
-// roundedIncumbent rounds the near-integral integer components of x and reports whether
-// the rounded point satisfies all bounds, rows, and integrality within incumbentTol.
+// roundedIncumbent snaps the near-integral integer components of x and checks all bounds and rows within incumbentTol.
 func roundedIncumbent(p *CompiledProblem, x []float64) ([]float64, bool) {
 	cand := slices.Clone(x)
 	snapToIntegers(p, cand)
@@ -826,7 +844,7 @@ func roundedIncumbent(p *CompiledProblem, x []float64) ([]float64, bool) {
 	return cand, bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol
 }
 
-// minObjective evaluates the internal minimization objective sum_j ObjMin[j]*x[j].
+// minObjective computes sum_j ObjMin[j]*x[j].
 func minObjective(p *CompiledProblem, x []float64) float64 {
 	obj := 0.0
 	for j := range p.NumVars {
@@ -848,7 +866,7 @@ func isIntegerFeasible(p *CompiledProblem, x []float64) bool {
 func snapToIntegers(p *CompiledProblem, x []float64) {
 	for _, col := range p.IntCols {
 		v := x[col]
-		if math.Abs(v-math.Round(v)) <= 1e-4 {
+		if math.Abs(v-math.Round(v)) <= intSnapTol {
 			x[col] = math.Round(v)
 		}
 	}

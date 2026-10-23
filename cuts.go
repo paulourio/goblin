@@ -1,19 +1,28 @@
-package gopt
+package goblin
 
 import (
 	"cmp"
 	"math"
 	"slices"
 
-	"gopt/internal/simd"
+	"github.com/paulourio/goblin/internal/simd"
 )
 
 const (
-	minIntInfeas    = 0.01
-	minCutEfficacy  = 1e-3
-	maxCutDynamism  = 1e5
-	rhsSafetyMargin = 1e-7
-	maxOrthoCosine  = 0.92
+	minIntInfeas     = 0.01
+	minCutEfficacy   = 1e-3
+	maxCutDynamism   = 1e5
+	rhsSafetyMargin  = 1e-7
+	maxOrthoCosine   = 0.92
+	halfFracTarget   = 0.5
+	maxGMIFraqRows   = 25
+	gmiZeroTol       = 1e-13
+	cutCoeffZeroTol  = 1e-12
+	unitCoeffTol     = 1e-9
+	cutCompareTol    = 1e-6
+	minCoverItemVal  = 1e-4
+	minPairNNZ       = 2
+	maxFlowLookahead = 6
 )
 
 type cutPlane struct {
@@ -107,17 +116,17 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			r:    r,
 			bVar: bVar,
 			f0:   f0,
-			dist: math.Abs(f0 - 0.5),
+			dist: math.Abs(f0 - halfFracTarget),
 		})
 	}
 	if len(fracRows) == 0 {
 		return nil
 	}
-	if len(fracRows) > 25 {
+	if len(fracRows) > maxGMIFraqRows {
 		slices.SortFunc(fracRows, func(a, b gmiRow) int {
 			return cmp.Compare(a.dist, b.dist)
 		})
-		fracRows = fracRows[:25]
+		fracRows = fracRows[:maxGMIFraqRows]
 	}
 
 	var cuts []cutPlane
@@ -144,7 +153,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				break
 			}
 			alpha := ws.TabRow[k]
-			if math.Abs(alpha) <= 1e-13 {
+			if math.Abs(alpha) <= gmiZeroTol {
 				continue
 			}
 
@@ -160,14 +169,14 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				if st == statusAtUpper {
 					bnd = ws.UB[k]
 				}
-				if math.Abs(bnd-math.Round(bnd)) > 1e-6 {
+				if math.Abs(bnd-math.Round(bnd)) > cutCompareTol {
 					isIntVar = false
 				}
 			}
 
 			if isIntVar {
 				fk := alphaTilde - math.Floor(alphaTilde)
-				if fk <= 1e-13 || fk >= 1.0-1e-13 {
+				if fk <= gmiZeroTol || fk >= 1.0-gmiZeroTol {
 					continue
 				}
 				if fk <= f0 {
@@ -183,7 +192,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				}
 			}
 
-			if gamma <= 1e-13 {
+			if gamma <= gmiZeroTol {
 				continue
 			}
 
@@ -214,7 +223,11 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			continue
 		}
 
-		simd.Scale64(structCoeffs, -1.0)
+		if solver.DisableSIMD {
+			simd.Scale64Scalar(structCoeffs, -1.0)
+		} else {
+			simd.Scale64(structCoeffs, -1.0)
+		}
 		cutRHS := -rhs
 
 		if cut, ok := finalizeCut(p, structCoeffs, cutRHS, lpPrimal); ok {
@@ -267,7 +280,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 		for k := p.RowPtr[i]; k < p.RowPtr[i+1]; k++ {
 			col := p.ColIdx[k]
 			a := sign * p.RowVal[k]
-			if math.Abs(a) <= 1e-12 {
+			if math.Abs(a) <= cutCoeffZeroTol {
 				continue
 			}
 			if p.VarCat[col] != Binary || p.VarLB[col] != 0 || p.VarUB[col] != 1 {
@@ -309,7 +322,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 		}
 
 		slices.SortFunc(items, func(a, b item) int {
-			if math.Abs(a.xVal-b.xVal) > 1e-6 {
+			if math.Abs(a.xVal-b.xVal) > cutCompareTol {
 				return cmp.Compare(b.xVal, a.xVal)
 			}
 			return cmp.Compare(b.weight, a.weight)
@@ -319,17 +332,17 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 		coverWeight := 0.0
 		coverSize := 0
 		for idx, it := range items {
-			if it.xVal <= 1e-4 {
+			if it.xVal <= minCoverItemVal {
 				break
 			}
 			inCover[idx] = true
 			coverWeight += it.weight
 			coverSize++
-			if coverWeight > rhs+1e-6 {
+			if coverWeight > rhs+cutCompareTol {
 				break
 			}
 		}
-		if coverWeight <= rhs+1e-6 || coverSize < 2 {
+		if coverWeight <= rhs+cutCompareTol || coverSize < minPairNNZ {
 			continue
 		}
 
@@ -337,13 +350,13 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 			if !inCover[idx] {
 				continue
 			}
-			if coverWeight-items[idx].weight > rhs+1e-6 {
+			if coverWeight-items[idx].weight > rhs+cutCompareTol {
 				inCover[idx] = false
 				coverWeight -= items[idx].weight
 				coverSize--
 			}
 		}
-		if coverSize < 2 {
+		if coverSize < minPairNNZ {
 			continue
 		}
 
@@ -367,7 +380,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 		lhsStar := 0.0
 
 		for idx, it := range items {
-			alpha := 0
+			var alpha int
 			if inCover[idx] {
 				alpha = 1
 			} else {
@@ -437,7 +450,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		}
 		s, e := p.RowPtr[i], p.RowPtr[i+1]
 		nnz := e - s
-		if nnz < 2 {
+		if nnz < minPairNNZ {
 			continue
 		}
 
@@ -449,14 +462,14 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		for k := s; k < e; k++ {
 			col := p.ColIdx[k]
 			val := p.RowVal[k]
-			if val < -1e-12 {
+			if val < -cutCoeffZeroTol {
 				negCount++
 				if p.VarCat[col] == Binary && p.VarLB[col] == 0 && p.VarUB[col] == 1 {
 					binCol = col
 					capVal = -val
 				}
-			} else if val > 1e-12 {
-				if p.VarLB[col] < -1e-12 {
+			} else if val > cutCoeffZeroTol {
+				if p.VarLB[col] < -cutCoeffZeroTol {
 					allPosNonNeg = false
 				}
 			}
@@ -466,11 +479,11 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			continue
 		}
 
-		if nnz == 2 {
+		if nnz == minPairNNZ {
 			for k := s; k < e; k++ {
 				col := p.ColIdx[k]
 				val := p.RowVal[k]
-				if col != binCol && math.Abs(val-1.0) <= 1e-9 {
+				if col != binCol && math.Abs(val-1.0) <= unitCoeffTol {
 					vubBinCol[col] = binCol
 					vubCap[col] = capVal
 				}
@@ -486,14 +499,14 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				continue
 			}
 			ak := p.RowVal[k]
-			if ak <= 1e-12 {
+			if ak <= cutCoeffZeroTol {
 				continue
 			}
 			effUB := min(p.VarUB[col], capVal/ak)
 			if math.IsInf(effUB, 1) || effUB <= 0 {
 				continue
 			}
-			if lpPrimal[col]-effUB*yStar > 1e-3 {
+			if lpPrimal[col]-effUB*yStar > minCutEfficacy {
 				clear(denseCut)
 				denseCut[col] = 1.0
 				denseCut[binCol] = -effUB
@@ -516,7 +529,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	var startNodes []flowNode
 
 	for i := range m {
-		if p.RowSense[i] != Equal || p.RowRHS[i] <= 1e-9 {
+		if p.RowSense[i] != Equal || p.RowRHS[i] <= unitCoeffTol {
 			continue
 		}
 		s, e := p.RowPtr[i], p.RowPtr[i+1]
@@ -533,16 +546,16 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		for k := s; k < e; k++ {
 			col := p.ColIdx[k]
 			val := p.RowVal[k]
-			if math.Abs(val-1.0) <= 1e-9 {
+			if math.Abs(val-1.0) <= unitCoeffTol {
 				if vubBinCol[col] != -1 && prodCol == -1 {
 					prodCol = col
-				} else if p.VarLB[col] >= -1e-12 && invIn == -1 {
+				} else if p.VarLB[col] >= -cutCoeffZeroTol && invIn == -1 {
 					invIn = col
 				} else {
 					valid = false
 					break
 				}
-			} else if math.Abs(val+1.0) <= 1e-9 && p.VarLB[col] >= -1e-12 && invOut == -1 {
+			} else if math.Abs(val+1.0) <= unitCoeffTol && p.VarLB[col] >= -cutCoeffZeroTol && invOut == -1 {
 				invOut = col
 			} else {
 				valid = false
@@ -586,7 +599,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 
 		T := len(chain)
 		for t := range T {
-			maxQ := min(T-1, t+6)
+			maxQ := min(T-1, t+maxFlowLookahead)
 			for q := t; q <= maxQ; q++ {
 				cumDem := 0.0
 				for s := t; s <= q; s++ {
@@ -659,7 +672,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		}
 		rhs := sign * p.RowRHS[i]
 		s, e := p.RowPtr[i], p.RowPtr[i+1]
-		if e-s < 2 {
+		if e-s < minPairNNZ {
 			continue
 		}
 
@@ -691,7 +704,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				continue
 			}
 			delta := math.Abs(p.RowVal[kDiv])
-			if delta <= 1e-6 {
+			if delta <= cutCompareTol {
 				continue
 			}
 			triedDivs++

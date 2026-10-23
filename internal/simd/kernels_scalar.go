@@ -2,10 +2,32 @@
 
 package simd
 
-import "math"
+import (
+	"math"
+	"sync/atomic"
+)
+
+var simdDisabled atomic.Bool
+
+// HardwareSIMDAvailable returns false when compiled without GOEXPERIMENT=simd on amd64.
+func HardwareSIMDAvailable() bool { return false }
+
+// SetDisabled toggles the process-wide SIMD disable flag.
+func SetDisabled(disabled bool) { simdDisabled.Store(disabled) }
+
+// IsDisabled reports whether SIMD has been disabled via SetDisabled.
+func IsDisabled() bool { return simdDisabled.Load() }
 
 // UsingHardwareSIMD returns false when compiled without GOEXPERIMENT=simd on amd64.
 func UsingHardwareSIMD() bool { return false }
+
+// UsingHardwareSIMDWith reports whether hardware SIMD is active given a per-solve disable flag.
+func UsingHardwareSIMDWith(_ bool) bool { return false }
+
+// Dot64Scalar computes the dot product sum_i (a[i] * b[i]) using 4-way loop unrolling.
+func Dot64Scalar(a, b []float64) float64 {
+	return Dot64(a, b)
+}
 
 // Dot64 computes the dot product sum_i (a[i] * b[i]) using 4-way loop unrolling.
 //
@@ -33,6 +55,11 @@ func Dot64(a, b []float64) float64 {
 		sum += float64(a[i] * b[i])
 	}
 	return sum
+}
+
+// Axpy64Scalar computes dst[i] += alpha * src[i] using 4-way scalar loop unrolling.
+func Axpy64Scalar(dst, src []float64, alpha float64) {
+	Axpy64(dst, src, alpha)
 }
 
 // Axpy64 computes dst[i] += alpha * src[i] using 4-way loop unrolling.
@@ -63,6 +90,11 @@ func Axpy64(dst, src []float64, alpha float64) {
 	}
 }
 
+// Scale64Scalar computes dst[i] *= alpha using 4-way scalar loop unrolling.
+func Scale64Scalar(dst []float64, alpha float64) {
+	Scale64(dst, alpha)
+}
+
 // Scale64 computes dst[i] *= alpha using 4-way loop unrolling.
 func Scale64(dst []float64, alpha float64) {
 	n := len(dst)
@@ -81,6 +113,11 @@ func Scale64(dst []float64, alpha float64) {
 	}
 }
 
+// AbsMax64Scalar returns max_i |x[i]| using a scalar loop.
+func AbsMax64Scalar(x []float64) float64 {
+	return AbsMax64(x)
+}
+
 // AbsMax64 returns max_i |x[i]|.
 func AbsMax64(x []float64) float64 {
 	var res float64
@@ -88,6 +125,11 @@ func AbsMax64(x []float64) float64 {
 		res = max(res, math.Abs(v))
 	}
 	return res
+}
+
+// RowActivityBoundsFiniteScalar computes minimum and maximum row activity using a scalar loop.
+func RowActivityBoundsFiniteScalar(row, lb, ub []float64) (minAct, maxAct float64) {
+	return RowActivityBoundsFinite(row, lb, ub)
 }
 
 // RowActivityBoundsFinite computes the minimum and maximum row activity

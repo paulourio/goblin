@@ -33,7 +33,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 
 # Support running directly from the workspace with the sibling PuLP checkout/venv.
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
+_CBC_DIST_DIR = os.path.join(_GOBLIN_ROOT, "third_party", "Cbc", "dist")
 for _cand_site in sorted(
     glob.glob(
         os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
@@ -72,7 +74,7 @@ def _detect_pulp_version() -> str:
 def _detect_cbc_version(cbc_path: str) -> str:
     if not cbc_path or not os.path.isfile(cbc_path):
         return "unknown"
-    cbc_lib_dir = os.path.abspath(os.path.join(_REPO_ROOT, "Cbc", "dist", "lib"))
+    cbc_lib_dir = os.path.join(_CBC_DIST_DIR, "lib")
     env = dict(os.environ)
     if os.path.isdir(cbc_lib_dir):
         ld = env.get("LD_LIBRARY_PATH", "")
@@ -105,7 +107,7 @@ def _extract_solve_status(solve_ret: Any) -> tuple[int, str]:
 
 
 def _make_cbc_solver(mip: bool = True) -> tuple[Any, str]:
-    cbc_lib_dir = os.path.abspath(os.path.join(_REPO_ROOT, "Cbc", "dist", "lib"))
+    cbc_lib_dir = os.path.join(_CBC_DIST_DIR, "lib")
     if os.path.isdir(cbc_lib_dir):
         ld = os.environ.get("LD_LIBRARY_PATH", "")
         if cbc_lib_dir not in ld.split(":"):
@@ -120,7 +122,7 @@ def _make_cbc_solver(mip: bool = True) -> tuple[Any, str]:
     candidates = [
         os.environ.get("CBC_BIN", ""),
         shutil.which("cbc") or "",
-        os.path.abspath(os.path.join(_REPO_ROOT, "Cbc", "dist", "bin", "cbc")),
+        os.path.join(_CBC_DIST_DIR, "bin", "cbc"),
     ]
     for cand in candidates:
         if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
@@ -358,7 +360,7 @@ def benchmark_single_json(
         "solution": sol_values,
         "trials": trials,
         "pulp_version": _WORKER_PULP_VERSION,
-        "cbc_path": _WORKER_CBC_PATH,
+        "cbc_path": os.path.basename(_WORKER_CBC_PATH),
         "cbc_version": _WORKER_CBC_VERSION,
         "cbc_spawn_floor_ms": _WORKER_SPAWN_FLOOR_MS,
         "cpu_affinity": _cpu_affinity(),

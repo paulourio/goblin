@@ -1,34 +1,34 @@
-package gopt_test
+package goblin_test
 
 import (
 	"math"
 	"testing"
 
-	"gopt"
+	gb "github.com/paulourio/goblin"
 )
 
 func TestModelAndCompile(t *testing.T) {
-	m := gopt.NewModel("canonical_mip", gopt.Minimize)
+	m := gb.NewModel("canonical_mip", gb.Minimize)
 	x := m.AddContVar("x", 0, 4)
 	y := m.AddContVar("y", -1, 1)
 	z := m.AddIntVar("z", 0, math.Inf(1))
 	w := m.AddBinaryVar("w")
 
 	// Objective: x + 4y + 9z + 2w + 5
-	m.SetObjective(gopt.NewExpr(
-		gopt.T(x, 1),
-		gopt.T(y, 4),
-		gopt.T(z, 9),
-		gopt.T(w, 2),
+	m.SetObjective(gb.NewExpr(
+		x.T(1),
+		y.T(4),
+		gb.T(z, 9),
+		w.T(2),
 	).AddConstant(5))
 
 	// Constraints:
 	// c1: x + y <= 5
 	// c2: x + z >= 10
 	// c3: -y + z + w == 7
-	m.AddConstraint("c1", gopt.Le(gopt.NewExpr(gopt.T(x, 1), gopt.T(y, 1)), 5))
-	m.AddConstraint("c2", gopt.Ge(gopt.NewExpr(gopt.T(x, 1), gopt.T(z, 1)), 10))
-	m.AddConstraint("c3", gopt.Eq(gopt.NewExpr(gopt.T(y, -1), gopt.T(z, 1), gopt.T(w, 1)), 7))
+	m.AddConstraint("c1", gb.NewExpr(x.T(1), y.T(1)).Le(5))
+	m.AddConstraint("c2", gb.NewExpr(x.T(1), z.T(1)).Ge(10))
+	m.AddConstraint("c3", gb.NewExpr(y.T(-1), z.T(1), w.T(1)).Eq(7))
 
 	if !m.IsMIP() {
 		t.Fatalf("expected IsMIP() == true")

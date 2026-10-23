@@ -1,0 +1,161 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  default: none
+  enable:
+    # Context & cancellation correctness (outer orchestration boundaries)
+    - containedctx
+    - contextcheck
+    - fatcontext
+    - noctx
+
+    # Core bug & correctness detection
+    - asasalint
+    - bidichk
+    - copyloopvar
+    - dupl
+    - durationcheck
+    - errcheck
+    - errorlint
+    - gocheckcompilerdirectives
+    - gocritic
+    - govet
+    - ineffassign
+    - makezero
+    - mirror
+    - musttag
+    - nilerr
+    - nilnesserr
+    - predeclared
+    - reassign
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+
+    # Testing discipline
+    - thelper
+    - tparallel
+
+    # Go 1.22–1.27 modernization & stdlib idioms
+    - intrange
+    - modernize
+    - perfsprint
+    - usestdlibvars
+    - usetesting
+
+    # Hygiene & security
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+
+  settings:
+    dupl:
+      threshold: 150
+
+    errcheck:
+      check-type-assertions: false
+      check-blank: false
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # Preserve cache-line layout in Workspace and LPSolver
+        - shadow         # Mathematical passes routinely reuse short loop/err identifiers
+
+    gocritic:
+      disabled-checks:
+        - ifElseChain    # Numerical range/tolerance branches are clearer as if/else chains
+
+    gosec:
+      excludes:
+        - G103 # Deliberate unsafe.Pointer arithmetic in internal/simd AVX2 kernels and cgo bridge
+        - G115 # Intentional 32-bit bit-packing in Var handles and CSC int32 index casts for CBC
+        - G404 # Deterministic math/rand/v2 PCG streams used for tie-breaking and corpus generation
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    thelper:
+      test:
+        first: true
+        name: true
+        begin: true
+      benchmark:
+        first: true
+        name: true
+        begin: true
+      tb:
+        first: true
+        name: true
+        begin: true
+      fuzz:
+        first: true
+        name: true
+        begin: true
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Hot numerical kernels must remain 100% free of context.Context overhead;
+      # cancellation is bridged only at coarse outer Solve/B&C checkpoints.
+      - path: ((^|/)(lu|simplex|cuts|heuristics|presolve|workspace|compiled|expr)\.go$|(^|/)internal/simd/)
+        linters:
+          - containedctx
+          - contextcheck
+          - fatcontext
+          - noctx
+
+      # Benchmark CLI, corpus generators, and test suites read local corpus/testdata files and write reports
+      - path: (_test\.go|(^|/)(cmd|bench)/)
+        linters:
+          - gosec
+
+      # Test helpers and corpus builders often keep unused parameters for signature symmetry
+      - path: (_test\.go|(^|/)bench/)
+        linters:
+          - unparam
+
+      # Keep zero-overhead index-based backward loop in sparse LU BTRAN
+      - path: (^|/)lu\.go$
+        linters:
+          - modernize
+        text: "slicesbackward"

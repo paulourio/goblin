@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Differential test of gopt against COIN-OR CBC on randomly generated MILPs.
+"""Differential test of goblin against COIN-OR CBC on randomly generated MILPs.
 
-Each run generates instances from four families (mixed general MILPs, big-M fixed-charge
-facility location with tiny demands, equality-constrained integer knapsacks, and badly
-scaled MILPs), solves them with CBC through PuLP, solves them with gopt in three option
-configurations through ``go run ./cmd/gopt-difftest``, and compares the outcomes.
+Each run generates problems from four families (mixed general MILPs, big-M fixed-charge
+depot siting with tiny demands, equation-constrained integer knapsacks, and badly
+scaled MILPs), solves them with CBC through PuLP, solves them with goblin in three flag
+modes through ``go run ./cmd/goblin-difftest``, and compares the outcomes.
 
-CBC is not treated as infallible. When gopt and CBC disagree, gopt's solution is checked
-for feasibility in PuLP's own model and CBC is re-run with preprocessing disabled; the
-disagreement is classified as a CBC defect only if gopt's solution is feasible and at
-least as good as every CBC answer. Any other disagreement is a gopt failure and makes the
+CBC is not treated as infallible. When goblin and CBC disagree, goblin's primal vector is checked
+against all bounds and rows in PuLP's own model and CBC is re-run with presolve disabled; the
+mismatch is classified as a CBC defect only if goblin's vector is valid and at
+least as good as every CBC answer. Any other mismatch is a goblin failure and makes the
 script exit with status 1.
 
-CBC is located through PuLP's bundled binary (PULP_CBC_CMD), the CBC_BIN environment
+CBC is located through PuLP's bundled binary (PULP_CBC_CMD), the CBC_BIN shell
 variable, or ``cbc`` on PATH.
 """
 
@@ -99,7 +99,7 @@ def fam_general(rng: random.Random, k: int) -> pulp.LpProblem:
 
 
 def fam_bigm(rng: random.Random, k: int) -> pulp.LpProblem:
-    """Fixed-charge facility location with large big-M and small demands."""
+    """Fixed-charge depot siting with large big-M and small demands."""
     nf, nc = rng.randint(3, 6), rng.randint(3, 8)
     big_m = rng.choice([1e4, 1e5, 1e6])
     prob = pulp.LpProblem(f"bigm{k}", pulp.LpMinimize)
@@ -119,7 +119,7 @@ def fam_bigm(rng: random.Random, k: int) -> pulp.LpProblem:
 
 
 def fam_eqknap(rng: random.Random, k: int) -> pulp.LpProblem:
-    """Equality-constrained general-integer knapsack (often infeasible or tight)."""
+    """Equation-constrained general-integer knapsack (often infeasible or tight)."""
     n = rng.randint(4, 9)
     prob = pulp.LpProblem(f"eqk{k}", pulp.LpMinimize)
     x = [
@@ -176,7 +176,7 @@ def solve_cbc(
 
 
 def feasible_in_pulp(doc: dict[str, Any], x: dict[str, float]) -> tuple[bool, float]:
-    """Evaluate a solution in PuLP's model; return (feasible, objective)."""
+    """Evaluate a primal vector in PuLP's model; return (feasible, objective)."""
     _, prob = pulp.LpProblem.fromDict(doc)
     for name, var in prob.variablesDict().items():
         val = x.get(name, 0.0)
@@ -204,20 +204,20 @@ def better_or_equal(a: float, b: float, sense: int) -> bool:
 
 
 def classify(ref: dict[str, Any], got: dict[str, Any]) -> str:
-    """Return 'ok', 'cbc-defect', or a description of a gopt failure."""
+    """Return 'ok', 'cbc-defect', or a summary of a goblin failure."""
     cs, gs = ref["status"], got["status"]
     if gs == "Optimal" and cs == "Optimal":
         if abs(got["obj"] - ref["obj"]) <= OBJ_RTOL * max(1.0, abs(ref["obj"])):
             if max(got["bviol"], got["rviol"], got["iviol"]) <= 1e-5:
                 return "ok"
-            return f"gopt solution violates the model (b={got['bviol']:.1e} r={got['rviol']:.1e})"
+            return f"goblin solution violates the model (b={got['bviol']:.1e} r={got['rviol']:.1e})"
     elif gs == cs:
         return "ok"
     if gs != "Optimal":
-        return f"status gopt={gs} cbc={cs}"
+        return f"status goblin={gs} cbc={cs}"
     feasible, obj = feasible_in_pulp(ref["doc"], got["x"])
     if not feasible:
-        return f"gopt Optimal {got['obj']:.6g} is infeasible in PuLP (cbc={cs} {ref['obj']})"
+        return f"goblin Optimal {got['obj']:.6g} is infeasible in PuLP (cbc={cs} {ref['obj']})"
     sense = ref["doc"]["parameters"]["sense"]
     answers = [(cs, ref["obj"])]
     answers.append(solve_cbc(ref["doc"], ["preprocess off", "presolve off"]))
@@ -227,7 +227,7 @@ def classify(ref: dict[str, Any], got: dict[str, Any]) -> str:
             and cbc_obj is not None
             and not better_or_equal(obj, cbc_obj, sense)
         ):
-            return f"objective gopt={obj:.6g} cbc={cbc_obj:.6g} (gopt worse)"
+            return f"objective goblin={obj:.6g} cbc={cbc_obj:.6g} (goblin worse)"
     return "cbc-defect"
 
 
@@ -243,7 +243,7 @@ def main() -> None:
     root = Path(__file__).resolve().parent.parent
     rng = random.Random(args.seed)
     refs: dict[str, dict[str, Any]] = {}
-    with tempfile.TemporaryDirectory(prefix="gopt_difftest_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="goblin_difftest_") as tmp:
         inst_path = Path(args.keep) if args.keep else Path(tmp) / "instances.jsonl"
         with inst_path.open("w", encoding="utf-8") as fh:
             for k in range(args.instances):
@@ -263,7 +263,7 @@ def main() -> None:
         failures = 0
         for mode, flags in MODES.items():
             out = subprocess.run(
-                ["go", "run", "./cmd/gopt-difftest", "-in", str(inst_path), *flags],
+                ["go", "run", "./cmd/goblin-difftest", "-in", str(inst_path), *flags],
                 cwd=root,
                 check=True,
                 capture_output=True,
@@ -273,13 +273,13 @@ def main() -> None:
             for line in out.splitlines():
                 got = json.loads(line)
                 verdict = classify(refs[got["id"]], got)
-                key = verdict if verdict in ("ok", "cbc-defect") else "gopt-failure"
+                key = verdict if verdict in ("ok", "cbc-defect") else "goblin-failure"
                 tally[key] = tally.get(key, 0) + 1
                 if key == "cbc-defect":
                     print(
-                        f"[{mode}] {got['id']}: CBC disagrees but gopt's solution is verified feasible and optimal-or-better"
+                        f"[{mode}] {got['id']}: CBC disagrees but goblin's solution is verified feasible and optimal-or-better"
                     )
-                elif key == "gopt-failure":
+                elif key == "goblin-failure":
                     failures += 1
                     print(f"[{mode}] {got['id']}: FAIL {verdict}")
             print(f"[{mode}] {sum(tally.values())} instances: {tally}")

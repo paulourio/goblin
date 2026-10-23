@@ -1,4 +1,4 @@
-package gopt
+package goblin
 
 import "sync"
 
@@ -61,10 +61,12 @@ type Workspace struct {
 	BFRTCands []bfrtCand
 }
 
+const defaultLUInitCap = 64
+
 var workspacePool = sync.Pool{
 	New: func() any {
 		return &Workspace{
-			LU: newLUFactorization(64),
+			LU: newLUFactorization(defaultLUInitCap),
 		}
 	},
 }

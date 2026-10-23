@@ -1,4 +1,4 @@
-package gopt
+package goblin
 
 import (
 	"math"
@@ -9,9 +9,10 @@ import (
 const (
 	presolveFeasTol = 1e-6
 	presolveIntTol  = 1e-7
+	presolveZeroTol = 1e-12
 )
 
-// PresolveResult holds the presolved CompiledProblem or an immediate infeasibility flag.
+// PresolveResult holds the reduced CompiledProblem or an immediate infeasible status flag.
 type PresolveResult struct {
 	Reduced          *CompiledProblem
 	Infeasible       bool
@@ -21,15 +22,17 @@ type PresolveResult struct {
 	StrengthenedRows int
 }
 
-// Presolve runs iterative domain propagation, GCD integer row reduction,
-// redundant constraint removal, and binary coefficient strengthening on orig.
+// Presolve runs iterative bound tightening, Euclidean GCD integer row scaling,
+// redundant row dropping, and binary coefficient strengthening on orig. When any
+// variable bound interval becomes empty or an integer row proves unreachable, it
+// returns Infeasible without allocating a reduced matrix.
 func Presolve(orig *CompiledProblem, maxPasses int) PresolveResult {
 	return presolveWithDeadline(orig, maxPasses, time.Time{})
 }
 
 func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time) PresolveResult {
 	if maxPasses <= 0 {
-		maxPasses = 6
+		maxPasses = defaultPresolveMaxPass
 	}
 	if !deadline.IsZero() && time.Now().After(deadline) {
 		return PresolveResult{Reduced: orig, TimedOut: true}
@@ -165,8 +168,8 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 		}
 	}
 
-	// 2. Iterative Savelsbergh activity bound tightening & redundant row elimination
-	for pass := 0; pass < maxPasses; pass++ {
+	// 2. Iterative Savelsbergh activity bound tightening & redundant row dropping
+	for range maxPasses {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return PresolveResult{Reduced: orig, TimedOut: true}
 		}
@@ -238,7 +241,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			if hasUpper && minInfCount <= 1 {
 				for k, col := range r.cols {
 					a := r.vals[k]
-					if math.Abs(a) <= 1e-12 {
+					if math.Abs(a) <= presolveZeroTol {
 						continue
 					}
 					l, u := lb[col], ub[col]
@@ -298,7 +301,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			if hasLower && maxInfCount <= 1 {
 				for k, col := range r.cols {
 					a := r.vals[k]
-					if math.Abs(a) <= 1e-12 {
+					if math.Abs(a) <= presolveZeroTol {
 						continue
 					}
 					l, u := lb[col], ub[col]

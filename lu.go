@@ -1,4 +1,4 @@
-package gopt
+package goblin
 
 import (
 	"fmt"
@@ -9,6 +9,10 @@ const (
 	luPivotTol     = 1e-11
 	luMarkowitzTol = 0.1
 	maxEtaUpdates  = 56
+	minEtaIdxCap   = 16384
+	etaIdxRowMult  = 24
+	luDropTol      = 1e-16
+	luSolveDropTol = 1e-15
 )
 
 type etaVector struct {
@@ -140,7 +144,7 @@ func (f *LUFactorization) Reset(m int) {
 }
 
 func (f *LUFactorization) NeedsRefactor() bool {
-	return len(f.etas) >= maxEtaUpdates || len(f.etaIdx) >= max(16384, 24*f.m)
+	return len(f.etas) >= maxEtaUpdates || len(f.etaIdx) >= max(minEtaIdxCap, etaIdxRowMult*f.m)
 }
 
 func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64)) error {
@@ -149,7 +153,7 @@ func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64))
 		clear(colBuf)
 		fillCol(col, colBuf)
 		for r, v := range colBuf {
-			if math.Abs(v) > 1e-16 {
+			if math.Abs(v) > luDropTol {
 				rows = append(rows, r)
 				vals = append(vals, v)
 			}
@@ -179,7 +183,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 	for col := range m {
 		deg := 0
 		for p := f.bColPtr[col]; p < f.bColPtr[col+1]; p++ {
-			if math.Abs(f.bVal[p]) > 1e-16 {
+			if math.Abs(f.bVal[p]) > luDropTol {
 				f.rowDeg[f.bRowIdx[p]]++
 				deg++
 			}
@@ -203,7 +207,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 	for col := range m {
 		for p := f.bColPtr[col]; p < f.bColPtr[col+1]; p++ {
 			v := f.bVal[p]
-			if math.Abs(v) > 1e-16 {
+			if math.Abs(v) > luDropTol {
 				r := f.bRowIdx[p]
 				pos := f.workInt[r]
 				f.bColIdx[pos] = col
@@ -230,7 +234,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		pivVal := 0.0
 		for p := f.bColPtr[col]; p < f.bColPtr[col+1]; p++ {
 			r := f.bRowIdx[p]
-			if !f.rowDone[r] && math.Abs(f.bVal[p]) > 1e-16 {
+			if !f.rowDone[r] && math.Abs(f.bVal[p]) > luDropTol {
 				pivRow = r
 				pivVal = f.bVal[p]
 				break
@@ -403,7 +407,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 		c := f.nucCols[ncIdx]
 		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
 			v := f.bVal[p]
-			if math.Abs(v) <= 1e-16 {
+			if math.Abs(v) <= luDropTol {
 				continue
 			}
 			r := f.bRowIdx[p]
@@ -595,7 +599,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 		for idx, r := range pivCRows {
 			aik := pivCVals[idx]
 			removeEntry(rCols, rVals, r, pivNC)
-			if math.Abs(aik) <= 1e-16 {
+			if math.Abs(aik) <= luDropTol {
 				if len(rCols[r]) == 1 {
 					rowSingQ = append(rowSingQ, r)
 				}
@@ -625,7 +629,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 					newV := rv[pos] + delta
 					rv[pos] = newV
 					updateEntry(cRows[c], cVals[c], r, newV)
-				} else if math.Abs(delta) > 1e-16 {
+				} else if math.Abs(delta) > luDropTol {
 					workPos[c] = len(rc)
 					rc = append(rc, c)
 					rv = append(rv, delta)
@@ -638,7 +642,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 			for p, c := range rc {
 				workPos[c] = -1
 				v := rv[p]
-				if math.Abs(v) > 1e-16 {
+				if math.Abs(v) > luDropTol {
 					rc[w] = c
 					rv[w] = v
 					w++
@@ -704,7 +708,7 @@ func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 		invD := f.uInvDiag[k]
 		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
 			v := f.bVal[p]
-			if math.Abs(v) <= 1e-16 {
+			if math.Abs(v) <= luDropTol {
 				continue
 			}
 			i := f.invPerm[f.bRowIdx[p]]
@@ -832,7 +836,7 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 		if wk == 0 {
 			continue
 		}
-		if math.Abs(wk) <= 1e-16 {
+		if math.Abs(wk) <= luDropTol {
 			w[k] = 0
 			continue
 		}
@@ -847,7 +851,7 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 		if wj == 0 {
 			continue
 		}
-		if math.Abs(wj) <= 1e-16 {
+		if math.Abs(wj) <= luDropTol {
 			w[j] = 0
 			continue
 		}
@@ -867,7 +871,7 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 		if xp == 0 {
 			continue
 		}
-		if math.Abs(xp) <= 1e-16 {
+		if math.Abs(xp) <= luDropTol {
 			rhs[pr] = 0
 			continue
 		}
@@ -887,7 +891,7 @@ func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
 		if v == 0 {
 			continue
 		}
-		if math.Abs(v) > 1e-15 {
+		if math.Abs(v) > luSolveDropTol {
 			nzIdx = append(nzIdx, i)
 		} else {
 			rhs[i] = 0
@@ -922,7 +926,7 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 		if wi == 0 {
 			continue
 		}
-		if math.Abs(wi) <= 1e-16 {
+		if math.Abs(wi) <= luDropTol {
 			w[i] = 0
 			continue
 		}
@@ -939,7 +943,7 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 		if wi == 0 {
 			continue
 		}
-		if math.Abs(wi) <= 1e-16 {
+		if math.Abs(wi) <= luDropTol {
 			w[i] = 0
 			continue
 		}
@@ -961,7 +965,7 @@ func (f *LUFactorization) BTRANSparse(rhs []float64, nzIdx []int) []int {
 		if v == 0 {
 			continue
 		}
-		if math.Abs(v) > 1e-16 {
+		if math.Abs(v) > luDropTol {
 			nzIdx = append(nzIdx, i)
 		} else {
 			rhs[i] = 0
@@ -978,7 +982,7 @@ func (f *LUFactorization) PushEta(pivotRow int, fCol []float64) error {
 	startVal := len(f.etaPool)
 	startIdx := len(f.etaIdx)
 	for i, v := range fCol {
-		if i != pivotRow && math.Abs(v) > 1e-15 {
+		if i != pivotRow && math.Abs(v) > luSolveDropTol {
 			f.etaIdx = append(f.etaIdx, i)
 			f.etaPool = append(f.etaPool, v)
 		}
@@ -1002,7 +1006,7 @@ func (f *LUFactorization) PushEtaSparse(pivotRow int, fCol []float64, fColIdx []
 	for _, i := range fColIdx {
 		if i != pivotRow {
 			v := fCol[i]
-			if math.Abs(v) > 1e-15 {
+			if math.Abs(v) > luSolveDropTol {
 				f.etaIdx = append(f.etaIdx, i)
 				f.etaPool = append(f.etaPool, v)
 			}

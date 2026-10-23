@@ -1,4 +1,4 @@
-package gopt
+package goblin
 
 // Term represents a single linear term (Coeff * Var).
 type Term struct {
@@ -11,28 +11,35 @@ func T(v Var, coeff float64) Term {
 	return Term{Var: v, Coeff: coeff}
 }
 
-// Expr represents an affine linear expression: sum_i (Coeff_i * Var_i) + Constant.
+// T constructs a single linear term coeff * v without repeating the package prefix.
+func (v Var) T(coeff float64) Term {
+	return Term{Var: v, Coeff: coeff}
+}
+
+// Expr represents an affine linear form: sum_i (Coeff_i * Var_i) + Constant.
+// Duplicate variable terms are preserved in slice order until Model.Compile merges
+// matching column indices and drops zero entries.
 type Expr struct {
 	Terms    []Term
 	Constant float64
 }
 
-// NewExpr creates an Expr from a list of terms.
+// NewExpr builds an Expr from terms.
 func NewExpr(terms ...Term) Expr {
 	return Expr{Terms: terms}
 }
 
-// VarExpr converts a single variable into an Expr with coefficient 1.0.
+// VarExpr wraps one Var with unit weight.
 func VarExpr(v Var) Expr {
 	return Expr{Terms: []Term{{Var: v, Coeff: 1.0}}}
 }
 
-// ConstExpr creates a constant affine expression.
+// ConstExpr builds a constant Expr.
 func ConstExpr(c float64) Expr {
 	return Expr{Constant: c}
 }
 
-// Sum combines multiple expressions into a single linear expression.
+// Sum concatenates all terms and sums the constants of exprs into a single Expr.
 func Sum(exprs ...Expr) Expr {
 	totalTerms := 0
 	constant := 0.0
@@ -63,7 +70,8 @@ func SumVars(vars ...Var) Expr {
 	return Expr{Terms: terms}
 }
 
-// Dot computes the dot product of variables and coefficients: sum_i coeffs[i] * vars[i].
+// Dot computes the inner product sum_i coeffs[i] * vars[i] up to min(len(vars), len(coeffs)),
+// skipping any entry whose coefficient is zero.
 func Dot(vars []Var, coeffs []float64) Expr {
 	n := min(len(vars), len(coeffs))
 	terms := make([]Term, 0, n)
@@ -108,12 +116,27 @@ func Le(expr Expr, rhs float64) Constraint {
 	return Constraint{Expr: expr, Sense: LessEqual, RHS: rhs}
 }
 
+// Le creates a less-than-or-equal constraint: e <= rhs.
+func (e Expr) Le(rhs float64) Constraint {
+	return Constraint{Expr: e, Sense: LessEqual, RHS: rhs}
+}
+
 // Ge creates a greater-than-or-equal constraint: expr >= rhs.
 func Ge(expr Expr, rhs float64) Constraint {
 	return Constraint{Expr: expr, Sense: GreaterEqual, RHS: rhs}
 }
 
+// Ge creates a greater-than-or-equal constraint: e >= rhs.
+func (e Expr) Ge(rhs float64) Constraint {
+	return Constraint{Expr: e, Sense: GreaterEqual, RHS: rhs}
+}
+
 // Eq creates an equality constraint: expr == rhs.
 func Eq(expr Expr, rhs float64) Constraint {
 	return Constraint{Expr: expr, Sense: Equal, RHS: rhs}
+}
+
+// Eq creates an equality constraint: e == rhs.
+func (e Expr) Eq(rhs float64) Constraint {
+	return Constraint{Expr: e, Sense: Equal, RHS: rhs}
 }

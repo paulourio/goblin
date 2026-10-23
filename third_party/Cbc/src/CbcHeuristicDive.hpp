@@ -1,0 +1,278 @@
+// Copyright (C) 2008, International Business Machines
+// Corporation and others.  All Rights Reserved.
+// This code is licensed under the terms of the Eclipse Public License (EPL).
+
+#ifndef CbcHeuristicDive_H
+#define CbcHeuristicDive_H
+
+#include <atomic>
+#include "CbcHeuristic.hpp"
+#include "OsiCuts.hpp"
+class CbcSubProblem;
+class OsiRowCut;
+struct PseudoReducedCost {
+  int var;
+  double pseudoRedCost;
+};
+
+/** Dive class
+ */
+
+class CBCLIB_EXPORT CbcHeuristicDive : public CbcHeuristic {
+public:
+  // Default Constructor
+  CbcHeuristicDive();
+
+  // Constructor with model - assumed before cuts
+  CbcHeuristicDive(CbcModel &model);
+
+  // Copy constructor
+  CbcHeuristicDive(const CbcHeuristicDive &);
+
+  // Destructor
+  ~CbcHeuristicDive();
+
+  /// Clone
+  virtual CbcHeuristicDive *clone() const = 0;
+
+  /// Assignment operator
+  CbcHeuristicDive &operator=(const CbcHeuristicDive &rhs);
+
+  /// Create C++ lines to get to current state
+  virtual void generateCpp(FILE *) {}
+
+  /// Create C++ lines to get to current state - does work for base class
+  void generateCpp(FILE *fp, const char *heuristic);
+
+  /// Resets stuff if model changes
+  virtual void resetModel(CbcModel *model);
+
+  /// update model (This is needed if cliques update matrix etc)
+  virtual void setModel(CbcModel *model);
+
+  //  REMLOVE using CbcHeuristic::solution ;
+  /** returns 0 if no solution, 1 if valid solution
+        with better objective value than one passed in
+        Sets solution values if good, sets objective value (only if good)
+        This is called after cuts have been added - so can not add cuts
+        This does Fractional Diving
+    */
+  virtual int solution(double &objectiveValue,
+    double *newSolution);
+  /// inner part of dive
+  int solution(double &objectiveValue, int &numberNodes,
+    int &numberCuts, OsiRowCut **cuts,
+    CbcSubProblem **&nodes,
+    double *newSolution);
+  /** returns 0 if no solution, 1 if valid solution
+        with better objective value than one passed in
+	also returns list of nodes
+        This does Fractional Diving
+    */
+  int fathom(CbcModel *model, int &numberNodes, CbcSubProblem **&nodes);
+
+  /// Validate model i.e. sets when_ to 0 if necessary (may be NULL)
+  virtual void validate();
+
+  /// Sets priorities if any
+  void setPriorities();
+
+  /// Select candidate binary variables for fixing
+  void selectBinaryVariables();
+
+  /// Set percentage of integer variables to fix at bounds
+  void setPercentageToFix(double value)
+  {
+    percentageToFix_ = value;
+  }
+
+  /// Set maximum number of iterations
+  void setMaxIterations(int value)
+  {
+    maxIterations_ = value;
+  }
+
+  /// Set maximum number of simplex iterations
+  void setMaxSimplexIterations(int value)
+  {
+    maxSimplexIterations_ = value;
+  }
+  /// Get maximum number of simplex iterations
+  inline int maxSimplexIterations() const
+  {
+    return maxSimplexIterations_;
+  }
+
+  /// Set maximum number of simplex iterations at root node
+  void setMaxSimplexIterationsAtRoot(int value)
+  {
+    maxSimplexIterationsAtRoot_ = value;
+  }
+
+  /// Set maximum time allowed
+  void setMaxTime(double value)
+  {
+    maxTime_ = value;
+  }
+
+  /// Aggressive mode: lift limits when no incumbent exists (replaces diveopt 8)
+  void setAggressiveMode(bool value) { aggressiveMode_ = value; }
+  bool aggressiveMode() const { return aggressiveMode_; }
+
+  /// Adaptive fixing: reduce percentageToFix_ after infeasible dives
+  void setAdaptiveFixing(bool value) { adaptiveFixing_ = value; }
+  bool adaptiveFixing() const { return adaptiveFixing_; }
+
+  /// Fix general integers at non-bound values (replaces maxIterations_%10 hack)
+  void setFixGeneralIntegers(bool value) { fixGeneralIntegers_ = value; }
+  bool fixGeneralIntegers() const { return fixGeneralIntegers_; }
+
+  /// Tests if the heuristic can run
+  virtual bool canHeuristicRun();
+
+  /** Selects the next variable to branch on
+        Returns true if all the fractional variables can be trivially
+        rounded. Returns false, if there is at least one fractional variable
+        that is not trivially roundable. In this case, the bestColumn
+        returned will not be trivially roundable.
+    */
+  virtual bool selectVariableToBranch(OsiSolverInterface *solver,
+    const double *newSolution,
+    int &bestColumn,
+    int &bestRound)
+    = 0;
+  /** Initializes any data which is going to be used repeatedly
+        in selectVariableToBranch */
+  virtual void initializeData() {}
+
+  /// Perform reduced cost fixing on integer variables
+  int reducedCostFix(OsiSolverInterface *solver);
+  /// Fix other variables at bounds
+  virtual int fixOtherVariables(OsiSolverInterface *solver,
+    const double *solution,
+    PseudoReducedCost *candidate,
+    const double *random);
+
+protected:
+  // Data
+
+  // Original matrix by column
+  CoinPackedMatrix matrix_;
+
+  // Original matrix by
+  CoinPackedMatrix matrixByRow_;
+
+  // Down locks
+  unsigned short *downLocks_;
+
+  // Up locks
+  unsigned short *upLocks_;
+
+  /// Extra down array (number Integers long)
+  double *downArray_;
+
+  /// Extra up array (number Integers long)
+  double *upArray_;
+
+  /// Array of priorities
+  typedef struct {
+    unsigned int direction : 3; //  0 bit off, 1 bit (0 down first, 1 up first) 2 bit non zero don't try other way
+    unsigned int priority : 29;
+  } PriorityType;
+  PriorityType *priority_;
+  // Indexes of binary variables with 0 objective coefficient
+  // and in variable bound constraints
+  std::vector< int > binVarIndex_;
+
+  // Indexes of variable bound rows for each binary variable
+  std::vector< int > vbRowIndex_;
+
+  // Percentage of integer variables to fix at bounds
+  double percentageToFix_;
+
+  // Maximum time allowed
+  double maxTime_;
+
+  // Small objective (i.e. treat zero objective as this)
+  double smallObjective_;
+
+  // Maximum number of major iterations
+  int maxIterations_;
+
+  // Maximum number of simplex iterations
+  int maxSimplexIterations_;
+
+  // Maximum number of simplex iterations at root node
+  int maxSimplexIterationsAtRoot_;
+
+  // diveopt 8: track consecutive infeasible dives to adapt percentageToFix_
+  int numConsecutiveInfeasible_;
+
+  // Last run statistics (populated after solution() returns)
+  int lastDiveIterations_;
+  int lastSimplexIterations_;
+  int lastReasonToStop_;
+
+  // Conflict cuts discovered during diving (collected when collectConflicts_ is true)
+  OsiCuts conflictCuts_;
+  bool collectConflicts_;
+  int maxConflictSize_; // max number of fixings to consider as a conflict
+  double minConflictViolation_;
+
+public:
+  int lastDiveIterations() const { return lastDiveIterations_; }
+  int lastSimplexIterations() const { return lastSimplexIterations_; }
+  int lastReasonToStop() const { return lastReasonToStop_; }
+
+  void setCollectConflicts(bool v, int maxSize = 10, double minViol = 0.05) {
+    collectConflicts_ = v; maxConflictSize_ = maxSize; minConflictViolation_ = minViol;
+  }
+  const OsiCuts &conflictCuts() const { return conflictCuts_; }
+  void clearConflictCuts() { conflictCuts_ = OsiCuts(); }
+
+  // --- Explicit flags replacing magic number encodings ---
+
+  /// When true, lift iteration/simplex limits when no incumbent exists.
+  /// Replaces the "when_ % 100 == 8" magic encoding.
+  bool aggressiveMode_;
+
+  /// When true, adaptively reduce percentageToFix_ after consecutive
+  /// infeasible dives. Replaces the "when_ % 100 == 8" adaptive logic.
+  bool adaptiveFixing_;
+
+  /// When true, also fix general integer variables that are at a
+  /// non-bound integer value. Replaces "maxIterations_ % 10" encoding.
+  bool fixGeneralIntegers_;
+
+  /// External abort flag for parallel cancellation (nullptr = disabled).
+  /// When pointed-to value becomes true, the dive exits at next iteration.
+  const std::atomic<bool> *abortFlag_;
+
+  // --- Objective-guided diving (FPump-style) ---
+
+  /// 0=off, 1=binary only, 2=binary+general integer
+  int guidedObjMode_;
+  /// Strength of guidance objective coefficient
+  double guidedObjWeight_;
+  /// Blend weight for original objective (0=pure guidance, 1=pure original)
+  double guidedObjOrigWeight_;
+  /// Number of pure-guidance LP resolves before first fix
+  int guidedObjWarmup_;
+  /// Apply guidance every N iterations (1=every iter)
+  int guidedObjFrequency_;
+
+public:
+  /// Set external abort flag (for parallel scheduler)
+  void setAbortFlag(const std::atomic<bool> *flag) { abortFlag_ = flag; }
+
+  // Guided objective setters
+  void setGuidedObjMode(int v) { guidedObjMode_ = v; }
+  void setGuidedObjWeight(double v) { guidedObjWeight_ = v; }
+  void setGuidedObjOrigWeight(double v) { guidedObjOrigWeight_ = v; }
+  void setGuidedObjWarmup(int v) { guidedObjWarmup_ = v; }
+  void setGuidedObjFrequency(int v) { guidedObjFrequency_ = v; }
+};
+#endif
+
+/* vi: softtabstop=2 shiftwidth=2 expandtab tabstop=2
+*/
