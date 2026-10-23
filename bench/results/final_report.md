@@ -9,7 +9,7 @@
 - **Corpus**: 31 deterministic LP and MILP families across 3 tiers (`testdata/corpus/*.json` and `testdata/corpus/trials/*.jsonl`; 11 randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state.
 
 <!-- BEGIN GENERATED:PROVENANCE -->
-- **gopt telemetry source**: fingerprint `dfc05e06279c1488` (working tree on top of commit `5c12aa5e7e2c3070bfeebe8df5fd14d8df1c1be0`), `go1.27.1-X:nodwarf5`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources
+- **gopt telemetry source**: fingerprint `dfc05e06279c1488` (commit `4118cec7487c3731bdf8ced77d263ec3ffdef785`), `go1.27.1-X:nodwarf5`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources
 - **CPU affinity**: gopt `2`; Python + CBC `2`
 - **Python reference**: PuLP `4.2.0`, CBC `2.10.3` (`cbc`)
 - **CBC subprocess spawn floor**: 2.09 ms median (`prob.solve()` on a 1-variable MILP); the "Net of Spawn" columns subtract it
@@ -23,14 +23,14 @@ The planted-gap MAD family is constructed so that a root heuristic closes the ga
 <!-- BEGIN GENERATED:TIER_SUMMARY_TABLE -->
 | Workload Subset | Families | Py Total GeoMean (ms) | Py Net-of-Spawn GeoMean (ms) | goblin GeoMean (ms) | gopt GeoMean (ms) | `Py / gopt` GeoMean | `Py / gopt` Median [Min-Max] | `Py net / gopt` GeoMean | `gopt / goblin` |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Canonical (`N <= 22`) | 10 | 3.86 | 0.38 | 1.23 | 0.04 | **91.3x** | 150.2x [7.7x-313.6x] | 9.0x | 0.03x |
-| Tier 2: Target p90 (`30 <= N <= 76`) | 13 | 14.37 | 11.37 | 25.63 | 2.08 | **6.9x** | 8.7x [1.3x-27.4x] | 5.5x | 0.08x |
-| Tier 3: Large Tail (`135 <= N <= 4028`) | 8 | 101.99 | 97.98 | 133.67 | 44.89 | **2.3x** | 1.7x [0.4x-11.4x] | 2.2x | 0.34x |
-| Tier 3 non-MAD MILPs | 4 | 120.68 | 118.18 | 214.01 | 23.44 | **5.1x** | 8.3x [1.0x-11.4x] | 5.0x | 0.11x |
-| Planted-gap MAD family (zero integrality gap by construction) | 8 | 23.99 | 19.16 | 24.24 | 7.43 | **3.2x** | 2.2x [0.4x-27.4x] | 2.6x | 0.31x |
-| Random-weight MAD (negative controls) | 3 | 44.33 | 40.97 | 73.38 | 18.67 | **2.4x** | 1.4x [1.3x-7.7x] | 2.2x | 0.25x |
-| **All families except planted-gap MAD** | 23 | 13.42 | 4.59 | 12.39 | 0.71 | **18.8x** | 11.4x [1.0x-313.6x] | 6.4x | 0.06x |
-| All corpus families | 31 | 15.59 | 6.64 | 14.73 | 1.31 | **11.9x** | 9.5x [0.4x-313.6x] | 5.1x | 0.09x |
+| Tier 1: Canonical (`N <= 22`) | 10 | 3.86 | 0.38 | 1.23 | 0.04 | **98.7x** | 164.1x [6.9x-307.4x] | 9.8x | 0.03x |
+| Tier 2: Target p90 (`30 <= N <= 76`) | 13 | 14.37 | 11.37 | 25.63 | 2.10 | **6.8x** | 9.2x [1.5x-23.7x] | 5.4x | 0.08x |
+| Tier 3: Large Tail (`135 <= N <= 4028`) | 8 | 101.99 | 97.98 | 133.67 | 39.47 | **2.6x** | 2.6x [0.4x-13.0x] | 2.5x | 0.30x |
+| Tier 3 non-MAD MILPs | 4 | 120.68 | 118.18 | 214.01 | 23.18 | **5.2x** | 8.0x [1.2x-13.0x] | 5.1x | 0.11x |
+| Planted-gap MAD family (zero integrality gap by construction) | 8 | 23.99 | 19.16 | 24.24 | 6.85 | **3.5x** | 3.1x [0.4x-18.7x] | 2.8x | 0.28x |
+| Random-weight MAD (negative controls) | 3 | 44.33 | 40.97 | 73.38 | 16.76 | **2.6x** | 1.8x [1.5x-6.9x] | 2.4x | 0.23x |
+| **All families except planted-gap MAD** | 23 | 13.42 | 4.59 | 12.39 | 0.68 | **19.7x** | 13.0x [1.2x-307.4x] | 6.7x | 0.06x |
+| All corpus families | 31 | 15.59 | 6.64 | 14.73 | 1.24 | **12.6x** | 12.0x [0.4x-307.4x] | 5.4x | 0.08x |
 <!-- END GENERATED:TIER_SUMMARY_TABLE -->
 
 ## 3. End-to-End Pipeline Comparison (`JSON -> Solution`)
@@ -45,37 +45,37 @@ The Parity column is computed by `bench.CheckParity`: status, canonical objectiv
 <!-- BEGIN GENERATED:FULL_PIPELINE_TABLE -->
 | Problem ID | Vars | Rows | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / gopt` | Parity |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `t1_std_lp` | 3 | 3 | 0.087 | 0.008 | 1.86 | 0.00 | 0.00 | 1.92 | 0.01 | **174.2x** | `OK` |
-| `t1_std_lp_max` | 3 | 3 | 0.091 | 0.008 | 1.73 | 0.00 | 0.00 | 1.79 | 0.01 | **170.2x** | `OK` |
-| `t1_std_mip` | 3 | 3 | 0.122 | 0.008 | 3.35 | 1.25 | 0.00 | 3.45 | 0.01 | **304.1x** | `OK` |
-| `t1_mip_float_obj` | 3 | 3 | 0.129 | 0.008 | 3.21 | 1.12 | 0.00 | 3.30 | 0.01 | **313.6x** | `OK` |
-| `t1_whiskas` | 6 | 5 | 0.184 | 0.017 | 2.76 | 0.67 | 0.00 | 2.91 | 0.02 | **130.2x** | `OK` |
-| `t1_furniture` | 2 | 3 | 0.087 | 0.012 | 2.92 | 0.83 | 0.02 | 2.98 | 0.03 | **87.7x** | `OK` |
-| `t1_knapsack_12` | 12 | 3 | 0.142 | 0.037 | 4.87 | 2.77 | 0.09 | 4.98 | 0.14 | **36.6x** | `OK` |
-| `t1_infeasible_mip` | 2 | 1 | 0.095 | 0.008 | 2.21 | 0.11 | 0.00 | 2.27 | 0.01 | **244.6x** | `OK` |
-| `t1_mad_g2_i4` | 22 | 30 | 0.291 | 0.130 | 5.23 | 3.13 | 0.16 | 5.45 | 0.30 | **18.2x** | `OK` |
-| `t1_mad_rand_g2_i4` | 22 | 32 | 0.443 | 0.176 | 34.90 | 32.80 | 4.31 | 35.23 | 4.60 | **7.7x** | `OK` |
-| `t2_mkp_30` | 30 | 6 | 0.377 | 0.126 | 37.88 | 35.79 | 4.67 | 38.23 | 4.82 | **7.9x** | `OK` |
-| `t2_mkp_50` | 50 | 8 | 0.585 | 0.203 | 14.52 | 12.43 | 8.06 | 14.82 | 8.27 | **1.8x** | `OK` |
-| `t2_cflp_36` | 36 | 11 | 0.420 | 0.109 | 6.08 | 3.98 | 0.26 | 6.47 | 0.37 | **17.4x** | `OK` |
-| `t2_cflp_49` | 49 | 13 | 0.491 | 0.146 | 6.66 | 4.57 | 0.64 | 7.09 | 0.81 | **8.7x** | `OK` |
-| `t2_gap_45` | 45 | 13 | 0.345 | 0.135 | 10.44 | 8.35 | 1.00 | 10.81 | 1.14 | **9.5x** | `OK` |
-| `t2_lotsizing_48` | 48 | 32 | 0.550 | 0.188 | 58.84 | 56.74 | 6.33 | 59.24 | 6.50 | **9.1x** | `OK` |
-| `t2_binpack_44` | 44 | 14 | 0.473 | 0.131 | 10.99 | 8.89 | 0.55 | 11.38 | 0.68 | **16.7x** | `OK` |
-| `t2_setcover_50` | 50 | 20 | 0.418 | 0.130 | 6.20 | 4.11 | 0.14 | 6.51 | 0.28 | **23.6x** | `OK` |
-| `t2_mad_g2_i8` | 30 | 34 | 0.626 | 0.107 | 4.94 | 2.85 | 0.09 | 5.48 | 0.20 | **27.4x** | `OK` |
-| `t2_mad_g3_i9` | 48 | 48 | 0.961 | 0.331 | 7.57 | 5.48 | 0.53 | 8.33 | 0.96 | **8.7x** | `OK` |
-| `t2_mad_g4_i12` | 76 | 64 | 1.298 | 0.555 | 7.32 | 5.23 | 2.27 | 7.99 | 2.95 | **2.7x** | `OK` |
-| `t2_mad_rand_g2_i8` | 30 | 36 | 0.692 | 0.236 | 13.37 | 11.28 | 9.85 | 13.93 | 10.10 | **1.4x** | `OK` |
-| `t2_mad_rand_g3_i9` | 48 | 51 | 0.599 | 0.382 | 177.04 | 174.95 | 139.79 | 177.47 | 140.19 | **1.3x** | `OK` |
-| `t3_mkp_200` | 200 | 8 | 1.071 | 0.572 | 51.71 | 49.62 | 50.67 | 52.38 | 51.24 | **1.0x** | `OK` |
-| `t3_cflp_300` | 300 | 34 | 1.362 | 0.806 | 259.76 | 257.67 | 22.18 | 261.58 | 22.98 | **11.4x** | `OK` |
-| `t3_lotsizing_504` | 504 | 336 | 2.514 | 0.882 | 153.28 | 151.18 | 27.83 | 155.39 | 28.70 | **5.4x** | `OK` |
-| `t3_sched_1000` | 1000 | 100 | 6.842 | 2.548 | 95.76 | 93.67 | 7.37 | 99.61 | 8.94 | **11.1x** | `OK` |
-| `t3_mad_g5_i20` | 135 | 85 | 2.720 | 1.151 | 12.85 | 10.76 | 7.72 | 14.90 | 8.93 | **1.7x** | `OK` |
-| `t3_mad_g6_i30` | 222 | 108 | 2.982 | 1.557 | 28.08 | 25.99 | 16.63 | 30.12 | 18.19 | **1.7x** | `OK` |
-| `t3_mad_g10_i100` | 1070 | 230 | 16.389 | 7.145 | 183.31 | 181.21 | 546.52 | 195.76 | 553.86 | **0.4x** | `OK` |
-| `t3_mad_g4_i1000` | 4028 | 1052 | 77.944 | 26.438 | 560.97 | 558.88 | 577.18 | 628.55 | 606.41 | **1.0x** | `OK` |
+| `t1_std_lp` | 3 | 3 | 0.087 | 0.008 | 1.86 | 0.00 | 0.00 | 1.92 | 0.01 | **184.3x** | `OK` |
+| `t1_std_lp_max` | 3 | 3 | 0.091 | 0.008 | 1.73 | 0.00 | 0.00 | 1.79 | 0.01 | **184.8x** | `OK` |
+| `t1_std_mip` | 3 | 3 | 0.122 | 0.008 | 3.35 | 1.25 | 0.00 | 3.45 | 0.01 | **301.7x** | `OK` |
+| `t1_mip_float_obj` | 3 | 3 | 0.129 | 0.008 | 3.21 | 1.12 | 0.00 | 3.30 | 0.01 | **307.4x** | `OK` |
+| `t1_whiskas` | 6 | 5 | 0.184 | 0.017 | 2.76 | 0.67 | 0.00 | 2.91 | 0.02 | **136.4x** | `OK` |
+| `t1_furniture` | 2 | 3 | 0.087 | 0.008 | 2.92 | 0.83 | 0.01 | 2.98 | 0.02 | **143.8x** | `OK` |
+| `t1_knapsack_12` | 12 | 3 | 0.142 | 0.028 | 4.87 | 2.77 | 0.08 | 4.98 | 0.11 | **46.2x** | `OK` |
+| `t1_infeasible_mip` | 2 | 1 | 0.095 | 0.008 | 2.21 | 0.11 | 0.00 | 2.27 | 0.01 | **239.7x** | `OK` |
+| `t1_mad_g2_i4` | 22 | 30 | 0.291 | 0.133 | 5.23 | 3.13 | 0.17 | 5.45 | 0.29 | **18.7x** | `OK` |
+| `t1_mad_rand_g2_i4` | 22 | 32 | 0.443 | 0.179 | 34.90 | 32.80 | 4.96 | 35.23 | 5.14 | **6.9x** | `OK` |
+| `t2_mkp_30` | 30 | 6 | 0.377 | 0.141 | 37.88 | 35.79 | 5.16 | 38.23 | 5.43 | **7.0x** | `OK` |
+| `t2_mkp_50` | 50 | 8 | 0.585 | 0.222 | 14.52 | 12.43 | 8.70 | 14.82 | 8.92 | **1.7x** | `OK` |
+| `t2_cflp_36` | 36 | 11 | 0.420 | 0.125 | 6.08 | 3.98 | 0.33 | 6.47 | 0.46 | **14.1x** | `OK` |
+| `t2_cflp_49` | 49 | 13 | 0.491 | 0.102 | 6.66 | 4.57 | 0.46 | 7.09 | 0.59 | **12.0x** | `OK` |
+| `t2_gap_45` | 45 | 13 | 0.345 | 0.138 | 10.44 | 8.35 | 1.04 | 10.81 | 1.18 | **9.2x** | `OK` |
+| `t2_lotsizing_48` | 48 | 32 | 0.550 | 0.183 | 58.84 | 56.74 | 6.54 | 59.24 | 6.71 | **8.8x** | `OK` |
+| `t2_binpack_44` | 44 | 14 | 0.473 | 0.079 | 10.99 | 8.89 | 0.41 | 11.38 | 0.48 | **23.7x** | `OK` |
+| `t2_setcover_50` | 50 | 20 | 0.418 | 0.239 | 6.20 | 4.11 | 0.16 | 6.51 | 0.41 | **15.8x** | `OK` |
+| `t2_mad_g2_i8` | 30 | 34 | 0.626 | 0.196 | 4.94 | 2.85 | 0.16 | 5.48 | 0.36 | **15.0x** | `OK` |
+| `t2_mad_g3_i9` | 48 | 48 | 0.961 | 0.323 | 7.57 | 5.48 | 0.53 | 8.33 | 0.84 | **9.9x** | `OK` |
+| `t2_mad_g4_i12` | 76 | 64 | 1.298 | 0.568 | 7.32 | 5.23 | 2.19 | 7.99 | 2.68 | **3.0x** | `OK` |
+| `t2_mad_rand_g2_i8` | 30 | 36 | 0.692 | 0.150 | 13.37 | 11.28 | 7.56 | 13.93 | 7.77 | **1.8x** | `OK` |
+| `t2_mad_rand_g3_i9` | 48 | 51 | 0.599 | 0.328 | 177.04 | 174.95 | 117.55 | 177.47 | 117.89 | **1.5x** | `OK` |
+| `t3_mkp_200` | 200 | 8 | 1.071 | 0.497 | 51.71 | 49.62 | 43.55 | 52.38 | 43.84 | **1.2x** | `OK` |
+| `t3_cflp_300` | 300 | 34 | 1.362 | 0.787 | 259.76 | 257.67 | 21.03 | 261.58 | 21.81 | **12.0x** | `OK` |
+| `t3_lotsizing_504` | 504 | 336 | 2.514 | 0.844 | 153.28 | 151.18 | 38.44 | 155.39 | 39.30 | **4.0x** | `OK` |
+| `t3_sched_1000` | 1000 | 100 | 6.842 | 1.684 | 95.76 | 93.67 | 6.22 | 99.61 | 7.68 | **13.0x** | `OK` |
+| `t3_mad_g5_i20` | 135 | 85 | 2.720 | 0.551 | 12.85 | 10.76 | 4.26 | 14.90 | 4.78 | **3.1x** | `OK` |
+| `t3_mad_g6_i30` | 222 | 108 | 2.982 | 1.362 | 28.08 | 25.99 | 13.40 | 30.12 | 14.51 | **2.1x** | `OK` |
+| `t3_mad_g10_i100` | 1070 | 230 | 16.389 | 7.261 | 183.31 | 181.21 | 464.65 | 195.76 | 471.57 | **0.4x** | `OK` |
+| `t3_mad_g4_i1000` | 4028 | 1052 | 77.944 | 25.815 | 560.97 | 558.88 | 599.24 | 628.55 | 624.69 | **1.0x** | `OK` |
 <!-- END GENERATED:FULL_PIPELINE_TABLE -->
 
 ## 4. Scalar vs. `GOEXPERIMENT=simd` Build
@@ -83,44 +83,44 @@ The Parity column is computed by `bench.CheckParity`: status, canonical objectiv
 Ratios are geometric means of per-trial `scalar / SIMD` solve times over the same instances, with 95% t-intervals on the log ratios. "Reachable" is a necessary condition only: the AVX2 `Dot64`/`Axpy64` paths need a slice of length at least 256, which requires `n + m >= 256`.
 
 <!-- BEGIN GENERATED:SIMD_SUMMARY -->
-- **Negative controls** (`n + m < 256`, no AVX2 kernel can run): 20 of 25 have a 95% interval excluding 1. These differences come from the two binaries (compiler output and code layout differ under `GOEXPERIMENT=simd`) and from run-to-run effects, not from SIMD kernels. Intervals of similar size on the AVX2-capable instances are therefore not evidence of a SIMD effect.
-- **Instances where AVX2 can run**: 1 faster, 2 slower, 3 with no detectable effect, out of 6.
+- **Negative controls** (`n + m < 256`, no AVX2 kernel can run): 13 of 25 have a 95% interval excluding 1. These differences come from the two binaries (compiler output and code layout differ under `GOEXPERIMENT=simd`) and from run-to-run effects, not from SIMD kernels. Intervals of similar size on the AVX2-capable instances are therefore not evidence of a SIMD effect.
+- **Instances where AVX2 can run**: 0 faster, 1 slower, 5 with no detectable effect, out of 6.
 <!-- END GENERATED:SIMD_SUMMARY -->
 
 <!-- BEGIN GENERATED:SIMD_EFFECT_TABLE -->
 | Problem ID | `n + m` | AVX2 `Dot64`/`Axpy64` reachable | Scalar Solve Median (ms) | SIMD Solve Median (ms) | Paired `scalar / SIMD` GeoMean [95% CI] | Trials | Verdict |
 | :--- | ---: | :---: | ---: | ---: | ---: | ---: | :--- |
-| `t1_std_lp` | 6 | no (control) | 0.001 | 0.001 | 1.10x [1.05x-1.15x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_std_lp_max` | 6 | no (control) | 0.001 | 0.001 | 1.28x [1.10x-1.49x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_std_mip` | 6 | no (control) | 0.003 | 0.003 | 1.08x [1.02x-1.14x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_mip_float_obj` | 6 | no (control) | 0.002 | 0.002 | 1.06x [1.01x-1.11x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_whiskas` | 11 | no (control) | 0.003 | 0.002 | 1.16x [1.10x-1.22x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_furniture` | 5 | no (control) | 0.019 | 0.016 | 1.21x [1.12x-1.30x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_knapsack_12` | 15 | no (control) | 0.086 | 0.082 | 1.09x [1.01x-1.17x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_infeasible_mip` | 3 | no (control) | 0.000 | 0.000 | 1.65x [1.47x-1.85x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_mad_g2_i4` | 52 | no (control) | 0.155 | 0.107 | 1.36x [1.17x-1.58x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t1_mad_rand_g2_i4` | 54 | no (control) | 4.306 | 3.424 | 1.28x [1.10x-1.49x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_mkp_30` | 36 | no (control) | 4.666 | 3.191 | 1.41x [1.30x-1.53x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_mkp_50` | 58 | no (control) | 8.058 | 6.142 | 1.34x [1.21x-1.48x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_cflp_36` | 47 | no (control) | 0.261 | 0.173 | 1.50x [1.44x-1.56x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_cflp_49` | 62 | no (control) | 0.641 | 0.449 | 1.39x [1.33x-1.46x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_gap_45` | 58 | no (control) | 1.000 | 1.000 | 1.25x [1.08x-1.44x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_lotsizing_48` | 80 | no (control) | 6.326 | 5.917 | 1.14x [0.98x-1.32x] | 11 | identical source |
-| `t2_binpack_44` | 58 | no (control) | 0.553 | 0.743 | 0.83x [0.75x-0.92x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_setcover_50` | 70 | no (control) | 0.143 | 0.163 | 0.85x [0.74x-0.97x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_mad_g2_i8` | 64 | no (control) | 0.094 | 0.116 | 0.74x [0.63x-0.87x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_mad_g3_i9` | 96 | no (control) | 0.527 | 0.375 | 1.34x [1.24x-1.44x] | 11 | identical source; interval excludes 1 (build/run effect) |
-| `t2_mad_g4_i12` | 140 | no (control) | 2.271 | 2.208 | 1.00x [0.97x-1.03x] | 11 | identical source |
-| `t2_mad_rand_g2_i8` | 66 | no (control) | 9.853 | 8.402 | 1.10x [0.95x-1.27x] | 11 | identical source |
-| `t2_mad_rand_g3_i9` | 99 | no (control) | 139.789 | 132.912 | 1.02x [0.97x-1.09x] | 11 | identical source |
-| `t3_mkp_200` | 208 | no (control) | 50.666 | 55.941 | 0.98x [0.92x-1.04x] | 5 | identical source |
-| `t3_cflp_300` | 334 | possible | 22.179 | 21.627 | 1.02x [1.00x-1.04x] | 5 | no detectable effect |
-| `t3_lotsizing_504` | 840 | possible | 27.827 | 45.915 | 0.74x [0.59x-0.93x] | 5 | SIMD slower |
-| `t3_sched_1000` | 1100 | possible | 7.373 | 8.275 | 0.87x [0.78x-0.96x] | 5 | SIMD slower |
-| `t3_mad_g5_i20` | 220 | no (control) | 7.720 | 4.318 | 1.50x [1.13x-1.99x] | 5 | identical source; interval excludes 1 (build/run effect) |
-| `t3_mad_g6_i30` | 330 | possible | 16.634 | 9.630 | 1.37x [1.05x-1.79x] | 5 | SIMD faster |
-| `t3_mad_g10_i100` | 1300 | possible | 546.516 | 522.943 | 1.04x [0.91x-1.19x] | 5 | no detectable effect |
-| `t3_mad_g4_i1000` | 5080 | possible | 577.182 | 611.589 | 1.08x [0.97x-1.21x] | 5 | no detectable effect |
+| `t1_std_lp` | 6 | no (control) | 0.002 | 0.002 | 0.95x [0.87x-1.05x] | 11 | identical source |
+| `t1_std_lp_max` | 6 | no (control) | 0.001 | 0.001 | 1.07x [1.02x-1.13x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t1_std_mip` | 6 | no (control) | 0.003 | 0.003 | 0.83x [0.67x-1.02x] | 11 | identical source |
+| `t1_mip_float_obj` | 6 | no (control) | 0.003 | 0.003 | 0.78x [0.64x-0.95x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t1_whiskas` | 11 | no (control) | 0.003 | 0.004 | 0.71x [0.67x-0.75x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t1_furniture` | 5 | no (control) | 0.011 | 0.015 | 0.69x [0.63x-0.75x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t1_knapsack_12` | 15 | no (control) | 0.076 | 0.092 | 0.78x [0.72x-0.84x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t1_infeasible_mip` | 3 | no (control) | 0.000 | 0.000 | 0.78x [0.56x-1.10x] | 11 | identical source |
+| `t1_mad_g2_i4` | 52 | no (control) | 0.170 | 0.179 | 1.04x [0.82x-1.32x] | 11 | identical source |
+| `t1_mad_rand_g2_i4` | 54 | no (control) | 4.957 | 4.331 | 1.19x [1.07x-1.33x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_mkp_30` | 36 | no (control) | 5.164 | 3.441 | 1.47x [1.31x-1.65x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_mkp_50` | 58 | no (control) | 8.697 | 5.444 | 1.58x [1.45x-1.72x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_cflp_36` | 47 | no (control) | 0.328 | 0.279 | 1.07x [0.95x-1.20x] | 11 | identical source |
+| `t2_cflp_49` | 62 | no (control) | 0.459 | 0.572 | 0.85x [0.79x-0.92x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_gap_45` | 58 | no (control) | 1.043 | 0.920 | 0.96x [0.84x-1.10x] | 11 | identical source |
+| `t2_lotsizing_48` | 80 | no (control) | 6.535 | 4.375 | 1.28x [1.11x-1.48x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_binpack_44` | 58 | no (control) | 0.408 | 0.552 | 0.86x [0.74x-1.00x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_setcover_50` | 70 | no (control) | 0.161 | 0.203 | 0.93x [0.74x-1.18x] | 11 | identical source |
+| `t2_mad_g2_i8` | 64 | no (control) | 0.162 | 0.136 | 1.50x [0.98x-2.30x] | 11 | identical source |
+| `t2_mad_g3_i9` | 96 | no (control) | 0.529 | 0.533 | 1.01x [0.96x-1.06x] | 11 | identical source |
+| `t2_mad_g4_i12` | 140 | no (control) | 2.187 | 1.790 | 1.32x [1.17x-1.49x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_mad_rand_g2_i8` | 66 | no (control) | 7.562 | 10.164 | 0.77x [0.71x-0.83x] | 11 | identical source; interval excludes 1 (build/run effect) |
+| `t2_mad_rand_g3_i9` | 99 | no (control) | 117.549 | 128.359 | 0.93x [0.82x-1.05x] | 11 | identical source |
+| `t3_mkp_200` | 208 | no (control) | 43.551 | 37.777 | 1.01x [0.74x-1.36x] | 5 | identical source |
+| `t3_cflp_300` | 334 | possible | 21.027 | 19.816 | 0.97x [0.78x-1.20x] | 5 | no detectable effect |
+| `t3_lotsizing_504` | 840 | possible | 38.439 | 47.310 | 0.73x [0.57x-0.92x] | 5 | SIMD slower |
+| `t3_sched_1000` | 1100 | possible | 6.223 | 5.206 | 1.07x [0.78x-1.45x] | 5 | no detectable effect |
+| `t3_mad_g5_i20` | 220 | no (control) | 4.256 | 5.187 | 0.92x [0.69x-1.23x] | 5 | identical source |
+| `t3_mad_g6_i30` | 330 | possible | 13.396 | 12.400 | 1.12x [0.96x-1.29x] | 5 | no detectable effect |
+| `t3_mad_g10_i100` | 1300 | possible | 464.647 | 484.760 | 0.97x [0.91x-1.04x] | 5 | no detectable effect |
+| `t3_mad_g4_i1000` | 5080 | possible | 599.243 | 610.371 | 1.02x [0.96x-1.07x] | 5 | no detectable effect |
 <!-- END GENERATED:SIMD_EFFECT_TABLE -->
 
 ## 5. Solver-Core Checkpoint Progression (default build)
@@ -138,32 +138,32 @@ Progression across checkpoints on pre-compiled `CompiledProblem` instances:
 | `t1_std_lp` | 54.00 | 54.00 | 0.001 | 0.00 (1) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
 | `t1_std_lp_max` | 80.00 | 80.00 | 0.001 | 0.00 (1) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
 | `t1_std_mip` | 58.00 | 64.00 | 0.001 | 0.00 (3) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
-| `t1_mip_float_obj` | 58.90 | 64.95 | 0.001 | 0.00 (3) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
-| `t1_whiskas` | 0.52 | 0.52 | 0.004 | 0.01 (1) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
-| `t1_furniture` | 1075.00 | 1075.00 | 0.002 | 0.01 (1) | 0.02 (1) | 0.01 (1 / 0) | **0.02** (1 / 0) |
-| `t1_knapsack_12` | 578.65 | 513.24 | 0.005 | 0.12 (31) | 0.08 (24) | 0.10 (2 / 15) | **0.09** (1 / 15) |
-| `t1_infeasible_mip` | 1.50 | 0.00 | 0.001 | 0.00 (5) | 0.00 (0) | 0.00 (0 / 0) | **0.00** (0 / 0) |
-| `t1_mad_g2_i4` | 2160.00 | 2160.00 | 0.068 | 0.34 (4) | 0.24 (4) | 0.44 (4 / 2) | **0.16** (1 / 0) |
-| `t1_mad_rand_g2_i4` | 4257.00 | 5249.00 | 0.090 | 0.67 (9) | 0.70 (9) | 0.89 (11 / 4) | **4.31** (11 / 4) |
-| `t2_mkp_30` | 1966.92 | 1917.24 | 0.027 | 1.06 (77) | 1.29 (77) | 2.77 (60 / 9) | **4.67** (29 / 9) |
-| `t2_mkp_50` | 2648.37 | 2620.01 | 0.046 | 4.91 (119) | 6.19 (132) | 5.85 (2 / 5) | **8.06** (1 / 5) |
-| `t2_cflp_36` | 781.97 | 801.17 | 0.031 | 0.19 (7) | 0.20 (7) | 1.39 (3 / 2) | **0.26** (1 / 2) |
-| `t2_cflp_49` | 827.30 | 909.02 | 0.048 | 0.46 (9) | 0.46 (9) | 2.35 (4 / 20) | **0.64** (1 / 20) |
-| `t2_gap_45` | 178.04 | 195.18 | 0.042 | 2.64 (61) | 2.27 (61) | 0.35 (1 / 13) | **1.00** (1 / 13) |
-| `t2_lotsizing_48` | 2052.34 | 2245.81 | 0.108 | 3.87 (174) | 2.84 (198) | 7.65 (33 / 40) | **6.33** (11 / 40) |
-| `t2_binpack_44` | 29.30 | 30.32 | 0.047 | 28.97 (2400) | 24.45 (1895) | 1.31 (18 / 12) | **0.55** (1 / 12) |
-| `t2_setcover_50` | 56.84 | 58.10 | 0.041 | 0.68 (9) | 0.70 (9) | 0.28 (2 / 6) | **0.14** (1 / 6) |
-| `t2_mad_g2_i8` | 2160.00 | 2160.00 | 0.061 | 0.36 (6) | 0.41 (7) | 0.80 (6 / 2) | **0.09** (1 / 0) |
-| `t2_mad_g3_i9` | 4320.00 | 4320.00 | 0.348 | 2.54 (8) | 2.39 (18) | 2.02 (13 / 2) | **0.53** (1 / 0) |
-| `t2_mad_g4_i12` | 7200.00 | 7200.00 | 0.720 | 4.04 (30) | 3.99 (12) | 5.14 (10 / 7) | **2.27** (1 / 0) |
-| `t2_mad_rand_g2_i8` | 5894.00 | 6696.00 | 0.163 | 2.20 (31) | 1.72 (33) | 2.25 (32 / 5) | **9.85** (35 / 5) |
-| `t2_mad_rand_g3_i9` | 6060.00 | 7958.00 | 0.416 | 83.56 (181) | 66.65 (364) | 81.89 (262 / 11) | **139.79** (339 / 11) |
-| `t3_mkp_200` | 12955.46 | 12906.80 | 0.194 | 125.71 (5000, `NodeLimit`) | 151.19 (5000, `NodeLimit`) | 78.58 (739 / 21) | **50.67** (557 / 21) |
-| `t3_cflp_300` | 2081.53 | 2187.30 | 0.218 | 9.27 (134) | 7.24 (134) | 25.67 (39 / 37) | **22.18** (9 / 37) |
-| `t3_lotsizing_504` | 10518.99 | 13120.44 | 2.344 | 250.04 (3327, `TimeLimit`) | 250.06 (4215, `TimeLimit`) | 126.15 (365 / 165) | **27.83** (11 / 165) |
-| `t3_sched_1000` | 46971.09 | 46818.28 | 0.177 | 240.72 (5000, `NodeLimit`) | 250.04 (3164, `TimeLimit`) | 19.31 (96 / 50) | **7.37** (17 / 50) |
-| `t3_mad_g5_i20` | 10800.00 | 10800.00 | 6.360 | 33.96 (91) | 9.72 (47) | 9.54 (19 / 4) | **7.72** (1 / 0) |
-| `t3_mad_g6_i30` | 15120.00 | 15120.00 | 11.389 | 134.73 (266) | 52.98 (154) | 29.98 (32 / 4) | **16.63** (1 / 0) |
-| `t3_mad_g10_i100` | 79200.00 | 79200.00 | 221.955 | 250.10 (2, `TimeLimit`) | 250.13 (29, `TimeLimit`) | 250.08 (1 / 5, `TimeLimit`) | **546.52** (1 / 0) |
-| `t3_mad_g4_i1000` | 187200.00 | 187200.00 | 571.212 | 251.53 (0, `TimeLimit`) | 252.57 (0, `TimeLimit`) | 250.79 (0 / 0, `TimeLimit`) | **577.18** (1 / 0) |
+| `t1_mip_float_obj` | 58.90 | 64.95 | 0.002 | 0.01 (3) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
+| `t1_whiskas` | 0.52 | 0.52 | 0.002 | 0.00 (1) | 0.00 (1) | 0.00 (1 / 0) | **0.00** (1 / 0) |
+| `t1_furniture` | 1075.00 | 1075.00 | 0.001 | 0.01 (1) | 0.01 (1) | 0.01 (1 / 0) | **0.01** (1 / 0) |
+| `t1_knapsack_12` | 578.65 | 513.24 | 0.005 | 0.11 (31) | 0.12 (24) | 0.12 (2 / 15) | **0.08** (1 / 15) |
+| `t1_infeasible_mip` | 1.50 | 0.00 | 0.001 | 0.01 (5) | 0.00 (0) | 0.00 (0 / 0) | **0.00** (0 / 0) |
+| `t1_mad_g2_i4` | 2160.00 | 2160.00 | 0.101 | 0.40 (4) | 0.39 (4) | 0.51 (4 / 2) | **0.17** (1 / 0) |
+| `t1_mad_rand_g2_i4` | 4257.00 | 5249.00 | 0.093 | 0.63 (9) | 0.75 (9) | 0.88 (11 / 4) | **4.96** (11 / 4) |
+| `t2_mkp_30` | 1966.92 | 1917.24 | 0.023 | 1.14 (77) | 1.33 (77) | 2.96 (60 / 9) | **5.16** (29 / 9) |
+| `t2_mkp_50` | 2648.37 | 2620.01 | 0.046 | 4.96 (119) | 6.88 (132) | 6.15 (2 / 5) | **8.70** (1 / 5) |
+| `t2_cflp_36` | 781.97 | 801.17 | 0.035 | 0.22 (7) | 0.21 (7) | 1.32 (3 / 2) | **0.33** (1 / 2) |
+| `t2_cflp_49` | 827.30 | 909.02 | 0.033 | 0.34 (9) | 0.34 (9) | 1.57 (4 / 20) | **0.46** (1 / 20) |
+| `t2_gap_45` | 178.04 | 195.18 | 0.042 | 2.17 (61) | 2.37 (61) | 0.35 (1 / 13) | **1.04** (1 / 13) |
+| `t2_lotsizing_48` | 2052.34 | 2245.81 | 0.112 | 3.17 (174) | 2.61 (198) | 6.01 (33 / 40) | **6.54** (11 / 40) |
+| `t2_binpack_44` | 29.30 | 30.32 | 0.051 | 31.22 (2400) | 23.40 (1895) | 1.69 (18 / 12) | **0.41** (1 / 12) |
+| `t2_setcover_50` | 56.84 | 58.10 | 0.042 | 0.96 (9) | 0.69 (9) | 0.26 (2 / 6) | **0.16** (1 / 6) |
+| `t2_mad_g2_i8` | 2160.00 | 2160.00 | 0.094 | 0.55 (6) | 0.53 (7) | 0.82 (6 / 2) | **0.16** (1 / 0) |
+| `t2_mad_g3_i9` | 4320.00 | 4320.00 | 0.388 | 1.98 (8) | 1.96 (18) | 2.06 (13 / 2) | **0.53** (1 / 0) |
+| `t2_mad_g4_i12` | 7200.00 | 7200.00 | 1.155 | 5.62 (30) | 4.11 (12) | 4.05 (10 / 7) | **2.19** (1 / 0) |
+| `t2_mad_rand_g2_i8` | 5894.00 | 6696.00 | 0.107 | 1.85 (31) | 1.19 (33) | 2.29 (32 / 5) | **7.56** (35 / 5) |
+| `t2_mad_rand_g3_i9` | 6060.00 | 7958.00 | 0.235 | 84.05 (181) | 71.43 (364) | 68.07 (262 / 11) | **117.55** (339 / 11) |
+| `t3_mkp_200` | 12955.46 | 12906.80 | 0.194 | 105.08 (5000, `NodeLimit`) | 127.75 (5000, `NodeLimit`) | 74.91 (739 / 21) | **43.55** (557 / 21) |
+| `t3_cflp_300` | 2081.53 | 2187.30 | 0.143 | 9.54 (134) | 8.05 (134) | 16.82 (39 / 37) | **21.03** (9 / 37) |
+| `t3_lotsizing_504` | 10518.99 | 13120.44 | 1.329 | 250.03 (4883, `TimeLimit`) | 250.05 (3969, `TimeLimit`) | 140.97 (365 / 165) | **38.44** (11 / 165) |
+| `t3_sched_1000` | 46971.09 | 46818.28 | 0.282 | 250.05 (4976, `TimeLimit`) | 250.02 (3643, `TimeLimit`) | 19.66 (96 / 50) | **6.22** (17 / 50) |
+| `t3_mad_g5_i20` | 10800.00 | 10800.00 | 5.700 | 34.69 (91) | 8.13 (47) | 7.14 (19 / 4) | **4.26** (1 / 0) |
+| `t3_mad_g6_i30` | 15120.00 | 15120.00 | 11.144 | 133.70 (266) | 51.86 (154) | 29.74 (32 / 4) | **13.40** (1 / 0) |
+| `t3_mad_g10_i100` | 79200.00 | 79200.00 | 180.597 | 250.44 (3, `TimeLimit`) | 250.03 (2, `TimeLimit`) | 250.10 (2 / 10, `TimeLimit`) | **464.65** (1 / 0) |
+| `t3_mad_g4_i1000` | 187200.00 | 187200.00 | 544.282 | 252.18 (0, `TimeLimit`) | 251.72 (0, `TimeLimit`) | 250.02 (0 / 0, `TimeLimit`) | **599.24** (1 / 0) |
 <!-- END GENERATED:FULL_CHECKPOINT_TABLE -->
