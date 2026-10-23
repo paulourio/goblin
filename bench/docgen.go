@@ -486,7 +486,7 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			{"All corpus families", func(_ CorpusCase) bool { return true }},
 		}
 
-		b.WriteString("| Workload Subset | Families | Py Total GeoMean (ms) | Py Net-of-Spawn GeoMean (ms) | `goblin (CBC)` GeoMean (ms) | `goblin (Go)` GeoMean (ms) | `Py / goblin (Go)` GeoMean | `Py / goblin (Go)` Median [Min-Max] | `Py net / goblin (Go)` GeoMean | `goblin (Go) / CBC` |\n")
+		b.WriteString("| Workload Subset | Families | `Py / goblin (Go)` GeoMean | `Py net / goblin (Go)` | `goblin (Go) / CBC` | `goblin (Go)` (ms) | `goblin (CBC)` (ms) | Py Total (ms) | Py Net (ms) | `Py / goblin (Go)` Median [Min-Max] |\n")
 		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		for _, grp := range groups {
 			var pyVals, pyNetVals, gbVals, goVals, speedups []float64
@@ -514,21 +514,21 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 				gbStr = fmt.Sprintf("%.2f", gbGM)
 				gbRatio = fmt.Sprintf("%.2fx", goGM/gbGM)
 			}
-			fmt.Fprintf(&b, "| %s | %d | %.2f | %.2f | %s | %.2f | **%.1fx** | %.1fx [%.1fx-%.1fx] | %.1fx | %s |\n",
-				grp.label, len(goVals), pyGM, pyNetGM, gbStr, goGM, pyGM/goGM, medSp, minSp, maxSp, pyNetGM/goGM, gbRatio)
+			fmt.Fprintf(&b, "| %s | %d | **%.1fx** | %.1fx | %s | %.2f | %s | %.2f | %.2f | %.1fx [%.1fx-%.1fx] |\n",
+				grp.label, len(goVals), pyGM/goGM, pyNetGM/goGM, gbRatio, goGM, gbStr, pyGM, pyNetGM, medSp, minSp, maxSp)
 		}
 
 	case "SIMD_EFFECT_TABLE":
-		b.WriteString("| Problem ID | `n + m` | AVX2 `Dot64`/`Axpy64` reachable | Scalar Solve Median (ms) | SIMD Solve Median (ms) | Paired `scalar / SIMD` GeoMean [95% CI] | Trials | Verdict |\n")
-		b.WriteString("| :--- | ---: | :---: | ---: | ---: | ---: | ---: | :--- |\n")
+		b.WriteString("| Problem ID | `n + m` | AVX2 `Dot64`/`Axpy64` reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
+		b.WriteString("| :--- | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
 		for _, c := range cases {
 			sc := tb.Scalar[c.ID]
 			sm := tb.SIMD[c.ID]
 			size := sm.NumVars + sm.NumConstraints
 			gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
 			reach, verdict := simdVerdict(size, lo, hi, n)
-			fmt.Fprintf(&b, "| `%s` | %d | %s | %.3f | %.3f | %.2fx [%.2fx-%.2fx] | %d | %s |\n",
-				c.ID, size, reach, sc.TSolveMS, sm.TSolveMS, gm, lo, hi, n, verdict)
+			fmt.Fprintf(&b, "| `%s` | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %.3f | %.3f | %d |\n",
+				c.ID, size, reach, verdict, gm, lo, hi, sc.TSolveMS, sm.TSolveMS, n)
 		}
 
 	case "SIMD_SUMMARY":
@@ -562,10 +562,10 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			faster, slower, reachable-faster-slower, reachable)
 
 	case "MAD_PIPELINE_TABLE":
-		b.WriteString("| Problem ID | $G$ | $I$ | $T$ | Vars | Rows | Optimal Obj | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / goblin (Go)` | Parity |\n")
-		b.WriteString("| :--- | --: | ---: | --: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+		b.WriteString("| Problem ID | $G \\times I$ | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Optimal Obj | Parity |\n")
+		b.WriteString("| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
 		for _, c := range cases {
-			g, i, t, ok := madDimensions(c.ID)
+			g, i, _, ok := madDimensions(c.ID)
 			if !ok {
 				continue
 			}
@@ -573,17 +573,19 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			sc := tb.Scalar[c.ID]
 			pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
 			goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
-			fmt.Fprintf(&b, "| `%s` | %d | %d | %d | %d | %d | %.1f | %.3f | %.3f | %.2f | %.2f | %.2f | %.2f | %.2f | **%.1fx** | %s |\n",
-				c.ID, g, i, t, sc.NumVars, sc.NumConstraints,
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | %d | %d | **%.1fx** | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %.1f | %s |\n",
+				c.ID,
+				g, i, sc.NumVars, sc.NumConstraints,
+				py.TTotalMedianMS/sc.TTotalMS,
+				sc.TTotalMS, py.TTotalMedianMS,
+				sc.TSolveMS, py.TSolveMedianMS, pyNetSolveMS(py),
+				goPrep, pyPrep,
 				sc.CP7Full.Objective,
-				pyPrep, goPrep,
-				py.TSolveMedianMS, pyNetSolveMS(py), sc.TSolveMS,
-				py.TTotalMedianMS, sc.TTotalMS,
-				py.TTotalMedianMS/sc.TTotalMS, parityCell(tb, c.ID))
+				parityCell(tb, c.ID))
 		}
 
 	case "MAD_CBC_GAP_TABLE":
-		b.WriteString("| Problem ID | $G \\times I$ ($N \\times M$) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Py Net Solve (ms) | Go Total (ms) | CBC Total (ms) | Total (`Go / CBC`) |\n")
+		b.WriteString("| Problem ID | $G \\times I$ ($N \\times M$) | Total (`Go / CBC`) | Go Total (ms) | CBC Total (ms) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) | Py Net Solve (ms) |\n")
 		b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		for _, c := range cases {
 			g, i, _, ok := madDimensions(c.ID)
@@ -595,19 +597,21 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			gb := tb.Goblin[c.ID]
 			lpRatio := sc.RootLPTimeMS / max(gb.RootLPTimeMS, geoMeanMinFloor)
 			totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ ($%d \\times %d$) | %.3f (%d) | %.3f (%d) | %.2fx | %.2f (%d / %d) | %.2f (%d / %d) | %.2f | %.2f | %.2f | **%.2fx** |\n",
-				c.ID, g, i, sc.NumVars, sc.NumConstraints,
-				sc.RootLPTimeMS, sc.RootLPIters,
-				gb.RootLPTimeMS, gb.RootLPIters,
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ ($%d \\times %d$) | **%.2fx** | %.2f | %.2f | %.2fx | %.2f (%d / %d) | %.2f (%d / %d) | %.3f (%d) | %.3f (%d) | %.2f |\n",
+				c.ID,
+				g, i, sc.NumVars, sc.NumConstraints,
+				totRatio,
+				sc.TTotalMS, gb.TTotalMS,
 				lpRatio,
 				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
 				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
-				pyNetSolveMS(py),
-				sc.TTotalMS, gb.TTotalMS, totRatio)
+				sc.RootLPTimeMS, sc.RootLPIters,
+				gb.RootLPTimeMS, gb.RootLPIters,
+				pyNetSolveMS(py))
 		}
 
 	case "NON_MAD_CBC_GAP_TABLE":
-		b.WriteString("| Problem ID | $N \\times M$ | Go CP5 +Presolve (ms / nodes) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Total Mean $\\pm$ SD (ms) | CBC Total Mean $\\pm$ SD (ms) | Total Median (`Go / CBC`) |\n")
+		b.WriteString("| Problem ID | $N \\times M$ | Total Median (`Go / CBC`) | Go Total Mean $\\pm$ SD (ms) | CBC Total Mean $\\pm$ SD (ms) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP5 +Presolve (ms / nodes) |\n")
 		b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		gapIDs := []string{"t3_mkp_200", "t2_mkp_50", "t2_binpack_44", "t3_cflp_300", "t3_sched_1000"}
 		for _, id := range gapIDs {
@@ -617,19 +621,20 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			}
 			gb := tb.Goblin[id]
 			totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | %s | %s | %.2f (%d / %d) | %.2f (%d / %d) | $%.2f \\pm %.2f$ | $%.2f \\pm %.2f$ | **%.2fx** |\n",
-				id, sc.NumVars, sc.NumConstraints,
-				formatCP45(sc.CP5Presolve),
-				formatCP67(sc.CP6Cuts, false),
-				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
-				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | **%.2fx** | $%.2f \\pm %.2f$ | $%.2f \\pm %.2f$ | %.2f (%d / %d) | %.2f (%d / %d) | %s | %s |\n",
+				id,
+				sc.NumVars, sc.NumConstraints,
+				totRatio,
 				sc.TTotalMeanMS, sc.TTotalSDMS,
 				gb.TTotalMeanMS, gb.TTotalSDMS,
-				totRatio)
+				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
+				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
+				formatCP67(sc.CP6Cuts, false),
+				formatCP45(sc.CP5Presolve))
 		}
 
 	case "MAD_STATS_TABLE":
-		b.WriteString("| Problem ID | $G \\times I$ | Python `PuLP + CBC` Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` Scalar Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\\pm$ SD [95% CI], ms) |\n")
+		b.WriteString("| Problem ID | $G \\times I$ | `goblin (Go)` Scalar Total (Mean $\\pm$ SD [95% CI], ms) | Python `PuLP + CBC` Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\\pm$ SD [95% CI], ms) |\n")
 		b.WriteString("| :--- | :---: | ---: | ---: | ---: |\n")
 		for _, c := range cases {
 			g, i, _, ok := madDimensions(c.ID)
@@ -646,45 +651,48 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			tc := tCrit975(nTrials - 1)
 			sqrtN := math.Sqrt(float64(max(1, nTrials)))
 			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | $%.2f \\pm %.2f$ ($\\pm %.2f$) | $%.2f \\pm %.2f$ ($\\pm %.2f$) | $%.2f \\pm %.2f$ ($\\pm %.2f$) |\n",
-				c.ID, g, i,
-				py.TTotalMeanMS, py.TTotalSDMS, tc*py.TTotalSDMS/sqrtN,
+				c.ID,
+				g, i,
 				sc.TTotalMeanMS, sc.TTotalSDMS, tc*sc.TTotalSDMS/sqrtN,
+				py.TTotalMeanMS, py.TTotalSDMS, tc*py.TTotalSDMS/sqrtN,
 				sm.TTotalMeanMS, sm.TTotalSDMS, tc*sm.TTotalSDMS/sqrtN)
 		}
 
 	case "MAD_CHECKPOINT_TABLE", "FULL_CHECKPOINT_TABLE":
-		b.WriteString("| Problem ID | Root LP Obj | Optimal Obj | Root LP (ms) | CP4 Base (ms / nodes) | CP5 +Presolve (ms / nodes) | CP6 +Cuts (ms / nodes / cuts) | CP7 Full (ms / nodes / cuts) |\n")
+		b.WriteString("| Problem ID | CP7 Full (ms / nodes / cuts) | CP6 +Cuts (ms / nodes / cuts) | CP5 +Presolve (ms / nodes) | CP4 Base (ms / nodes) | Root LP (ms) | Optimal Obj | Root LP Obj |\n")
 		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 		for _, c := range cases {
 			if _, _, _, ok := madDimensions(c.ID); !ok && blockName == "MAD_CHECKPOINT_TABLE" {
 				continue
 			}
 			sc := tb.Scalar[c.ID]
-			fmt.Fprintf(&b, "| `%s` | %.2f | %.2f | %.3f | %s | %s | %s | %s |\n",
+			fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s | %.3f | %.2f | %.2f |\n",
 				c.ID,
-				sc.RootLPObj,
-				sc.CP7Full.Objective,
-				sc.RootLPTimeMS,
-				formatCP45(sc.CP4Baseline),
-				formatCP45(sc.CP5Presolve),
+				formatCP67(sc.CP7Full, true),
 				formatCP67(sc.CP6Cuts, false),
-				formatCP67(sc.CP7Full, true))
+				formatCP45(sc.CP5Presolve),
+				formatCP45(sc.CP4Baseline),
+				sc.RootLPTimeMS,
+				sc.CP7Full.Objective,
+				sc.RootLPObj)
 		}
 
 	case "FULL_PIPELINE_TABLE":
-		b.WriteString("| Problem ID | Vars | Rows | PyPrep (ms) | GoPrep (ms) | PySolve (ms) | PySolve Net of Spawn (ms) | GoSolve (ms) | PyTotal (ms) | GoTotal (ms) | `Py / goblin (Go)` | Parity |\n")
+		b.WriteString("| Problem ID | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Parity |\n")
 		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
 		for _, c := range cases {
 			py := tb.Python[c.ID]
 			sc := tb.Scalar[c.ID]
 			pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
 			goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
-			fmt.Fprintf(&b, "| `%s` | %d | %d | %.3f | %.3f | %.2f | %.2f | %.2f | %.2f | %.2f | **%.1fx** | %s |\n",
-				c.ID, sc.NumVars, sc.NumConstraints,
-				pyPrep, goPrep,
-				py.TSolveMedianMS, pyNetSolveMS(py), sc.TSolveMS,
-				py.TTotalMedianMS, sc.TTotalMS,
-				py.TTotalMedianMS/sc.TTotalMS, parityCell(tb, c.ID))
+			fmt.Fprintf(&b, "| `%s` | %d | %d | **%.1fx** | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %s |\n",
+				c.ID,
+				sc.NumVars, sc.NumConstraints,
+				py.TTotalMedianMS/sc.TTotalMS,
+				sc.TTotalMS, py.TTotalMedianMS,
+				sc.TSolveMS, py.TSolveMedianMS, pyNetSolveMS(py),
+				goPrep, pyPrep,
+				parityCell(tb, c.ID))
 		}
 
 	case "PROVENANCE":

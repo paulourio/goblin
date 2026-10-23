@@ -20,15 +20,15 @@
       846,
       1092
     ],
-    "t_parse_ms": 0.013041,
-    "t_build_ms": 0.002146,
-    "t_compile_ms": 0.002098,
-    "t_mps_write_ms": 0.00676,
-    "t_solve_ms": 1.039665,
-    "t_total_ms": 1.057856,
-    "t_total_mean_ms": 1.0520309999999997,
-    "t_total_sd_ms": 0.07663327889109271,
-    "root_lp_time_ms": 0.039995,
+    "t_parse_ms": 0.013227,
+    "t_build_ms": 0.003037,
+    "t_compile_ms": 0.002208,
+    "t_mps_write_ms": 0.006943,
+    "t_solve_ms": 1.046661,
+    "t_total_ms": 1.067276,
+    "t_total_mean_ms": 1.0586003636363637,
+    "t_total_sd_ms": 0.0670925644319439,
+    "root_lp_time_ms": 0.040459,
     "root_lp_iters": 2,
     "root_lp_obj": 1075,
     "cp4_baseline": {
@@ -38,7 +38,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.636883
+      "time_ms": 0.630696
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -47,7 +47,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.875568
+      "time_ms": 0.844511
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -56,7 +56,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.963305
+      "time_ms": 0.96844
     },
     "cp7_full": {
       "status": "Optimal",
@@ -65,36 +65,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 1.039665
+      "time_ms": 1.046661
     },
     "t_solve_trials_ms": [
-      0.845548,
-      1.033881,
-      1.006353,
-      1.128772,
-      1.119958,
-      1.086362,
-      0.983768,
-      1.0431,
-      1.043584,
-      1.039665,
-      1.036528
+      0.856486,
+      1.044255,
+      1.016965,
+      1.025275,
+      1.063672,
+      1.107683,
+      1.075384,
+      1.055464,
+      1.046661,
+      1.09837,
+      1.044935
     ],
     "t_total_trials_ms": [
-      0.862849,
-      1.050695,
-      1.024761,
-      1.146316,
-      1.138545,
-      1.104541,
-      1.000849,
-      1.06551,
-      1.066944,
-      1.057856,
-      1.053475
+      0.873554,
+      1.067276,
+      1.036877,
+      1.043759,
+      1.084042,
+      1.126327,
+      1.092968,
+      1.075232,
+      1.064849,
+      1.115543,
+      1.064177
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -120,15 +119,15 @@
       0,
       0
     ],
-    "t_parse_ms": 0.006705,
-    "t_build_ms": 0.001397,
-    "t_compile_ms": 0.001297,
-    "t_mps_write_ms": 0.002437,
-    "t_solve_ms": 0.279152,
-    "t_total_ms": 0.287981,
-    "t_total_mean_ms": 0.2909465454545454,
-    "t_total_sd_ms": 0.010124808544991228,
-    "root_lp_time_ms": 0.028121,
+    "t_parse_ms": 0.007254,
+    "t_build_ms": 0.00137,
+    "t_compile_ms": 0.001405,
+    "t_mps_write_ms": 0.002745,
+    "t_solve_ms": 0.279327,
+    "t_total_ms": 0.293488,
+    "t_total_mean_ms": 0.3016907272727273,
+    "t_total_sd_ms": 0.0265843653566938,
+    "root_lp_time_ms": 0.027733,
     "root_lp_iters": 0,
     "root_lp_obj": 1.5,
     "cp4_baseline": {
@@ -138,7 +137,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.38647
+      "time_ms": 0.391409
     },
     "cp5_presolve": {
       "status": "Infeasible",
@@ -147,7 +146,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.289182
+      "time_ms": 0.297326
     },
     "cp6_cuts": {
       "status": "Infeasible",
@@ -156,7 +155,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.280151
+      "time_ms": 0.273659
     },
     "cp7_full": {
       "status": "Infeasible",
@@ -165,36 +164,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.279152
+      "time_ms": 0.279327
     },
     "t_solve_trials_ms": [
-      0.295987,
-      0.275165,
-      0.303584,
-      0.276702,
-      0.281239,
-      0.268685,
-      0.279152,
-      0.275138,
-      0.283854,
-      0.274678,
-      0.280212
+      0.276904,
+      0.310016,
+      0.276721,
+      0.277947,
+      0.286636,
+      0.283079,
+      0.279327,
+      0.274681,
+      0.315665,
+      0.275769,
+      0.279969
     ],
     "t_total_trials_ms": [
-      0.305434,
-      0.286424,
-      0.313331,
-      0.287108,
-      0.290612,
-      0.278797,
-      0.287981,
-      0.283842,
-      0.294454,
-      0.283485,
-      0.288944
+      0.288745,
+      0.320401,
+      0.287223,
+      0.287631,
+      0.297182,
+      0.292926,
+      0.297445,
+      0.283423,
+      0.376289,
+      0.293488,
+      0.293845
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -220,15 +218,15 @@
       639.0519999999999,
       416.7073333333334
     ],
-    "t_parse_ms": 0.026963,
-    "t_build_ms": 0.003818,
-    "t_compile_ms": 0.003431,
-    "t_mps_write_ms": 0.012643,
-    "t_solve_ms": 2.169206,
-    "t_total_ms": 2.211356,
-    "t_total_mean_ms": 2.2638840909090905,
-    "t_total_sd_ms": 0.6416872512416707,
-    "root_lp_time_ms": 0.048819,
+    "t_parse_ms": 0.029952,
+    "t_build_ms": 0.003349,
+    "t_compile_ms": 0.003509,
+    "t_mps_write_ms": 0.013236,
+    "t_solve_ms": 2.122559,
+    "t_total_ms": 2.159251,
+    "t_total_mean_ms": 2.1584359090909087,
+    "t_total_sd_ms": 0.5809498724157627,
+    "root_lp_time_ms": 0.050981,
     "root_lp_iters": 5,
     "root_lp_obj": 578.6452877655677,
     "cp4_baseline": {
@@ -238,7 +236,7 @@
       "nodes": 14,
       "iterations": 35,
       "cuts_added": 0,
-      "time_ms": 0.974648
+      "time_ms": 0.918663
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -247,7 +245,7 @@
       "nodes": 14,
       "iterations": 35,
       "cuts_added": 0,
-      "time_ms": 1.13965
+      "time_ms": 1.162935
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -256,7 +254,7 @@
       "nodes": 0,
       "iterations": 23,
       "cuts_added": 62,
-      "time_ms": 1.47859
+      "time_ms": 1.419723
     },
     "cp7_full": {
       "status": "Optimal",
@@ -265,36 +263,35 @@
       "nodes": 0,
       "iterations": 27,
       "cuts_added": 64,
-      "time_ms": 2.169206
+      "time_ms": 2.122559
     },
     "t_solve_trials_ms": [
-      2.558825,
-      2.169206,
-      2.042465,
-      2.606181,
-      2.963152,
-      2.2033,
-      1.678147,
-      1.894857,
-      1.997085,
-      3.330567,
-      0.979633
+      2.60394,
+      1.668497,
+      2.122559,
+      2.484074,
+      2.963445,
+      2.147162,
+      1.719949,
+      1.989107,
+      1.807912,
+      2.793735,
+      0.994713
     ],
     "t_total_trials_ms": [
-      2.646124,
-      2.211356,
-      2.078278,
-      2.636889,
-      2.994409,
-      2.237767,
-      1.710522,
-      1.927747,
-      2.066142,
-      3.37859,
-      1.014901
+      2.641549,
+      1.7013,
+      2.159251,
+      2.525873,
+      3.045731,
+      2.184679,
+      1.7571,
+      2.025675,
+      1.843549,
+      2.830868,
+      1.02722
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -320,15 +317,15 @@
       2399.999999999997,
       2399.999999999997
     ],
-    "t_parse_ms": 0.077688,
-    "t_build_ms": 0.007272,
-    "t_compile_ms": 0.007103,
-    "t_mps_write_ms": 0.039684,
-    "t_solve_ms": 1.806158,
-    "t_total_ms": 1.898833,
-    "t_total_mean_ms": 2.1329657272727274,
-    "t_total_sd_ms": 0.307661143991922,
-    "root_lp_time_ms": 0.120092,
+    "t_parse_ms": 0.079221,
+    "t_build_ms": 0.007393,
+    "t_compile_ms": 0.010432,
+    "t_mps_write_ms": 0.040832,
+    "t_solve_ms": 1.788924,
+    "t_total_ms": 1.879284,
+    "t_total_mean_ms": 2.127911272727273,
+    "t_total_sd_ms": 0.3211629499279426,
+    "root_lp_time_ms": 0.116297,
     "root_lp_iters": 19,
     "root_lp_obj": 2399.9999999999973,
     "cp4_baseline": {
@@ -338,7 +335,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.93611
+      "time_ms": 0.940395
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -347,7 +344,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 1.637114
+      "time_ms": 1.666695
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -356,7 +353,7 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 4,
-      "time_ms": 1.88438
+      "time_ms": 1.858704
     },
     "cp7_full": {
       "status": "Optimal",
@@ -365,36 +362,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 1.806158
+      "time_ms": 1.788924
     },
     "t_solve_trials_ms": [
-      1.748608,
-      2.39881,
-      1.75217,
-      1.77941,
-      2.418235,
-      2.357099,
-      2.311788,
-      2.296794,
-      1.804257,
-      1.806158,
-      1.748846
+      1.76494,
+      2.4918,
+      1.761339,
+      1.766495,
+      2.269131,
+      2.424463,
+      2.297383,
+      2.327339,
+      1.724429,
+      1.788924,
+      1.724832
     ],
     "t_total_trials_ms": [
-      1.845434,
-      2.499012,
-      1.851108,
-      1.874202,
-      2.51015,
-      2.453731,
-      2.406884,
-      2.389041,
-      1.894957,
-      1.898833,
-      1.839271
+      1.860789,
+      2.586667,
+      1.865604,
+      1.860945,
+      2.361521,
+      2.513332,
+      2.397201,
+      2.428642,
+      1.827258,
+      1.879284,
+      1.825781
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -420,15 +416,15 @@
       6841.999999999999,
       3162.9999999999986
     ],
-    "t_parse_ms": 0.08392,
-    "t_build_ms": 0.009314,
-    "t_compile_ms": 0.009484,
-    "t_mps_write_ms": 0.044236,
-    "t_solve_ms": 10.756589,
-    "t_total_ms": 10.865698,
-    "t_total_mean_ms": 9.478245,
-    "t_total_sd_ms": 3.026790672973042,
-    "root_lp_time_ms": 0.120799,
+    "t_parse_ms": 0.083785,
+    "t_build_ms": 0.009743,
+    "t_compile_ms": 0.009393,
+    "t_mps_write_ms": 0.044033,
+    "t_solve_ms": 10.611157,
+    "t_total_ms": 10.715495,
+    "t_total_mean_ms": 9.449213272727274,
+    "t_total_sd_ms": 3.0053795347790295,
+    "root_lp_time_ms": 0.118048,
     "root_lp_iters": 18,
     "root_lp_obj": 4257,
     "cp4_baseline": {
@@ -438,7 +434,7 @@
       "nodes": 20,
       "iterations": 95,
       "cuts_added": 0,
-      "time_ms": 2.453315
+      "time_ms": 2.402936
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -447,7 +443,7 @@
       "nodes": 8,
       "iterations": 28,
       "cuts_added": 0,
-      "time_ms": 2.09855
+      "time_ms": 2.125955
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -456,7 +452,7 @@
       "nodes": 10,
       "iterations": 77,
       "cuts_added": 83,
-      "time_ms": 4.497222
+      "time_ms": 4.485056
     },
     "cp7_full": {
       "status": "Optimal",
@@ -465,36 +461,35 @@
       "nodes": 6,
       "iterations": 83,
       "cuts_added": 88,
-      "time_ms": 10.756589
+      "time_ms": 10.611157
     },
     "t_solve_trials_ms": [
-      7.977499,
-      12.185369,
-      3.755594,
-      4.574303,
-      11.479965,
-      11.559196,
-      10.756589,
-      9.721024,
-      12.687372,
-      7.651983,
-      10.772191
+      8.071129,
+      12.166537,
+      3.738633,
+      4.527206,
+      11.417051,
+      11.570593,
+      10.636414,
+      9.748265,
+      12.615493,
+      7.674628,
+      10.611157
     ],
     "t_total_trials_ms": [
-      8.069165,
-      12.286859,
-      3.858373,
-      4.676744,
-      11.574202,
-      11.659549,
-      10.865698,
-      9.827838,
-      12.791606,
-      7.763291,
-      10.88737
+      8.18629,
+      12.269819,
+      3.845718,
+      4.630034,
+      11.51191,
+      11.676764,
+      10.738452,
+      9.856091,
+      12.725299,
+      7.785474,
+      10.715495
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -520,15 +515,15 @@
       105.64999999999998,
       105.34999999999998
     ],
-    "t_parse_ms": 0.014657,
-    "t_build_ms": 0.003452,
-    "t_compile_ms": 0.001919,
-    "t_mps_write_ms": 0.007132,
-    "t_solve_ms": 0.901062,
-    "t_total_ms": 0.923758,
-    "t_total_mean_ms": 0.8377822727272727,
-    "t_total_sd_ms": 0.16999053865617983,
-    "root_lp_time_ms": 0.03531,
+    "t_parse_ms": 0.015608,
+    "t_build_ms": 0.002574,
+    "t_compile_ms": 0.00206,
+    "t_mps_write_ms": 0.007391,
+    "t_solve_ms": 0.903062,
+    "t_total_ms": 0.922939,
+    "t_total_mean_ms": 0.8096872727272726,
+    "t_total_sd_ms": 0.15669425473519497,
+    "root_lp_time_ms": 0.036251,
     "root_lp_iters": 1,
     "root_lp_obj": 58.9,
     "cp4_baseline": {
@@ -538,7 +533,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.633633
+      "time_ms": 0.634492
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -547,7 +542,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.879312
+      "time_ms": 0.88832
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -556,7 +551,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.881512
+      "time_ms": 0.933894
     },
     "cp7_full": {
       "status": "Optimal",
@@ -565,36 +560,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.901062
+      "time_ms": 0.903062
     },
     "t_solve_trials_ms": [
-      0.919088,
-      0.946965,
-      0.908685,
-      0.770426,
-      1.073112,
-      0.632131,
-      0.901062,
-      0.922473,
-      0.733033,
-      0.575489,
-      0.581294
+      0.907171,
+      0.951315,
+      0.92347,
+      0.62832,
+      0.903062,
+      0.679779,
+      0.916274,
+      0.923159,
+      0.68559,
+      0.584183,
+      0.564788
     ],
     "t_total_trials_ms": [
-      0.945728,
-      0.96732,
-      0.930134,
-      0.793018,
-      1.110604,
-      0.652534,
-      0.923758,
-      0.944453,
-      0.752482,
-      0.595321,
-      0.600253
+      0.929773,
+      0.971486,
+      0.945074,
+      0.648815,
+      0.922939,
+      0.69881,
+      0.943133,
+      0.943325,
+      0.704231,
+      0.614423,
+      0.584551
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -620,15 +614,15 @@
       92.8,
       92.2
     ],
-    "t_parse_ms": 0.006864,
-    "t_build_ms": 0.00111,
-    "t_compile_ms": 0.00055,
-    "t_mps_write_ms": 0.003347,
-    "t_solve_ms": 0.036621,
-    "t_total_ms": 0.045224,
-    "t_total_mean_ms": 0.04619009090909092,
-    "t_total_sd_ms": 0.008443196509078127,
-    "root_lp_time_ms": 0.035474,
+    "t_parse_ms": 0.006911,
+    "t_build_ms": 0.001429,
+    "t_compile_ms": 0.000647,
+    "t_mps_write_ms": 0.003462,
+    "t_solve_ms": 0.037538,
+    "t_total_ms": 0.046766,
+    "t_total_mean_ms": 0.04750290909090909,
+    "t_total_sd_ms": 0.006849613703772578,
+    "root_lp_time_ms": 0.034428,
     "root_lp_iters": 1,
     "root_lp_obj": 54,
     "cp4_baseline": {
@@ -638,7 +632,7 @@
       "nodes": 0,
       "iterations": 1,
       "cuts_added": 0,
-      "time_ms": 0.03057
+      "time_ms": 0.031916
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -647,7 +641,7 @@
       "nodes": 0,
       "iterations": 1,
       "cuts_added": 0,
-      "time_ms": 0.037298
+      "time_ms": 0.035324
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -656,7 +650,7 @@
       "nodes": 0,
       "iterations": 1,
       "cuts_added": 0,
-      "time_ms": 0.033522
+      "time_ms": 0.032971
     },
     "cp7_full": {
       "status": "Optimal",
@@ -665,36 +659,35 @@
       "nodes": 0,
       "iterations": 1,
       "cuts_added": 0,
-      "time_ms": 0.036621
+      "time_ms": 0.037538
     },
     "t_solve_trials_ms": [
-      0.049862,
-      0.046481,
-      0.037145,
-      0.035929,
-      0.036621,
-      0.03776,
-      0.035544,
-      0.039873,
-      0.034395,
-      0.0277,
-      0.025992
+      0.043567,
+      0.04776,
+      0.039238,
+      0.037076,
+      0.037538,
+      0.044473,
+      0.040387,
+      0.03627,
+      0.035512,
+      0.027254,
+      0.025654
     ],
     "t_total_trials_ms": [
-      0.064371,
-      0.056488,
-      0.046094,
-      0.044645,
-      0.045224,
-      0.046039,
-      0.043566,
-      0.048655,
-      0.042839,
-      0.036108,
-      0.034062
+      0.053386,
+      0.059675,
+      0.048727,
+      0.046357,
+      0.046766,
+      0.052742,
+      0.051681,
+      0.045359,
+      0.043785,
+      0.036685,
+      0.037369
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -720,15 +713,15 @@
       127.8,
       125.6
     ],
-    "t_parse_ms": 0.006742,
-    "t_build_ms": 0.000997,
-    "t_compile_ms": 0.000608,
-    "t_mps_write_ms": 0.003265,
-    "t_solve_ms": 0.026731,
-    "t_total_ms": 0.03668,
-    "t_total_mean_ms": 0.04077472727272727,
-    "t_total_sd_ms": 0.007380277096300777,
-    "root_lp_time_ms": 0.025699,
+    "t_parse_ms": 0.006706,
+    "t_build_ms": 0.001695,
+    "t_compile_ms": 0.000689,
+    "t_mps_write_ms": 0.003425,
+    "t_solve_ms": 0.024454,
+    "t_total_ms": 0.034383,
+    "t_total_mean_ms": 0.03885563636363636,
+    "t_total_sd_ms": 0.007304941262908654,
+    "root_lp_time_ms": 0.027417,
     "root_lp_iters": 0,
     "root_lp_obj": 80,
     "cp4_baseline": {
@@ -738,7 +731,7 @@
       "nodes": 0,
       "iterations": 1,
       "cuts_added": 0,
-      "time_ms": 0.030427
+      "time_ms": 0.034299
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -747,7 +740,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.033941
+      "time_ms": 0.035931
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -756,7 +749,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.032731
+      "time_ms": 0.033172
     },
     "cp7_full": {
       "status": "Optimal",
@@ -765,36 +758,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.026731
+      "time_ms": 0.024454
     },
     "t_solve_trials_ms": [
-      0.026731,
-      0.042682,
-      0.037992,
-      0.03842,
-      0.029985,
-      0.025733,
-      0.024584,
-      0.039262,
-      0.024989,
-      0.025976,
-      0.024736
+      0.024328,
+      0.040644,
+      0.036722,
+      0.036677,
+      0.024308,
+      0.025256,
+      0.023584,
+      0.035313,
+      0.023482,
+      0.023034,
+      0.024454
     ],
     "t_total_trials_ms": [
-      0.03628,
-      0.051222,
-      0.048714,
-      0.04922,
-      0.043739,
-      0.034161,
-      0.03668,
-      0.047923,
-      0.033697,
-      0.034665,
-      0.032221
+      0.034383,
+      0.04999,
+      0.046655,
+      0.05007,
+      0.033591,
+      0.038283,
+      0.032292,
+      0.043583,
+      0.033866,
+      0.032246,
+      0.032453
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -820,15 +812,15 @@
       104.6,
       104.29999999999998
     ],
-    "t_parse_ms": 0.014159,
-    "t_build_ms": 0.002409,
-    "t_compile_ms": 0.001959,
-    "t_mps_write_ms": 0.007368,
-    "t_solve_ms": 0.878297,
-    "t_total_ms": 0.89658,
-    "t_total_mean_ms": 0.7992893636363636,
-    "t_total_sd_ms": 0.16121291405546437,
-    "root_lp_time_ms": 0.035115,
+    "t_parse_ms": 0.014228,
+    "t_build_ms": 0.003845,
+    "t_compile_ms": 0.00216,
+    "t_mps_write_ms": 0.00748,
+    "t_solve_ms": 0.853907,
+    "t_total_ms": 0.871961,
+    "t_total_mean_ms": 0.8108144545454544,
+    "t_total_sd_ms": 0.17397533889857128,
+    "root_lp_time_ms": 0.035324,
     "root_lp_iters": 1,
     "root_lp_obj": 58,
     "cp4_baseline": {
@@ -838,7 +830,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.636757
+      "time_ms": 0.634482
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -847,7 +839,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.874981
+      "time_ms": 0.883199
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -856,7 +848,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.887931
+      "time_ms": 0.967137
     },
     "cp7_full": {
       "status": "Optimal",
@@ -865,36 +857,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 0.878297
+      "time_ms": 0.853907
     },
     "t_solve_trials_ms": [
-      0.91273,
-      0.954857,
-      0.923988,
-      0.630834,
-      0.878297,
-      0.625425,
-      0.918246,
-      0.916878,
-      0.646213,
-      0.575434,
-      0.590085
+      1.025632,
+      0.966641,
+      0.915933,
+      0.648387,
+      0.876762,
+      0.619623,
+      0.853907,
+      0.961137,
+      0.657138,
+      0.593307,
+      0.567253
     ],
     "t_total_trials_ms": [
-      0.930599,
-      0.981716,
-      0.945247,
-      0.650195,
-      0.89658,
-      0.645175,
-      0.936479,
-      0.934829,
-      0.66795,
-      0.594465,
-      0.608948
+      1.051763,
+      0.991896,
+      0.937137,
+      0.668059,
+      0.896591,
+      0.641103,
+      0.871961,
+      0.981262,
+      0.67902,
+      0.613411,
+      0.586756
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -920,15 +911,15 @@
       0.5033,
       0.39089999999999997
     ],
-    "t_parse_ms": 0.015172,
-    "t_build_ms": 0.001872,
-    "t_compile_ms": 0.00116,
-    "t_mps_write_ms": 0.008167,
-    "t_solve_ms": 0.04879,
-    "t_total_ms": 0.068041,
-    "t_total_mean_ms": 0.06889200000000001,
-    "t_total_sd_ms": 0.00362929519328478,
-    "root_lp_time_ms": 0.048398,
+    "t_parse_ms": 0.015408,
+    "t_build_ms": 0.001916,
+    "t_compile_ms": 0.001104,
+    "t_mps_write_ms": 0.008246,
+    "t_solve_ms": 0.050339,
+    "t_total_ms": 0.069268,
+    "t_total_mean_ms": 0.07022836363636363,
+    "t_total_sd_ms": 0.005431595221898024,
+    "root_lp_time_ms": 0.042626,
     "root_lp_iters": 2,
     "root_lp_obj": 0.5199999999999999,
     "cp4_baseline": {
@@ -938,7 +929,7 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 0,
-      "time_ms": 0.032802
+      "time_ms": 0.03374
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -947,7 +938,7 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 0,
-      "time_ms": 0.048509
+      "time_ms": 0.044693
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -956,7 +947,7 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 0,
-      "time_ms": 0.045988
+      "time_ms": 0.043655
     },
     "cp7_full": {
       "status": "Optimal",
@@ -965,36 +956,35 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 0,
-      "time_ms": 0.04879
+      "time_ms": 0.050339
     },
     "t_solve_trials_ms": [
-      0.051458,
-      0.05175,
-      0.05714,
-      0.049015,
-      0.048108,
-      0.050694,
-      0.048378,
-      0.04698,
-      0.04879,
-      0.044295,
-      0.046692
+      0.05205,
+      0.058279,
+      0.058857,
+      0.051433,
+      0.055516,
+      0.050339,
+      0.046209,
+      0.048603,
+      0.043981,
+      0.049147,
+      0.044545
     ],
     "t_total_trials_ms": [
-      0.069922,
-      0.069741,
-      0.074908,
-      0.075838,
-      0.065427,
-      0.067466,
-      0.06915,
-      0.065746,
-      0.066647,
-      0.064926,
-      0.068041
+      0.071091,
+      0.077986,
+      0.07858,
+      0.074032,
+      0.073309,
+      0.069077,
+      0.065556,
+      0.067566,
+      0.06138,
+      0.069268,
+      0.064667
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1020,15 +1010,15 @@
       40.61899999999999,
       30.318999999999996
     ],
-    "t_parse_ms": 0.068713,
-    "t_build_ms": 0.006553,
-    "t_compile_ms": 0.005603,
-    "t_mps_write_ms": 0.031213,
-    "t_solve_ms": 5.826808,
-    "t_total_ms": 5.907515,
-    "t_total_mean_ms": 6.423030454545454,
-    "t_total_sd_ms": 2.111122376056981,
-    "root_lp_time_ms": 0.072386,
+    "t_parse_ms": 0.068766,
+    "t_build_ms": 0.006222,
+    "t_compile_ms": 0.00558,
+    "t_mps_write_ms": 0.031448,
+    "t_solve_ms": 5.764596,
+    "t_total_ms": 5.842243,
+    "t_total_mean_ms": 6.414515545454545,
+    "t_total_sd_ms": 2.0905944516464383,
+    "root_lp_time_ms": 0.075564,
     "root_lp_iters": 23,
     "root_lp_obj": 29.297799999999995,
     "cp4_baseline": {
@@ -1038,7 +1028,7 @@
       "nodes": 104,
       "iterations": 304,
       "cuts_added": 0,
-      "time_ms": 5.316327
+      "time_ms": 5.226253
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1047,7 +1037,7 @@
       "nodes": 104,
       "iterations": 304,
       "cuts_added": 0,
-      "time_ms": 5.598102
+      "time_ms": 5.509546
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1056,7 +1046,7 @@
       "nodes": 0,
       "iterations": 10,
       "cuts_added": 18,
-      "time_ms": 1.612098
+      "time_ms": 1.664912
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1065,36 +1055,35 @@
       "nodes": 0,
       "iterations": 8,
       "cuts_added": 18,
-      "time_ms": 5.826808
+      "time_ms": 5.764596
     },
     "t_solve_trials_ms": [
-      4.586683,
-      7.637752,
-      4.563693,
-      5.279214,
-      4.885236,
-      5.826808,
-      4.699034,
-      8.182837,
-      5.999481,
-      11.526465,
-      6.541254
+      4.634341,
+      7.549225,
+      4.543781,
+      5.445168,
+      4.858755,
+      5.764596,
+      4.742195,
+      8.206267,
+      5.978043,
+      11.50149,
+      6.434856
     ],
     "t_total_trials_ms": [
-      4.674445,
-      7.717796,
-      4.645733,
-      5.358218,
-      4.961606,
-      5.907515,
-      4.783592,
-      8.262629,
-      6.077317,
-      11.609057,
-      6.655427
+      4.719217,
+      7.631001,
+      4.628385,
+      5.523364,
+      4.942271,
+      5.842243,
+      4.827238,
+      8.286284,
+      6.058501,
+      11.582889,
+      6.518278
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1120,15 +1109,15 @@
       923.7059999999998,
       1160.5339999999999
     ],
-    "t_parse_ms": 0.058491,
-    "t_build_ms": 0.005457,
-    "t_compile_ms": 0.004626,
-    "t_mps_write_ms": 0.032155,
-    "t_solve_ms": 1.730847,
-    "t_total_ms": 1.806486,
-    "t_total_mean_ms": 2.6051426363636363,
-    "t_total_sd_ms": 1.7772621808332205,
-    "root_lp_time_ms": 0.058838,
+    "t_parse_ms": 0.058036,
+    "t_build_ms": 0.005515,
+    "t_compile_ms": 0.005052,
+    "t_mps_write_ms": 0.032522,
+    "t_solve_ms": 1.748567,
+    "t_total_ms": 1.825001,
+    "t_total_mean_ms": 2.5858399090909097,
+    "t_total_sd_ms": 1.7246172880623374,
+    "root_lp_time_ms": 0.05876,
     "root_lp_iters": 17,
     "root_lp_obj": 781.9660000000001,
     "cp4_baseline": {
@@ -1138,7 +1127,7 @@
       "nodes": 4,
       "iterations": 19,
       "cuts_added": 0,
-      "time_ms": 0.920551
+      "time_ms": 0.913036
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1147,7 +1136,7 @@
       "nodes": 4,
       "iterations": 19,
       "cuts_added": 0,
-      "time_ms": 1.135773
+      "time_ms": 1.12503
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1156,7 +1145,7 @@
       "nodes": 0,
       "iterations": 7,
       "cuts_added": 5,
-      "time_ms": 3.797901
+      "time_ms": 3.805523
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1165,36 +1154,35 @@
       "nodes": 0,
       "iterations": 6,
       "cuts_added": 2,
-      "time_ms": 1.730847
+      "time_ms": 1.748567
     },
     "t_solve_trials_ms": [
-      1.335298,
-      4.110899,
-      7.066364,
-      1.730847,
-      2.062075,
-      2.646322,
-      1.54931,
-      1.573892,
-      0.949907,
-      1.480492,
-      3.360296
+      1.471419,
+      4.022603,
+      6.956632,
+      1.748567,
+      1.983283,
+      2.519765,
+      1.569396,
+      1.635257,
+      0.951783,
+      1.491308,
+      3.309641
     ],
     "t_total_trials_ms": [
-      1.401873,
-      4.182666,
-      7.135462,
-      1.806486,
-      2.130959,
-      2.715416,
-      1.619455,
-      1.64169,
-      1.01904,
-      1.549239,
-      3.454283
+      1.541506,
+      4.091053,
+      7.031167,
+      1.825001,
+      2.051708,
+      2.588764,
+      1.637281,
+      1.712315,
+      1.025328,
+      1.565399,
+      3.374717
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1220,15 +1208,15 @@
       1086.175,
       1057.012
     ],
-    "t_parse_ms": 0.075489,
-    "t_build_ms": 0.006106,
-    "t_compile_ms": 0.006034,
-    "t_mps_write_ms": 0.041372,
-    "t_solve_ms": 2.365082,
-    "t_total_ms": 2.461165,
-    "t_total_mean_ms": 3.107242272727272,
-    "t_total_sd_ms": 1.870311335838078,
-    "root_lp_time_ms": 0.075564,
+    "t_parse_ms": 0.07342,
+    "t_build_ms": 0.006204,
+    "t_compile_ms": 0.005424,
+    "t_mps_write_ms": 0.04152,
+    "t_solve_ms": 2.380904,
+    "t_total_ms": 2.466889,
+    "t_total_mean_ms": 3.099123727272728,
+    "t_total_sd_ms": 1.8318552104566068,
+    "root_lp_time_ms": 0.073101,
     "root_lp_iters": 17,
     "root_lp_obj": 827.297,
     "cp4_baseline": {
@@ -1238,7 +1226,7 @@
       "nodes": 6,
       "iterations": 15,
       "cuts_added": 0,
-      "time_ms": 1.022509
+      "time_ms": 1.012697
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1247,7 +1235,7 @@
       "nodes": 6,
       "iterations": 15,
       "cuts_added": 0,
-      "time_ms": 1.346002
+      "time_ms": 1.282891
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1256,7 +1244,7 @@
       "nodes": 2,
       "iterations": 213,
       "cuts_added": 269,
-      "time_ms": 3.070427
+      "time_ms": 3.081236
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1265,36 +1253,35 @@
       "nodes": 0,
       "iterations": 23,
       "cuts_added": 74,
-      "time_ms": 2.365082
+      "time_ms": 2.380904
     },
     "t_solve_trials_ms": [
-      2.552191,
-      3.515958,
-      2.26281,
-      8.542294,
-      2.365082,
-      2.431708,
-      2.29388,
-      2.343943,
-      2.095159,
-      2.15661,
-      2.648901
+      2.481846,
+      3.47962,
+      2.32329,
+      8.431081,
+      2.380904,
+      2.465046,
+      2.283147,
+      2.362337,
+      2.117759,
+      2.195434,
+      2.614678
     ],
     "t_total_trials_ms": [
-      2.644115,
-      3.604216,
-      2.354624,
-      8.626026,
-      2.461165,
-      2.516436,
-      2.382802,
-      2.42588,
-      2.179171,
-      2.244239,
-      2.740991
+      2.571292,
+      3.564543,
+      2.413082,
+      8.51307,
+      2.466889,
+      2.553612,
+      2.366486,
+      2.443833,
+      2.20919,
+      2.278674,
+      2.70969
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1320,15 +1307,15 @@
       182.18,
       221.76399999999998
     ],
-    "t_parse_ms": 0.077943,
-    "t_build_ms": 0.010046,
-    "t_compile_ms": 0.009829,
-    "t_mps_write_ms": 0.036175,
-    "t_solve_ms": 6.360557,
-    "t_total_ms": 6.536091,
-    "t_total_mean_ms": 8.951258454545453,
-    "t_total_sd_ms": 7.764353892010517,
-    "root_lp_time_ms": 0.065208,
+    "t_parse_ms": 0.073631,
+    "t_build_ms": 0.0083,
+    "t_compile_ms": 0.008244,
+    "t_mps_write_ms": 0.037002,
+    "t_solve_ms": 6.203698,
+    "t_total_ms": 6.304231,
+    "t_total_mean_ms": 8.925968090909091,
+    "t_total_sd_ms": 7.744834466040478,
+    "root_lp_time_ms": 0.066283,
     "root_lp_iters": 22,
     "root_lp_obj": 178.0448,
     "cp4_baseline": {
@@ -1338,7 +1325,7 @@
       "nodes": 16,
       "iterations": 60,
       "cuts_added": 0,
-      "time_ms": 3.799279
+      "time_ms": 3.750036
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1347,7 +1334,7 @@
       "nodes": 16,
       "iterations": 60,
       "cuts_added": 0,
-      "time_ms": 4.073182
+      "time_ms": 4.028898
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1356,7 +1343,7 @@
       "nodes": 0,
       "iterations": 16,
       "cuts_added": 35,
-      "time_ms": 2.202302
+      "time_ms": 2.197586
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1365,36 +1352,35 @@
       "nodes": 0,
       "iterations": 3,
       "cuts_added": 16,
-      "time_ms": 6.360557
+      "time_ms": 6.203698
     },
     "t_solve_trials_ms": [
-      3.44333,
-      2.886129,
-      7.079221,
-      6.440313,
-      5.037381,
-      4.151619,
-      12.119559,
-      13.391636,
-      30.048081,
-      6.360557,
-      6.335285
+      3.448894,
+      2.935084,
+      7.699339,
+      6.438799,
+      5.044394,
+      4.243218,
+      12.041967,
+      13.316025,
+      29.97105,
+      5.729444,
+      6.203698
     ],
     "t_total_trials_ms": [
-      3.553648,
-      2.981474,
-      7.182635,
-      6.536091,
-      5.143488,
-      4.252542,
-      12.211043,
-      13.494049,
-      30.142919,
-      6.541411,
-      6.424543
+      3.533776,
+      3.019716,
+      7.900617,
+      6.530631,
+      5.130156,
+      4.332156,
+      12.136681,
+      13.410717,
+      30.060382,
+      5.826586,
+      6.304231
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1420,15 +1406,15 @@
       1678.2949999999998,
       1888.5539999999999
     ],
-    "t_parse_ms": 0.08657,
-    "t_build_ms": 0.008789,
-    "t_compile_ms": 0.007395,
-    "t_mps_write_ms": 0.04468,
-    "t_solve_ms": 20.681811,
-    "t_total_ms": 20.782159,
-    "t_total_mean_ms": 21.424637999999998,
-    "t_total_sd_ms": 9.364138247625203,
-    "root_lp_time_ms": 0.075714,
+    "t_parse_ms": 0.086532,
+    "t_build_ms": 0.008679,
+    "t_compile_ms": 0.006805,
+    "t_mps_write_ms": 0.043755,
+    "t_solve_ms": 20.652168,
+    "t_total_ms": 20.74896,
+    "t_total_mean_ms": 21.31495218181818,
+    "t_total_sd_ms": 9.2769007191435,
+    "root_lp_time_ms": 0.078408,
     "root_lp_iters": 24,
     "root_lp_obj": 2052.33736,
     "cp4_baseline": {
@@ -1438,7 +1424,7 @@
       "nodes": 88,
       "iterations": 198,
       "cuts_added": 0,
-      "time_ms": 6.026754
+      "time_ms": 6.027064
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1447,7 +1433,7 @@
       "nodes": 86,
       "iterations": 191,
       "cuts_added": 0,
-      "time_ms": 6.277017
+      "time_ms": 6.251489
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1456,7 +1442,7 @@
       "nodes": 63,
       "iterations": 575,
       "cuts_added": 467,
-      "time_ms": 27.13112
+      "time_ms": 27.019128
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1465,36 +1451,35 @@
       "nodes": 0,
       "iterations": 206,
       "cuts_added": 362,
-      "time_ms": 20.681811
+      "time_ms": 20.652168
     },
     "t_solve_trials_ms": [
-      18.30422,
-      13.903476,
-      30.657192,
-      37.181726,
-      24.251124,
-      33.502329,
-      8.615959,
-      16.593785,
-      9.793221,
-      21.06087,
-      20.681811
+      18.229318,
+      13.868401,
+      30.606997,
+      36.831115,
+      24.205874,
+      33.058704,
+      8.522552,
+      16.629103,
+      9.653114,
+      21.080266,
+      20.652168
     ],
     "t_total_trials_ms": [
-      18.40754,
-      14.010675,
-      30.764857,
-      37.279771,
-      24.360731,
-      33.60439,
-      8.721183,
-      16.692345,
-      9.894229,
-      21.153138,
-      20.782159
+      18.33706,
+      13.975063,
+      30.710526,
+      36.936523,
+      24.316567,
+      33.163045,
+      8.624587,
+      16.730233,
+      9.749307,
+      21.172603,
+      20.74896
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1520,15 +1505,15 @@
       2399.999999999886,
       2399.9999999998918
     ],
-    "t_parse_ms": 0.105826,
-    "t_build_ms": 0.007948,
-    "t_compile_ms": 0.006926,
-    "t_mps_write_ms": 0.05739,
-    "t_solve_ms": 1.657825,
-    "t_total_ms": 1.777522,
-    "t_total_mean_ms": 1.9441122727272726,
-    "t_total_sd_ms": 0.4019926565414077,
-    "root_lp_time_ms": 0.11586,
+    "t_parse_ms": 0.106391,
+    "t_build_ms": 0.008733,
+    "t_compile_ms": 0.007281,
+    "t_mps_write_ms": 0.057969,
+    "t_solve_ms": 1.684023,
+    "t_total_ms": 1.806222,
+    "t_total_mean_ms": 2.010450181818182,
+    "t_total_sd_ms": 0.4346338431350734,
+    "root_lp_time_ms": 0.115857,
     "root_lp_iters": 21,
     "root_lp_obj": 2400.0000000000045,
     "cp4_baseline": {
@@ -1538,7 +1523,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 1.091429
+      "time_ms": 1.091539
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1547,7 +1532,7 @@
       "nodes": 2,
       "iterations": 3,
       "cuts_added": 0,
-      "time_ms": 1.614118
+      "time_ms": 1.581147
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1556,7 +1541,7 @@
       "nodes": 0,
       "iterations": 1,
       "cuts_added": 6,
-      "time_ms": 1.746083
+      "time_ms": 1.807877
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1565,36 +1550,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 1.657825
+      "time_ms": 1.684023
     },
     "t_solve_trials_ms": [
-      1.684732,
-      2.931499,
-      1.715084,
-      1.637369,
-      1.657825,
-      1.603378,
-      1.647174,
-      1.629909,
-      1.637875,
-      1.698653,
-      2.178001
+      2.298536,
+      2.914121,
+      1.704314,
+      1.684023,
+      1.691287,
+      1.605246,
+      1.599903,
+      1.624156,
+      1.648199,
+      1.67429,
+      2.209482
     ],
     "t_total_trials_ms": [
-      1.828404,
-      3.055862,
-      1.838747,
-      1.764409,
-      1.777522,
-      1.72312,
-      1.766395,
-      1.74997,
-      1.760562,
-      1.818525,
-      2.301719
+      2.51949,
+      3.049918,
+      1.826509,
+      1.806222,
+      1.814077,
+      1.731503,
+      1.723047,
+      1.748944,
+      1.769486,
+      1.795496,
+      2.33026
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1620,15 +1604,15 @@
       4800.0000000000055,
       4800.000000000007
     ],
-    "t_parse_ms": 0.165489,
-    "t_build_ms": 0.011227,
-    "t_compile_ms": 0.010641,
-    "t_mps_write_ms": 0.090822,
-    "t_solve_ms": 2.274087,
-    "t_total_ms": 2.459081,
-    "t_total_mean_ms": 2.5207420909090907,
-    "t_total_sd_ms": 0.19034539214147242,
-    "root_lp_time_ms": 0.20112,
+    "t_parse_ms": 0.16274,
+    "t_build_ms": 0.011737,
+    "t_compile_ms": 0.011128,
+    "t_mps_write_ms": 0.090986,
+    "t_solve_ms": 2.307949,
+    "t_total_ms": 2.497364,
+    "t_total_mean_ms": 2.5337608181818183,
+    "t_total_sd_ms": 0.19352368072864792,
+    "root_lp_time_ms": 0.203606,
     "root_lp_iters": 40,
     "root_lp_obj": 4800.000000000001,
     "cp4_baseline": {
@@ -1638,7 +1622,7 @@
       "nodes": 18,
       "iterations": 100,
       "cuts_added": 0,
-      "time_ms": 1.841598
+      "time_ms": 1.781406
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1647,7 +1631,7 @@
       "nodes": 18,
       "iterations": 100,
       "cuts_added": 0,
-      "time_ms": 2.651948
+      "time_ms": 2.660242
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1656,7 +1640,7 @@
       "nodes": 0,
       "iterations": 3,
       "cuts_added": 11,
-      "time_ms": 2.563032
+      "time_ms": 2.563146
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1665,36 +1649,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 2.274087
+      "time_ms": 2.307949
     },
     "t_solve_trials_ms": [
-      2.274087,
-      2.322034,
-      2.322121,
-      2.266431,
-      2.306598,
-      2.241854,
-      2.812192,
-      2.236173,
-      2.319131,
-      2.207637,
-      2.246737
+      2.385185,
+      2.230198,
+      2.840305,
+      2.37975,
+      2.307949,
+      2.216054,
+      2.345443,
+      2.231979,
+      2.340958,
+      2.212363,
+      2.26236
     ],
     "t_total_trials_ms": [
-      2.454851,
-      2.5049,
-      2.511257,
-      2.459081,
-      2.486795,
-      2.429866,
-      3.083809,
-      2.458075,
-      2.50721,
-      2.389811,
-      2.442508
+      2.568746,
+      2.415778,
+      3.08189,
+      2.579425,
+      2.497364,
+      2.398606,
+      2.529527,
+      2.424452,
+      2.528077,
+      2.40089,
+      2.446614
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1720,15 +1703,15 @@
       8000.000000000007,
       8000.00000000001
     ],
-    "t_parse_ms": 0.247693,
-    "t_build_ms": 0.01811,
-    "t_compile_ms": 0.017485,
-    "t_mps_write_ms": 0.146284,
-    "t_solve_ms": 2.941454,
-    "t_total_ms": 3.223074,
-    "t_total_mean_ms": 3.5894042727272732,
-    "t_total_sd_ms": 0.5649481305348468,
-    "root_lp_time_ms": 0.343471,
+    "t_parse_ms": 0.248159,
+    "t_build_ms": 0.017264,
+    "t_compile_ms": 0.018613,
+    "t_mps_write_ms": 0.145906,
+    "t_solve_ms": 3.009089,
+    "t_total_ms": 3.30167,
+    "t_total_mean_ms": 3.5970239090909093,
+    "t_total_sd_ms": 0.5583532265705026,
+    "root_lp_time_ms": 0.338802,
     "root_lp_iters": 63,
     "root_lp_obj": 7999.999999999999,
     "cp4_baseline": {
@@ -1738,7 +1721,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 1.813081
+      "time_ms": 1.829507
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1747,7 +1730,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 2.885617
+      "time_ms": 2.934709
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1756,7 +1739,7 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 7,
-      "time_ms": 3.249219
+      "time_ms": 3.310613
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1765,36 +1748,35 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 2.941454
+      "time_ms": 3.009089
     },
     "t_solve_trials_ms": [
-      2.896612,
-      2.833164,
-      2.909517,
-      3.091034,
-      2.924686,
-      2.941454,
-      2.896946,
-      4.361059,
-      3.388946,
-      4.093511,
-      3.842755
+      2.904585,
+      2.896989,
+      2.905541,
+      3.072658,
+      3.410877,
+      3.009089,
+      2.932987,
+      4.424215,
+      2.893556,
+      4.036271,
+      3.903375
     ],
     "t_total_trials_ms": [
-      3.180198,
-      3.126796,
-      3.190709,
-      3.369529,
-      3.208384,
-      3.223074,
-      3.176233,
-      4.66464,
-      3.810745,
-      4.390244,
-      4.142895
+      3.18783,
+      3.181839,
+      3.189501,
+      3.350033,
+      3.749437,
+      3.30167,
+      3.21144,
+      4.71454,
+      3.177156,
+      4.317742,
+      4.186075
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1820,15 +1802,15 @@
       8924,
       5060.9999999999045
     ],
-    "t_parse_ms": 0.116293,
-    "t_build_ms": 0.010366,
-    "t_compile_ms": 0.008319,
-    "t_mps_write_ms": 0.062755,
-    "t_solve_ms": 15.867994,
-    "t_total_ms": 16.004286,
-    "t_total_mean_ms": 13.914817545454547,
-    "t_total_sd_ms": 6.23254615548797,
-    "root_lp_time_ms": 0.121013,
+    "t_parse_ms": 0.112141,
+    "t_build_ms": 0.009276,
+    "t_compile_ms": 0.008076,
+    "t_mps_write_ms": 0.06156,
+    "t_solve_ms": 15.806177,
+    "t_total_ms": 15.933618,
+    "t_total_mean_ms": 13.829950545454544,
+    "t_total_sd_ms": 6.184460883903711,
+    "root_lp_time_ms": 0.120211,
     "root_lp_iters": 24,
     "root_lp_obj": 5894.000000000001,
     "cp4_baseline": {
@@ -1838,7 +1820,7 @@
       "nodes": 20,
       "iterations": 113,
       "cuts_added": 0,
-      "time_ms": 4.099151
+      "time_ms": 4.071511
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1847,7 +1829,7 @@
       "nodes": 28,
       "iterations": 179,
       "cuts_added": 0,
-      "time_ms": 4.634837
+      "time_ms": 4.652915
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1856,7 +1838,7 @@
       "nodes": 50,
       "iterations": 360,
       "cuts_added": 119,
-      "time_ms": 7.243631
+      "time_ms": 7.175864
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1865,36 +1847,35 @@
       "nodes": 12,
       "iterations": 216,
       "cuts_added": 129,
-      "time_ms": 15.867994
+      "time_ms": 15.806177
     },
     "t_solve_trials_ms": [
-      18.980876,
-      19.640525,
-      5.763709,
-      16.979292,
-      5.738318,
-      15.407754,
-      6.936334,
-      19.896334,
-      15.867994,
-      6.261919,
-      20.110271
+      19.032068,
+      19.498126,
+      5.607841,
+      16.842375,
+      5.822309,
+      15.244457,
+      7.019566,
+      19.682007,
+      15.806177,
+      6.172943,
+      19.967422
     ],
     "t_total_trials_ms": [
-      19.121199,
-      19.776176,
-      5.900162,
-      17.113229,
-      5.872789,
-      15.536755,
-      7.068859,
-      20.024246,
-      16.004286,
-      6.39605,
-      20.249242
+      19.159192,
+      19.628356,
+      5.741603,
+      16.967523,
+      5.959898,
+      15.373507,
+      7.146348,
+      19.815519,
+      15.933618,
+      6.304285,
+      20.099607
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -1920,15 +1901,15 @@
       9829,
       8463.999999999998
     ],
-    "t_parse_ms": 0.175993,
-    "t_build_ms": 0.014783,
-    "t_compile_ms": 0.018347,
-    "t_mps_write_ms": 0.099771,
-    "t_solve_ms": 84.999948,
-    "t_total_ms": 85.225086,
-    "t_total_mean_ms": 83.82765718181818,
-    "t_total_sd_ms": 46.49995780820631,
-    "root_lp_time_ms": 0.238573,
+    "t_parse_ms": 0.176763,
+    "t_build_ms": 0.01367,
+    "t_compile_ms": 0.012998,
+    "t_mps_write_ms": 0.098707,
+    "t_solve_ms": 84.502181,
+    "t_total_ms": 84.715257,
+    "t_total_mean_ms": 83.79503490909093,
+    "t_total_sd_ms": 46.43293298561519,
+    "root_lp_time_ms": 0.239683,
     "root_lp_iters": 54,
     "root_lp_obj": 6060.000000000001,
     "cp4_baseline": {
@@ -1938,7 +1919,7 @@
       "nodes": 272,
       "iterations": 1446,
       "cuts_added": 0,
-      "time_ms": 30.64497
+      "time_ms": 31.406623
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -1947,7 +1928,7 @@
       "nodes": 272,
       "iterations": 1442,
       "cuts_added": 0,
-      "time_ms": 31.759468
+      "time_ms": 33.167492
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -1956,7 +1937,7 @@
       "nodes": 241,
       "iterations": 2391,
       "cuts_added": 541,
-      "time_ms": 57.736777
+      "time_ms": 59.527736
     },
     "cp7_full": {
       "status": "Optimal",
@@ -1965,36 +1946,35 @@
       "nodes": 198,
       "iterations": 1300,
       "cuts_added": 191,
-      "time_ms": 84.999948
+      "time_ms": 84.502181
     },
     "t_solve_trials_ms": [
-      107.245475,
-      137.35061,
-      80.806784,
-      84.999948,
-      7.642901,
-      110.761045,
-      113.15101,
-      66.269476,
-      4.473868,
-      144.986932,
-      62.020497
+      104.699109,
+      136.679072,
+      80.634548,
+      84.502181,
+      7.571073,
+      110.534265,
+      112.512956,
+      67.736643,
+      4.535398,
+      147.031254,
+      63.062094
     ],
     "t_total_trials_ms": [
-      107.447821,
-      137.551233,
-      81.006294,
-      85.225086,
-      7.843607,
-      110.964085,
-      113.37048,
-      66.490422,
-      4.753071,
-      145.201419,
-      62.250711
+      104.915628,
+      136.886028,
+      80.840188,
+      84.715257,
+      7.783358,
+      110.732905,
+      112.714366,
+      67.935658,
+      4.737205,
+      147.221386,
+      63.263405
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2020,15 +2000,15 @@
       1234.935878787879,
       1497.0332517162472
     ],
-    "t_parse_ms": 0.061757,
-    "t_build_ms": 0.008473,
-    "t_compile_ms": 0.00747,
-    "t_mps_write_ms": 0.03697,
-    "t_solve_ms": 7.761819,
-    "t_total_ms": 7.832361,
-    "t_total_mean_ms": 9.019662636363636,
-    "t_total_sd_ms": 5.6620546229927395,
-    "root_lp_time_ms": 0.06876,
+    "t_parse_ms": 0.06082,
+    "t_build_ms": 0.006699,
+    "t_compile_ms": 0.006708,
+    "t_mps_write_ms": 0.033306,
+    "t_solve_ms": 6.90178,
+    "t_total_ms": 6.983096,
+    "t_total_mean_ms": 8.908925636363636,
+    "t_total_sd_ms": 5.671041200872081,
+    "root_lp_time_ms": 0.064828,
     "root_lp_iters": 9,
     "root_lp_obj": 1966.9239391458352,
     "cp4_baseline": {
@@ -2038,7 +2018,7 @@
       "nodes": 25,
       "iterations": 82,
       "cuts_added": 0,
-      "time_ms": 1.810923
+      "time_ms": 1.82437
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2047,7 +2027,7 @@
       "nodes": 25,
       "iterations": 82,
       "cuts_added": 0,
-      "time_ms": 2.097895
+      "time_ms": 2.129927
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2056,7 +2036,7 @@
       "nodes": 2,
       "iterations": 55,
       "cuts_added": 44,
-      "time_ms": 5.13339
+      "time_ms": 4.934687
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2065,36 +2045,35 @@
       "nodes": 2,
       "iterations": 47,
       "cuts_added": 57,
-      "time_ms": 7.761819
+      "time_ms": 6.90178
     },
     "t_solve_trials_ms": [
-      4.62718,
-      14.09188,
-      6.486202,
-      3.884465,
-      7.761819,
-      8.367609,
-      3.407269,
-      4.287184,
-      11.423031,
-      22.167168,
-      11.844706
+      4.557471,
+      13.928415,
+      6.429799,
+      3.959452,
+      6.90178,
+      8.378277,
+      3.396301,
+      4.302259,
+      11.378388,
+      22.197607,
+      11.749523
     ],
     "t_total_trials_ms": [
-      4.700772,
-      14.171889,
-      6.572618,
-      3.962491,
-      7.832361,
-      8.450983,
-      3.481471,
-      4.360559,
-      11.502017,
-      22.251692,
-      11.929436
+      4.629861,
+      14.001328,
+      6.502225,
+      4.036111,
+      6.983096,
+      8.455803,
+      3.46245,
+      4.371657,
+      11.450105,
+      22.275821,
+      11.829725
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2120,15 +2099,15 @@
       2853.2052712079008,
       2379.1706802941812
     ],
-    "t_parse_ms": 0.101193,
-    "t_build_ms": 0.010298,
-    "t_compile_ms": 0.01067,
-    "t_mps_write_ms": 0.062623,
-    "t_solve_ms": 8.361701,
-    "t_total_ms": 8.485765,
-    "t_total_mean_ms": 12.065233818181817,
-    "t_total_sd_ms": 8.798504275076086,
-    "root_lp_time_ms": 0.092718,
+    "t_parse_ms": 0.098644,
+    "t_build_ms": 0.008302,
+    "t_compile_ms": 0.007766,
+    "t_mps_write_ms": 0.058471,
+    "t_solve_ms": 8.252331,
+    "t_total_ms": 8.358881,
+    "t_total_mean_ms": 11.912374363636362,
+    "t_total_sd_ms": 8.694765210920192,
+    "root_lp_time_ms": 0.090716,
     "root_lp_iters": 14,
     "root_lp_obj": 2648.3687203038785,
     "cp4_baseline": {
@@ -2138,7 +2117,7 @@
       "nodes": 40,
       "iterations": 111,
       "cuts_added": 0,
-      "time_ms": 2.999849
+      "time_ms": 2.994712
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2147,7 +2126,7 @@
       "nodes": 40,
       "iterations": 111,
       "cuts_added": 0,
-      "time_ms": 3.391494
+      "time_ms": 3.343862
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2156,7 +2135,7 @@
       "nodes": 0,
       "iterations": 8,
       "cuts_added": 10,
-      "time_ms": 15.859926
+      "time_ms": 16.022107
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2165,36 +2144,35 @@
       "nodes": 0,
       "iterations": 8,
       "cuts_added": 15,
-      "time_ms": 8.361701
+      "time_ms": 8.252331
     },
     "t_solve_trials_ms": [
-      3.08406,
-      18.685969,
-      11.250813,
-      6.609127,
-      5.323609,
-      7.587363,
-      5.748683,
-      9.656638,
-      8.361701,
-      30.452945,
-      24.508438
+      3.208492,
+      18.109062,
+      11.056222,
+      6.487102,
+      5.194622,
+      7.635005,
+      5.718504,
+      9.468179,
+      8.252331,
+      30.139373,
+      24.489582
     ],
     "t_total_trials_ms": [
-      3.21182,
-      18.911533,
-      11.384216,
-      6.736752,
-      5.437354,
-      7.705853,
-      5.868709,
-      9.767555,
-      8.485765,
-      30.578626,
-      24.629389
+      3.328148,
+      18.243552,
+      11.178827,
+      6.604351,
+      5.312201,
+      7.749079,
+      5.829684,
+      9.571628,
+      8.358881,
+      30.250915,
+      24.608852
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2220,15 +2198,15 @@
       44.126,
       47.135000000000005
     ],
-    "t_parse_ms": 0.112282,
-    "t_build_ms": 0.009651,
-    "t_compile_ms": 0.009232,
-    "t_mps_write_ms": 0.069166,
-    "t_solve_ms": 3.382655,
-    "t_total_ms": 3.50784,
-    "t_total_mean_ms": 3.558993545454545,
-    "t_total_sd_ms": 1.9829800365435537,
-    "root_lp_time_ms": 0.080601,
+    "t_parse_ms": 0.11617,
+    "t_build_ms": 0.01188,
+    "t_compile_ms": 0.012477,
+    "t_mps_write_ms": 0.073663,
+    "t_solve_ms": 3.293053,
+    "t_total_ms": 3.429516,
+    "t_total_mean_ms": 3.604378090909091,
+    "t_total_sd_ms": 2.191664287555439,
+    "root_lp_time_ms": 0.078518,
     "root_lp_iters": 9,
     "root_lp_obj": 56.842499999999994,
     "cp4_baseline": {
@@ -2238,7 +2216,7 @@
       "nodes": 0,
       "iterations": 3,
       "cuts_added": 0,
-      "time_ms": 0.949478
+      "time_ms": 0.894002
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2247,7 +2225,7 @@
       "nodes": 0,
       "iterations": 3,
       "cuts_added": 0,
-      "time_ms": 1.215659
+      "time_ms": 1.20399
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2256,7 +2234,7 @@
       "nodes": 0,
       "iterations": 3,
       "cuts_added": 12,
-      "time_ms": 1.925182
+      "time_ms": 2.895306
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2265,36 +2243,35 @@
       "nodes": 0,
       "iterations": 3,
       "cuts_added": 7,
-      "time_ms": 3.382655
+      "time_ms": 3.293053
     },
     "t_solve_trials_ms": [
-      4.525807,
-      4.495138,
-      2.75269,
-      8.018816,
-      1.245556,
-      3.382655,
-      1.150889,
-      3.647664,
-      3.263011,
-      1.194316,
-      4.01885
+      4.527566,
+      4.526654,
+      2.671616,
+      8.803696,
+      1.222521,
+      3.463981,
+      1.151113,
+      3.012016,
+      3.293053,
+      1.241094,
+      4.086037
     ],
     "t_total_trials_ms": [
-      4.662129,
-      4.624836,
-      2.891231,
-      8.159822,
-      1.379771,
-      3.50784,
-      1.282626,
-      3.774508,
-      3.396914,
-      1.322131,
-      4.147121
+      4.666498,
+      4.665224,
+      2.831951,
+      9.022946,
+      1.374397,
+      3.595494,
+      1.305636,
+      3.15557,
+      3.429516,
+      1.378979,
+      4.221948
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2314,15 +2291,15 @@
       2057.4799999999996,
       2057.673
     ],
-    "t_parse_ms": 0.359019,
-    "t_build_ms": 0.037106,
-    "t_compile_ms": 0.017344,
-    "t_mps_write_ms": 0.232765,
-    "t_solve_ms": 47.967857,
-    "t_total_ms": 48.378005,
-    "t_total_mean_ms": 54.579175799999994,
-    "t_total_sd_ms": 11.80548417533026,
-    "root_lp_time_ms": 0.232305,
+    "t_parse_ms": 0.368069,
+    "t_build_ms": 0.035704,
+    "t_compile_ms": 0.018248,
+    "t_mps_write_ms": 0.230953,
+    "t_solve_ms": 49.359889,
+    "t_total_ms": 49.806195,
+    "t_total_mean_ms": 54.1846802,
+    "t_total_sd_ms": 10.645945478607183,
+    "root_lp_time_ms": 0.241782,
     "root_lp_iters": 53,
     "root_lp_obj": 2081.5278965517246,
     "cp4_baseline": {
@@ -2332,7 +2309,7 @@
       "nodes": 61,
       "iterations": 410,
       "cuts_added": 0,
-      "time_ms": 13.275234
+      "time_ms": 12.886815
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2341,7 +2318,7 @@
       "nodes": 61,
       "iterations": 410,
       "cuts_added": 0,
-      "time_ms": 14.116647
+      "time_ms": 14.367875
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2350,7 +2327,7 @@
       "nodes": 30,
       "iterations": 669,
       "cuts_added": 346,
-      "time_ms": 54.826105
+      "time_ms": 56.668605
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2359,24 +2336,23 @@
       "nodes": 18,
       "iterations": 483,
       "cuts_added": 353,
-      "time_ms": 47.967857
+      "time_ms": 49.359889
     },
     "t_solve_trials_ms": [
-      47.967857,
-      46.679928,
-      72.4292,
-      44.146313,
-      59.569856
+      49.359889,
+      48.388176,
+      72.169625,
+      45.629374,
+      53.253237
     ],
     "t_total_trials_ms": [
-      48.378005,
-      47.10088,
-      72.83757,
-      44.568114,
-      60.01131
+      49.806195,
+      48.811207,
+      72.589532,
+      46.042187,
+      53.67428
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2396,15 +2372,15 @@
       12956.208999999943,
       13209.889999999985
     ],
-    "t_parse_ms": 0.684264,
-    "t_build_ms": 0.070042,
-    "t_compile_ms": 0.030136,
-    "t_mps_write_ms": 0.348846,
-    "t_solve_ms": 68.739779,
-    "t_total_ms": 69.517908,
-    "t_total_mean_ms": 92.0913726,
-    "t_total_sd_ms": 58.655441913221516,
-    "root_lp_time_ms": 0.428111,
+    "t_parse_ms": 1.077761,
+    "t_build_ms": 0.072208,
+    "t_compile_ms": 0.035331,
+    "t_mps_write_ms": 0.348735,
+    "t_solve_ms": 70.550609,
+    "t_total_ms": 71.766737,
+    "t_total_mean_ms": 93.6445898,
+    "t_total_sd_ms": 57.686055545841015,
+    "root_lp_time_ms": 0.428429,
     "root_lp_iters": 160,
     "root_lp_obj": 10518.991199999999,
     "cp4_baseline": {
@@ -2414,7 +2390,7 @@
       "nodes": 315,
       "iterations": 217,
       "cuts_added": 0,
-      "time_ms": 196.445249
+      "time_ms": 230.891374
     },
     "cp5_presolve": {
       "status": "NodeLimit",
@@ -2423,7 +2399,7 @@
       "nodes": 211,
       "iterations": 197,
       "cuts_added": 0,
-      "time_ms": 141.263632
+      "time_ms": 141.627809
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2432,7 +2408,7 @@
       "nodes": 28,
       "iterations": 465,
       "cuts_added": 791,
-      "time_ms": 44.925894
+      "time_ms": 45.635462
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2441,24 +2417,23 @@
       "nodes": 10,
       "iterations": 377,
       "cuts_added": 773,
-      "time_ms": 68.739779
+      "time_ms": 70.550609
     },
     "t_solve_trials_ms": [
-      68.739779,
-      49.231009,
-      56.937871,
-      192.204428,
-      88.766489
+      70.550609,
+      49.348478,
+      58.229192,
+      191.366407,
+      93.259299
     ],
     "t_total_trials_ms": [
-      69.517908,
-      50.085492,
-      57.727524,
-      193.582371,
-      89.543568
+      71.766737,
+      50.765148,
+      59.012872,
+      192.608728,
+      94.069464
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2478,15 +2453,15 @@
       87999.99999999997,
       87999.99999999996
     ],
-    "t_parse_ms": 3.470142,
-    "t_build_ms": 0.228746,
-    "t_compile_ms": 0.166414,
-    "t_mps_write_ms": 2.306367,
-    "t_solve_ms": 33.469094,
-    "t_total_ms": 37.331715,
-    "t_total_mean_ms": 38.2768594,
-    "t_total_sd_ms": 4.5623522601864925,
-    "root_lp_time_ms": 2.914462,
+    "t_parse_ms": 3.391007,
+    "t_build_ms": 0.238625,
+    "t_compile_ms": 0.172969,
+    "t_mps_write_ms": 2.314088,
+    "t_solve_ms": 33.578779,
+    "t_total_ms": 37.375769,
+    "t_total_mean_ms": 38.2414218,
+    "t_total_sd_ms": 4.437907239401158,
+    "root_lp_time_ms": 2.953931,
     "root_lp_iters": 319,
     "root_lp_obj": 87999.9999999999,
     "cp4_baseline": {
@@ -2496,7 +2471,7 @@
       "nodes": 102,
       "iterations": 228,
       "cuts_added": 0,
-      "time_ms": 283.723049
+      "time_ms": 282.70284
     },
     "cp5_presolve": {
       "status": "TimeLimit",
@@ -2505,7 +2480,7 @@
       "nodes": 101,
       "iterations": 228,
       "cuts_added": 0,
-      "time_ms": 386.604587
+      "time_ms": 385.656009
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2514,7 +2489,7 @@
       "nodes": 0,
       "iterations": 43,
       "cuts_added": 170,
-      "time_ms": 53.324614
+      "time_ms": 53.051429
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2523,24 +2498,23 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 33.469094
+      "time_ms": 33.578779
     },
     "t_solve_trials_ms": [
-      28.258892,
-      31.326115,
-      33.469094,
-      39.579117,
-      38.210648
+      28.807934,
+      31.553968,
+      33.578779,
+      39.320679,
+      38.314668
     ],
     "t_total_trials_ms": [
-      32.134442,
-      36.404012,
-      37.331715,
-      43.459068,
-      42.05506
+      32.595367,
+      35.841981,
+      37.375769,
+      43.284871,
+      42.109121
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2560,15 +2534,15 @@
       208000.00000000358,
       208000.00000000297
     ],
-    "t_parse_ms": 12.417706,
-    "t_build_ms": 0.875075,
-    "t_compile_ms": 0.810507,
-    "t_mps_write_ms": 9.170778,
-    "t_solve_ms": 266.964139,
-    "t_total_ms": 280.860371,
-    "t_total_mean_ms": 282.5072732,
-    "t_total_sd_ms": 154.22766240101856,
-    "root_lp_time_ms": 33.509292,
+    "t_parse_ms": 12.776792,
+    "t_build_ms": 0.868803,
+    "t_compile_ms": 0.952266,
+    "t_mps_write_ms": 9.115398,
+    "t_solve_ms": 266.846252,
+    "t_total_ms": 280.66577,
+    "t_total_mean_ms": 283.16345520000004,
+    "t_total_sd_ms": 153.82677670751136,
+    "root_lp_time_ms": 33.752976,
     "root_lp_iters": 3128,
     "root_lp_obj": 207999.9999999263,
     "cp4_baseline": {
@@ -2578,7 +2552,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 29.92114
+      "time_ms": 30.13493
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2587,7 +2561,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 55.507384
+      "time_ms": 56.113327
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2596,7 +2570,7 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 57.8945
+      "time_ms": 58.914623
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2605,24 +2579,23 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 266.964139
+      "time_ms": 266.846252
     },
     "t_solve_trials_ms": [
-      66.46503,
-      267.034533,
-      498.440643,
-      241.079652,
-      266.964139
+      66.360269,
+      266.846252,
+      498.087991,
+      241.474704,
+      269.932754
     ],
     "t_total_trials_ms": [
-      80.601817,
-      280.860371,
-      514.175816,
-      255.987475,
-      280.910887
+      80.578742,
+      280.66577,
+      513.1852,
+      256.856949,
+      284.530615
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2642,15 +2615,15 @@
       12000.000000000018,
       12000.000000000016
     ],
-    "t_parse_ms": 0.433122,
-    "t_build_ms": 0.030165,
-    "t_compile_ms": 0.028383,
-    "t_mps_write_ms": 0.271429,
-    "t_solve_ms": 7.684471,
-    "t_total_ms": 8.202726,
-    "t_total_mean_ms": 8.204957799999999,
-    "t_total_sd_ms": 1.6056739000918587,
-    "root_lp_time_ms": 0.522084,
+    "t_parse_ms": 0.436026,
+    "t_build_ms": 0.030137,
+    "t_compile_ms": 0.029917,
+    "t_mps_write_ms": 0.271861,
+    "t_solve_ms": 7.716275,
+    "t_total_ms": 8.22169,
+    "t_total_mean_ms": 8.3785504,
+    "t_total_sd_ms": 1.5314079407180508,
+    "root_lp_time_ms": 0.521296,
     "root_lp_iters": 94,
     "root_lp_obj": 12000.000000000013,
     "cp4_baseline": {
@@ -2660,7 +2633,7 @@
       "nodes": 50,
       "iterations": 280,
       "cuts_added": 0,
-      "time_ms": 16.659675
+      "time_ms": 16.649156
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2669,7 +2642,7 @@
       "nodes": 50,
       "iterations": 280,
       "cuts_added": 0,
-      "time_ms": 18.475879
+      "time_ms": 18.403948
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2678,7 +2651,7 @@
       "nodes": 0,
       "iterations": 6,
       "cuts_added": 48,
-      "time_ms": 6.615099
+      "time_ms": 6.48118
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2687,24 +2660,23 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 7.684471
+      "time_ms": 7.716275
     },
     "t_solve_trials_ms": [
-      7.684471,
-      6.201877,
-      9.78397,
-      6.085386,
-      8.786607
+      7.716275,
+      6.648232,
+      9.961425,
+      5.993091,
+      8.729674
     ],
     "t_total_trials_ms": [
-      8.202726,
-      6.692042,
-      10.267206,
-      6.585802,
-      9.277013
+      8.22169,
+      7.506293,
+      10.455208,
+      6.488357,
+      9.221204
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2724,15 +2696,15 @@
       16799.999999999985,
       16799.999999999985
     ],
-    "t_parse_ms": 0.69572,
-    "t_build_ms": 0.050098,
-    "t_compile_ms": 0.054787,
-    "t_mps_write_ms": 0.455636,
-    "t_solve_ms": 6.866603,
-    "t_total_ms": 7.688834,
-    "t_total_mean_ms": 7.8368348,
-    "t_total_sd_ms": 0.3306699753934427,
-    "root_lp_time_ms": 0.871517,
+    "t_parse_ms": 0.697783,
+    "t_build_ms": 0.048147,
+    "t_compile_ms": 0.087751,
+    "t_mps_write_ms": 0.458439,
+    "t_solve_ms": 6.944656,
+    "t_total_ms": 7.780804,
+    "t_total_mean_ms": 7.8414016,
+    "t_total_sd_ms": 0.23326758032418493,
+    "root_lp_time_ms": 0.875592,
     "root_lp_iters": 149,
     "root_lp_obj": 16800.000000000004,
     "cp4_baseline": {
@@ -2742,7 +2714,7 @@
       "nodes": 4,
       "iterations": 8,
       "cuts_added": 0,
-      "time_ms": 4.962389
+      "time_ms": 4.899493
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2751,7 +2723,7 @@
       "nodes": 4,
       "iterations": 8,
       "cuts_added": 0,
-      "time_ms": 8.001171
+      "time_ms": 8.044454
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2760,7 +2732,7 @@
       "nodes": 0,
       "iterations": 2,
       "cuts_added": 17,
-      "time_ms": 8.252057
+      "time_ms": 8.246116
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2769,24 +2741,23 @@
       "nodes": 0,
       "iterations": 0,
       "cuts_added": 0,
-      "time_ms": 6.866603
+      "time_ms": 6.944656
     },
     "t_solve_trials_ms": [
-      6.866603,
-      7.036468,
-      6.824516,
-      7.041848,
-      6.855783
+      6.944656,
+      6.831045,
+      7.034969,
+      7.002332,
+      6.93698
     ],
     "t_total_trials_ms": [
-      7.688834,
-      8.407562,
-      7.614385,
-      7.837189,
-      7.636204
+      7.780804,
+      7.664973,
+      8.249036,
+      7.788782,
+      7.723413
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2806,15 +2777,15 @@
       12923.325111274691,
       14132.476392857145
     ],
-    "t_parse_ms": 0.26435,
-    "t_build_ms": 0.026703,
-    "t_compile_ms": 0.019311,
-    "t_mps_write_ms": 0.141601,
-    "t_solve_ms": 47.78542,
-    "t_total_ms": 48.1788,
-    "t_total_mean_ms": 40.5193482,
-    "t_total_sd_ms": 19.94559322093035,
-    "root_lp_time_ms": 0.181683,
+    "t_parse_ms": 0.249334,
+    "t_build_ms": 0.025108,
+    "t_compile_ms": 0.014565,
+    "t_mps_write_ms": 0.140306,
+    "t_solve_ms": 47.392823,
+    "t_total_ms": 47.688403,
+    "t_total_mean_ms": 39.7348676,
+    "t_total_sd_ms": 19.09383008434795,
+    "root_lp_time_ms": 0.179894,
     "root_lp_iters": 19,
     "root_lp_obj": 12955.460004660994,
     "cp4_baseline": {
@@ -2824,7 +2795,7 @@
       "nodes": 682,
       "iterations": 980,
       "cuts_added": 0,
-      "time_ms": 45.307438
+      "time_ms": 46.762038
     },
     "cp5_presolve": {
       "status": "Optimal",
@@ -2833,7 +2804,7 @@
       "nodes": 682,
       "iterations": 980,
       "cuts_added": 0,
-      "time_ms": 45.914182
+      "time_ms": 47.778171
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2842,7 +2813,7 @@
       "nodes": 436,
       "iterations": 1661,
       "cuts_added": 279,
-      "time_ms": 93.14556
+      "time_ms": 95.661228
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2851,24 +2822,23 @@
       "nodes": 154,
       "iterations": 1145,
       "cuts_added": 88,
-      "time_ms": 47.78542
+      "time_ms": 47.392823
     },
     "t_solve_trials_ms": [
-      53.382237,
-      47.78542,
-      31.747645,
-      58.64651,
-      9.439788
+      55.850231,
+      47.392823,
+      32.106071,
+      52.231742,
+      9.429074
     ],
     "t_total_trials_ms": [
-      53.69778,
-      48.1788,
-      32.058807,
-      58.935437,
-      9.725917
+      56.363005,
+      47.688403,
+      32.393195,
+      52.516208,
+      9.713527
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
@@ -2888,15 +2858,15 @@
       45323.9976493229,
       47457.26317965368
     ],
-    "t_parse_ms": 1.058625,
-    "t_build_ms": 0.111611,
-    "t_compile_ms": 0.045988,
-    "t_mps_write_ms": 0.539323,
-    "t_solve_ms": 57.851334,
-    "t_total_ms": 59.114955,
-    "t_total_mean_ms": 60.2132154,
-    "t_total_sd_ms": 4.587062902656589,
-    "root_lp_time_ms": 0.49897,
+    "t_parse_ms": 1.04632,
+    "t_build_ms": 0.114121,
+    "t_compile_ms": 0.046466,
+    "t_mps_write_ms": 0.545187,
+    "t_solve_ms": 59.121959,
+    "t_total_ms": 60.322429,
+    "t_total_mean_ms": 61.429342,
+    "t_total_sd_ms": 4.824152269856488,
+    "root_lp_time_ms": 0.513392,
     "root_lp_iters": 50,
     "root_lp_obj": 46971.094601198805,
     "cp4_baseline": {
@@ -2906,7 +2876,7 @@
       "nodes": 112,
       "iterations": 103,
       "cuts_added": 0,
-      "time_ms": 169.23121
+      "time_ms": 171.496022
     },
     "cp5_presolve": {
       "status": "NodeLimit",
@@ -2915,7 +2885,7 @@
       "nodes": 112,
       "iterations": 103,
       "cuts_added": 0,
-      "time_ms": 167.741678
+      "time_ms": 168.527067
     },
     "cp6_cuts": {
       "status": "Optimal",
@@ -2924,7 +2894,7 @@
       "nodes": 0,
       "iterations": 76,
       "cuts_added": 188,
-      "time_ms": 10.858709
+      "time_ms": 10.924935
     },
     "cp7_full": {
       "status": "Optimal",
@@ -2933,24 +2903,23 @@
       "nodes": 0,
       "iterations": 76,
       "cuts_added": 188,
-      "time_ms": 57.851334
+      "time_ms": 59.121959
     },
     "t_solve_trials_ms": [
-      61.371926,
-      65.42448,
-      56.079892,
-      53.950016,
-      57.851334
+      62.503522,
+      66.857978,
+      57.669205,
+      54.615521,
+      59.121959
     ],
     "t_total_trials_ms": [
-      62.840154,
-      66.682171,
-      57.270131,
-      55.158666,
-      59.114955
+      63.699298,
+      68.414186,
+      58.893213,
+      55.817584,
+      60.322429
     ],
-    "git_commit": "1b1a98018251d5283ec57c65e12dc0707f2d55f5",
-    "git_dirty": true,
+    "git_commit": "ff6e5230482dce42de75d010b475c088846121a8",
     "go_version": "go1.27.1-X:nodwarf5",
     "source_fingerprint": "f409647e4eddfdee",
     "cpu_affinity": "2"
