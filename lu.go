@@ -11,8 +11,8 @@ const (
 	maxEtaUpdates  = 56
 	minEtaIdxCap   = 16384
 	etaIdxRowMult  = 24
-	luDropTol      = 1e-16
-	luSolveDropTol = 1e-15
+	luDropTol      = 1e-13
+	luSolveDropTol = 1e-13
 )
 
 type etaVector struct {
@@ -137,6 +137,7 @@ func (f *LUFactorization) Reset(m int) {
 		f.colDone = f.colDone[:m]
 		f.workInt = f.workInt[:m]
 		f.work = f.work[:m]
+		clear(f.work)
 	}
 	f.etas = f.etas[:0]
 	f.etaPool = f.etaPool[:0]
@@ -822,68 +823,133 @@ func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 
 func (f *LUFactorization) FTRAN(rhs []float64) {
 	m := f.m
-	if m == 0 {
+	if m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lColPtr) <= m || len(f.uColPtr) <= m {
 		return
 	}
-	w := f.work
-	for i := range m {
-		w[i] = rhs[f.perm[i]]
-	}
-
-	// Solve unit lower-triangular L * y = P * rhs
-	for k := f.numColSing; k < m; k++ {
-		wk := w[k]
-		if wk == 0 {
+	rhs = rhs[:m]
+	w := f.work[:m]
+	perm := f.perm[:m]
+	firstNZ := m
+	lastNZ := -1
+	for i, p := range perm {
+		if uint(p) >= uint(m) {
 			continue
 		}
-		if math.Abs(wk) <= luDropTol {
-			w[k] = 0
-			continue
-		}
-		for p := f.lColPtr[k]; p < f.lColPtr[k+1]; p++ {
-			w[f.lRowIdx[p]] -= f.lColVal[p] * wk
-		}
-	}
-
-	// Solve upper-triangular U * x = y
-	for j := m - 1; j >= 0; j-- {
-		wj := w[j]
-		if wj == 0 {
-			continue
-		}
-		if math.Abs(wj) <= luDropTol {
-			w[j] = 0
-			continue
-		}
-		wj *= f.uInvDiag[j]
-		w[j] = wj
-		for p := f.uColPtr[j]; p < f.uColPtr[j+1]; p++ {
-			w[f.uRowIdx[p]] -= f.uColVal[p] * wj
+		v := rhs[p]
+		if v != 0 {
+			rhs[p] = 0
+			w[i] = v
+			if lastNZ < 0 {
+				firstNZ = i
+			}
+			lastNZ = i
 		}
 	}
 
-	for k := range m {
-		rhs[f.colPerm[k]] = w[k]
+	if lastNZ >= 0 {
+		lColPtr := f.lColPtr[:m+1]
+		lRowIdx := f.lRowIdx
+		lColVal := f.lColVal
+		uInvDiag := f.uInvDiag[:m]
+		uColPtr := f.uColPtr[:m+1]
+		uRowIdx := f.uRowIdx
+		uColVal := f.uColVal
+
+		// Solve unit lower-triangular L * y = P * rhs
+		startK := max(f.numColSing, firstNZ)
+		for k := startK; k <= lastNZ && uint(k) < uint(m); k++ {
+			wk := w[k]
+			if wk == 0 {
+				continue
+			}
+			if wk <= luDropTol && wk >= -luDropTol {
+				w[k] = 0
+				continue
+			}
+			start, end := lColPtr[k], lColPtr[k+1]
+			rows := lRowIdx[start:end]
+			vals := lColVal[start:end]
+			if len(rows) > 0 {
+				vals = vals[:len(rows)]
+				for p, r := range rows {
+					if uint(r) < uint(m) {
+						w[r] -= vals[p] * wk
+						if r > lastNZ {
+							lastNZ = r
+						}
+					}
+				}
+			}
+		}
+
+		// Solve upper-triangular U * x = y.
+		for j := lastNZ; j >= 0; j-- {
+			if uint(j) >= uint(m) {
+				continue
+			}
+			wj := w[j]
+			if wj == 0 {
+				continue
+			}
+			if wj <= luDropTol && wj >= -luDropTol {
+				w[j] = 0
+				continue
+			}
+			wj *= uInvDiag[j]
+			w[j] = wj
+			start, end := uColPtr[j], uColPtr[j+1]
+			rows := uRowIdx[start:end]
+			vals := uColVal[start:end]
+			if len(rows) > 0 {
+				vals = vals[:len(rows)]
+				for p, r := range rows {
+					if uint(r) < uint(m) {
+						w[r] -= vals[p] * wj
+					}
+				}
+			}
+		}
+
+		colPerm := f.colPerm[:lastNZ+1]
+		wOut := w[:lastNZ+1]
+		for k, c := range colPerm {
+			if wk := wOut[k]; wk != 0 {
+				wOut[k] = 0
+				if uint(c) < uint(m) {
+					rhs[c] = wk
+				}
+			}
+		}
 	}
-	for _, eta := range f.etas {
+
+	etas := f.etas
+	for e := range etas {
+		eta := &etas[e]
 		pr := eta.pivotRow
+		if uint(pr) >= uint(m) {
+			continue
+		}
 		xp := rhs[pr]
 		if xp == 0 {
 			continue
 		}
-		if math.Abs(xp) <= luDropTol {
+		if xp <= luDropTol && xp >= -luDropTol {
 			rhs[pr] = 0
 			continue
 		}
 		xp *= eta.pivotInv
 		rhs[pr] = xp
-		for k, idx := range eta.idx {
-			rhs[idx] -= eta.val[k] * xp
+		idxs := eta.idx
+		vals := eta.val[:len(idxs)]
+		for k, idx := range idxs {
+			if uint(idx) < uint(m) {
+				rhs[idx] -= vals[k] * xp
+			}
 		}
 	}
 }
 
-// FTRANSparse solves B * x = rhs in place and appends the indices i with |x[i]| > 1e-15 to nzIdx.
+// FTRANSparse solves B * x = rhs in place and appends the indices i with |x[i]| > luSolveDropTol to nzIdx.
 func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
 	f.FTRAN(rhs)
 	nzIdx = nzIdx[:0]
@@ -891,7 +957,7 @@ func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
 		if v == 0 {
 			continue
 		}
-		if math.Abs(v) > luSolveDropTol {
+		if v > luSolveDropTol || v < -luSolveDropTol {
 			nzIdx = append(nzIdx, i)
 		} else {
 			rhs[i] = 0
@@ -902,62 +968,126 @@ func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
 
 func (f *LUFactorization) BTRAN(rhs []float64) {
 	m := f.m
-	if m == 0 {
+	if m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lRowPtr) <= m || len(f.uRowPtr) <= m {
 		return
 	}
-	w := f.work
+	rhs = rhs[:m]
+	w := f.work[:m]
 
-	for e := len(f.etas) - 1; e >= 0; e-- {
-		eta := f.etas[e]
+	etas := f.etas
+	for e := len(etas) - 1; e >= 0; e-- {
+		eta := &etas[e]
 		pr := eta.pivotRow
+		if uint(pr) >= uint(m) {
+			continue
+		}
 		sum := rhs[pr]
-		for k, idx := range eta.idx {
-			sum -= eta.val[k] * rhs[idx]
+		idxs := eta.idx
+		vals := eta.val[:len(idxs)]
+		for k, idx := range idxs {
+			if uint(idx) < uint(m) {
+				sum -= vals[k] * rhs[idx]
+			}
 		}
 		rhs[pr] = sum * eta.pivotInv
 	}
-	for k := range m {
-		w[k] = rhs[f.colPerm[k]]
+	colPerm := f.colPerm[:m]
+	firstNZ := m
+	lastNZ := -1
+	for k, c := range colPerm {
+		if uint(c) >= uint(m) {
+			continue
+		}
+		v := rhs[c]
+		if v != 0 {
+			rhs[c] = 0
+			w[k] = v
+			if lastNZ < 0 {
+				firstNZ = k
+			}
+			lastNZ = k
+		}
+	}
+	if lastNZ < 0 {
+		return
 	}
 
+	uInvDiag := f.uInvDiag[:m]
+	uRowPtr := f.uRowPtr[:m+1]
+	uColIdx := f.uColIdx
+	uRowVal := f.uRowVal
+	lRowPtr := f.lRowPtr[:m+1]
+	lColIdx := f.lColIdx
+	lRowVal := f.lRowVal
+
 	// Solve U^T * z = Q^T * rhs
-	for i := range m {
+	for i := firstNZ; i <= lastNZ && uint(i) < uint(m); i++ {
 		wi := w[i]
 		if wi == 0 {
 			continue
 		}
-		if math.Abs(wi) <= luDropTol {
+		if wi <= luDropTol && wi >= -luDropTol {
 			w[i] = 0
 			continue
 		}
-		wi *= f.uInvDiag[i]
+		wi *= uInvDiag[i]
 		w[i] = wi
-		for p := f.uRowPtr[i]; p < f.uRowPtr[i+1]; p++ {
-			w[f.uColIdx[p]] -= f.uRowVal[p] * wi
+		start, end := uRowPtr[i], uRowPtr[i+1]
+		cols := uColIdx[start:end]
+		vals := uRowVal[start:end]
+		if len(cols) > 0 {
+			vals = vals[:len(cols)]
+			for p, c := range cols {
+				if uint(c) < uint(m) {
+					w[c] -= vals[p] * wi
+					if c > lastNZ {
+						lastNZ = c
+					}
+				}
+			}
 		}
 	}
 
 	// Solve unit upper-triangular L^T * y = z
-	for i := m - 1; i >= f.numColSing; i-- {
+	numColSing := f.numColSing
+	for i := lastNZ; i >= numColSing; i-- {
+		if uint(i) >= uint(m) {
+			continue
+		}
 		wi := w[i]
 		if wi == 0 {
 			continue
 		}
-		if math.Abs(wi) <= luDropTol {
+		if wi <= luDropTol && wi >= -luDropTol {
 			w[i] = 0
 			continue
 		}
-		for p := f.lRowPtr[i]; p < f.lRowPtr[i+1]; p++ {
-			w[f.lColIdx[p]] -= f.lRowVal[p] * wi
+		start, end := lRowPtr[i], lRowPtr[i+1]
+		cols := lColIdx[start:end]
+		vals := lRowVal[start:end]
+		if len(cols) > 0 {
+			vals = vals[:len(cols)]
+			for p, c := range cols {
+				if uint(c) < uint(m) {
+					w[c] -= vals[p] * wi
+				}
+			}
 		}
 	}
 
-	for i := range m {
-		rhs[f.perm[i]] = w[i]
+	perm := f.perm[:lastNZ+1]
+	wOut := w[:lastNZ+1]
+	for i, p := range perm {
+		if wi := wOut[i]; wi != 0 {
+			wOut[i] = 0
+			if uint(p) < uint(m) {
+				rhs[p] = wi
+			}
+		}
 	}
 }
 
-// BTRANSparse solves B^T * y = rhs in place and appends the indices i with |y[i]| > 1e-16 to nzIdx.
+// BTRANSparse solves B^T * y = rhs in place and appends the indices i with |y[i]| > luDropTol to nzIdx.
 func (f *LUFactorization) BTRANSparse(rhs []float64, nzIdx []int) []int {
 	f.BTRAN(rhs)
 	nzIdx = nzIdx[:0]
@@ -965,7 +1095,7 @@ func (f *LUFactorization) BTRANSparse(rhs []float64, nzIdx []int) []int {
 		if v == 0 {
 			continue
 		}
-		if math.Abs(v) > luDropTol {
+		if v > luDropTol || v < -luDropTol {
 			nzIdx = append(nzIdx, i)
 		} else {
 			rhs[i] = 0

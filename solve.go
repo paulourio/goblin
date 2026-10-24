@@ -59,6 +59,8 @@ type Options struct {
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
 
+	hasCutoff bool
+	cutoffMin float64
 }
 
 const (

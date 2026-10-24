@@ -648,42 +648,59 @@ func (s *LPSolver) computeDualsAndReducedCosts(cost []float64) {
 	ws := s.WS
 	n := p.NumVars
 	m := s.TotalRows()
+	tot := ws.TotVar
 
-	for i := range m {
-		ws.Y[i] = cost[ws.Basis[i]]
+	cost = cost[:tot]
+	basis := ws.Basis[:m]
+	y := ws.Y[:m]
+	status := ws.Status[:tot]
+	dj := ws.Dj[:tot]
+
+	for i, bVar := range basis {
+		y[i] = cost[bVar]
 	}
 	ws.LU.BTRAN(ws.Y)
 
 	baseM := p.NumConstraints
+	colPtr := p.ColPtr[:n+1]
+	rowIdx := p.RowIdx
+	colVal := p.ColVal[:len(rowIdx)]
 	for j := range n {
-		if ws.Status[j] == statusBasic {
-			ws.Dj[j] = 0
+		if status[j] == statusBasic {
+			dj[j] = 0
 			continue
 		}
 		dot := 0.0
-		for k := p.ColPtr[j]; k < p.ColPtr[j+1]; k++ {
-			dot += ws.Y[p.RowIdx[k]] * p.ColVal[k]
+		start, end := colPtr[j], colPtr[j+1]
+		rows := rowIdx[start:end]
+		vals := colVal[start:end]
+		for k, r := range rows {
+			if uint(r) < uint(m) {
+				dot += y[r] * vals[k]
+			}
 		}
-		ws.Dj[j] = cost[j] - dot
+		dj[j] = cost[j] - dot
 	}
 	for r, dr := range s.ExtraRows {
-		yr := ws.Y[baseM+r]
-		if math.Abs(yr) <= luDropTol {
+		yr := y[baseM+r]
+		if yr <= luDropTol && yr >= -luDropTol {
 			continue
 		}
-		for k, c := range dr.ColIdx {
-			if ws.Status[c] != statusBasic {
-				ws.Dj[c] -= yr * dr.Val[k]
+		cols := dr.ColIdx
+		vals := dr.Val[:len(cols)]
+		for k, c := range cols {
+			if uint(c) < uint(tot) && status[c] != statusBasic {
+				dj[c] -= yr * vals[k]
 			}
 		}
 	}
 
-	for i := range m {
+	for i, yi := range y {
 		slackVar := n + i
-		if ws.Status[slackVar] == statusBasic {
-			ws.Dj[slackVar] = 0
+		if status[slackVar] == statusBasic {
+			dj[slackVar] = 0
 		} else {
-			ws.Dj[slackVar] = cost[slackVar] - ws.Y[i]
+			dj[slackVar] = cost[slackVar] - yi
 		}
 	}
 }
@@ -691,16 +708,20 @@ func (s *LPSolver) computeDualsAndReducedCosts(cost []float64) {
 func (s *LPSolver) stabilizeNonBasicBounds() bool {
 	ws := s.WS
 	tot := ws.TotVar
+	status := ws.Status[:tot]
+	lbSlice := ws.LB[:tot]
+	ubSlice := ws.UB[:tot]
+	djSlice := ws.Dj[:tot]
+	xSlice := ws.X[:tot]
 	dualFeas := true
 
-	for k := range tot {
-		st := ws.Status[k]
+	for k, st := range status {
 		if st == statusBasic {
 			continue
 		}
-		lb, ub, dj := ws.LB[k], ws.UB[k], ws.Dj[k]
+		lb, ub, dj := lbSlice[k], ubSlice[k], djSlice[k]
 		if st == statusFixed {
-			ws.X[k] = lb
+			xSlice[k] = lb
 			continue
 		}
 		hasLB := !math.IsInf(lb, -1)
@@ -708,27 +729,27 @@ func (s *LPSolver) stabilizeNonBasicBounds() bool {
 
 		if hasLB && hasUB {
 			if dj < -dualTol {
-				ws.Status[k] = statusAtUpper
-				ws.X[k] = ub
+				status[k] = statusAtUpper
+				xSlice[k] = ub
 			} else if dj > dualTol {
-				ws.Status[k] = statusAtLower
-				ws.X[k] = lb
+				status[k] = statusAtLower
+				xSlice[k] = lb
 			} else {
 				if st != statusAtUpper {
-					ws.Status[k] = statusAtLower
-					ws.X[k] = lb
+					status[k] = statusAtLower
+					xSlice[k] = lb
 				} else {
-					ws.X[k] = ub
+					xSlice[k] = ub
 				}
 			}
 			continue
 		}
-		ws.X[k] = nonBasicValue(st, lb, ub)
+		xSlice[k] = nonBasicValue(st, lb, ub)
 		if st == statusAtLower && dj < -dualTol {
 			dualFeas = false
 		} else if st == statusAtUpper && dj > dualTol {
 			dualFeas = false
-		} else if st == statusSuperBasic && math.Abs(dj) > dualTol {
+		} else if st == statusSuperBasic && (dj > dualTol || dj < -dualTol) {
 			dualFeas = false
 		}
 	}
@@ -737,24 +758,12 @@ func (s *LPSolver) stabilizeNonBasicBounds() bool {
 
 func (s *LPSolver) isDualFeasible() bool {
 	ws := s.WS
-	tot := ws.TotVar
-	tol := 1e-5
-	for k := range tot {
-		st := ws.Status[k]
-		dj := ws.Dj[k]
-		switch st {
-		case statusAtLower:
-			if dj < -tol {
-				return false
-			}
-		case statusAtUpper:
-			if dj > tol {
-				return false
-			}
-		case statusSuperBasic:
-			if math.Abs(dj) > tol {
-				return false
-			}
+	status := ws.Status[:ws.TotVar]
+	djSlice := ws.Dj[:len(status)]
+	for k, st := range status {
+		dj := djSlice[k]
+		if (st == statusAtLower && dj < -1e-5) || (st == statusAtUpper && dj > 1e-5) || (st == statusSuperBasic && (dj > 1e-5 || dj < -1e-5)) {
+			return false
 		}
 	}
 	return true
@@ -765,43 +774,59 @@ func (s *LPSolver) computePrimalValues() {
 	ws := s.WS
 	n := p.NumVars
 	m := s.TotalRows()
+	tot := ws.TotVar
+	status := ws.Status[:tot]
+	xSlice := ws.X[:tot]
+	xbSlice := ws.XB[:m]
+	basis := ws.Basis[:m]
 
 	for i := range m {
-		ws.XB[i] = s.rowRHS(i)
+		xb := s.rowRHS(i)
+		slackVar := n + i
+		if status[slackVar] != statusBasic {
+			xb -= xSlice[slackVar]
+		}
+		xbSlice[i] = xb
 	}
 
 	baseM := p.NumConstraints
+	colPtr := p.ColPtr[:n+1]
+	rowIdx := p.RowIdx
+	colVal := p.ColVal[:len(rowIdx)]
 	for j := range n {
-		if ws.Status[j] == statusBasic {
+		if status[j] == statusBasic {
 			continue
 		}
-		xj := ws.X[j]
+		xj := xSlice[j]
 		if xj == 0 {
 			continue
 		}
-		for k := p.ColPtr[j]; k < p.ColPtr[j+1]; k++ {
-			ws.XB[p.RowIdx[k]] -= p.ColVal[k] * xj
+		start, end := colPtr[j], colPtr[j+1]
+		rows := rowIdx[start:end]
+		vals := colVal[start:end]
+		for k, r := range rows {
+			if uint(r) < uint(m) {
+				xbSlice[r] -= vals[k] * xj
+			}
 		}
 	}
 	for r, dr := range s.ExtraRows {
 		sum := 0.0
-		for k, c := range dr.ColIdx {
-			if ws.Status[c] != statusBasic {
-				sum += dr.Val[k] * ws.X[c]
+		cols := dr.ColIdx
+		vals := dr.Val[:len(cols)]
+		for k, c := range cols {
+			if uint(c) < uint(tot) && status[c] != statusBasic {
+				sum += vals[k] * xSlice[c]
 			}
 		}
-		ws.XB[baseM+r] -= sum
-	}
-	for i := range m {
-		slackVar := n + i
-		if ws.Status[slackVar] != statusBasic {
-			ws.XB[i] -= ws.X[slackVar]
-		}
+		xbSlice[baseM+r] -= sum
 	}
 
 	ws.LU.FTRAN(ws.XB)
-	for i := range m {
-		ws.X[ws.Basis[i]] = ws.XB[i]
+	for i, bVar := range basis {
+		if uint(bVar) < uint(tot) {
+			xSlice[bVar] = xbSlice[i]
+		}
 	}
 }
 
@@ -810,148 +835,434 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 	ws := s.WS
 	n := p.NumVars
 	m := s.TotalRows()
+	tot := ws.TotVar
+	rho := ws.Rho[:m]
+	tabRow := ws.TabRow[:tot]
+	tabMark := ws.TabRowMark[:tot]
+	status := ws.Status[:tot]
+	basis := ws.Basis[:m]
+	numChunks := (n + 63) >> 6
+	chunkMark := ws.TabRowChunkMark[:numChunks]
 
 	if ws.RhoSparse {
 		for _, i := range ws.RhoIdx {
-			ws.Rho[i] = 0
+			if uint(i) < uint(m) {
+				rho[i] = 0
+			}
 		}
 		ws.RhoIdx = ws.RhoIdx[:0]
 	} else {
-		clear(ws.Rho)
+		clear(rho)
 	}
-	ws.Rho[r] = 1.0
+	rho[r] = 1.0
 	ws.RhoIdx = ws.LU.BTRANSparse(ws.Rho, ws.RhoIdx)
 	ws.RhoSparse = true
 
 	if ws.TabRowSparse {
 		for _, k := range ws.TabRowIdx {
-			ws.TabRow[k] = 0
-			ws.TabRowMark[k] = false
+			if uint(k) < uint(tot) {
+				tabRow[k] = 0
+				tabMark[k] = false
+			}
 		}
 		ws.TabRowIdx = ws.TabRowIdx[:0]
 	} else {
-		clear(ws.TabRow)
+		for _, ch := range ws.TabRowChunks {
+			if uint(ch) < uint(numChunks) {
+				chunkMark[ch] = false
+				start := ch << 6
+				end := min(start+64, n)
+				clear(tabRow[start:end])
+			}
+		}
+		ws.TabRowChunks = ws.TabRowChunks[:0]
+		for _, k := range ws.TabRowIdx {
+			if uint(k) < uint(tot) {
+				tabRow[k] = 0
+			}
+		}
 		ws.TabRowIdx = ws.TabRowIdx[:0]
 	}
 	baseM := p.NumConstraints
 
 	if n > 0 && n <= DenseThreshold && len(p.DenseRows) == baseM*p.RowStride {
 		ws.TabRowSparse = false
+		chunks := ws.TabRowChunks[:0]
+		for ch := range numChunks {
+			chunkMark[ch] = true
+			chunks = append(chunks, ch)
+		}
+		ws.TabRowChunks = chunks
 		stride := p.RowStride
-		tabStruct := ws.TabRow[:n]
+		tabStruct := tabRow[:n]
+		sparseRowCap := n >> 2
+		if simd.UsingHardwareSIMDWith(s.DisableSIMD) && n >= 32 {
+			sparseRowCap = min(8, sparseRowCap)
+		}
+		tabIdx := ws.TabRowIdx
 		for _, i := range ws.RhoIdx {
-			yi := ws.Rho[i]
+			if uint(i) >= uint(m) {
+				continue
+			}
+			yi := rho[i]
 			if i < baseM {
-				s.axpy64(tabStruct, p.DenseRows[i*stride:i*stride+n], yi)
+				start, end := p.RowPtr[i], p.RowPtr[i+1]
+				if end-start <= sparseRowCap {
+					cols := p.ColIdx[start:end]
+					vals := p.RowVal[start:end]
+					for k, col := range cols {
+						if uint(col) < uint(n) {
+							tabStruct[col] += yi * vals[k]
+						}
+					}
+				} else {
+					s.axpy64(tabStruct, p.DenseRows[i*stride:][:n], yi)
+				}
 			} else {
 				dr := s.ExtraRows[i-baseM]
-				if dr.Dense != nil {
+				if len(dr.ColIdx) <= sparseRowCap {
+					cols := dr.ColIdx
+					vals := dr.Val[:len(cols)]
+					for k, col := range cols {
+						if uint(col) < uint(n) {
+							tabStruct[col] += yi * vals[k]
+						}
+					}
+				} else if dr.Dense != nil {
 					s.axpy64(tabStruct, dr.Dense[:n], yi)
 				}
 			}
-			ws.TabRow[n+i] = yi
+			slack := n + i
+			if uint(slack) < uint(tot) && status[slack] != statusBasic {
+				tabRow[slack] = yi
+				tabIdx = append(tabIdx, slack)
+			}
 		}
-		for i := range m {
-			ws.TabRow[ws.Basis[i]] = 0
+		for _, bVar := range basis {
+			if uint(bVar) < uint(n) {
+				tabStruct[bVar] = 0
+			}
 		}
-		ws.TabRow[ws.Basis[r]] = 1.0
-	} else {
-		ws.TabRowSparse = true
+		br := basis[r]
+		tabRow[br] = 1.0
+		if br >= n {
+			tabIdx = append(tabIdx, br)
+		}
+		ws.TabRowIdx = tabIdx
+		return
+	}
+
+	totalNNZ := 0
+	for _, i := range ws.RhoIdx {
+		if i < baseM {
+			totalNNZ += p.RowPtr[i+1] - p.RowPtr[i]
+		} else {
+			totalNNZ += len(s.ExtraRows[i-baseM].ColIdx)
+		}
+	}
+
+	if totalNNZ >= 64 {
+		ws.TabRowSparse = false
+		tabStruct := tabRow[:n]
+		chunks := ws.TabRowChunks[:0]
+		tabIdx := ws.TabRowIdx
 		for _, i := range ws.RhoIdx {
-			yi := ws.Rho[i]
+			if uint(i) >= uint(m) {
+				continue
+			}
+			yi := rho[i]
+			var cols []int
+			var vals []float64
 			if i < baseM {
-				for k := p.RowPtr[i]; k < p.RowPtr[i+1]; k++ {
-					col := p.ColIdx[k]
-					if ws.Status[col] == statusBasic {
-						continue
-					}
-					if !ws.TabRowMark[col] {
-						ws.TabRowMark[col] = true
-						ws.TabRowIdx = append(ws.TabRowIdx, col)
-					}
-					ws.TabRow[col] += yi * p.RowVal[k]
-				}
+				start, end := p.RowPtr[i], p.RowPtr[i+1]
+				cols = p.ColIdx[start:end]
+				vals = p.RowVal[start:end]
 			} else {
 				dr := s.ExtraRows[i-baseM]
-				for k, col := range dr.ColIdx {
-					if ws.Status[col] == statusBasic {
-						continue
+				cols = dr.ColIdx
+				vals = dr.Val[:len(cols)]
+			}
+			cnt := len(cols)
+			if cnt >= 32 {
+				c0 := cols[0]
+				if cols[cnt-1]-c0 == cnt-1 {
+					s.axpy64(tabStruct[c0:][:cnt], vals[:cnt], yi)
+					for ch := c0 >> 6; ch <= (c0+cnt-1)>>6; ch++ {
+						if uint(ch) < uint(numChunks) && !chunkMark[ch] {
+							chunkMark[ch] = true
+							chunks = append(chunks, ch)
+						}
 					}
-					if !ws.TabRowMark[col] {
-						ws.TabRowMark[col] = true
-						ws.TabRowIdx = append(ws.TabRowIdx, col)
+				} else if cnt >= 34 && cols[cnt-3]-c0 == cnt-3 {
+					l := cnt - 2
+					s.axpy64(tabStruct[c0:][:l], vals[:l], yi)
+					for ch := c0 >> 6; ch <= (c0+l-1)>>6; ch++ {
+						if uint(ch) < uint(numChunks) && !chunkMark[ch] {
+							chunkMark[ch] = true
+							chunks = append(chunks, ch)
+						}
 					}
-					ws.TabRow[col] += yi * dr.Val[k]
+					c1, c2 := cols[l], cols[l+1]
+					tabStruct[c1] += yi * vals[l]
+					tabStruct[c2] += yi * vals[l+1]
+					if !chunkMark[c1>>6] {
+						chunkMark[c1>>6] = true
+						chunks = append(chunks, c1>>6)
+					}
+					if !chunkMark[c2>>6] {
+						chunkMark[c2>>6] = true
+						chunks = append(chunks, c2>>6)
+					}
+				} else {
+					for k, col := range cols {
+						if uint(col) < uint(n) {
+							tabStruct[col] += yi * vals[k]
+							if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
+								chunkMark[ch] = true
+								chunks = append(chunks, ch)
+							}
+						}
+					}
+				}
+			} else {
+				for k, col := range cols {
+					if uint(col) < uint(n) {
+						tabStruct[col] += yi * vals[k]
+						if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
+							chunkMark[ch] = true
+							chunks = append(chunks, ch)
+						}
+					}
 				}
 			}
 			slack := n + i
-			if ws.Status[slack] != statusBasic {
-				ws.TabRowMark[slack] = true
-				ws.TabRowIdx = append(ws.TabRowIdx, slack)
-				ws.TabRow[slack] = yi
+			if uint(slack) < uint(tot) && status[slack] != statusBasic {
+				tabRow[slack] = yi
+				tabIdx = append(tabIdx, slack)
 			}
 		}
-		br := ws.Basis[r]
-		if !ws.TabRowMark[br] {
-			ws.TabRowMark[br] = true
-			ws.TabRowIdx = append(ws.TabRowIdx, br)
+		for _, bVar := range basis {
+			if uint(bVar) < uint(n) && chunkMark[bVar>>6] {
+				tabStruct[bVar] = 0
+			}
 		}
-		ws.TabRow[br] = 1.0
+		br := basis[r]
+		tabRow[br] = 1.0
+		if br < n {
+			if ch := br >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
+				chunkMark[ch] = true
+				chunks = append(chunks, ch)
+			}
+		} else {
+			tabIdx = append(tabIdx, br)
+		}
+		ws.TabRowChunks = chunks
+		ws.TabRowIdx = tabIdx
+	} else {
+		ws.TabRowSparse = true
+		tabIdx := ws.TabRowIdx
+		for _, i := range ws.RhoIdx {
+			if uint(i) >= uint(m) {
+				continue
+			}
+			yi := rho[i]
+			if i < baseM {
+				start, end := p.RowPtr[i], p.RowPtr[i+1]
+				cols := p.ColIdx[start:end]
+				vals := p.RowVal[start:end]
+				for k, col := range cols {
+					if uint(col) >= uint(tot) || status[col] == statusBasic {
+						continue
+					}
+					if !tabMark[col] {
+						tabMark[col] = true
+						tabIdx = append(tabIdx, col)
+					}
+					tabRow[col] += yi * vals[k]
+				}
+			} else {
+				dr := s.ExtraRows[i-baseM]
+				cols := dr.ColIdx
+				vals := dr.Val[:len(cols)]
+				for k, col := range cols {
+					if uint(col) >= uint(tot) || status[col] == statusBasic {
+						continue
+					}
+					if !tabMark[col] {
+						tabMark[col] = true
+						tabIdx = append(tabIdx, col)
+					}
+					tabRow[col] += yi * vals[k]
+				}
+			}
+			slack := n + i
+			if uint(slack) < uint(tot) && status[slack] != statusBasic {
+				tabMark[slack] = true
+				tabIdx = append(tabIdx, slack)
+				tabRow[slack] = yi
+			}
+		}
+		br := basis[r]
+		if uint(br) < uint(tot) {
+			if !tabMark[br] {
+				tabMark[br] = true
+				tabIdx = append(tabIdx, br)
+			}
+			tabRow[br] = 1.0
+		}
+		ws.TabRowIdx = tabIdx
 	}
 }
 
-func (s *LPSolver) selectDualBFRT(leaveDir, primalInfeas float64) int {
-	ws := s.WS
-	cands := ws.BFRTCands[:0]
+func bfrtCandLess(a, b bfrtCand) bool {
+	if a.ratio != b.ratio {
+		return a.ratio < b.ratio
+	}
+	if a.absA != b.absA {
+		return a.absA > b.absA
+	}
+	return a.col < b.col
+}
 
-	appendCand := func(k int) {
-		st := ws.Status[k]
-		if st == statusBasic || st == statusFixed {
-			return
+func sortBFRTCands(a []bfrtCand) {
+	for len(a) > 16 {
+		mid := len(a) >> 1
+		last := len(a) - 1
+		if bfrtCandLess(a[mid], a[0]) {
+			a[0], a[mid] = a[mid], a[0]
 		}
-		tab := ws.TabRow[k]
-		alphaBar := -leaveDir * tab
-		var ratio float64
-		switch st {
-		case statusAtLower:
-			if alphaBar <= pivotTol {
-				return
+		if bfrtCandLess(a[last], a[mid]) {
+			a[mid], a[last] = a[last], a[mid]
+			if bfrtCandLess(a[mid], a[0]) {
+				a[0], a[mid] = a[mid], a[0]
 			}
-			ratio = max(0.0, ws.Dj[k]) / alphaBar
-		case statusAtUpper:
-			if alphaBar >= -pivotTol {
-				return
-			}
-			ratio = max(0.0, -ws.Dj[k]) / (-alphaBar)
-		case statusSuperBasic:
-			if math.Abs(alphaBar) <= pivotTol {
-				return
-			}
-			ratio = 0
-		default:
-			return
 		}
-		absA := math.Abs(tab)
-		maxFlip := math.Inf(1)
-		inEq := k < len(s.colHasEq) && s.colHasEq[k]
-		if !inEq && absA >= 1e-5 && st != statusSuperBasic && !math.IsInf(ws.LB[k], -1) && !math.IsInf(ws.UB[k], 1) {
-			maxFlip = absA * (ws.UB[k] - ws.LB[k])
+		pivot := a[mid]
+		i, j := 0, last
+		for i <= j {
+			for bfrtCandLess(a[i], pivot) {
+				i++
+			}
+			for bfrtCandLess(pivot, a[j]) {
+				j--
+			}
+			if i <= j {
+				a[i], a[j] = a[j], a[i]
+				i++
+				j--
+			}
 		}
-		cands = append(cands, bfrtCand{
-			col:     k,
-			ratio:   ratio,
-			absA:    absA,
-			maxFlip: maxFlip,
-		})
+		if j < len(a)-i {
+			if j > 0 {
+				sortBFRTCands(a[:j+1])
+			}
+			a = a[i:]
+		} else {
+			if i < len(a)-1 {
+				sortBFRTCands(a[i:])
+			}
+			a = a[:j+1]
+		}
+	}
+	for i := 1; i < len(a); i++ {
+		cur := a[i]
+		j := i - 1
+		for j >= 0 && bfrtCandLess(cur, a[j]) {
+			a[j+1] = a[j]
+			j--
+		}
+		a[j+1] = cur
+	}
+}
+
+func (s *LPSolver) selectDualBFRT(primalInfeas, leaveDir float64) int {
+	ws := s.WS
+	cands := ws.BFRTCands
+	if len(cands) == 0 {
+		return -1
+	}
+	minIdx := 0
+	for i := 1; i < len(cands); i++ {
+		if bfrtCandLess(cands[i], cands[minIdx]) {
+			minIdx = i
+		}
+	}
+	c0 := cands[minIdx]
+	if c0.ratio <= primalTol || c0.absA < minStaysFeasPivot {
+		return -1
+	}
+	k0 := c0.col
+	if (k0 < len(s.colHasEq) && s.colHasEq[k0]) || ws.Status[k0] == statusSuperBasic || math.IsInf(ws.LB[k0], -1) || math.IsInf(ws.UB[k0], 1) {
+		return -1
+	}
+	maxFlip0 := c0.absA * (ws.UB[k0] - ws.LB[k0])
+	if maxFlip0 <= 0 || primalInfeas-maxFlip0 <= primalTol {
+		return -1
 	}
 
-	if ws.TabRowSparse {
-		for _, k := range ws.TabRowIdx {
-			appendCand(k)
+	n := s.Prob.NumVars
+	tot := ws.TotVar
+	tabRow := ws.TabRow[:tot]
+	status := ws.Status[:tot]
+	dj := ws.Dj[:tot]
+	cands = cands[:0]
+	if !ws.TabRowSparse {
+		for _, ch := range ws.TabRowChunks {
+			start := ch << 6
+			end := min(start+64, n)
+			for k := start; k < end; k++ {
+				tab := tabRow[k]
+				if tab <= pivotTol && tab >= -pivotTol {
+					continue
+				}
+				alphaBar := -leaveDir * tab
+				var absA, d float64
+				switch status[k] {
+				case statusAtLower:
+					absA = alphaBar
+					d = dj[k]
+				case statusAtUpper:
+					absA = -alphaBar
+					d = -dj[k]
+				case statusSuperBasic:
+					cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
+					continue
+				default:
+					continue
+				}
+				if absA > pivotTol {
+					d = max(0.0, d)
+					cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
+				}
+			}
 		}
-	} else {
-		for k := range ws.TotVar {
-			appendCand(k)
+	}
+	for _, k := range ws.TabRowIdx {
+		if uint(k) >= uint(tot) {
+			continue
+		}
+		tab := tabRow[k]
+		if tab <= pivotTol && tab >= -pivotTol {
+			continue
+		}
+		alphaBar := -leaveDir * tab
+		var absA, d float64
+		switch status[k] {
+		case statusAtLower:
+			absA = alphaBar
+			d = dj[k]
+		case statusAtUpper:
+			absA = -alphaBar
+			d = -dj[k]
+		case statusSuperBasic:
+			cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
+			continue
+		default:
+			continue
+		}
+		if absA > pivotTol {
+			d = max(0.0, d)
+			cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
 		}
 	}
 	ws.BFRTCands = cands
@@ -959,24 +1270,24 @@ func (s *LPSolver) selectDualBFRT(leaveDir, primalInfeas float64) int {
 		return -1
 	}
 
-	slices.SortFunc(cands, func(a, b bfrtCand) int {
-		if a.ratio < b.ratio {
-			return -1
+	lbSlice := ws.LB[:tot]
+	ubSlice := ws.UB[:tot]
+	colHasEq := s.colHasEq
+	for i := range cands {
+		k := cands[i].col
+		absA := cands[i].absA
+		maxFlip := math.Inf(1)
+		inEq := uint(k) < uint(len(colHasEq)) && colHasEq[k]
+		if !inEq && absA >= 1e-5 && uint(k) < uint(tot) && status[k] != statusSuperBasic {
+			lbk, ubk := lbSlice[k], ubSlice[k]
+			if !math.IsInf(lbk, -1) && !math.IsInf(ubk, 1) {
+				maxFlip = absA * (ubk - lbk)
+			}
 		}
-		if a.ratio > b.ratio {
-			return 1
-		}
-		if a.absA > b.absA {
-			return -1
-		}
-		if a.absA < b.absA {
-			return 1
-		}
-		return a.col - b.col
-	})
-	if cands[0].ratio <= primalTol {
-		return -1
+		cands[i].maxFlip = maxFlip
 	}
+
+	sortBFRTCands(cands)
 
 	remInfeas := primalInfeas
 	stopIdx := 0
@@ -1047,12 +1358,15 @@ func (s *LPSolver) recomputeRowBasicDeg() {
 	ws := s.WS
 	n := p.NumVars
 	m := s.TotalRows()
-	clear(ws.RowBasicDeg)
-	for i := range m {
-		bVar := ws.Basis[i]
-		if bVar < n {
-			for idx := p.ColPtr[bVar]; idx < p.ColPtr[bVar+1]; idx++ {
-				ws.RowBasicDeg[p.RowIdx[idx]]++
+	rowDeg := ws.RowBasicDeg[:m]
+	clear(rowDeg)
+	basis := ws.Basis[:m]
+	colPtr := p.ColPtr[:n+1]
+	rowIdx := p.RowIdx
+	for _, bVar := range basis {
+		if uint(bVar) < uint(n) {
+			for _, r := range rowIdx[colPtr[bVar]:colPtr[bVar+1]] {
+				rowDeg[r]++
 			}
 		}
 	}
@@ -1060,16 +1374,17 @@ func (s *LPSolver) recomputeRowBasicDeg() {
 
 func (s *LPSolver) colBasisLoad(k int, dynamic bool) int {
 	p := s.Prob
-	if k >= p.NumVars {
+	if uint(k) >= uint(p.NumVars) {
 		return 0
 	}
+	start, end := p.ColPtr[k], p.ColPtr[k+1]
 	if !dynamic {
-		return p.ColPtr[k+1] - p.ColPtr[k]
+		return end - start
 	}
-	ws := s.WS
+	rowDeg := s.WS.RowBasicDeg
 	load := 0
-	for idx := p.ColPtr[k]; idx < p.ColPtr[k+1]; idx++ {
-		load += ws.RowBasicDeg[p.RowIdx[idx]]
+	for _, r := range p.RowIdx[start:end] {
+		load += rowDeg[r]
 	}
 	return load
 }
@@ -1099,24 +1414,32 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		leaveDir := 0.0
 		primalInfeas := 0.0
 
-		for r := range m {
-			bVar := ws.Basis[r]
-			val := ws.XB[r]
-			lb, ub := ws.LB[bVar], ws.UB[bVar]
-			tol := s.feasTol(bVar)
+		basis := ws.Basis[:m]
+		xb := ws.XB[:m]
+		dse := ws.DSE[:m]
+		lb := ws.LB[:tot]
+		ub := ws.UB[:tot]
+		colTol := s.colTol
+		for r, bVar := range basis {
+			val := xb[r]
+			lbr, ubr := lb[bVar], ub[bVar]
+			tol := primalTol
+			if uint(bVar) < uint(len(colTol)) {
+				tol = colTol[bVar]
+			}
 			var viol, dir float64
-			if val < lb-tol {
-				viol = lb - val
+			if val < lbr-tol {
+				viol = lbr - val
 				dir = 1.0
-			} else if val > ub+tol {
-				viol = val - ub
+			} else if val > ubr+tol {
+				viol = val - ubr
 				dir = -1.0
 			}
 			if viol > 0 {
-				w := ws.DSE[r]
+				w := dse[r]
 				if !(w >= minDSEWeight && w <= maxDSEWeight) {
 					w = 1.0
-					ws.DSE[r] = 1.0
+					dse[r] = 1.0
 				}
 				score := (viol * viol) / w
 				if leaveRow == -1 || score > bestScore {
@@ -1146,44 +1469,82 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		s.ComputeTableauRow(leaveRow)
 
 		thetaMax := math.Inf(1)
-		updateThetaMax := func(k int) {
-			st := ws.Status[k]
-			if st == statusBasic || st == statusFixed {
-				return
+		cands := ws.BFRTCands[:0]
+		tabRow := ws.TabRow[:tot]
+		status := ws.Status[:tot]
+		dj := ws.Dj[:tot]
+		if !ws.TabRowSparse {
+			for _, ch := range ws.TabRowChunks {
+				start := ch << 6
+				end := min(start+64, n)
+				for k := start; k < end; k++ {
+					tab := tabRow[k]
+					if tab <= pivotTol && tab >= -pivotTol {
+						continue
+					}
+					alphaBar := -leaveDir * tab
+					var absA, d float64
+					switch status[k] {
+					case statusAtLower:
+						absA = alphaBar
+						d = dj[k]
+					case statusAtUpper:
+						absA = -alphaBar
+						d = -dj[k]
+					case statusSuperBasic:
+						thetaMax = 0
+						cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
+						continue
+					default:
+						continue
+					}
+					if absA > pivotTol {
+						d = max(0.0, d)
+						if d <= (thetaMax+2*minScaledPrimalTol)*absA {
+							if ratio := (d + harrisTol) / absA; ratio < thetaMax {
+								thetaMax = ratio
+							}
+							cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
+						}
+					}
+				}
 			}
-			alphaBar := -leaveDir * ws.TabRow[k]
-			switch st {
+		}
+		for _, k := range ws.TabRowIdx {
+			if uint(k) >= uint(tot) {
+				continue
+			}
+			tab := tabRow[k]
+			if tab <= pivotTol && tab >= -pivotTol {
+				continue
+			}
+			alphaBar := -leaveDir * tab
+			var absA, d float64
+			switch status[k] {
 			case statusAtLower:
-				if alphaBar > pivotTol {
-					d := max(0.0, ws.Dj[k])
-					ratio := (d + harrisTol) / alphaBar
-					if ratio < thetaMax {
-						thetaMax = ratio
-					}
-				}
+				absA = alphaBar
+				d = dj[k]
 			case statusAtUpper:
-				if alphaBar < -pivotTol {
-					d := max(0.0, -ws.Dj[k])
-					ratio := (d + harrisTol) / (-alphaBar)
-					if ratio < thetaMax {
+				absA = -alphaBar
+				d = -dj[k]
+			case statusSuperBasic:
+				thetaMax = 0
+				cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
+				continue
+			default:
+				continue
+			}
+			if absA > pivotTol {
+				d = max(0.0, d)
+				if d <= (thetaMax+2*minScaledPrimalTol)*absA {
+					if ratio := (d + harrisTol) / absA; ratio < thetaMax {
 						thetaMax = ratio
 					}
-				}
-			case statusSuperBasic:
-				if math.Abs(alphaBar) > pivotTol {
-					thetaMax = 0
+					cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
 				}
 			}
 		}
-		if ws.TabRowSparse {
-			for _, k := range ws.TabRowIdx {
-				updateThetaMax(k)
-			}
-		} else {
-			for k := range tot {
-				updateThetaMax(k)
-			}
-		}
+		ws.BFRTCands = cands
 
 		if math.IsInf(thetaMax, 1) {
 			if len(ws.LU.etas) > 0 {
@@ -1201,58 +1562,36 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		bestLoad := 0
 		bestStaysFeas := false
 		dynLoad := thetaMax > harrisTol && iter < 3*m
-		evalEnterCand := func(k int) {
-			st := ws.Status[k]
-			if st == statusBasic || st == statusFixed {
-				return
-			}
-			alphaBar := -leaveDir * ws.TabRow[k]
-			eligible := false
-			switch st {
-			case statusAtLower:
-				if alphaBar > pivotTol {
-					d := max(0.0, ws.Dj[k])
-					eligible = (d / alphaBar) <= thetaMax+minScaledPrimalTol
+		thetaLim := thetaMax + minScaledPrimalTol
+		scalePiv := n > 100
+		for _, c := range cands {
+			if c.ratio <= thetaLim {
+				k := c.col
+				absA := c.absA
+				staysFeas := absA >= minStaysFeasPivot && primalInfeas <= absA*(ub[k]-lb[k])+primalTol
+				pivScore := absA
+				if scalePiv {
+					pivScore = absA * s.feasTol(k)
 				}
-			case statusAtUpper:
-				if alphaBar < -pivotTol {
-					d := max(0.0, -ws.Dj[k])
-					eligible = (d / (-alphaBar)) <= thetaMax+minScaledPrimalTol
-				}
-			case statusSuperBasic:
-				eligible = math.Abs(alphaBar) > pivotTol
-			}
-			if eligible {
-				absA := math.Abs(ws.TabRow[k])
-				staysFeas := absA >= minStaysFeasPivot && primalInfeas <= absA*(ws.UB[k]-ws.LB[k])+primalTol
 				if enterVar == -1 || (staysFeas && !bestStaysFeas) {
 					bestStaysFeas = staysFeas
-					bestPivAbs = absA
+					bestPivAbs = pivScore
 					bestLoad = s.colBasisLoad(k, dynLoad)
 					enterVar = k
 				} else if staysFeas == bestStaysFeas {
-					if absA > bestPivAbs*(1.0+pivotTieRelTol) {
-						bestPivAbs = absA
+					if pivScore > bestPivAbs*(1.0+pivotTieRelTol) {
+						bestPivAbs = pivScore
 						bestLoad = s.colBasisLoad(k, dynLoad)
 						enterVar = k
-					} else if absA >= bestPivAbs*(1.0-pivotTieRelTol) {
+					} else if pivScore >= bestPivAbs*(1.0-pivotTieRelTol) {
 						load := s.colBasisLoad(k, dynLoad)
 						if load < bestLoad || (load == bestLoad && k < enterVar) {
-							bestPivAbs = absA
+							bestPivAbs = pivScore
 							bestLoad = load
 							enterVar = k
 						}
 					}
 				}
-			}
-		}
-		if ws.TabRowSparse {
-			for _, k := range ws.TabRowIdx {
-				evalEnterCand(k)
-			}
-		} else {
-			for k := range tot {
-				evalEnterCand(k)
 			}
 		}
 
@@ -1261,8 +1600,8 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		}
 
 		ws.FlipCols = ws.FlipCols[:0]
-		if !bestStaysFeas && thetaMax > harrisTol && !math.IsInf(ws.LB[enterVar], -1) && !math.IsInf(ws.UB[enterVar], 1) {
-			if bfrtEnter := s.selectDualBFRT(leaveDir, primalInfeas); bfrtEnter != -1 {
+		if !bestStaysFeas && thetaMax > harrisTol && !math.IsInf(lb[enterVar], -1) && !math.IsInf(ub[enterVar], 1) {
+			if bfrtEnter := s.selectDualBFRT(primalInfeas, leaveDir); bfrtEnter != -1 {
 				enterVar = bfrtEnter
 			}
 		}
@@ -1280,7 +1619,7 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		ws.FColSparse = true
 
 		pivElem := ws.FCol[leaveRow]
-		if math.Abs(pivElem) < minDualPivotElem {
+		if pivElem < minDualPivotElem && pivElem > -minDualPivotElem {
 			if err := s.factorizeBasis(); err != nil {
 				return StatusNumericalError, iter
 			}
@@ -1292,111 +1631,117 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		if len(ws.FlipCols) > 0 {
 			clear(ws.Tau)
 			for _, fk := range ws.FlipCols {
-				lb, ub := ws.LB[fk], ws.UB[fk]
+				lbf, ubf := lb[fk], ub[fk]
 				var deltaX float64
-				if ws.Status[fk] == statusAtLower {
-					ws.Status[fk] = statusAtUpper
-					ws.X[fk] = ub
-					deltaX = ub - lb
+				if status[fk] == statusAtLower {
+					status[fk] = statusAtUpper
+					ws.X[fk] = ubf
+					deltaX = ubf - lbf
 				} else {
-					ws.Status[fk] = statusAtLower
-					ws.X[fk] = lb
-					deltaX = lb - ub
+					status[fk] = statusAtLower
+					ws.X[fk] = lbf
+					deltaX = lbf - ubf
 				}
 				s.addScaledColumn(fk, deltaX, ws.Tau)
 			}
 			ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
 			for _, i := range ws.TauIdx {
-				ws.XB[i] -= ws.Tau[i]
-				ws.X[ws.Basis[i]] = ws.XB[i]
+				xb[i] -= ws.Tau[i]
+				ws.X[basis[i]] = xb[i]
 			}
-			bVar := ws.Basis[leaveRow]
+			bVar := basis[leaveRow]
 			if leaveDir > 0 {
-				primalInfeas = max(0.0, ws.LB[bVar]-ws.XB[leaveRow])
+				primalInfeas = max(0.0, lb[bVar]-xb[leaveRow])
 			} else {
-				primalInfeas = max(0.0, ws.XB[leaveRow]-ws.UB[bVar])
+				primalInfeas = max(0.0, xb[leaveRow]-ub[bVar])
 			}
 		}
 
 		invPiv := 1.0 / pivElem
 		invPiv2 := invPiv * invPiv
-		newLeaveWeight := ws.DSE[leaveRow] * invPiv2
+		leaveWeight := dse[leaveRow]
+		newLeaveWeight := leaveWeight * invPiv2
 		if !(newLeaveWeight >= minDSEWeight && newLeaveWeight <= maxDSEWeight) {
 			newLeaveWeight = min(max(newLeaveWeight, minDSEWeight), maxDSEWeight)
 			if math.IsNaN(newLeaveWeight) {
 				newLeaveWeight = 1.0
 			}
 		}
+		fCol := ws.FCol[:m]
 		if len(ws.FColIdx) > 1 {
-			clear(ws.Tau)
+			tau := ws.Tau[:m]
+			clear(tau)
 			if ws.RhoSparse {
+				rho := ws.Rho[:m]
 				for _, i := range ws.RhoIdx {
-					ws.Tau[i] = ws.Rho[i]
+					tau[i] = rho[i]
 				}
 			} else {
-				copy(ws.Tau, ws.Rho)
+				copy(tau, ws.Rho[:m])
 			}
 			ws.LU.FTRAN(ws.Tau)
 			for _, i := range ws.FColIdx {
-				if i != leaveRow {
-					fi := ws.FCol[i]
-					if math.Abs(fi) > minDSEColEntry {
+				if i != leaveRow && uint(i) < uint(m) {
+					fi := fCol[i]
+					if fi > minDSEColEntry || fi < -minDSEColEntry {
 						ratio := fi * invPiv
-						w := ws.DSE[i] - 2.0*ratio*ws.Tau[i] + ratio*ratio*ws.DSE[leaveRow]
+						w := dse[i] - 2.0*ratio*tau[i] + ratio*ratio*leaveWeight
 						if !(w >= minDSEWeight && w <= maxDSEWeight) {
 							w = min(max(w, minDSEWeight), maxDSEWeight)
 							if math.IsNaN(w) {
 								w = 1.0
 							}
 						}
-						ws.DSE[i] = w
+						dse[i] = w
 					}
 				}
 			}
 		}
-		ws.DSE[leaveRow] = newLeaveWeight
+		dse[leaveRow] = newLeaveWeight
 
-		leaveVar := ws.Basis[leaveRow]
+		leaveVar := basis[leaveRow]
 		var newLeaveVal float64
 		if leaveDir > 0 {
-			ws.Status[leaveVar] = statusAtLower
-			newLeaveVal = ws.LB[leaveVar]
+			status[leaveVar] = statusAtLower
+			newLeaveVal = lb[leaveVar]
 		} else {
-			ws.Status[leaveVar] = statusAtUpper
-			newLeaveVal = ws.UB[leaveVar]
+			status[leaveVar] = statusAtUpper
+			newLeaveVal = ub[leaveVar]
 		}
-		if ws.LB[leaveVar] == ws.UB[leaveVar] {
-			ws.Status[leaveVar] = statusFixed
+		if lb[leaveVar] == ub[leaveVar] {
+			status[leaveVar] = statusFixed
 		}
 
 		primalStep := -leaveDir * primalInfeas / pivElem
 		oldEnterVal := ws.X[enterVar]
 		newEnterVal := oldEnterVal + primalStep
 
+		xSlice := ws.X[:tot]
 		for _, i := range ws.FColIdx {
-			if i != leaveRow {
-				ws.XB[i] -= ws.FCol[i] * primalStep
-				ws.X[ws.Basis[i]] = ws.XB[i]
+			if i != leaveRow && uint(i) < uint(m) {
+				xb[i] -= fCol[i] * primalStep
+				xSlice[basis[i]] = xb[i]
 			}
 		}
-		ws.XB[leaveRow] = newEnterVal
-		ws.X[leaveVar] = newLeaveVal
-		ws.X[enterVar] = newEnterVal
+		xb[leaveRow] = newEnterVal
+		xSlice[leaveVar] = newLeaveVal
+		xSlice[enterVar] = newEnterVal
 
+		rowDeg := ws.RowBasicDeg[:m]
 		if leaveVar < n {
-			for idx := p.ColPtr[leaveVar]; idx < p.ColPtr[leaveVar+1]; idx++ {
-				ws.RowBasicDeg[p.RowIdx[idx]]--
+			for _, r := range p.RowIdx[p.ColPtr[leaveVar]:p.ColPtr[leaveVar+1]] {
+				rowDeg[r]--
 			}
 		}
 		if enterVar < n {
-			for idx := p.ColPtr[enterVar]; idx < p.ColPtr[enterVar+1]; idx++ {
-				ws.RowBasicDeg[p.RowIdx[idx]]++
+			for _, r := range p.RowIdx[p.ColPtr[enterVar]:p.ColPtr[enterVar+1]] {
+				rowDeg[r]++
 			}
 		}
-		ws.Basis[leaveRow] = enterVar
+		basis[leaveRow] = enterVar
 		ws.BasicRow[leaveVar] = -1
 		ws.BasicRow[enterVar] = leaveRow
-		ws.Status[enterVar] = statusBasic
+		status[enterVar] = statusBasic
 
 		if err := ws.LU.PushEtaSparse(leaveRow, ws.FCol, ws.FColIdx); err != nil {
 			if err := s.factorizeBasis(); err != nil {
@@ -1405,24 +1750,35 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 			s.computeDualsAndReducedCosts(cost)
 			s.computePrimalValues()
 		} else {
-			dualStep := ws.Dj[enterVar] / ws.TabRow[enterVar]
-			if math.Abs(dualStep) > 0 {
+			dualStep := dj[enterVar] / tabRow[enterVar]
+			if dualStep != 0 {
 				if ws.RhoSparse {
+					y := ws.Y[:m]
+					rho := ws.Rho[:m]
 					for _, i := range ws.RhoIdx {
-						ws.Y[i] += dualStep * ws.Rho[i]
+						y[i] += dualStep * rho[i]
 					}
 				} else {
 					s.axpy64(ws.Y[:m], ws.Rho[:m], dualStep)
 				}
 				if ws.TabRowSparse {
 					for _, k := range ws.TabRowIdx {
-						ws.Dj[k] -= dualStep * ws.TabRow[k]
+						dj[k] -= dualStep * tabRow[k]
 					}
 				} else {
-					s.axpy64(ws.Dj[:tot], ws.TabRow[:tot], -dualStep)
+					for _, ch := range ws.TabRowChunks {
+						start := ch << 6
+						end := min(start+64, n)
+						s.axpy64(dj[start:end], tabRow[start:end], -dualStep)
+					}
+					for _, k := range ws.TabRowIdx {
+						if status[k] != statusBasic {
+							dj[k] -= dualStep * tabRow[k]
+						}
+					}
 				}
 			}
-			ws.Dj[enterVar] = 0
+			dj[enterVar] = 0
 		}
 	}
 

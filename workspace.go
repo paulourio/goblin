@@ -44,18 +44,20 @@ type Workspace struct {
 	Dj  []float64
 	DSE []float64
 
-	Rho          []float64
-	RhoIdx       []int
-	RhoSparse    bool
-	FCol         []float64
-	FColIdx      []int
-	FColSparse   bool
-	Tau          []float64
-	TauIdx       []int
-	TabRow       []float64
-	TabRowIdx    []int
-	TabRowMark   []bool
-	TabRowSparse bool
+	Rho             []float64
+	RhoIdx          []int
+	RhoSparse       bool
+	FCol            []float64
+	FColIdx         []int
+	FColSparse      bool
+	Tau             []float64
+	TauIdx          []int
+	TabRow          []float64
+	TabRowIdx       []int
+	TabRowMark      []bool
+	TabRowSparse    bool
+	TabRowChunks    []int
+	TabRowChunkMark []bool
 
 	FlipCols  []int
 	BFRTCands []bfrtCand
@@ -129,6 +131,15 @@ func (ws *Workspace) EnsureSize(n, m int) {
 	}
 	ws.TabRowIdx = ws.TabRowIdx[:0]
 	ws.TabRowSparse = false
+	numChunks := (n + 63) >> 6
+	if cap(ws.TabRowChunkMark) < numChunks {
+		ws.TabRowChunkMark = make([]bool, numChunks)
+		ws.TabRowChunks = make([]int, 0, numChunks)
+	} else {
+		ws.TabRowChunkMark = ws.TabRowChunkMark[:numChunks]
+		clear(ws.TabRowChunkMark)
+		ws.TabRowChunks = ws.TabRowChunks[:0]
+	}
 	ws.FlipCols = ws.FlipCols[:0]
 	ws.BFRTCands = ws.BFRTCands[:0]
 }

@@ -50,13 +50,14 @@ type nodeQueue []*searchNode
 
 func (pq nodeQueue) Len() int { return len(pq) }
 func (pq nodeQueue) Less(i, j int) bool {
-	if math.Abs(pq[i].lowerBound-pq[j].lowerBound) > nodeQueueCmpTol {
-		return pq[i].lowerBound < pq[j].lowerBound
+	ni, nj := pq[i], pq[j]
+	if dl := ni.lowerBound - nj.lowerBound; dl > nodeQueueCmpTol || dl < -nodeQueueCmpTol {
+		return dl < 0
 	}
-	if math.Abs(pq[i].estimate-pq[j].estimate) > nodeQueueCmpTol {
-		return pq[i].estimate < pq[j].estimate
+	if de := ni.estimate - nj.estimate; de > nodeQueueCmpTol || de < -nodeQueueCmpTol {
+		return de < 0
 	}
-	return pq[i].depth > pq[j].depth
+	return ni.depth > nj.depth
 }
 func (pq nodeQueue) Swap(i, j int) { pq[i], pq[j] = pq[j], pq[i] }
 func (pq *nodeQueue) Push(x any)   { *pq = append(*pq, x.(*searchNode)) }
@@ -197,7 +198,24 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	}
 
 	bestObjMin := math.Inf(1)
+	if opts.hasCutoff {
+		bestObjMin = opts.cutoffMin - p.ObjConstant
+	}
 	var bestPrimal []float64
+	isSubMIP := p.Name == "__submip__"
+	if isSubMIP && bestObjMin <= rootLPMin+opts.AbsGapTol {
+		return Result{
+			modelID:      p.modelID,
+			Status:       StatusOptimal,
+			Objective:    math.NaN(),
+			BestBound:    rootLPUser,
+			RootLPBound:  rootLPUser,
+			RootCutBound: rootLPUser,
+			Nodes:        1,
+			Iterations:   totalLPIters,
+			SolveTime:    time.Since(startTime),
+		}
+	}
 
 	var heurWS *Workspace
 	var heurSolver *LPSolver
@@ -211,7 +229,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 		heurSolver.CopyRootBasisFrom(lpSolver)
 
 		if !timeExpired() {
-			if sol, objMin, ok := tryPropagatedRounding(p, rootRes.Primal, p.VarLB, p.VarUB, heurSolver); ok {
+			if sol, objMin, ok := tryPropagatedRounding(p, rootRes.Primal, p.VarLB, p.VarUB, heurSolver); ok && objMin < bestObjMin {
 				bestObjMin = objMin
 				bestPrimal = sol
 			}
@@ -223,7 +241,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 				bestPrimal = sol
 			}
 		}
-		if !timeExpired() && !isGapClosed(rootLPMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
+		if (!opts.EnableCuts || opts.MaxCutPasses <= 0 || isGapClosed(rootLPMin, bestObjMin, 0.20, opts.AbsGapTol)) && !timeExpired() && !isGapClosed(rootLPMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
 			if sol, objMin, ok := tryRootSubMIP(p, lpSolver, rootRes.Primal, p.VarLB, p.VarUB, bestObjMin, deadline); ok && objMin < bestObjMin {
 				bestObjMin = objMin
 				bestPrimal = sol
@@ -319,20 +337,20 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	rootCutUser := p.ObjectiveFromMin(rootCutMin)
 
 	postCutSubMIPFound := false
-	if opts.EnableHeuristics && !timeExpired() && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
+	if opts.EnableHeuristics && cutsAdded > 0 && !timeExpired() && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
 		if sol, objMin, ok := tryRootSubMIP(p, lpSolver, curLPRes.Primal, p.VarLB, p.VarUB, bestObjMin, deadline); ok && objMin < bestObjMin {
 			bestObjMin = objMin
 			bestPrimal = sol
 			postCutSubMIPFound = true
 		}
-		if !timeExpired() && !postCutSubMIPFound && cutsAdded > 0 && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
+		if !timeExpired() && !postCutSubMIPFound && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
 			if sol, objMin, ok := tryPropagatedRounding(p, curLPRes.Primal, p.VarLB, p.VarUB, heurSolver); ok && objMin < bestObjMin {
 				bestObjMin = objMin
 				bestPrimal = sol
 			}
 		}
-		if !timeExpired() && !postCutSubMIPFound && cutsAdded > 0 && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
-			if sol, objMin, ok := tryFractionalDiving(p, curLPRes.Primal, p.VarLB, p.VarUB, heurSolver, bestObjMin, false); ok && objMin < bestObjMin {
+		if !timeExpired() && !postCutSubMIPFound && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
+			if sol, objMin, ok := tryFractionalDiving(p, curLPRes.Primal, p.VarLB, p.VarUB, heurSolver, bestObjMin, p.NumVars > 100); ok && objMin < bestObjMin {
 				bestObjMin = objMin
 				bestPrimal = sol
 			}
@@ -364,8 +382,11 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	pq := make(nodeQueue, 0, initNodeQueueCap)
 	heap.Init(&pq)
 
-	curLB := slices.Clone(p.VarLB)
-	curUB := slices.Clone(p.VarUB)
+	baseLB := slices.Clone(p.VarLB)
+	baseUB := slices.Clone(p.VarUB)
+	tightenUnboundedIntCols(p, baseLB, baseUB, bestObjMin)
+	curLB := slices.Clone(baseLB)
+	curUB := slices.Clone(baseUB)
 
 	nodesExplored := 1
 	nodeCounter := 1
@@ -414,7 +435,13 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 		heap.Push(&pq, downNode)
 		heap.Push(&pq, upNode)
 
+		lastIncumbentNode := 1
+		heurMisses := 0
 		for pq.Len() > 0 || plungeNode != nil {
+			if isSubMIP && bestPrimal != nil && nodesExplored-lastIncumbentNode >= 48 {
+				hitNodeLimit = true
+				break
+			}
 			if opts.MaxNodes > 0 && nodesExplored >= opts.MaxNodes {
 				hitNodeLimit = true
 				break
@@ -446,8 +473,8 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 
 			nodesExplored++
 
-			copy(curLB, p.VarLB)
-			copy(curUB, p.VarUB)
+			copy(curLB, baseLB)
+			copy(curUB, baseUB)
 			for _, d := range node.deltas {
 				curLB[d.col] = max(curLB[d.col], d.lb)
 				curUB[d.col] = min(curUB[d.col], d.ub)
@@ -495,18 +522,31 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 					if objMin := minObjective(p, cand); objMin < bestObjMin {
 						bestObjMin = objMin
 						bestPrimal = cand
+						lastIncumbentNode = nodesExplored
+						heurMisses = 0
 					}
 					continue
 				}
 			}
 
-			if opts.EnableHeuristics && !timeExpired() && ((!postCutSubMIPFound && node.depth <= 5) || nodesExplored%4 == 0) {
+			heurStride := 4
+			if n > 200 || heurMisses >= 4 {
+				heurStride = 16
+			}
+			if n <= 200 && heurMisses >= 12 {
+				heurStride = 64
+			}
+			if opts.EnableHeuristics && !timeExpired() && ((!postCutSubMIPFound && node.depth <= 5 && (n <= 200 || node.depth <= 1)) || nodesExplored%heurStride == 0) {
 				if sol, objMin, ok := tryPropagatedRounding(p, nodeRes.Primal, curLB, curUB, heurSolver); ok && objMin < bestObjMin {
 					bestObjMin = objMin
 					bestPrimal = sol
+					lastIncumbentNode = nodesExplored
+					heurMisses = 0
 					if nodeRes.ObjectiveMin >= bestObjMin-opts.AbsGapTol || isGapClosed(nodeRes.ObjectiveMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
 						continue
 					}
+				} else {
+					heurMisses++
 				}
 			}
 
@@ -893,4 +933,74 @@ func isGapClosed(lowerBound, upperBound, relTol, absTol float64) bool {
 	}
 	denom := max(1.0, math.Abs(upperBound))
 	return (diff / denom) <= relTol
+}
+
+func tightenUnboundedIntCols(p *CompiledProblem, baseLB, baseUB []float64, bestObjMin float64) {
+	if math.IsInf(bestObjMin, 1) {
+		return
+	}
+	hasInfInt := false
+	for _, col := range p.IntCols {
+		if math.IsInf(baseLB[col], -1) || math.IsInf(baseUB[col], 1) {
+			hasInfInt = true
+			break
+		}
+	}
+	if !hasInfInt {
+		return
+	}
+	n := p.NumVars
+	minObj := 0.0
+	for j := range n {
+		c := p.ObjMin[j]
+		if c > 0 {
+			if math.IsInf(baseLB[j], -1) {
+				return
+			}
+			minObj += c * baseLB[j]
+		} else if c < 0 {
+			if math.IsInf(baseUB[j], 1) {
+				return
+			}
+			minObj += c * baseUB[j]
+		}
+	}
+	slack := bestObjMin - minObj
+	if slack < -1e-6 {
+		return
+	}
+	slack = max(0.0, slack)
+	tlb := slices.Clone(baseLB)
+	tub := slices.Clone(baseUB)
+	for j := range n {
+		c := p.ObjMin[j]
+		if c > 1e-12 {
+			u := tlb[j] + slack/c
+			if p.VarCat[j] != Continuous {
+				u = math.Floor(u + heurIntBoundTol)
+			}
+			if u < tub[j] {
+				tub[j] = max(tlb[j], u)
+			}
+		} else if c < -1e-12 {
+			l := tub[j] + slack/c
+			if p.VarCat[j] != Continuous {
+				l = math.Ceil(l - heurIntBoundTol)
+			}
+			if l > tlb[j] {
+				tlb[j] = min(tub[j], l)
+			}
+		}
+	}
+	if !propagateBounds(p, tlb, tub, 3) {
+		return
+	}
+	for _, col := range p.IntCols {
+		if math.IsInf(baseUB[col], 1) && !math.IsInf(tub[col], 1) {
+			baseUB[col] = tub[col]
+		}
+		if math.IsInf(baseLB[col], -1) && !math.IsInf(tlb[col], -1) {
+			baseLB[col] = tlb[col]
+		}
+	}
 }
