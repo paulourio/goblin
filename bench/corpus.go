@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 	"github.com/paulourio/goblin/format"
 )
 
@@ -18,12 +18,12 @@ type CorpusCase struct {
 	ID          string
 	Tier        string // "tier1_canonical", "tier2_p90", "tier3_large"
 	Description string
-	Model       *goblin.Model
-	BuildTrial  func(trial int) *goblin.Model
+	Model       *gb.Model
+	BuildTrial  func(trial int) *gb.Model
 }
 
 // TrialModel returns the deterministic problem instance for trial k (k == 0 returns the canonical Model).
-func (c CorpusCase) TrialModel(trial int) *goblin.Model {
+func (c CorpusCase) TrialModel(trial int) *gb.Model {
 	if trial <= 0 || c.BuildTrial == nil {
 		return c.Model
 	}
@@ -56,36 +56,36 @@ func BuildCorpus() []CorpusCase {
 			ID:          "t1_std_lp",
 			Tier:        "tier1_canonical",
 			Description: "PuLP canonical continuous LP (3 vars, 3 rows)",
-			Model:       buildPuLPStdProblem("t1_std_lp", goblin.Minimize, false, false),
-			BuildTrial: func(trial int) *goblin.Model {
-				return buildPuLPStdProblemTrial("t1_std_lp", goblin.Minimize, false, false, trial)
+			Model:       buildPuLPStdProblem("t1_std_lp", gb.Minimize, false, false),
+			BuildTrial: func(trial int) *gb.Model {
+				return buildPuLPStdProblemTrial("t1_std_lp", gb.Minimize, false, false, trial)
 			},
 		},
 		CorpusCase{
 			ID:          "t1_std_lp_max",
 			Tier:        "tier1_canonical",
 			Description: "PuLP canonical continuous LP maximize (3 vars, 3 rows)",
-			Model:       buildPuLPStdProblem("t1_std_lp_max", goblin.Maximize, false, false),
-			BuildTrial: func(trial int) *goblin.Model {
-				return buildPuLPStdProblemTrial("t1_std_lp_max", goblin.Maximize, false, false, trial)
+			Model:       buildPuLPStdProblem("t1_std_lp_max", gb.Maximize, false, false),
+			BuildTrial: func(trial int) *gb.Model {
+				return buildPuLPStdProblemTrial("t1_std_lp_max", gb.Maximize, false, false, trial)
 			},
 		},
 		CorpusCase{
 			ID:          "t1_std_mip",
 			Tier:        "tier1_canonical",
 			Description: "PuLP canonical mixed-integer problem (3 vars, 3 rows)",
-			Model:       buildPuLPStdProblem("t1_std_mip", goblin.Minimize, true, false),
-			BuildTrial: func(trial int) *goblin.Model {
-				return buildPuLPStdProblemTrial("t1_std_mip", goblin.Minimize, true, false, trial)
+			Model:       buildPuLPStdProblem("t1_std_mip", gb.Minimize, true, false),
+			BuildTrial: func(trial int) *gb.Model {
+				return buildPuLPStdProblemTrial("t1_std_mip", gb.Minimize, true, false, trial)
 			},
 		},
 		CorpusCase{
 			ID:          "t1_mip_float_obj",
 			Tier:        "tier1_canonical",
 			Description: "PuLP test_mip_floats_objective (3 vars, 3 rows, obj=64.95)",
-			Model:       buildPuLPStdProblem("t1_mip_float_obj", goblin.Minimize, true, true),
-			BuildTrial: func(trial int) *goblin.Model {
-				return buildPuLPStdProblemTrial("t1_mip_float_obj", goblin.Minimize, true, true, trial)
+			Model:       buildPuLPStdProblem("t1_mip_float_obj", gb.Minimize, true, true),
+			BuildTrial: func(trial int) *gb.Model {
+				return buildPuLPStdProblemTrial("t1_mip_float_obj", gb.Minimize, true, true, trial)
 			},
 		},
 		CorpusCase{
@@ -107,7 +107,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier1_canonical",
 			Description: "Mixed 0-1 and integer knapsack (12 vars, 3 rows)",
 			Model:       buildMixedKnapsack("t1_knapsack_12", 12, 3, 101),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMixedKnapsack("t1_knapsack_12", 12, 3, trialSeed(101, trial))
 			},
 		},
@@ -123,7 +123,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier1_canonical",
 			Description: "26-var MAD group-item allocation (G=2 groups, I=4 items, T=6 periods)",
 			Model:       buildMADAllocation("t1_mad_g2_i4", 2, 4, 6, 109),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t1_mad_g2_i4", 2, 4, 6, trialSeed(109, trial))
 			},
 		},
@@ -132,7 +132,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier1_canonical",
 			Description: "26-var unstructured random-weight MAD allocation (G=2 groups, I=4 items, T=6 periods)",
 			Model:       BuildMADRandom("t1_mad_rand_g2_i4", 2, 4, 6, 7000),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return BuildMADRandom("t1_mad_rand_g2_i4", 2, 4, 6, trialSeed(7000, trial))
 			},
 		},
@@ -147,7 +147,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "30-var mixed 0-1 & general integer multidimensional knapsack (6 rows)",
 			Model:       buildMixedKnapsack("t2_mkp_30", 30, 6, 201),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMixedKnapsack("t2_mkp_30", 30, 6, trialSeed(201, trial))
 			},
 		},
@@ -156,7 +156,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "50-var mixed 0-1 & general integer multidimensional knapsack (8 rows)",
 			Model:       buildMixedKnapsack("t2_mkp_50", 50, 8, 202),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMixedKnapsack("t2_mkp_50", 50, 8, trialSeed(202, trial))
 			},
 		},
@@ -165,7 +165,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "36-var Capacitated Facility Location (6 binary open + 30 mixed flows)",
 			Model:       buildFacilityLocation("t2_cflp_36", 6, 5, 203),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildFacilityLocation("t2_cflp_36", 6, 5, trialSeed(203, trial))
 			},
 		},
@@ -174,7 +174,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "49-var Capacitated Facility Location (7 binary open + 42 mixed flows)",
 			Model:       buildFacilityLocation("t2_cflp_49", 7, 6, 204),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildFacilityLocation("t2_cflp_49", 7, 6, trialSeed(204, trial))
 			},
 		},
@@ -183,7 +183,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "45-var Generalized Assignment with integer overtime (5 agents, 8 tasks)",
 			Model:       buildGeneralizedAssignment("t2_gap_45", 5, 8, 205),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildGeneralizedAssignment("t2_gap_45", 5, 8, trialSeed(205, trial))
 			},
 		},
@@ -192,7 +192,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "48-var Capacitated Lot-Sizing (16 periods: binary setup + int prod + cont inv)",
 			Model:       buildLotSizing("t2_lotsizing_48", 16, 206),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildLotSizing("t2_lotsizing_48", 16, trialSeed(206, trial))
 			},
 		},
@@ -201,7 +201,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "44-var Bin Packing with general integer slack (4 bins, 10 items)",
 			Model:       buildBinPacking("t2_binpack_44", 4, 10, 207),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildBinPacking("t2_binpack_44", 4, 10, trialSeed(207, trial))
 			},
 		},
@@ -210,7 +210,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "50-var Set Covering with 0-1 selection and integer penalty slacks (20 rows)",
 			Model:       buildSetCovering("t2_setcover_50", 50, 20, 208),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildSetCovering("t2_setcover_50", 50, 20, trialSeed(208, trial))
 			},
 		},
@@ -219,7 +219,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "34-var MAD group-item allocation (G=2 groups, I=8 items, T=6 periods)",
 			Model:       buildMADAllocation("t2_mad_g2_i8", 2, 8, 6, 209),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t2_mad_g2_i8", 2, 8, 6, trialSeed(209, trial))
 			},
 		},
@@ -228,7 +228,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "54-var MAD group-item allocation (G=3 groups, I=9 items, T=6 periods)",
 			Model:       buildMADAllocation("t2_mad_g3_i9", 3, 9, 6, 210),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t2_mad_g3_i9", 3, 9, 6, trialSeed(210, trial))
 			},
 		},
@@ -237,7 +237,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "84-var MAD group-item allocation (G=4 groups, I=12 items, T=6 periods)",
 			Model:       buildMADAllocation("t2_mad_g4_i12", 4, 12, 6, 211),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t2_mad_g4_i12", 4, 12, 6, trialSeed(211, trial))
 			},
 		},
@@ -246,7 +246,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "34-var unstructured random-weight MAD allocation (G=2 groups, I=8 items, T=6 periods)",
 			Model:       BuildMADRandom("t2_mad_rand_g2_i8", 2, 8, 6, 7001),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return BuildMADRandom("t2_mad_rand_g2_i8", 2, 8, 6, trialSeed(7001, trial))
 			},
 		},
@@ -255,7 +255,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier2_p90",
 			Description: "54-var unstructured random-weight MAD allocation (G=3 groups, I=9 items, T=6 periods)",
 			Model:       BuildMADRandom("t2_mad_rand_g3_i9", 3, 9, 6, 7002),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return BuildMADRandom("t2_mad_rand_g3_i9", 3, 9, 6, trialSeed(7002, trial))
 			},
 		},
@@ -270,7 +270,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "200-var mixed 0-1/integer/continuous multidimensional knapsack (8 rows)",
 			Model:       buildMixedKnapsack("t3_mkp_200", 200, 8, 301),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMixedKnapsack("t3_mkp_200", 200, 8, trialSeed(301, trial))
 			},
 		},
@@ -279,7 +279,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "300-var Capacitated Facility Location (15 binary facilities, 19 customers)",
 			Model:       buildFacilityLocation("t3_cflp_300", 15, 19, 302),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildFacilityLocation("t3_cflp_300", 15, 19, trialSeed(302, trial))
 			},
 		},
@@ -288,7 +288,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "504-var Multi-Item Capacitated Lot-Sizing (42 items x 4 periods x 3 vars)",
 			Model:       buildMultiItemLotSizing("t3_lotsizing_504", 42, 4, 303),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMultiItemLotSizing("t3_lotsizing_504", 42, 4, trialSeed(303, trial))
 			},
 		},
@@ -297,7 +297,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "1000-var Block Resource Allocation & Scheduling (50 blocks x 20 vars, 100 rows)",
 			Model:       buildBlockScheduling("t3_sched_1000", 50, 20, 304),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildBlockScheduling("t3_sched_1000", 50, 20, trialSeed(304, trial))
 			},
 		},
@@ -306,7 +306,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "145-var MAD group-item allocation (G=5 groups, I=20 items, T=6 periods)",
 			Model:       buildMADAllocation("t3_mad_g5_i20", 5, 20, 6, 305),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t3_mad_g5_i20", 5, 20, 6, trialSeed(305, trial))
 			},
 		},
@@ -315,7 +315,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "234-var MAD group-item allocation (G=6 groups, I=30 items, T=6 periods)",
 			Model:       buildMADAllocation("t3_mad_g6_i30", 6, 30, 6, 306),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t3_mad_g6_i30", 6, 30, 6, trialSeed(306, trial))
 			},
 		},
@@ -324,7 +324,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "1090-var MAD group-item allocation (G=10 groups, I=100 items, T=6 periods)",
 			Model:       buildMADAllocation("t3_mad_g10_i100", 10, 100, 6, 307),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t3_mad_g10_i100", 10, 100, 6, trialSeed(307, trial))
 			},
 		},
@@ -333,7 +333,7 @@ func BuildCorpus() []CorpusCase {
 			Tier:        "tier3_large",
 			Description: "4036-var MAD group-item allocation (G=4 groups, I=1000 items, T=6 periods)",
 			Model:       buildMADAllocation("t3_mad_g4_i1000", 4, 1000, 6, 308),
-			BuildTrial: func(trial int) *goblin.Model {
+			BuildTrial: func(trial int) *gb.Model {
 				return buildMADAllocation("t3_mad_g4_i1000", 4, 1000, 6, trialSeed(308, trial))
 			},
 		},
@@ -385,15 +385,15 @@ func WriteCorpusJSON(dir string) ([]CorpusCase, error) {
 	return cases, nil
 }
 
-func buildPuLPStdProblem(name string, sense goblin.Sense, mip bool, floatObj bool) *goblin.Model {
+func buildPuLPStdProblem(name string, sense gb.Sense, mip bool, floatObj bool) *gb.Model {
 	return buildPuLPStdProblemTrial(name, sense, mip, floatObj, 0)
 }
 
-func buildPuLPStdProblemTrial(name string, sense goblin.Sense, mip bool, floatObj bool, trial int) *goblin.Model {
-	m := goblin.NewModel(name, sense)
-	cat := goblin.Continuous
+func buildPuLPStdProblemTrial(name string, sense gb.Sense, mip bool, floatObj bool, trial int) *gb.Model {
+	m := gb.NewModel(name, sense)
+	cat := gb.Continuous
 	if mip {
-		cat = goblin.Integer
+		cat = gb.Integer
 	}
 	x := m.AddContVar("x", 0, 4)
 	y := m.AddContVar("y", -1, 1)
@@ -419,19 +419,19 @@ func buildPuLPStdProblemTrial(name string, sense goblin.Sense, mip bool, floatOb
 		rhs2 = 9.0 + 0.5*float64(rng.IntN(5))
 		rhs3 += float64(rng.IntN(5))
 	}
-	m.SetObjectiveNamed("obj", goblin.NewExpr(goblin.T(x, cx), goblin.T(y, cy), goblin.T(z, cz)))
-	m.AddConstraint("c1", goblin.Le(goblin.NewExpr(goblin.T(x, 1), goblin.T(y, 1)), rhs1))
-	m.AddConstraint("c2", goblin.Ge(goblin.NewExpr(goblin.T(x, 1), goblin.T(z, 1)), rhs2))
-	m.AddConstraint("c3", goblin.Eq(goblin.NewExpr(goblin.T(y, -1), goblin.T(z, 1)), rhs3))
+	m.SetObjectiveNamed("obj", gb.NewExpr(gb.T(x, cx), gb.T(y, cy), gb.T(z, cz)))
+	m.AddConstraint("c1", gb.Le(gb.NewExpr(gb.T(x, 1), gb.T(y, 1)), rhs1))
+	m.AddConstraint("c2", gb.Ge(gb.NewExpr(gb.T(x, 1), gb.T(z, 1)), rhs2))
+	m.AddConstraint("c3", gb.Eq(gb.NewExpr(gb.T(y, -1), gb.T(z, 1)), rhs3))
 	return m
 }
 
-func buildWhiskasProblem() *goblin.Model {
+func buildWhiskasProblem() *gb.Model {
 	return buildWhiskasProblemTrial(0)
 }
 
-func buildWhiskasProblemTrial(trial int) *goblin.Model {
-	m := goblin.NewModel("t1_whiskas", goblin.Minimize)
+func buildWhiskasProblemTrial(trial int) *gb.Model {
+	m := gb.NewModel("t1_whiskas", gb.Minimize)
 	x1 := m.AddContVar("Chicken", 0, 100)
 	x2 := m.AddContVar("Beef", 0, 100)
 	x3 := m.AddContVar("Mutton", 0, 100)
@@ -456,36 +456,36 @@ func buildWhiskasProblemTrial(trial int) *goblin.Model {
 		saltRHS = 0.36 + 0.02*float64(rng.IntN(5))
 	}
 
-	m.SetObjectiveNamed("Cost", goblin.NewExpr(
-		goblin.T(x1, c1), goblin.T(x2, c2), goblin.T(x3, c3),
-		goblin.T(x4, c4), goblin.T(x5, c5), goblin.T(x6, c6),
+	m.SetObjectiveNamed("Cost", gb.NewExpr(
+		gb.T(x1, c1), gb.T(x2, c2), gb.T(x3, c3),
+		gb.T(x4, c4), gb.T(x5, c5), gb.T(x6, c6),
 	))
-	m.AddConstraint("Sum", goblin.Eq(goblin.SumVars(x1, x2, x3, x4, x5, x6), 100))
-	m.AddConstraint("Protein", goblin.Ge(goblin.NewExpr(
-		goblin.T(x1, 0.100), goblin.T(x2, 0.200), goblin.T(x3, 0.150),
-		goblin.T(x4, 0.000), goblin.T(x5, 0.040), goblin.T(x6, 0.000),
+	m.AddConstraint("Sum", gb.Eq(gb.SumVars(x1, x2, x3, x4, x5, x6), 100))
+	m.AddConstraint("Protein", gb.Ge(gb.NewExpr(
+		gb.T(x1, 0.100), gb.T(x2, 0.200), gb.T(x3, 0.150),
+		gb.T(x4, 0.000), gb.T(x5, 0.040), gb.T(x6, 0.000),
 	), protRHS))
-	m.AddConstraint("Fat", goblin.Ge(goblin.NewExpr(
-		goblin.T(x1, 0.080), goblin.T(x2, 0.100), goblin.T(x3, 0.110),
-		goblin.T(x4, 0.010), goblin.T(x5, 0.010), goblin.T(x6, 0.000),
+	m.AddConstraint("Fat", gb.Ge(gb.NewExpr(
+		gb.T(x1, 0.080), gb.T(x2, 0.100), gb.T(x3, 0.110),
+		gb.T(x4, 0.010), gb.T(x5, 0.010), gb.T(x6, 0.000),
 	), fatRHS))
-	m.AddConstraint("Fibre", goblin.Le(goblin.NewExpr(
-		goblin.T(x1, 0.001), goblin.T(x2, 0.005), goblin.T(x3, 0.003),
-		goblin.T(x4, 0.100), goblin.T(x5, 0.150), goblin.T(x6, 0.000),
+	m.AddConstraint("Fibre", gb.Le(gb.NewExpr(
+		gb.T(x1, 0.001), gb.T(x2, 0.005), gb.T(x3, 0.003),
+		gb.T(x4, 0.100), gb.T(x5, 0.150), gb.T(x6, 0.000),
 	), fibreRHS))
-	m.AddConstraint("Salt", goblin.Le(goblin.NewExpr(
-		goblin.T(x1, 0.002), goblin.T(x2, 0.005), goblin.T(x3, 0.007),
-		goblin.T(x4, 0.002), goblin.T(x5, 0.008), goblin.T(x6, 0.000),
+	m.AddConstraint("Salt", gb.Le(gb.NewExpr(
+		gb.T(x1, 0.002), gb.T(x2, 0.005), gb.T(x3, 0.007),
+		gb.T(x4, 0.002), gb.T(x5, 0.008), gb.T(x6, 0.000),
 	), saltRHS))
 	return m
 }
 
-func buildFurnitureProblem() *goblin.Model {
+func buildFurnitureProblem() *gb.Model {
 	return buildFurnitureProblemTrial(0)
 }
 
-func buildFurnitureProblemTrial(trial int) *goblin.Model {
-	m := goblin.NewModel("t1_furniture", goblin.Maximize)
+func buildFurnitureProblemTrial(trial int) *gb.Model {
+	m := gb.NewModel("t1_furniture", gb.Maximize)
 	tables := m.AddIntVar("Tables", 0, 100)
 	chairs := m.AddIntVar("Chairs", 0, 100)
 	pTab, pCh := 45.0, 20.0
@@ -499,19 +499,19 @@ func buildFurnitureProblemTrial(trial int) *goblin.Model {
 		laborRHS = float64(390 + 15*rng.IntN(12))
 		demRHS = float64(8 + rng.IntN(6))
 	}
-	m.SetObjectiveNamed("Profit", goblin.NewExpr(goblin.T(tables, pTab), goblin.T(chairs, pCh)))
-	m.AddConstraint("Wood", goblin.Le(goblin.NewExpr(goblin.T(tables, 20), goblin.T(chairs, 5)), woodRHS))
-	m.AddConstraint("Labor", goblin.Le(goblin.NewExpr(goblin.T(tables, 10), goblin.T(chairs, 15)), laborRHS))
-	m.AddConstraint("Demand", goblin.Ge(goblin.NewExpr(goblin.T(tables, 1), goblin.T(chairs, 1)), demRHS))
+	m.SetObjectiveNamed("Profit", gb.NewExpr(gb.T(tables, pTab), gb.T(chairs, pCh)))
+	m.AddConstraint("Wood", gb.Le(gb.NewExpr(gb.T(tables, 20), gb.T(chairs, 5)), woodRHS))
+	m.AddConstraint("Labor", gb.Le(gb.NewExpr(gb.T(tables, 10), gb.T(chairs, 15)), laborRHS))
+	m.AddConstraint("Demand", gb.Ge(gb.NewExpr(gb.T(tables, 1), gb.T(chairs, 1)), demRHS))
 	return m
 }
 
-func buildInfeasibleMIP() *goblin.Model {
+func buildInfeasibleMIP() *gb.Model {
 	return buildInfeasibleMIPTrial(0)
 }
 
-func buildInfeasibleMIPTrial(trial int) *goblin.Model {
-	m := goblin.NewModel("t1_infeasible_mip", goblin.Minimize)
+func buildInfeasibleMIPTrial(trial int) *gb.Model {
+	m := gb.NewModel("t1_infeasible_mip", gb.Minimize)
 	x := m.AddBinaryVar("x")
 	y := m.AddBinaryVar("y")
 	cx, cy := 1.0, 1.0
@@ -525,19 +525,19 @@ func buildInfeasibleMIPTrial(trial int) *goblin.Model {
 			rhs = 1.0
 		}
 	}
-	m.SetObjectiveNamed("obj", goblin.NewExpr(goblin.T(x, cx), goblin.T(y, cy)))
-	m.AddConstraint("parity", goblin.Eq(goblin.NewExpr(goblin.T(x, 2), goblin.T(y, 2)), rhs))
+	m.SetObjectiveNamed("obj", gb.NewExpr(gb.T(x, cx), gb.T(y, cy)))
+	m.AddConstraint("parity", gb.Eq(gb.NewExpr(gb.T(x, 2), gb.T(y, 2)), rhs))
 	return m
 }
 
 // buildMixedKnapsack builds a realistic mixed-integer resource allocation problem where
 // ~70% of variables are 0-1 binary, ~20% are general integers in [0, 5], and ~10% are continuous.
-func buildMixedKnapsack(name string, nVars, nRows int, seed uint64) *goblin.Model {
+func buildMixedKnapsack(name string, nVars, nRows int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
-	m := goblin.NewModel(name, goblin.Maximize)
+	m := gb.NewModel(name, gb.Maximize)
 
-	vars := make([]goblin.Var, nVars)
-	objTerms := make([]goblin.Term, nVars)
+	vars := make([]gb.Var, nVars)
+	objTerms := make([]gb.Term, nVars)
 	for j := range nVars {
 		vname := fmt.Sprintf("x_%04d", j)
 		rem := j % 10
@@ -550,21 +550,21 @@ func buildMixedKnapsack(name string, nVars, nRows int, seed uint64) *goblin.Mode
 		}
 		// Add small jitter so objective optima are unique
 		val := float64(10+rng.IntN(90)) + float64(j+1)*1e-3
-		objTerms[j] = goblin.T(vars[j], val)
+		objTerms[j] = gb.T(vars[j], val)
 	}
-	m.SetObjectiveNamed("total_value", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("total_value", gb.Expr{Terms: objTerms})
 
 	density := 0.45
 	if nVars > 100 {
 		density = 0.15
 	}
 	for i := range nRows {
-		var terms []goblin.Term
+		var terms []gb.Term
 		rowSum := 0.0
 		for j := range nVars {
 			if rng.Float64() < density || (j%nRows == i) {
 				w := float64(1 + rng.IntN(25))
-				terms = append(terms, goblin.T(vars[j], w))
+				terms = append(terms, gb.T(vars[j], w))
 				_, ub := m.VarBounds(vars[j])
 				rowSum += w * min(ub, 2.0)
 			}
@@ -573,26 +573,26 @@ func buildMixedKnapsack(name string, nVars, nRows int, seed uint64) *goblin.Mode
 		if capRHS < 10 {
 			capRHS = 10
 		}
-		m.AddConstraint(fmt.Sprintf("res_%03d", i), goblin.Le(goblin.Expr{Terms: terms}, capRHS))
+		m.AddConstraint(fmt.Sprintf("res_%03d", i), gb.Le(gb.Expr{Terms: terms}, capRHS))
 	}
 	return m
 }
 
 // buildFacilityLocation creates a Capacitated Facility Location Problem (CFLP) with
 // nFac binary facility-opening variables and nFac*nCust allocation variables (mixed integer and continuous).
-func buildFacilityLocation(name string, nFac, nCust int, seed uint64) *goblin.Model {
+func buildFacilityLocation(name string, nFac, nCust int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0xdeadbeef))
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	openVars := make([]goblin.Var, nFac)
-	flowVars := make([][]goblin.Var, nFac)
-	var objTerms []goblin.Term
+	openVars := make([]gb.Var, nFac)
+	flowVars := make([][]gb.Var, nFac)
+	var objTerms []gb.Term
 
 	for f := range nFac {
 		openVars[f] = m.AddBinaryVar(fmt.Sprintf("open_%02d", f))
 		fixedCost := float64(120+rng.IntN(150)) + float64(f)*0.01
-		objTerms = append(objTerms, goblin.T(openVars[f], fixedCost))
-		flowVars[f] = make([]goblin.Var, nCust)
+		objTerms = append(objTerms, gb.T(openVars[f], fixedCost))
+		flowVars[f] = make([]gb.Var, nCust)
 	}
 
 	demands := make([]float64, nCust)
@@ -614,28 +614,28 @@ func buildFacilityLocation(name string, nFac, nCust int, seed uint64) *goblin.Mo
 				flowVars[f][c] = m.AddIntVar(vname, 0, demands[c])
 			}
 			unitCost := float64(3+rng.IntN(20)) + float64(f*nCust+c)*1e-3
-			objTerms = append(objTerms, goblin.T(flowVars[f][c], unitCost))
+			objTerms = append(objTerms, gb.T(flowVars[f][c], unitCost))
 		}
 	}
-	m.SetObjectiveNamed("total_cost", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("total_cost", gb.Expr{Terms: objTerms})
 
 	// Demand satisfaction constraints for each customer
 	for c := range nCust {
-		terms := make([]goblin.Term, nFac)
+		terms := make([]gb.Term, nFac)
 		for f := range nFac {
-			terms[f] = goblin.T(flowVars[f][c], 1.0)
+			terms[f] = gb.T(flowVars[f][c], 1.0)
 		}
-		m.AddConstraint(fmt.Sprintf("dem_%02d", c), goblin.Ge(goblin.Expr{Terms: terms}, demands[c]))
+		m.AddConstraint(fmt.Sprintf("dem_%02d", c), gb.Ge(gb.Expr{Terms: terms}, demands[c]))
 	}
 
 	// Capacity linking constraints: sum_c flow[f][c] - capPerFac * open[f] <= 0
 	for f := range nFac {
-		terms := make([]goblin.Term, 0, nCust+1)
+		terms := make([]gb.Term, 0, nCust+1)
 		for c := range nCust {
-			terms = append(terms, goblin.T(flowVars[f][c], 1.0))
+			terms = append(terms, gb.T(flowVars[f][c], 1.0))
 		}
-		terms = append(terms, goblin.T(openVars[f], -capPerFac))
-		m.AddConstraint(fmt.Sprintf("cap_%02d", f), goblin.Le(goblin.Expr{Terms: terms}, 0))
+		terms = append(terms, gb.T(openVars[f], -capPerFac))
+		m.AddConstraint(fmt.Sprintf("cap_%02d", f), gb.Le(gb.Expr{Terms: terms}, 0))
 	}
 
 	return m
@@ -643,63 +643,63 @@ func buildFacilityLocation(name string, nFac, nCust int, seed uint64) *goblin.Mo
 
 // buildGeneralizedAssignment creates a Generalized Assignment Problem with nAgents * nTasks
 // 0-1 assignment variables plus nAgents general integer overtime variables.
-func buildGeneralizedAssignment(name string, nAgents, nTasks int, seed uint64) *goblin.Model {
+func buildGeneralizedAssignment(name string, nAgents, nTasks int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0xabcdef01))
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	assign := make([][]goblin.Var, nAgents)
-	overtime := make([]goblin.Var, nAgents)
-	var objTerms []goblin.Term
+	assign := make([][]gb.Var, nAgents)
+	overtime := make([]gb.Var, nAgents)
+	var objTerms []gb.Term
 
 	for a := range nAgents {
-		assign[a] = make([]goblin.Var, nTasks)
+		assign[a] = make([]gb.Var, nTasks)
 		for t := range nTasks {
 			assign[a][t] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", a, t))
 			cost := float64(10+rng.IntN(40)) + float64(a*nTasks+t)*1e-3
-			objTerms = append(objTerms, goblin.T(assign[a][t], cost))
+			objTerms = append(objTerms, gb.T(assign[a][t], cost))
 		}
 	}
 	for a := range nAgents {
 		overtime[a] = m.AddIntVar(fmt.Sprintf("ot_%d", a), 0, 15)
-		objTerms = append(objTerms, goblin.T(overtime[a], 25.0+float64(a)*0.1))
+		objTerms = append(objTerms, gb.T(overtime[a], 25.0+float64(a)*0.1))
 	}
-	m.SetObjectiveNamed("cost", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("cost", gb.Expr{Terms: objTerms})
 
 	// Each task assigned to exactly 1 agent
 	for t := range nTasks {
-		terms := make([]goblin.Term, nAgents)
+		terms := make([]gb.Term, nAgents)
 		for a := range nAgents {
-			terms[a] = goblin.T(assign[a][t], 1.0)
+			terms[a] = gb.T(assign[a][t], 1.0)
 		}
-		m.AddConstraint(fmt.Sprintf("task_%d", t), goblin.Eq(goblin.Expr{Terms: terms}, 1.0))
+		m.AddConstraint(fmt.Sprintf("task_%d", t), gb.Eq(gb.Expr{Terms: terms}, 1.0))
 	}
 
 	// Agent capacity with integer overtime
 	for a := range nAgents {
-		terms := make([]goblin.Term, 0, nTasks+1)
+		terms := make([]gb.Term, 0, nTasks+1)
 		totalReq := 0.0
 		for t := range nTasks {
 			req := float64(4 + rng.IntN(10))
 			totalReq += req
-			terms = append(terms, goblin.T(assign[a][t], req))
+			terms = append(terms, gb.T(assign[a][t], req))
 		}
-		terms = append(terms, goblin.T(overtime[a], -1.0))
+		terms = append(terms, gb.T(overtime[a], -1.0))
 		regCap := math.Floor(totalReq / float64(nAgents) * 0.85)
-		m.AddConstraint(fmt.Sprintf("agent_cap_%d", a), goblin.Le(goblin.Expr{Terms: terms}, regCap))
+		m.AddConstraint(fmt.Sprintf("agent_cap_%d", a), gb.Le(gb.Expr{Terms: terms}, regCap))
 	}
 	return m
 }
 
 // buildLotSizing builds a Capacitated Lot-Sizing problem with 3 variables per period:
 // binary setup y_t, integer production batch p_t, and continuous inventory s_t.
-func buildLotSizing(name string, nPeriods int, seed uint64) *goblin.Model {
+func buildLotSizing(name string, nPeriods int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x12345678))
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	setup := make([]goblin.Var, nPeriods)
-	prod := make([]goblin.Var, nPeriods)
-	inv := make([]goblin.Var, nPeriods)
-	var objTerms []goblin.Term
+	setup := make([]gb.Var, nPeriods)
+	prod := make([]gb.Var, nPeriods)
+	inv := make([]gb.Var, nPeriods)
+	var objTerms []gb.Term
 
 	maxBatch := 25.0
 	for t := range nPeriods {
@@ -711,26 +711,26 @@ func buildLotSizing(name string, nPeriods int, seed uint64) *goblin.Model {
 		prodCost := float64(4 + rng.IntN(6))
 		holdCost := 1.5 + float64(t%3)*0.25
 		objTerms = append(objTerms,
-			goblin.T(setup[t], setupCost),
-			goblin.T(prod[t], prodCost),
-			goblin.T(inv[t], holdCost),
+			gb.T(setup[t], setupCost),
+			gb.T(prod[t], prodCost),
+			gb.T(inv[t], holdCost),
 		)
 	}
-	m.SetObjectiveNamed("total_lot_cost", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("total_lot_cost", gb.Expr{Terms: objTerms})
 
 	for t := range nPeriods {
 		demand := float64(6 + rng.IntN(10))
 		// Flow balance: inv[t-1] + prod[t] - inv[t] == demand
-		var balTerms []goblin.Term
+		var balTerms []gb.Term
 		if t > 0 {
-			balTerms = append(balTerms, goblin.T(inv[t-1], 1.0))
+			balTerms = append(balTerms, gb.T(inv[t-1], 1.0))
 		}
-		balTerms = append(balTerms, goblin.T(prod[t], 1.0), goblin.T(inv[t], -1.0))
-		m.AddConstraint(fmt.Sprintf("bal_%03d", t), goblin.Eq(goblin.Expr{Terms: balTerms}, demand))
+		balTerms = append(balTerms, gb.T(prod[t], 1.0), gb.T(inv[t], -1.0))
+		m.AddConstraint(fmt.Sprintf("bal_%03d", t), gb.Eq(gb.Expr{Terms: balTerms}, demand))
 
 		// Setup linking: prod[t] - maxBatch * setup[t] <= 0
-		m.AddConstraint(fmt.Sprintf("link_%03d", t), goblin.Le(
-			goblin.NewExpr(goblin.T(prod[t], 1.0), goblin.T(setup[t], -maxBatch)),
+		m.AddConstraint(fmt.Sprintf("link_%03d", t), gb.Le(
+			gb.NewExpr(gb.T(prod[t], 1.0), gb.T(setup[t], -maxBatch)),
 			0,
 		))
 	}
@@ -739,17 +739,17 @@ func buildLotSizing(name string, nPeriods int, seed uint64) *goblin.Model {
 
 // buildMultiItemLotSizing builds a Multi-Item Capacitated Lot-Sizing problem with
 // nItems * nPeriods * 3 variables (binary setup, integer production, continuous inventory).
-func buildMultiItemLotSizing(name string, nItems, nPeriods int, seed uint64) *goblin.Model {
+func buildMultiItemLotSizing(name string, nItems, nPeriods int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x33557799))
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	var objTerms []goblin.Term
+	var objTerms []gb.Term
 	maxBatch := 25.0
 
 	for item := range nItems {
-		setup := make([]goblin.Var, nPeriods)
-		prod := make([]goblin.Var, nPeriods)
-		inv := make([]goblin.Var, nPeriods)
+		setup := make([]gb.Var, nPeriods)
+		prod := make([]gb.Var, nPeriods)
+		inv := make([]gb.Var, nPeriods)
 
 		for t := range nPeriods {
 			setup[t] = m.AddBinaryVar(fmt.Sprintf("setup_%02d_%02d", item, t))
@@ -760,41 +760,41 @@ func buildMultiItemLotSizing(name string, nItems, nPeriods int, seed uint64) *go
 			prodCost := float64(3 + rng.IntN(5))
 			holdCost := 1.0 + float64((item+t)%3)*0.25
 			objTerms = append(objTerms,
-				goblin.T(setup[t], setupCost),
-				goblin.T(prod[t], prodCost),
-				goblin.T(inv[t], holdCost),
+				gb.T(setup[t], setupCost),
+				gb.T(prod[t], prodCost),
+				gb.T(inv[t], holdCost),
 			)
 		}
 
 		for t := range nPeriods {
 			demand := float64(5 + rng.IntN(8))
-			var balTerms []goblin.Term
+			var balTerms []gb.Term
 			if t > 0 {
-				balTerms = append(balTerms, goblin.T(inv[t-1], 1.0))
+				balTerms = append(balTerms, gb.T(inv[t-1], 1.0))
 			}
-			balTerms = append(balTerms, goblin.T(prod[t], 1.0), goblin.T(inv[t], -1.0))
-			m.AddConstraint(fmt.Sprintf("bal_%02d_%02d", item, t), goblin.Eq(goblin.Expr{Terms: balTerms}, demand))
+			balTerms = append(balTerms, gb.T(prod[t], 1.0), gb.T(inv[t], -1.0))
+			m.AddConstraint(fmt.Sprintf("bal_%02d_%02d", item, t), gb.Eq(gb.Expr{Terms: balTerms}, demand))
 
-			m.AddConstraint(fmt.Sprintf("link_%02d_%02d", item, t), goblin.Le(
-				goblin.NewExpr(goblin.T(prod[t], 1.0), goblin.T(setup[t], -maxBatch)),
+			m.AddConstraint(fmt.Sprintf("link_%02d_%02d", item, t), gb.Le(
+				gb.NewExpr(gb.T(prod[t], 1.0), gb.T(setup[t], -maxBatch)),
 				0,
 			))
 		}
 	}
-	m.SetObjectiveNamed("multi_lot_cost", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("multi_lot_cost", gb.Expr{Terms: objTerms})
 	return m
 }
 
 // buildBlockScheduling builds a 1000-variable mixed binary/integer/continuous scheduling
 // problem with nBlocks * varsPerBlock variables and 2 * nBlocks constraints.
-func buildBlockScheduling(name string, nBlocks, varsPerBlock int, seed uint64) *goblin.Model {
+func buildBlockScheduling(name string, nBlocks, varsPerBlock int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x778899aa))
-	m := goblin.NewModel(name, goblin.Maximize)
+	m := gb.NewModel(name, gb.Maximize)
 
-	var objTerms []goblin.Term
+	var objTerms []gb.Term
 	for b := range nBlocks {
-		bVars := make([]goblin.Var, varsPerBlock)
-		var capTerms, covTerms []goblin.Term
+		bVars := make([]gb.Var, varsPerBlock)
+		var capTerms, covTerms []gb.Term
 		rowSum := 0.0
 		for j := range varsPerBlock {
 			idx := b*varsPerBlock + j
@@ -808,43 +808,43 @@ func buildBlockScheduling(name string, nBlocks, varsPerBlock int, seed uint64) *
 				bVars[j] = m.AddContVar(vname, 0, 8)
 			}
 			val := float64(15+rng.IntN(70)) + float64(idx+1)*1e-3
-			objTerms = append(objTerms, goblin.T(bVars[j], val))
+			objTerms = append(objTerms, gb.T(bVars[j], val))
 
 			w := float64(2 + rng.IntN(12))
-			capTerms = append(capTerms, goblin.T(bVars[j], w))
+			capTerms = append(capTerms, gb.T(bVars[j], w))
 			rowSum += w
 			if j < varsPerBlock/2 {
-				covTerms = append(covTerms, goblin.T(bVars[j], 1.0))
+				covTerms = append(covTerms, gb.T(bVars[j], 1.0))
 			}
 		}
-		m.AddConstraint(fmt.Sprintf("bcap_%03d", b), goblin.Le(goblin.Expr{Terms: capTerms}, math.Floor(0.45*rowSum)))
-		m.AddConstraint(fmt.Sprintf("bcov_%03d", b), goblin.Ge(goblin.Expr{Terms: covTerms}, 2.0))
+		m.AddConstraint(fmt.Sprintf("bcap_%03d", b), gb.Le(gb.Expr{Terms: capTerms}, math.Floor(0.45*rowSum)))
+		m.AddConstraint(fmt.Sprintf("bcov_%03d", b), gb.Ge(gb.Expr{Terms: covTerms}, 2.0))
 	}
-	m.SetObjectiveNamed("sched_val", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("sched_val", gb.Expr{Terms: objTerms})
 	return m
 }
 
 // buildBinPacking builds a Bin Packing problem with nBins binary bin-open variables
 // and nBins*nItems binary item-to-bin assignment variables.
-func buildBinPacking(name string, nBins, nItems int, seed uint64) *goblin.Model {
+func buildBinPacking(name string, nBins, nItems int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x55aa55aa))
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	binOpen := make([]goblin.Var, nBins)
-	assign := make([][]goblin.Var, nBins)
-	var objTerms []goblin.Term
+	binOpen := make([]gb.Var, nBins)
+	assign := make([][]gb.Var, nBins)
+	var objTerms []gb.Term
 
 	for b := range nBins {
 		// Break symmetry slightly with progressive bin cost
 		binOpen[b] = m.AddBinaryVar(fmt.Sprintf("bin_%02d", b))
-		objTerms = append(objTerms, goblin.T(binOpen[b], 10.0+float64(b)*0.1))
-		assign[b] = make([]goblin.Var, nItems)
+		objTerms = append(objTerms, gb.T(binOpen[b], 10.0+float64(b)*0.1))
+		assign[b] = make([]gb.Var, nItems)
 		for i := range nItems {
 			assign[b][i] = m.AddBinaryVar(fmt.Sprintf("x_%02d_%02d", b, i))
-			objTerms = append(objTerms, goblin.T(assign[b][i], float64(b+1)*1e-3))
+			objTerms = append(objTerms, gb.T(assign[b][i], float64(b+1)*1e-3))
 		}
 	}
-	m.SetObjectiveNamed("bins_used", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("bins_used", gb.Expr{Terms: objTerms})
 
 	weights := make([]float64, nItems)
 	totalW := 0.0
@@ -855,32 +855,32 @@ func buildBinPacking(name string, nBins, nItems int, seed uint64) *goblin.Model 
 	binCap := math.Ceil(totalW / float64(nBins) * 1.35)
 
 	for i := range nItems {
-		terms := make([]goblin.Term, nBins)
+		terms := make([]gb.Term, nBins)
 		for b := range nBins {
-			terms[b] = goblin.T(assign[b][i], 1.0)
+			terms[b] = gb.T(assign[b][i], 1.0)
 		}
-		m.AddConstraint(fmt.Sprintf("item_%02d", i), goblin.Eq(goblin.Expr{Terms: terms}, 1.0))
+		m.AddConstraint(fmt.Sprintf("item_%02d", i), gb.Eq(gb.Expr{Terms: terms}, 1.0))
 	}
 
 	for b := range nBins {
-		terms := make([]goblin.Term, 0, nItems+1)
+		terms := make([]gb.Term, 0, nItems+1)
 		for i := range nItems {
-			terms = append(terms, goblin.T(assign[b][i], weights[i]))
+			terms = append(terms, gb.T(assign[b][i], weights[i]))
 		}
-		terms = append(terms, goblin.T(binOpen[b], -binCap))
-		m.AddConstraint(fmt.Sprintf("bincap_%02d", b), goblin.Le(goblin.Expr{Terms: terms}, 0))
+		terms = append(terms, gb.T(binOpen[b], -binCap))
+		m.AddConstraint(fmt.Sprintf("bincap_%02d", b), gb.Le(gb.Expr{Terms: terms}, 0))
 	}
 	return m
 }
 
 // buildSetCovering builds a Set Covering problem with nVars variables (40 binary + 10 integer)
 // and nRows covering constraints.
-func buildSetCovering(name string, nVars, nRows int, seed uint64) *goblin.Model {
+func buildSetCovering(name string, nVars, nRows int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x87654321))
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	vars := make([]goblin.Var, nVars)
-	objTerms := make([]goblin.Term, nVars)
+	vars := make([]gb.Var, nVars)
+	objTerms := make([]gb.Term, nVars)
 	for j := range nVars {
 		if j%5 == 4 {
 			vars[j] = m.AddIntVar(fmt.Sprintf("s_%03d", j), 0, 3)
@@ -888,22 +888,22 @@ func buildSetCovering(name string, nVars, nRows int, seed uint64) *goblin.Model 
 			vars[j] = m.AddBinaryVar(fmt.Sprintf("s_%03d", j))
 		}
 		cost := float64(5+rng.IntN(30)) + float64(j)*1e-3
-		objTerms[j] = goblin.T(vars[j], cost)
+		objTerms[j] = gb.T(vars[j], cost)
 	}
-	m.SetObjectiveNamed("cover_cost", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("cover_cost", gb.Expr{Terms: objTerms})
 
 	for i := range nRows {
-		var terms []goblin.Term
+		var terms []gb.Term
 		for j := range nVars {
 			if rng.Float64() < 0.25 || (j%nRows == i) {
-				terms = append(terms, goblin.T(vars[j], 1.0))
+				terms = append(terms, gb.T(vars[j], 1.0))
 			}
 		}
 		rhs := 1.0
 		if i%4 == 0 {
 			rhs = 2.0
 		}
-		m.AddConstraint(fmt.Sprintf("cov_%03d", i), goblin.Ge(goblin.Expr{Terms: terms}, rhs))
+		m.AddConstraint(fmt.Sprintf("cov_%03d", i), gb.Ge(gb.Expr{Terms: terms}, rhs))
 	}
 	return m
 }
@@ -925,90 +925,90 @@ const madRoundingBase = 100.0
 //   - (2) Roundness penalty (2*G rows): r[g] >= m[g] - B*n[g] and r[g] >= B*n[g] - m[g].
 //   - (3) Item partitioning (I equation rows): sum_{g in [0, G-1]} x[g][i] == 1 for all i.
 //   - (4) Designated subset D = [I-G, I-1] assignment (G equation rows): sum_{i in D} x[g][i] == 1 for all g.
-func BuildMADFromWeights(name string, nG, nI, nT int, roundingBase float64, w [][]float64) *goblin.Model {
+func BuildMADFromWeights(name string, nG, nI, nT int, roundingBase float64, w [][]float64) *gb.Model {
 	if roundingBase <= 0 {
 		roundingBase = madRoundingBase
 	}
-	m := goblin.NewModel(name, goblin.Minimize)
+	m := gb.NewModel(name, gb.Minimize)
 
-	x := make([][]goblin.Var, nG)
-	z := make([][]goblin.Var, nG)
-	central := make([]goblin.Var, nG)
-	roundMult := make([]goblin.Var, nG)
-	roundDev := make([]goblin.Var, nG)
-	objTerms := make([]goblin.Term, 0, nG*(nT+1))
+	x := make([][]gb.Var, nG)
+	z := make([][]gb.Var, nG)
+	central := make([]gb.Var, nG)
+	roundMult := make([]gb.Var, nG)
+	roundDev := make([]gb.Var, nG)
+	objTerms := make([]gb.Term, 0, nG*(nT+1))
 
 	for g := range nG {
-		x[g] = make([]goblin.Var, nI)
+		x[g] = make([]gb.Var, nI)
 		for i := range nI {
 			x[g][i] = m.AddBinaryVar(fmt.Sprintf("x_%02d_%02d", g, i))
 		}
-		z[g] = make([]goblin.Var, nT)
+		z[g] = make([]gb.Var, nT)
 		for t := range nT {
 			z[g][t] = m.AddContVar(fmt.Sprintf("z_%02d_%02d", g, t), 0, math.Inf(1))
-			objTerms = append(objTerms, goblin.T(z[g][t], 1.0))
+			objTerms = append(objTerms, gb.T(z[g][t], 1.0))
 		}
 		central[g] = m.AddContVar(fmt.Sprintf("m_%02d", g), 0, math.Inf(1))
 		roundMult[g] = m.AddIntVar(fmt.Sprintf("n_%02d", g), 1, math.Inf(1))
 		roundDev[g] = m.AddContVar(fmt.Sprintf("r_%02d", g), 0, math.Inf(1))
-		objTerms = append(objTerms, goblin.T(roundDev[g], 1.0))
+		objTerms = append(objTerms, gb.T(roundDev[g], 1.0))
 	}
-	m.SetObjectiveNamed("total_mad", goblin.Expr{Terms: objTerms})
+	m.SetObjectiveNamed("total_mad", gb.Expr{Terms: objTerms})
 
 	// (1) Central level absolute spread for each group g and period t:
 	//     z[g][t] >= sum_i W[t][i]*x[g][i] - m[g] and z[g][t] >= m[g] - sum_i W[t][i]*x[g][i].
 	for g := range nG {
 		for t := range nT {
-			posTerms := make([]goblin.Term, 0, nI+2)
-			negTerms := make([]goblin.Term, 0, nI+2)
-			posTerms = append(posTerms, goblin.T(z[g][t], 1.0), goblin.T(central[g], 1.0))
-			negTerms = append(negTerms, goblin.T(z[g][t], 1.0), goblin.T(central[g], -1.0))
+			posTerms := make([]gb.Term, 0, nI+2)
+			negTerms := make([]gb.Term, 0, nI+2)
+			posTerms = append(posTerms, gb.T(z[g][t], 1.0), gb.T(central[g], 1.0))
+			negTerms = append(negTerms, gb.T(z[g][t], 1.0), gb.T(central[g], -1.0))
 			for i := range nI {
 				wt := w[t][i]
 				if wt != 0 {
-					posTerms = append(posTerms, goblin.T(x[g][i], -wt))
-					negTerms = append(negTerms, goblin.T(x[g][i], wt))
+					posTerms = append(posTerms, gb.T(x[g][i], -wt))
+					negTerms = append(negTerms, gb.T(x[g][i], wt))
 				}
 			}
-			m.AddConstraint(fmt.Sprintf("dev_pos_%02d_%02d", g, t), goblin.Ge(goblin.Expr{Terms: posTerms}, 0))
-			m.AddConstraint(fmt.Sprintf("dev_neg_%02d_%02d", g, t), goblin.Ge(goblin.Expr{Terms: negTerms}, 0))
+			m.AddConstraint(fmt.Sprintf("dev_pos_%02d_%02d", g, t), gb.Ge(gb.Expr{Terms: posTerms}, 0))
+			m.AddConstraint(fmt.Sprintf("dev_neg_%02d_%02d", g, t), gb.Ge(gb.Expr{Terms: negTerms}, 0))
 		}
 	}
 
 	// (2) Roundness penalty for each group g:
 	//     r[g] >= m[g] - B*n[g] and r[g] >= B*n[g] - m[g].
 	for g := range nG {
-		m.AddConstraint(fmt.Sprintf("round_pos_%02d", g), goblin.Ge(goblin.NewExpr(
-			goblin.T(roundDev[g], 1.0),
-			goblin.T(central[g], -1.0),
-			goblin.T(roundMult[g], roundingBase),
+		m.AddConstraint(fmt.Sprintf("round_pos_%02d", g), gb.Ge(gb.NewExpr(
+			gb.T(roundDev[g], 1.0),
+			gb.T(central[g], -1.0),
+			gb.T(roundMult[g], roundingBase),
 		), 0))
-		m.AddConstraint(fmt.Sprintf("round_neg_%02d", g), goblin.Ge(goblin.NewExpr(
-			goblin.T(roundDev[g], 1.0),
-			goblin.T(central[g], 1.0),
-			goblin.T(roundMult[g], -roundingBase),
+		m.AddConstraint(fmt.Sprintf("round_neg_%02d", g), gb.Ge(gb.NewExpr(
+			gb.T(roundDev[g], 1.0),
+			gb.T(central[g], 1.0),
+			gb.T(roundMult[g], -roundingBase),
 		), 0))
 	}
 
 	// (3) Each item i must be assigned to a single group g:
 	//     sum_{g in [0, nG-1]} x[g][i] == 1.
 	for i := range nI {
-		terms := make([]goblin.Term, nG)
+		terms := make([]gb.Term, nG)
 		for g := range nG {
-			terms[g] = goblin.T(x[g][i], 1.0)
+			terms[g] = gb.T(x[g][i], 1.0)
 		}
-		m.AddConstraint(fmt.Sprintf("item_%02d", i), goblin.Eq(goblin.Expr{Terms: terms}, 1.0))
+		m.AddConstraint(fmt.Sprintf("item_%02d", i), gb.Eq(gb.Expr{Terms: terms}, 1.0))
 	}
 
 	// (4) Each group g must receive one item from designated subset D = [nI-nG, nI-1]:
 	//     sum_{i in D} x[g][i] == 1.
 	dStart := nI - nG
 	for g := range nG {
-		terms := make([]goblin.Term, 0, nG)
+		terms := make([]gb.Term, 0, nG)
 		for i := dStart; i < nI; i++ {
-			terms = append(terms, goblin.T(x[g][i], 1.0))
+			terms = append(terms, gb.T(x[g][i], 1.0))
 		}
-		m.AddConstraint(fmt.Sprintf("group_d_%02d", g), goblin.Eq(goblin.Expr{Terms: terms}, 1.0))
+		m.AddConstraint(fmt.Sprintf("group_d_%02d", g), gb.Eq(gb.Expr{Terms: terms}, 1.0))
 	}
 
 	return m
@@ -1019,7 +1019,7 @@ func BuildMADFromWeights(name string, nG, nI, nT int, roundingBase float64, w []
 // Subset D = [nI - nG, nI - 1] consists of nG designated items where each group g
 // receives one item from D, while every item i in [0, nI - 1] is assigned
 // to a single group g.
-func buildMADAllocation(name string, nG, nI, nT int, seed uint64) *goblin.Model {
+func buildMADAllocation(name string, nG, nI, nT int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x4d41445f4749))
 
 	// Generate deterministic non-negative period weight matrix W[t][i] (size nT x nI).
@@ -1120,7 +1120,7 @@ func buildMADAllocation(name string, nG, nI, nT int, seed uint64) *goblin.Model 
 // BuildMADRandom constructs an unstructured random-weight Mean Absolute Deviation (MAD)
 // group-item allocation MILP (negative control contrasting with the engineered
 // orthogonal-signature buildMADAllocation instances).
-func BuildMADRandom(name string, nG, nI, nT int, seed uint64) *goblin.Model {
+func BuildMADRandom(name string, nG, nI, nT int, seed uint64) *gb.Model {
 	rng := rand.New(rand.NewPCG(seed, seed^0x77))
 
 	w := make([][]float64, nT)

@@ -500,6 +500,7 @@ func solveFixedIntContinuousLP(
 	lp := NewLPSolver(subP, ws)
 	if auxSolver != nil {
 		lp.Deadline = auxSolver.Deadline
+		lp.Done = auxSolver.Done
 		lp.DisableSIMD = auxSolver.DisableSIMD
 	}
 	res := lp.Solve()
@@ -817,7 +818,11 @@ func tryRootSubMIP(
 	if p.Name == "__submip__" || len(p.IntCols) == 0 {
 		return nil, 0, false
 	}
-	if !deadline.IsZero() && time.Now().After(deadline) {
+	var done <-chan struct{}
+	if lpSolver != nil {
+		done = lpSolver.Done
+	}
+	if stopRequested(deadline, done) {
 		return nil, 0, false
 	}
 
@@ -967,7 +972,7 @@ func tryRootSubMIP(
 	}
 
 	subP := subModel.Compile()
-	if pres := presolveWithDeadline(subP, subMIPPresolvePasses, deadline); pres.TimedOut || pres.Infeasible {
+	if pres := presolveWithDeadline(subP, subMIPPresolvePasses, deadline, done); pres.TimedOut || pres.Infeasible {
 		return nil, 0, false
 	} else if pres.Reduced != nil {
 		subP = pres.Reduced
@@ -991,7 +996,7 @@ func tryRootSubMIP(
 		subOpts.DisableSIMD = lpSolver.DisableSIMD
 	}
 
-	subRes := solveBranchAndCut(subP, subOpts, time.Now())
+	subRes := solveBranchAndCutWithDone(subP, subOpts, time.Now(), deadline, done)
 	if len(subRes.Values) != subP.NumVars {
 		return nil, 0, false
 	}

@@ -1,6 +1,7 @@
 #ifndef GOBLIN_CBC_BRIDGE_H
 #define GOBLIN_CBC_BRIDGE_H
 
+// C ABI bridge declarations connecting Goblin's cgo layer to COIN-OR CBC and CLP.
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,6 +33,7 @@ void goblin_solve_lp(
     const double *row_ub,
     int enable_presolve,
     double time_limit_sec,
+    const int *cancel_flag,
     GoblinResult *out,
     double *primal_out,
     double *dual_out,
@@ -59,6 +61,7 @@ void goblin_solve_mip(
     double rel_gap_tol,
     double abs_gap_tol,
     double time_limit_sec,
+    const int *cancel_flag,
     GoblinResult *out,
     double *primal_out
 );

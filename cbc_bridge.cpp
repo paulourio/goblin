@@ -9,9 +9,11 @@
 #include <string>
 
 #include "CoinFinite.hpp"
+#include "ClpEventHandler.hpp"
 #include "ClpSimplex.hpp"
 #include "ClpSolve.hpp"
 #include "OsiClpSolverInterface.hpp"
+#include "CbcEventHandler.hpp"
 #include "CbcModel.hpp"
 #include "CbcCutGenerator.hpp"
 #include "CbcSolver.hpp"
@@ -30,10 +32,68 @@ thread_local double tl_root_lp_min = 0.0;
 thread_local double tl_root_cut_min = 0.0;
 thread_local bool tl_has_root_lp = false;
 thread_local bool tl_has_root_cut = false;
+thread_local const int *tl_cancel_flag = nullptr;
+
+class GoblinClpCancelHandler : public ClpEventHandler {
+public:
+    explicit GoblinClpCancelHandler(const int *cancel_flag)
+        : ClpEventHandler(), cancel_flag_(cancel_flag) {}
+    GoblinClpCancelHandler(const GoblinClpCancelHandler &rhs)
+        : ClpEventHandler(rhs), cancel_flag_(rhs.cancel_flag_) {}
+    GoblinClpCancelHandler &operator=(const GoblinClpCancelHandler &rhs) {
+        if (this != &rhs) {
+            ClpEventHandler::operator=(rhs);
+            cancel_flag_ = rhs.cancel_flag_;
+        }
+        return *this;
+    }
+    ClpEventHandler *clone() const override {
+        return new GoblinClpCancelHandler(*this);
+    }
+    int event(Event) override {
+        if (cancel_flag_ && __atomic_load_n(cancel_flag_, __ATOMIC_RELAXED) != 0) {
+            return 0; // 0 sets ClpModel::status() = 5 (stopped by event)
+        }
+        return -1;
+    }
+
+private:
+    const int *cancel_flag_;
+};
+
+class GoblinCbcCancelHandler : public CbcEventHandler {
+public:
+    explicit GoblinCbcCancelHandler(const int *cancel_flag)
+        : CbcEventHandler(), cancel_flag_(cancel_flag) {}
+    GoblinCbcCancelHandler(const GoblinCbcCancelHandler &rhs)
+        : CbcEventHandler(rhs), cancel_flag_(rhs.cancel_flag_) {}
+    GoblinCbcCancelHandler &operator=(const GoblinCbcCancelHandler &rhs) {
+        if (this != &rhs) {
+            CbcEventHandler::operator=(rhs);
+            cancel_flag_ = rhs.cancel_flag_;
+        }
+        return *this;
+    }
+    CbcEventHandler *clone() const override {
+        return new GoblinCbcCancelHandler(*this);
+    }
+    CbcAction event(CbcEvent) override {
+        if (cancel_flag_ && __atomic_load_n(cancel_flag_, __ATOMIC_RELAXED) != 0) {
+            return CbcEventHandler::stop;
+        }
+        return CbcEventHandler::noAction;
+    }
+
+private:
+    const int *cancel_flag_;
+};
 
 int goblin_cbc_callback(CbcModel *currentSolver, int whereFrom) {
     if (!currentSolver) {
         return 0;
+    }
+    if (tl_cancel_flag && __atomic_load_n(tl_cancel_flag, __ATOMIC_RELAXED) != 0) {
+        return 1;
     }
     if (whereFrom == 1) {
         if (currentSolver->solver() && currentSolver->solver()->isProvenOptimal()) {
@@ -106,6 +166,7 @@ void goblin_solve_lp(
     const double *row_ub,
     int enable_presolve,
     double time_limit_sec,
+    const int *cancel_flag,
     GoblinResult *out,
     double *primal_out,
     double *dual_out,
@@ -113,6 +174,10 @@ void goblin_solve_lp(
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
     std::memset(out, 0, sizeof(GoblinResult));
+    if (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) {
+        out->status = -4; // StatusTimeLimit
+        return;
+    }
 
     OsiClpSolverInterface solver;
     configure_silent_clp(solver);
@@ -148,6 +213,10 @@ void goblin_solve_lp(
     if (time_limit_sec > 0.0 && solver.getModelPtr()) {
         solver.getModelPtr()->setMaximumWallSeconds(time_limit_sec);
     }
+    if (cancel_flag && solver.getModelPtr()) {
+        GoblinClpCancelHandler cancelHandler(cancel_flag);
+        solver.getModelPtr()->passInEventHandler(&cancelHandler);
+    }
 
     solver.initialSolve();
 
@@ -155,7 +224,11 @@ void goblin_solve_lp(
     out->nodes = 0;
     out->cuts_added = 0;
 
-    if (solver.isProvenOptimal()) {
+    bool canceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) ||
+                    (solver.getModelPtr() && solver.getModelPtr()->status() == 5);
+    if (canceled) {
+        out->status = -4; // StatusTimeLimit
+    } else if (solver.isProvenOptimal()) {
         out->status = 1; // StatusOptimal
         out->has_sol = 1;
         double obj = solver.getObjValue();
@@ -205,16 +278,22 @@ void goblin_solve_mip(
     double rel_gap_tol,
     double abs_gap_tol,
     double time_limit_sec,
+    const int *cancel_flag,
     GoblinResult *out,
     double *primal_out
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
     std::memset(out, 0, sizeof(GoblinResult));
+    if (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) {
+        out->status = -4; // StatusTimeLimit
+        return;
+    }
     tl_total_cuts = 0;
     tl_root_lp_min = 0.0;
     tl_root_cut_min = 0.0;
     tl_has_root_lp = false;
     tl_has_root_cut = false;
+    tl_cancel_flag = cancel_flag;
 
     OsiClpSolverInterface solver;
     configure_silent_clp(solver);
@@ -238,6 +317,10 @@ void goblin_solve_mip(
     if (num_ints > 0 && int_cols) {
         solver.setInteger(int_cols, num_ints);
     }
+    if (cancel_flag && solver.getModelPtr()) {
+        GoblinClpCancelHandler clpCancelHandler(cancel_flag);
+        solver.getModelPtr()->passInEventHandler(&clpCancelHandler);
+    }
 
     CbcModel cbcModel(solver);
     cbcModel.setLogLevel(0);
@@ -248,6 +331,15 @@ void goblin_solve_mip(
     cbcSolver.parameters().disableWelcomePrinting();
     cbcSolver.parameters().disableSignalHandler();
     cbcSolver.setPrinting(false);
+    if (cancel_flag && cbcSolver.model()) {
+        GoblinCbcCancelHandler cbcCancelHandler(cancel_flag);
+        cbcSolver.model()->passInEventHandler(&cbcCancelHandler);
+        OsiClpSolverInterface *cbcClp = dynamic_cast<OsiClpSolverInterface *>(cbcSolver.model()->solver());
+        if (cbcClp && cbcClp->getModelPtr()) {
+            GoblinClpCancelHandler clpCancelHandler(cancel_flag);
+            cbcClp->getModelPtr()->passInEventHandler(&clpCancelHandler);
+        }
+    }
 
     CbcParameters &params = cbcSolver.parameters();
     params[CbcParam::LOGLEVEL]->setVal(0);
@@ -315,6 +407,7 @@ void goblin_solve_mip(
     inputQueue.emplace_back("-quit");
 
     cbcSolver.run(inputQueue, goblin_cbc_callback);
+    tl_cancel_flag = nullptr;
 
     CbcModel &m = *cbcSolver.model();
     const CbcSolverStatistics &stats = cbcSolver.getStatistics();
@@ -376,14 +469,17 @@ void goblin_solve_mip(
         gapClosed = (gap <= tol + 1e-6);
     }
 
-    if (m.isProvenOptimal() || gapClosed) {
+    bool canceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) ||
+                    m.status() == 5;
+
+    if (!canceled && (m.isProvenOptimal() || gapClosed)) {
         out->status = 1; // StatusOptimal
         out->best_bound_min = out->obj_min;
-    } else if (m.isProvenInfeasible() || m.isInitialSolveProvenPrimalInfeasible()) {
+    } else if (!canceled && (m.isProvenInfeasible() || m.isInitialSolveProvenPrimalInfeasible())) {
         out->status = -1; // StatusInfeasible
-    } else if (m.isContinuousUnbounded() || m.isInitialSolveProvenDualInfeasible()) {
+    } else if (!canceled && (m.isContinuousUnbounded() || m.isInitialSolveProvenDualInfeasible())) {
         out->status = -2; // StatusUnbounded
-    } else if (m.isSecondsLimitReached()) {
+    } else if (canceled || m.isSecondsLimitReached()) {
         out->status = -4; // StatusTimeLimit
     } else if (m.isNodeLimitReached()) {
         out->status = -6; // StatusNodeLimit

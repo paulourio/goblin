@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 )
 
 // TestCBCPorted_KnapsackAndModification ports testKnapsack, testProblemModification,
@@ -19,21 +19,21 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 	t.Run("CInterfaceTest_Knapsack_SequentialModification", func(t *testing.T) {
 		// Maximize 5x0 + 3x1 + 2x2 + 7x3 + 4x4
 		// s.t.     2x0 + 8x1 + 4x2 + 2x3 + 5x4 <= 10, x_j in {0,1}
-		m := goblin.NewModel("knapsack", goblin.Maximize)
+		m := gb.NewModel("knapsack", gb.Maximize)
 		weights := []float64{2, 8, 4, 2, 5}
 		profits := []float64{5, 3, 2, 7, 4}
-		x := make([]goblin.Var, 5)
-		var objTerms, rowTerms []goblin.Term
+		x := make([]gb.Var, 5)
+		var objTerms, rowTerms []gb.Term
 		for i := range 5 {
 			x[i] = m.AddBinaryVar(fmt.Sprintf("x%d", i))
-			objTerms = append(objTerms, goblin.T(x[i], profits[i]))
-			rowTerms = append(rowTerms, goblin.T(x[i], weights[i]))
+			objTerms = append(objTerms, gb.T(x[i], profits[i]))
+			rowTerms = append(rowTerms, gb.T(x[i], weights[i]))
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
-		m.AddConstraint("cap", goblin.Le(goblin.SumTerms(rowTerms...), 10.0))
+		m.SetObjective(gb.SumTerms(objTerms...))
+		m.AddConstraint("cap", gb.Le(gb.SumTerms(rowTerms...), 10.0))
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal {
 			t.Fatalf("expected Optimal, got %v", res.Status)
 		}
 		if math.Abs(res.Objective-16.0) > 1e-6 {
@@ -48,8 +48,8 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 
 		// Fix x0 <= 0 -> optimal objective 11.0, primal [0, 0, 0, 1, 1]
 		m.SetVarBounds(x[0], 0, 0)
-		res2 := m.Solve()
-		if res2.Status != goblin.StatusOptimal || math.Abs(res2.Objective-11.0) > 1e-6 {
+		res2 := mustSolve(t, m)
+		if res2.Status != gb.StatusOptimal || math.Abs(res2.Objective-11.0) > 1e-6 {
 			t.Fatalf("step 2: status=%v obj=%.6f, want Optimal 11.0", res2.Status, res2.Objective)
 		}
 		want2 := []float64{0, 0, 0, 1, 1}
@@ -61,8 +61,8 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 
 		// Fix x1 >= 1 -> optimal objective 10.0, primal [0, 1, 0, 1, 0]
 		m.SetVarBounds(x[1], 1, 1)
-		res3 := m.Solve()
-		if res3.Status != goblin.StatusOptimal || math.Abs(res3.Objective-10.0) > 1e-6 {
+		res3 := mustSolve(t, m)
+		if res3.Status != gb.StatusOptimal || math.Abs(res3.Objective-10.0) > 1e-6 {
 			t.Fatalf("step 3: status=%v obj=%.6f, want Optimal 10.0", res3.Status, res3.Objective)
 		}
 		want3 := []float64{0, 1, 0, 1, 0}
@@ -76,20 +76,20 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 	t.Run("CInterfaceTest_new_KnapsackWithParams", func(t *testing.T) {
 		// Maximize 10x0 + 13x1 + 18x2 + 31x3 + 7x4 + 15x5
 		// s.t.     11x0 + 15x1 + 20x2 + 35x3 + 10x4 + 33x5 <= 47, x_j in {0,1}
-		m := goblin.NewModel("knapsack_params", goblin.Maximize)
+		m := gb.NewModel("knapsack_params", gb.Maximize)
 		weights := []float64{11, 15, 20, 35, 10, 33}
 		profits := []float64{10, 13, 18, 31, 7, 15}
-		var objTerms, rowTerms []goblin.Term
+		var objTerms, rowTerms []gb.Term
 		for i := range 6 {
 			v := m.AddBinaryVar(fmt.Sprintf("x%d", i))
-			objTerms = append(objTerms, goblin.T(v, profits[i]))
-			rowTerms = append(rowTerms, goblin.T(v, weights[i]))
+			objTerms = append(objTerms, gb.T(v, profits[i]))
+			rowTerms = append(rowTerms, gb.T(v, weights[i]))
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
-		m.AddConstraint("cap", goblin.Le(goblin.SumTerms(rowTerms...), 47.0))
+		m.SetObjective(gb.SumTerms(objTerms...))
+		m.AddConstraint("cap", gb.Le(gb.SumTerms(rowTerms...), 47.0))
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal || math.Abs(res.Objective-41.0) > 1e-5 {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal || math.Abs(res.Objective-41.0) > 1e-5 {
 			t.Fatalf("expected Optimal 41.0, got %v %.6f", res.Status, res.Objective)
 		}
 	})
@@ -99,13 +99,13 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 // testIntegerInfeasible, testIntegerUnbounded, and testIntegerBounds from Cbc/test/CInterfaceTest.c.
 func TestCBCPorted_InfeasibleAndUnboundedEdgeCases(t *testing.T) {
 	t.Run("testInfeasiblePreprocess", func(t *testing.T) {
-		buildModel := func() *goblin.Model {
-			m := goblin.NewModel("infeas_preprocess", goblin.Minimize)
-			x := make([]goblin.Var, 8)
+		buildModel := func() *gb.Model {
+			m := gb.NewModel("infeas_preprocess", gb.Minimize)
+			x := make([]gb.Var, 8)
 			for i := range 8 {
 				x[i] = m.AddBinaryVar(fmt.Sprintf("x%d", i))
 			}
-			m.SetObjective(goblin.NewExpr(goblin.T(x[0], 1), goblin.T(x[1], 1)))
+			m.SetObjective(gb.NewExpr(gb.T(x[0], 1), gb.T(x[1], 1)))
 
 			start := []int{0, 4, 8, 12, 16, 19, 22, 25, 28}
 			rowIdx := []int{
@@ -131,43 +131,43 @@ func TestCBCPorted_InfeasibleAndUnboundedEdgeCases(t *testing.T) {
 			rowLB := []float64{0, 0, -math.Inf(1), 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, -math.Inf(1)}
 			rowUB := []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, math.Inf(1), 2}
 
-			rowTerms := make([][]goblin.Term, 14)
+			rowTerms := make([][]gb.Term, 14)
 			for col := range 8 {
 				for k := start[col]; k < start[col+1]; k++ {
 					r := rowIdx[k]
-					rowTerms[r] = append(rowTerms[r], goblin.T(x[col], val[k]))
+					rowTerms[r] = append(rowTerms[r], gb.T(x[col], val[k]))
 				}
 			}
 			for r := range 14 {
-				expr := goblin.SumTerms(rowTerms[r]...)
+				expr := gb.SumTerms(rowTerms[r]...)
 				if rowLB[r] == rowUB[r] {
-					m.AddConstraint(fmt.Sprintf("r%d", r), goblin.Eq(expr, rowLB[r]))
+					m.AddConstraint(fmt.Sprintf("r%d", r), gb.Eq(expr, rowLB[r]))
 				} else if math.IsInf(rowLB[r], -1) {
-					m.AddConstraint(fmt.Sprintf("r%d", r), goblin.Le(expr, rowUB[r]))
+					m.AddConstraint(fmt.Sprintf("r%d", r), gb.Le(expr, rowUB[r]))
 				} else {
-					m.AddConstraint(fmt.Sprintf("r%d", r), goblin.Ge(expr, rowLB[r]))
+					m.AddConstraint(fmt.Sprintf("r%d", r), gb.Ge(expr, rowLB[r]))
 				}
 			}
 			return m
 		}
 
 		for _, presolve := range []bool{true, false} {
-			res := buildModel().Solve(goblin.WithPresolve(presolve))
-			if res.Status != goblin.StatusInfeasible {
+			res := mustSolve(t, buildModel(), gb.WithPresolve(presolve))
+			if res.Status != gb.StatusInfeasible {
 				t.Fatalf("presolve=%v: expected StatusInfeasible, got %v (obj=%.6f)", presolve, res.Status, res.Objective)
 			}
 		}
 	})
 
 	t.Run("testIntegerInfeasible", func(t *testing.T) {
-		m := goblin.NewModel("int_infeas", goblin.Minimize)
+		m := gb.NewModel("int_infeas", gb.Minimize)
 		x := m.AddBinaryVar("x")
-		m.SetObjective(goblin.NewExpr(goblin.T(x, 1)))
-		m.AddConstraint("c0", goblin.Le(goblin.NewExpr(goblin.T(x, 1)), -10.0))
+		m.SetObjective(gb.NewExpr(gb.T(x, 1)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x, 1)), -10.0))
 
 		for _, presolve := range []bool{true, false} {
-			res := m.Solve(goblin.WithPresolve(presolve))
-			if res.Status != goblin.StatusInfeasible {
+			res := mustSolve(t, m, gb.WithPresolve(presolve))
+			if res.Status != gb.StatusInfeasible {
 				t.Fatalf("presolve=%v: expected StatusInfeasible, got %v", presolve, res.Status)
 			}
 		}
@@ -175,16 +175,16 @@ func TestCBCPorted_InfeasibleAndUnboundedEdgeCases(t *testing.T) {
 
 	t.Run("testIntegerUnbounded", func(t *testing.T) {
 		// Minimize x s.t. x + y <= 3, x - y == 0, x, y free, x integer
-		m := goblin.NewModel("int_unbounded", goblin.Minimize)
+		m := gb.NewModel("int_unbounded", gb.Minimize)
 		x := m.AddIntVar("x", math.Inf(-1), math.Inf(1))
 		y := m.AddContVar("y", math.Inf(-1), math.Inf(1))
-		m.SetObjective(goblin.NewExpr(goblin.T(x, 1)))
-		m.AddConstraint("c0", goblin.Le(goblin.NewExpr(goblin.T(x, 1), goblin.T(y, 1)), 3.0))
-		m.AddConstraint("c1", goblin.Eq(goblin.NewExpr(goblin.T(x, 1), goblin.T(y, -1)), 0.0))
+		m.SetObjective(gb.NewExpr(gb.T(x, 1)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x, 1), gb.T(y, 1)), 3.0))
+		m.AddConstraint("c1", gb.Eq(gb.NewExpr(gb.T(x, 1), gb.T(y, -1)), 0.0))
 
 		for _, presolve := range []bool{true, false} {
-			res := m.Solve(goblin.WithPresolve(presolve))
-			if res.Status != goblin.StatusUnbounded {
+			res := mustSolve(t, m, gb.WithPresolve(presolve))
+			if res.Status != gb.StatusUnbounded {
 				t.Fatalf("presolve=%v: expected StatusUnbounded, got %v", presolve, res.Status)
 			}
 		}
@@ -193,14 +193,14 @@ func TestCBCPorted_InfeasibleAndUnboundedEdgeCases(t *testing.T) {
 	t.Run("testIntegerBounds", func(t *testing.T) {
 		// max 1.1x + 100.0z s.t. x + z <= 3, 0 <= x <= 3, 0 <= z <= 1.5 (z Integer)
 		// Expected: x* = 2.0, z* = 1.0, obj = 102.2
-		m := goblin.NewModel("int_bounds", goblin.Maximize)
+		m := gb.NewModel("int_bounds", gb.Maximize)
 		x := m.AddContVar("x", 0.0, 3.0)
 		z := m.AddIntVar("z", 0.0, 1.5)
-		m.SetObjective(goblin.NewExpr(goblin.T(x, 1.1), goblin.T(z, 100.0)))
-		m.AddConstraint("c0", goblin.Le(goblin.NewExpr(goblin.T(x, 1.0), goblin.T(z, 1.0)), 3.0))
+		m.SetObjective(gb.NewExpr(gb.T(x, 1.1), gb.T(z, 100.0)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x, 1.0), gb.T(z, 1.0)), 3.0))
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal {
 			t.Fatalf("expected StatusOptimal, got %v", res.Status)
 		}
 		if math.Abs(res.Value(x)-2.0) > 1e-6 || math.Abs(res.Value(z)-1.0) > 1e-6 {
@@ -217,96 +217,96 @@ func TestCBCPorted_InfeasibleAndUnboundedEdgeCases(t *testing.T) {
 func TestCBCPorted_LPReoptimizationAndDelete(t *testing.T) {
 	t.Run("testLPReoptimization", func(t *testing.T) {
 		// Max 5x + 4y s.t. 6x + 4y <= 24, x + 2y <= 6, x, y >= 0
-		m := goblin.NewModel("lp_reopt", goblin.Maximize)
+		m := gb.NewModel("lp_reopt", gb.Maximize)
 		x := m.AddContVar("x", 0, math.Inf(1))
 		y := m.AddContVar("y", 0, math.Inf(1))
-		m.SetObjective(goblin.NewExpr(goblin.T(x, 5), goblin.T(y, 4)))
-		m.AddConstraint("c0", goblin.Le(goblin.NewExpr(goblin.T(x, 6), goblin.T(y, 4)), 24.0))
-		m.AddConstraint("c1", goblin.Le(goblin.NewExpr(goblin.T(x, 1), goblin.T(y, 2)), 6.0))
+		m.SetObjective(gb.NewExpr(gb.T(x, 5), gb.T(y, 4)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x, 6), gb.T(y, 4)), 24.0))
+		m.AddConstraint("c1", gb.Le(gb.NewExpr(gb.T(x, 1), gb.T(y, 2)), 6.0))
 
 		p := m.Compile()
-		lp := goblin.NewLPSolver(p, nil)
+		lp := gb.NewLPSolver(p, nil)
 
 		// 1. Initial solve: x=3, y=1.5 -> obj = 21.0
 		r1 := lp.Solve()
-		if r1.Status != goblin.StatusOptimal || math.Abs(r1.Objective-21.0) > 1e-5 {
+		if r1.Status != gb.StatusOptimal || math.Abs(r1.Objective-21.0) > 1e-5 {
 			t.Fatalf("step 1: status=%v obj=%.6f, want Optimal 21.0", r1.Status, r1.Objective)
 		}
 
 		// 2. Tighten x <= 2 -> x=2, y=2 -> obj = 18.0
 		lp.SetStructuralBounds([]float64{0, 0}, []float64{2.0, math.Inf(1)})
 		r2 := lp.Solve()
-		if r2.Status != goblin.StatusOptimal || math.Abs(r2.Objective-18.0) > 1e-5 {
+		if r2.Status != gb.StatusOptimal || math.Abs(r2.Objective-18.0) > 1e-5 {
 			t.Fatalf("step 2: status=%v obj=%.6f, want Optimal 18.0", r2.Status, r2.Objective)
 		}
 
 		// 3. Add constraint x + y <= 3 -> x=2, y=1 -> obj = 14.0
 		lp.AddCut([]int{0, 1}, []float64{1.0, 1.0}, 3.0)
 		r3 := lp.Solve()
-		if r3.Status != goblin.StatusOptimal || math.Abs(r3.Objective-14.0) > 1e-5 {
+		if r3.Status != gb.StatusOptimal || math.Abs(r3.Objective-14.0) > 1e-5 {
 			t.Fatalf("step 3: status=%v obj=%.6f, want Optimal 14.0", r3.Status, r3.Objective)
 		}
 
 		// 4. Relax x <= 100 -> x=3, y=0 -> obj = 15.0
 		lp.SetStructuralBounds([]float64{0, 0}, []float64{100.0, math.Inf(1)})
 		r4 := lp.Solve()
-		if r4.Status != goblin.StatusOptimal || math.Abs(r4.Objective-15.0) > 1e-5 {
+		if r4.Status != gb.StatusOptimal || math.Abs(r4.Objective-15.0) > 1e-5 {
 			t.Fatalf("step 4: status=%v obj=%.6f, want Optimal 15.0", r4.Status, r4.Objective)
 		}
 
 		// 5. Force x >= 10 -> Infeasible
 		lp.SetStructuralBounds([]float64{10.0, 0}, []float64{100.0, math.Inf(1)})
 		r5 := lp.Solve()
-		if r5.Status != goblin.StatusInfeasible {
+		if r5.Status != gb.StatusInfeasible {
 			t.Fatalf("step 5: expected StatusInfeasible, got %v", r5.Status)
 		}
 	})
 
 	t.Run("testSOS1_CInterfaceTest_advanced", func(t *testing.T) {
 		// max 3*x0 + 2*x1 + 5*x2, x0+x1+x2 <= 10, SOS1(x0,x1,x2) => x2=10, obj=50
-		m := goblin.NewModel("sos1_adv", goblin.Maximize)
+		m := gb.NewModel("sos1_adv", gb.Maximize)
 		coeffs := []float64{3.0, 2.0, 5.0}
-		x := make([]goblin.Var, 3)
-		z := make([]goblin.Var, 3)
-		var objTerms, capTerms, sosTerms []goblin.Term
+		x := make([]gb.Var, 3)
+		z := make([]gb.Var, 3)
+		var objTerms, capTerms, sosTerms []gb.Term
 		for i := range 3 {
 			x[i] = m.AddContVar(fmt.Sprintf("x%d", i), 0, 10.0)
 			z[i] = m.AddBinaryVar(fmt.Sprintf("z%d", i))
-			objTerms = append(objTerms, goblin.T(x[i], coeffs[i]))
-			capTerms = append(capTerms, goblin.T(x[i], 1.0))
-			sosTerms = append(sosTerms, goblin.T(z[i], 1.0))
-			m.AddConstraint(fmt.Sprintf("vub_%d", i), goblin.Le(goblin.NewExpr(goblin.T(x[i], 1.0), goblin.T(z[i], -10.0)), 0.0))
+			objTerms = append(objTerms, gb.T(x[i], coeffs[i]))
+			capTerms = append(capTerms, gb.T(x[i], 1.0))
+			sosTerms = append(sosTerms, gb.T(z[i], 1.0))
+			m.AddConstraint(fmt.Sprintf("vub_%d", i), gb.Le(gb.NewExpr(gb.T(x[i], 1.0), gb.T(z[i], -10.0)), 0.0))
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
-		m.AddConstraint("cap", goblin.Le(goblin.SumTerms(capTerms...), 10.0))
-		m.AddConstraint("sos1", goblin.Le(goblin.SumTerms(sosTerms...), 1.0))
+		m.SetObjective(gb.SumTerms(objTerms...))
+		m.AddConstraint("cap", gb.Le(gb.SumTerms(capTerms...), 10.0))
+		m.AddConstraint("sos1", gb.Le(gb.SumTerms(sosTerms...), 1.0))
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal || math.Abs(res.Objective-50.0) > 1e-4 {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal || math.Abs(res.Objective-50.0) > 1e-4 {
 			t.Fatalf("got %v %.6f, want Optimal 50.0", res.Status, res.Objective)
 		}
 	})
 
 	t.Run("testDelete", func(t *testing.T) {
-		m2 := goblin.NewModel("ub5_with_tight", goblin.Maximize)
+		m2 := gb.NewModel("ub5_with_tight", gb.Maximize)
 		x2 := m2.AddContVar("x", 0, 5)
 		y2 := m2.AddContVar("y", 0, 5)
 		z2 := m2.AddContVar("z", 0, 5)
-		m2.SetObjective(goblin.NewExpr(goblin.T(x2, 10), goblin.T(y2, 6), goblin.T(z2, 4)))
-		m2.AddConstraint("r0", goblin.Le(goblin.NewExpr(goblin.T(x2, 1), goblin.T(y2, 1), goblin.T(z2, 1)), 10.0))
-		m2.AddConstraint("r1", goblin.Le(goblin.NewExpr(goblin.T(x2, 1)), 3.0))
-		res2 := m2.Solve()
-		if res2.Status != goblin.StatusOptimal || math.Abs(res2.Objective-68.0) > 1e-5 {
+		m2.SetObjective(gb.NewExpr(gb.T(x2, 10), gb.T(y2, 6), gb.T(z2, 4)))
+		m2.AddConstraint("r0", gb.Le(gb.NewExpr(gb.T(x2, 1), gb.T(y2, 1), gb.T(z2, 1)), 10.0))
+		m2.AddConstraint("r1", gb.Le(gb.NewExpr(gb.T(x2, 1)), 3.0))
+		res2 := mustSolve(t, m2)
+		if res2.Status != gb.StatusOptimal || math.Abs(res2.Objective-68.0) > 1e-5 {
 			t.Fatalf("ub5 with tight: got %v %.6f, want Optimal 68.0", res2.Status, res2.Objective)
 		}
 
-		m3 := goblin.NewModel("ub5_without_tight", goblin.Maximize)
+		m3 := gb.NewModel("ub5_without_tight", gb.Maximize)
 		x3 := m3.AddContVar("x", 0, 5)
 		y3 := m3.AddContVar("y", 0, 5)
-		m3.SetObjective(goblin.NewExpr(goblin.T(x3, 10), goblin.T(y3, 6)))
-		m3.AddConstraint("r0", goblin.Le(goblin.NewExpr(goblin.T(x3, 1), goblin.T(y3, 1)), 10.0))
-		res3 := m3.Solve()
-		if res3.Status != goblin.StatusOptimal || math.Abs(res3.Objective-80.0) > 1e-5 {
+		m3.SetObjective(gb.NewExpr(gb.T(x3, 10), gb.T(y3, 6)))
+		m3.AddConstraint("r0", gb.Le(gb.NewExpr(gb.T(x3, 1), gb.T(y3, 1)), 10.0))
+		res3 := mustSolve(t, m3)
+		if res3.Status != gb.StatusOptimal || math.Abs(res3.Objective-80.0) > 1e-5 {
 			t.Fatalf("ub5 without tight: got %v %.6f, want Optimal 80.0", res3.Status, res3.Objective)
 		}
 	})
@@ -324,34 +324,34 @@ func TestCBCPorted_TransportationConstruction(t *testing.T) {
 		{14, 9, 16, 5},
 	}
 
-	m := goblin.NewModel("transportation_3x4", goblin.Minimize)
-	var x [3][4]goblin.Var
-	var objTerms []goblin.Term
+	m := gb.NewModel("transportation_3x4", gb.Minimize)
+	var x [3][4]gb.Var
+	var objTerms []gb.Term
 	for i := range 3 {
 		for j := range 4 {
 			x[i][j] = m.AddContVar(fmt.Sprintf("x_%d_%d", i, j), 0, math.Inf(1))
-			objTerms = append(objTerms, goblin.T(x[i][j], cost[i][j]))
+			objTerms = append(objTerms, gb.T(x[i][j], cost[i][j]))
 		}
 	}
-	m.SetObjective(goblin.SumTerms(objTerms...))
+	m.SetObjective(gb.SumTerms(objTerms...))
 
 	for i := range 3 {
-		var terms []goblin.Term
+		var terms []gb.Term
 		for j := range 4 {
-			terms = append(terms, goblin.T(x[i][j], 1.0))
+			terms = append(terms, gb.T(x[i][j], 1.0))
 		}
-		m.AddConstraint(fmt.Sprintf("supply_%d", i), goblin.Le(goblin.SumTerms(terms...), supply[i]))
+		m.AddConstraint(fmt.Sprintf("supply_%d", i), gb.Le(gb.SumTerms(terms...), supply[i]))
 	}
 	for j := range 4 {
-		var terms []goblin.Term
+		var terms []gb.Term
 		for i := range 3 {
-			terms = append(terms, goblin.T(x[i][j], 1.0))
+			terms = append(terms, gb.T(x[i][j], 1.0))
 		}
-		m.AddConstraint(fmt.Sprintf("demand_%d", j), goblin.Ge(goblin.SumTerms(terms...), demand[j]))
+		m.AddConstraint(fmt.Sprintf("demand_%d", j), gb.Ge(gb.SumTerms(terms...), demand[j]))
 	}
 
-	res := m.Solve()
-	if res.Status != goblin.StatusOptimal {
+	res := mustSolve(t, m)
+	if res.Status != gb.StatusOptimal {
 		t.Fatalf("expected StatusOptimal, got %v", res.Status)
 	}
 	if math.Abs(res.Objective-465.0) > 1e-5 {
@@ -378,27 +378,27 @@ func TestCBCPorted_CuttingStockColumnGenerationAndKantorovich(t *testing.T) {
 
 		var masterObj float64
 		for iter := range 20 {
-			master := goblin.NewModel("master_cs", goblin.Minimize)
-			lam := make([]goblin.Var, len(patterns))
-			var objTerms []goblin.Term
+			master := gb.NewModel("master_cs", gb.Minimize)
+			lam := make([]gb.Var, len(patterns))
+			var objTerms []gb.Term
 			for pIdx := range patterns {
 				lam[pIdx] = master.AddContVar(fmt.Sprintf("P_%d", pIdx), 0, math.Inf(1))
-				objTerms = append(objTerms, goblin.T(lam[pIdx], 1.0))
+				objTerms = append(objTerms, gb.T(lam[pIdx], 1.0))
 			}
-			master.SetObjective(goblin.SumTerms(objTerms...))
+			master.SetObjective(gb.SumTerms(objTerms...))
 
 			for i := range numItems {
-				var rowTerms []goblin.Term
+				var rowTerms []gb.Term
 				for pIdx, pat := range patterns {
 					if pat[i] != 0 {
-						rowTerms = append(rowTerms, goblin.T(lam[pIdx], pat[i]))
+						rowTerms = append(rowTerms, gb.T(lam[pIdx], pat[i]))
 					}
 				}
-				master.AddConstraint(fmt.Sprintf("demand_%d", i), goblin.Ge(goblin.SumTerms(rowTerms...), demands[i]))
+				master.AddConstraint(fmt.Sprintf("demand_%d", i), gb.Ge(gb.SumTerms(rowTerms...), demands[i]))
 			}
 
-			res := master.Solve()
-			if res.Status != goblin.StatusOptimal {
+			res := mustSolve(t, master)
+			if res.Status != gb.StatusOptimal {
 				t.Fatalf("iter %d: master LP status = %v", iter, res.Status)
 			}
 			if len(res.Duals) != numItems {
@@ -406,22 +406,22 @@ func TestCBCPorted_CuttingStockColumnGenerationAndKantorovich(t *testing.T) {
 			}
 			masterObj = res.Objective
 
-			pricing := goblin.NewModel("pricing_knapsack", goblin.Maximize)
-			aVars := make([]goblin.Var, numItems)
-			var pObj, pCap []goblin.Term
+			pricing := gb.NewModel("pricing_knapsack", gb.Maximize)
+			aVars := make([]gb.Var, numItems)
+			var pObj, pCap []gb.Term
 			for i := range numItems {
 				maxCopies := math.Floor(barLength / widths[i])
 				aVars[i] = pricing.AddIntVar(fmt.Sprintf("a_%d", i), 0, maxCopies)
 				if res.Duals[i] > 0 {
-					pObj = append(pObj, goblin.T(aVars[i], res.Duals[i]))
+					pObj = append(pObj, gb.T(aVars[i], res.Duals[i]))
 				}
-				pCap = append(pCap, goblin.T(aVars[i], widths[i]))
+				pCap = append(pCap, gb.T(aVars[i], widths[i]))
 			}
-			pricing.SetObjective(goblin.SumTerms(pObj...))
-			pricing.AddConstraint("length", goblin.Le(goblin.SumTerms(pCap...), barLength))
+			pricing.SetObjective(gb.SumTerms(pObj...))
+			pricing.AddConstraint("length", gb.Le(gb.SumTerms(pCap...), barLength))
 
-			pRes := pricing.Solve()
-			if pRes.Status != goblin.StatusOptimal {
+			pRes := mustSolve(t, pricing)
+			if pRes.Status != gb.StatusOptimal {
 				t.Fatalf("iter %d: pricing MIP status = %v", iter, pRes.Status)
 			}
 			reducedCost := 1.0 - pRes.Objective
@@ -442,41 +442,41 @@ func TestCBCPorted_CuttingStockColumnGenerationAndKantorovich(t *testing.T) {
 
 	t.Run("Kantorovich_CInterfaceTest_kantorovich", func(t *testing.T) {
 		const numBars = 10
-		m := goblin.NewModel("kantorovich_cs", goblin.Minimize)
-		y := make([]goblin.Var, numBars)
-		var x [4][numBars]goblin.Var
-		var objTerms []goblin.Term
+		m := gb.NewModel("kantorovich_cs", gb.Minimize)
+		y := make([]gb.Var, numBars)
+		var x [4][numBars]gb.Var
+		var objTerms []gb.Term
 		for j := range numBars {
 			y[j] = m.AddBinaryVar(fmt.Sprintf("y_%d", j))
-			objTerms = append(objTerms, goblin.T(y[j], 1.0))
+			objTerms = append(objTerms, gb.T(y[j], 1.0))
 			for i := range numItems {
 				maxCopies := math.Floor(barLength / widths[i])
 				x[i][j] = m.AddIntVar(fmt.Sprintf("x_%d_%d", i, j), 0, maxCopies)
 			}
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
+		m.SetObjective(gb.SumTerms(objTerms...))
 
 		for i := range numItems {
-			var terms []goblin.Term
+			var terms []gb.Term
 			for j := range numBars {
-				terms = append(terms, goblin.T(x[i][j], 1.0))
+				terms = append(terms, gb.T(x[i][j], 1.0))
 			}
-			m.AddConstraint(fmt.Sprintf("demand_%d", i), goblin.Ge(goblin.SumTerms(terms...), demands[i]))
+			m.AddConstraint(fmt.Sprintf("demand_%d", i), gb.Ge(gb.SumTerms(terms...), demands[i]))
 		}
 		for j := range numBars {
-			var terms []goblin.Term
+			var terms []gb.Term
 			for i := range numItems {
-				terms = append(terms, goblin.T(x[i][j], widths[i]))
+				terms = append(terms, gb.T(x[i][j], widths[i]))
 			}
-			terms = append(terms, goblin.T(y[j], -barLength))
-			m.AddConstraint(fmt.Sprintf("cap_%d", j), goblin.Le(goblin.SumTerms(terms...), 0.0))
+			terms = append(terms, gb.T(y[j], -barLength))
+			m.AddConstraint(fmt.Sprintf("cap_%d", j), gb.Le(gb.SumTerms(terms...), 0.0))
 		}
 		for j := 1; j < numBars; j++ {
-			m.AddConstraint(fmt.Sprintf("sym_%d", j), goblin.Ge(goblin.NewExpr(goblin.T(y[j-1], 1.0), goblin.T(y[j], -1.0)), 0.0))
+			m.AddConstraint(fmt.Sprintf("sym_%d", j), gb.Ge(gb.NewExpr(gb.T(y[j-1], 1.0), gb.T(y[j], -1.0)), 0.0))
 		}
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal {
 			t.Fatalf("expected StatusOptimal, got %v", res.Status)
 		}
 		if math.Abs(res.Objective-3.0) > 1e-5 {
@@ -502,51 +502,51 @@ func TestCBCPorted_FacilityLocation(t *testing.T) {
 		{18, 22, 14, 20, 10, 12, 18, 10},
 	}
 
-	m := goblin.NewModel("facility_location", goblin.Minimize)
-	y := make([]goblin.Var, numFacilities)
-	var x [numFacilities][numCustomers]goblin.Var
-	var objTerms []goblin.Term
+	m := gb.NewModel("facility_location", gb.Minimize)
+	y := make([]gb.Var, numFacilities)
+	var x [numFacilities][numCustomers]gb.Var
+	var objTerms []gb.Term
 
 	for f := range numFacilities {
 		y[f] = m.AddBinaryVar(fmt.Sprintf("y_%d", f))
-		objTerms = append(objTerms, goblin.T(y[f], fixedCost[f]))
+		objTerms = append(objTerms, gb.T(y[f], fixedCost[f]))
 	}
 	for f := range numFacilities {
 		for c := range numCustomers {
 			x[f][c] = m.AddContVar(fmt.Sprintf("x_%d_%d", f, c), 0.0, 1.0)
-			objTerms = append(objTerms, goblin.T(x[f][c], transportCost[f][c]*demand[c]))
+			objTerms = append(objTerms, gb.T(x[f][c], transportCost[f][c]*demand[c]))
 		}
 	}
-	m.SetObjective(goblin.SumTerms(objTerms...))
+	m.SetObjective(gb.SumTerms(objTerms...))
 
 	// Customer demand satisfaction: sum_f x[f][c] == 1
 	for c := range numCustomers {
-		var terms []goblin.Term
+		var terms []gb.Term
 		for f := range numFacilities {
-			terms = append(terms, goblin.T(x[f][c], 1.0))
+			terms = append(terms, gb.T(x[f][c], 1.0))
 		}
-		m.AddConstraint(fmt.Sprintf("dem_%d", c), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+		m.AddConstraint(fmt.Sprintf("dem_%d", c), gb.Eq(gb.SumTerms(terms...), 1.0))
 	}
 
 	// Facility capacity: sum_c demand[c]*x[f][c] - capacity[f]*y[f] <= 0
 	for f := range numFacilities {
-		var terms []goblin.Term
+		var terms []gb.Term
 		for c := range numCustomers {
-			terms = append(terms, goblin.T(x[f][c], demand[c]))
+			terms = append(terms, gb.T(x[f][c], demand[c]))
 		}
-		terms = append(terms, goblin.T(y[f], -capacity[f]))
-		m.AddConstraint(fmt.Sprintf("cap_%d", f), goblin.Le(goblin.SumTerms(terms...), 0.0))
+		terms = append(terms, gb.T(y[f], -capacity[f]))
+		m.AddConstraint(fmt.Sprintf("cap_%d", f), gb.Le(gb.SumTerms(terms...), 0.0))
 	}
 
 	// Tightening linking constraints: x[f][c] - y[f] <= 0
 	for f := range numFacilities {
 		for c := range numCustomers {
-			m.AddConstraint(fmt.Sprintf("link_%d_%d", f, c), goblin.Le(goblin.NewExpr(goblin.T(x[f][c], 1.0), goblin.T(y[f], -1.0)), 0.0))
+			m.AddConstraint(fmt.Sprintf("link_%d_%d", f, c), gb.Le(gb.NewExpr(gb.T(x[f][c], 1.0), gb.T(y[f], -1.0)), 0.0))
 		}
 	}
 
-	res := m.Solve()
-	if res.Status != goblin.StatusOptimal {
+	res := mustSolve(t, m)
+	if res.Status != gb.StatusOptimal {
 		t.Fatalf("expected StatusOptimal, got %v", res.Status)
 	}
 	if math.Abs(res.Objective-1290.0) > 1e-4 {
@@ -577,15 +577,15 @@ func TestCBCPorted_JobShopScheduling(t *testing.T) {
 		}
 	}
 
-	m := goblin.NewModel("jssp_3x3", goblin.Minimize)
+	m := gb.NewModel("jssp_3x3", gb.Minimize)
 	cMax := m.AddContVar("C", 0, bigM)
-	var x [numJobs][numMachines]goblin.Var
+	var x [numJobs][numMachines]gb.Var
 	for j := range numJobs {
 		for i := range numMachines {
 			x[j][i] = m.AddContVar(fmt.Sprintf("x_%d_%d", j+1, i+1), 0, bigM)
 		}
 	}
-	m.SetObjective(goblin.NewExpr(goblin.T(cMax, 1.0)))
+	m.SetObjective(gb.NewExpr(gb.T(cMax, 1.0)))
 
 	// Precedence within job: x[j][machines[j][i]] - x[j][machines[j][i-1]] >= times[j][machines[j][i-1]]
 	for j := range numJobs {
@@ -594,13 +594,13 @@ func TestCBCPorted_JobShopScheduling(t *testing.T) {
 			mPrev := machines[j][i-1]
 			m.AddConstraint(
 				fmt.Sprintf("prec_%d_%d", j+1, i),
-				goblin.Ge(goblin.NewExpr(goblin.T(x[j][mCur], 1.0), goblin.T(x[j][mPrev], -1.0)), times[j][mPrev]),
+				gb.Ge(gb.NewExpr(gb.T(x[j][mCur], 1.0), gb.T(x[j][mPrev], -1.0)), times[j][mPrev]),
 			)
 		}
 		lastMach := machines[j][numMachines-1]
 		m.AddConstraint(
 			fmt.Sprintf("ms_%d", j+1),
-			goblin.Ge(goblin.NewExpr(goblin.T(cMax, 1.0), goblin.T(x[j][lastMach], -1.0)), times[j][lastMach]),
+			gb.Ge(gb.NewExpr(gb.T(cMax, 1.0), gb.T(x[j][lastMach], -1.0)), times[j][lastMach]),
 		)
 	}
 
@@ -611,19 +611,19 @@ func TestCBCPorted_JobShopScheduling(t *testing.T) {
 				y := m.AddBinaryVar(fmt.Sprintf("y_%d_%d_%d", j+1, k+1, i+1))
 				m.AddConstraint(
 					fmt.Sprintf("ov1_%d_%d_%d", j+1, k+1, i+1),
-					goblin.Ge(goblin.NewExpr(goblin.T(x[j][i], 1.0), goblin.T(x[k][i], -1.0), goblin.T(y, bigM)), times[k][i]),
+					gb.Ge(gb.NewExpr(gb.T(x[j][i], 1.0), gb.T(x[k][i], -1.0), gb.T(y, bigM)), times[k][i]),
 				)
 				m.AddConstraint(
 					fmt.Sprintf("ov2_%d_%d_%d", j+1, k+1, i+1),
-					goblin.Ge(goblin.NewExpr(goblin.T(x[k][i], 1.0), goblin.T(x[j][i], -1.0), goblin.T(y, -bigM)), times[j][i]-bigM),
+					gb.Ge(gb.NewExpr(gb.T(x[k][i], 1.0), gb.T(x[j][i], -1.0), gb.T(y, -bigM)), times[j][i]-bigM),
 				)
 			}
 		}
 	}
 
 	for _, presolve := range []bool{true, false} {
-		res := m.Solve(goblin.WithPresolve(presolve))
-		if res.Status != goblin.StatusOptimal {
+		res := mustSolve(t, m, gb.WithPresolve(presolve))
+		if res.Status != gb.StatusOptimal {
 			t.Fatalf("presolve=%v: expected StatusOptimal, got %v", presolve, res.Status)
 		}
 		if math.Abs(res.Objective-7.0) > 1e-4 {
@@ -636,55 +636,55 @@ func TestCBCPorted_JobShopScheduling(t *testing.T) {
 func TestCBCPorted_NQueens(t *testing.T) {
 	for _, n := range []int{8, 10, 16, 25} {
 		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
-			m := goblin.NewModel(fmt.Sprintf("queens_%d", n), goblin.Minimize)
-			x := make([][]goblin.Var, n)
+			m := gb.NewModel(fmt.Sprintf("queens_%d", n), gb.Minimize)
+			x := make([][]gb.Var, n)
 			for i := range n {
-				x[i] = make([]goblin.Var, n)
+				x[i] = make([]gb.Var, n)
 				for j := range n {
 					x[i][j] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", i, j))
 				}
 			}
 			for i := range n {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for j := range n {
-					terms = append(terms, goblin.T(x[i][j], 1.0))
+					terms = append(terms, gb.T(x[i][j], 1.0))
 				}
-				m.AddConstraint(fmt.Sprintf("row_%d", i), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+				m.AddConstraint(fmt.Sprintf("row_%d", i), gb.Eq(gb.SumTerms(terms...), 1.0))
 			}
 			for j := range n {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for i := range n {
-					terms = append(terms, goblin.T(x[i][j], 1.0))
+					terms = append(terms, gb.T(x[i][j], 1.0))
 				}
-				m.AddConstraint(fmt.Sprintf("col_%d", j), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+				m.AddConstraint(fmt.Sprintf("col_%d", j), gb.Eq(gb.SumTerms(terms...), 1.0))
 			}
 			for k := -(n - 2); k <= n-2; k++ {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for i := range n {
 					j := i - k
 					if j >= 0 && j < n {
-						terms = append(terms, goblin.T(x[i][j], 1.0))
+						terms = append(terms, gb.T(x[i][j], 1.0))
 					}
 				}
 				if len(terms) > 1 {
-					m.AddConstraint(fmt.Sprintf("diag1_%d", k), goblin.Le(goblin.SumTerms(terms...), 1.0))
+					m.AddConstraint(fmt.Sprintf("diag1_%d", k), gb.Le(gb.SumTerms(terms...), 1.0))
 				}
 			}
 			for k := 1; k <= 2*n-3; k++ {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for i := range n {
 					j := k - i
 					if j >= 0 && j < n {
-						terms = append(terms, goblin.T(x[i][j], 1.0))
+						terms = append(terms, gb.T(x[i][j], 1.0))
 					}
 				}
 				if len(terms) > 1 {
-					m.AddConstraint(fmt.Sprintf("diag2_%d", k), goblin.Le(goblin.SumTerms(terms...), 1.0))
+					m.AddConstraint(fmt.Sprintf("diag2_%d", k), gb.Le(gb.SumTerms(terms...), 1.0))
 				}
 			}
 
-			res := m.Solve()
-			if res.Status != goblin.StatusOptimal {
+			res := mustSolve(t, m)
+			if res.Status != gb.StatusOptimal {
 				t.Fatalf("N=%d: expected StatusOptimal, got %v", n, res.Status)
 			}
 
@@ -745,30 +745,30 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 		// Now forbid a 2-edge subpath from the optimal tour (e.g. tour1[0]->tour1[1]->tour1[2])
 		// by penalizing/forbidding one of its edges and re-solving, matching CInterfaceTest_mip_reopt.c
 		n := 5
-		m := goblin.NewModel("tsp5_reopt", goblin.Minimize)
-		var x [5][5]goblin.Var
-		var objTerms []goblin.Term
+		m := gb.NewModel("tsp5_reopt", gb.Minimize)
+		var x [5][5]gb.Var
+		var objTerms []gb.Term
 		for i := range n {
 			for j := range n {
 				if i == j {
-					x[i][j] = m.AddVar(fmt.Sprintf("x_%d_%d", i, j), 0, 0, goblin.Binary)
+					x[i][j] = m.AddVar(fmt.Sprintf("x_%d_%d", i, j), 0, 0, gb.Binary)
 				} else {
 					x[i][j] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", i, j))
-					objTerms = append(objTerms, goblin.T(x[i][j], dist[i][j]))
+					objTerms = append(objTerms, gb.T(x[i][j], dist[i][j]))
 				}
 			}
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
+		m.SetObjective(gb.SumTerms(objTerms...))
 		for i := range n {
-			var outT, inT []goblin.Term
+			var outT, inT []gb.Term
 			for j := range n {
 				if i != j {
-					outT = append(outT, goblin.T(x[i][j], 1))
-					inT = append(inT, goblin.T(x[j][i], 1))
+					outT = append(outT, gb.T(x[i][j], 1))
+					inT = append(inT, gb.T(x[j][i], 1))
 				}
 			}
-			m.AddConstraint(fmt.Sprintf("out_%d", i), goblin.Eq(goblin.SumTerms(outT...), 1))
-			m.AddConstraint(fmt.Sprintf("in_%d", i), goblin.Eq(goblin.SumTerms(inT...), 1))
+			m.AddConstraint(fmt.Sprintf("out_%d", i), gb.Eq(gb.SumTerms(outT...), 1))
+			m.AddConstraint(fmt.Sprintf("in_%d", i), gb.Eq(gb.SumTerms(inT...), 1))
 		}
 		// All subtours of size 2 and 3
 		for mask := 1; mask < (1 << n); mask++ {
@@ -779,22 +779,22 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 				}
 			}
 			if len(S) >= 2 && len(S) <= n-2 {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for _, u := range S {
 					for _, v := range S {
 						if u != v {
-							terms = append(terms, goblin.T(x[u][v], 1))
+							terms = append(terms, gb.T(x[u][v], 1))
 						}
 					}
 				}
-				m.AddConstraint(fmt.Sprintf("sec_%d", mask), goblin.Le(goblin.SumTerms(terms...), float64(len(S)-1)))
+				m.AddConstraint(fmt.Sprintf("sec_%d", mask), gb.Le(gb.SumTerms(terms...), float64(len(S)-1)))
 			}
 		}
 		// Forbid the 2-arc sequence tour1[0]->tour1[1]->tour1[2]
 		u, v, w := tour1[0], tour1[1], tour1[2]
-		m.AddConstraint("forbid_seq", goblin.Le(goblin.NewExpr(goblin.T(x[u][v], 1), goblin.T(x[v][w], 1)), 1.0))
-		res2 := m.Solve()
-		if res2.Status != goblin.StatusOptimal {
+		m.AddConstraint("forbid_seq", gb.Le(gb.NewExpr(gb.T(x[u][v], 1), gb.T(x[v][w], 1)), 1.0))
+		res2 := mustSolve(t, m)
+		if res2.Status != gb.StatusOptimal {
 			t.Fatalf("reopt status = %v", res2.Status)
 		}
 		if res2.Objective <= obj1+0.5 {
@@ -818,47 +818,47 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 		}
 		// 1. Verify MTZ LP relaxation = 238.75 (Cbc/test/CInterfaceTest.c:703)
 		const n = 7
-		mLP := goblin.NewModel("tsp7_lp", goblin.Minimize)
-		var xLP [n][n]goblin.Var
-		var yLP [n]goblin.Var
-		var objLP []goblin.Term
+		mLP := gb.NewModel("tsp7_lp", gb.Minimize)
+		var xLP [n][n]gb.Var
+		var yLP [n]gb.Var
+		var objLP []gb.Term
 		for i := range n {
 			for j := range n {
 				if d[i][j] < oo {
 					xLP[i][j] = mLP.AddContVar(fmt.Sprintf("x_%d_%d", i, j), 0, 1)
-					objLP = append(objLP, goblin.T(xLP[i][j], d[i][j]))
+					objLP = append(objLP, gb.T(xLP[i][j], d[i][j]))
 				}
 			}
 		}
 		for i := range n {
 			yLP[i] = mLP.AddContVar(fmt.Sprintf("y_%d", i), 0, n)
 		}
-		mLP.SetObjective(goblin.SumTerms(objLP...))
+		mLP.SetObjective(gb.SumTerms(objLP...))
 		for i := range n {
-			var outT, inT []goblin.Term
+			var outT, inT []gb.Term
 			for j := range n {
 				if d[i][j] < oo {
-					outT = append(outT, goblin.T(xLP[i][j], 1))
+					outT = append(outT, gb.T(xLP[i][j], 1))
 				}
 				if d[j][i] < oo {
-					inT = append(inT, goblin.T(xLP[j][i], 1))
+					inT = append(inT, gb.T(xLP[j][i], 1))
 				}
 			}
-			mLP.AddConstraint(fmt.Sprintf("out_%d", i), goblin.Eq(goblin.SumTerms(outT...), 1))
-			mLP.AddConstraint(fmt.Sprintf("in_%d", i), goblin.Eq(goblin.SumTerms(inT...), 1))
+			mLP.AddConstraint(fmt.Sprintf("out_%d", i), gb.Eq(gb.SumTerms(outT...), 1))
+			mLP.AddConstraint(fmt.Sprintf("in_%d", i), gb.Eq(gb.SumTerms(inT...), 1))
 		}
 		for i := 1; i < n; i++ {
 			for j := 1; j < n; j++ {
 				if d[i][j] < oo {
 					mLP.AddConstraint(
 						fmt.Sprintf("mtz_%d_%d", i, j),
-						goblin.Ge(goblin.NewExpr(goblin.T(yLP[i], 1), goblin.T(yLP[j], -1), goblin.T(xLP[i][j], -float64(n+1))), -float64(n)),
+						gb.Ge(gb.NewExpr(gb.T(yLP[i], 1), gb.T(yLP[j], -1), gb.T(xLP[i][j], -float64(n+1))), -float64(n)),
 					)
 				}
 			}
 		}
-		resLP := mLP.Solve()
-		if resLP.Status != goblin.StatusOptimal || math.Abs(resLP.Objective-238.75) > 1e-4 {
+		resLP := mustSolve(t, mLP)
+		if resLP.Status != gb.StatusOptimal || math.Abs(resLP.Objective-238.75) > 1e-4 {
 			t.Fatalf("expected 7-city MTZ LP relaxation 238.75, got %v %.6f", resLP.Status, resLP.Objective)
 		}
 
@@ -956,44 +956,44 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 func solveAsymmetricTSPWithSubtourCuts(t *testing.T, dist [][]float64) (float64, []int) {
 	t.Helper()
 	n := len(dist)
-	m := goblin.NewModel(fmt.Sprintf("tsp_%d", n), goblin.Minimize)
-	x := make([][]goblin.Var, n)
-	var objTerms []goblin.Term
+	m := gb.NewModel(fmt.Sprintf("tsp_%d", n), gb.Minimize)
+	x := make([][]gb.Var, n)
+	var objTerms []gb.Term
 	for i := range n {
-		x[i] = make([]goblin.Var, n)
+		x[i] = make([]gb.Var, n)
 		for j := range n {
 			if i == j || dist[i][j] >= 1e8 {
-				x[i][j] = m.AddVar(fmt.Sprintf("x_%d_%d", i, j), 0, 0, goblin.Binary)
+				x[i][j] = m.AddVar(fmt.Sprintf("x_%d_%d", i, j), 0, 0, gb.Binary)
 			} else {
 				x[i][j] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", i, j))
-				objTerms = append(objTerms, goblin.T(x[i][j], dist[i][j]))
+				objTerms = append(objTerms, gb.T(x[i][j], dist[i][j]))
 			}
 		}
 	}
-	m.SetObjective(goblin.SumTerms(objTerms...))
+	m.SetObjective(gb.SumTerms(objTerms...))
 
 	for i := range n {
-		var outTerms, inTerms []goblin.Term
+		var outTerms, inTerms []gb.Term
 		for j := range n {
 			if i != j && dist[i][j] < 1e8 {
-				outTerms = append(outTerms, goblin.T(x[i][j], 1.0))
+				outTerms = append(outTerms, gb.T(x[i][j], 1.0))
 			}
 			if i != j && dist[j][i] < 1e8 {
-				inTerms = append(inTerms, goblin.T(x[j][i], 1.0))
+				inTerms = append(inTerms, gb.T(x[j][i], 1.0))
 			}
 		}
-		m.AddConstraint(fmt.Sprintf("out_%d", i), goblin.Eq(goblin.SumTerms(outTerms...), 1.0))
-		m.AddConstraint(fmt.Sprintf("in_%d", i), goblin.Eq(goblin.SumTerms(inTerms...), 1.0))
+		m.AddConstraint(fmt.Sprintf("out_%d", i), gb.Eq(gb.SumTerms(outTerms...), 1.0))
+		m.AddConstraint(fmt.Sprintf("in_%d", i), gb.Eq(gb.SumTerms(inTerms...), 1.0))
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
-			m.AddConstraint(fmt.Sprintf("sub2_%d_%d", i, j), goblin.Le(goblin.NewExpr(goblin.T(x[i][j], 1.0), goblin.T(x[j][i], 1.0)), 1.0))
+			m.AddConstraint(fmt.Sprintf("sub2_%d_%d", i, j), gb.Le(gb.NewExpr(gb.T(x[i][j], 1.0), gb.T(x[j][i], 1.0)), 1.0))
 		}
 	}
 
 	for iter := range 64 {
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal {
 			t.Fatalf("TSP iter %d: expected Optimal, got %v", iter, res.Status)
 		}
 		next := make([]int, n)
@@ -1025,17 +1025,17 @@ func solveAsymmetricTSPWithSubtourCuts(t *testing.T, dist [][]float64) (float64,
 		}
 		for _, cyc := range cycles {
 			if len(cyc) < n {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for _, u := range cyc {
 					for _, v := range cyc {
 						if u != v && dist[u][v] < 1e8 {
-							terms = append(terms, goblin.T(x[u][v], 1.0))
+							terms = append(terms, gb.T(x[u][v], 1.0))
 						}
 					}
 				}
 				m.AddConstraint(
 					fmt.Sprintf("subtour_it%d_sz%d", iter, len(cyc)),
-					goblin.Le(goblin.SumTerms(terms...), float64(len(cyc)-1)),
+					gb.Le(gb.SumTerms(terms...), float64(len(cyc)-1)),
 				)
 			}
 		}
@@ -1047,50 +1047,50 @@ func solveAsymmetricTSPWithSubtourCuts(t *testing.T, dist [][]float64) (float64,
 // TestCBCPorted_OsiExmip1AndModify ports exmip1 from Cbc/test/OsiCbcSolverInterfaceTest.cpp,
 // Cbc/examples/sample5.cpp, Cbc/examples/modify.cpp, and Cbc/examples/simpleBAB.cpp.
 func TestCBCPorted_OsiExmip1AndModify(t *testing.T) {
-	buildExmip1 := func(asMIP bool) (*goblin.Model, []goblin.Var) {
-		m := goblin.NewModel("exmip1", goblin.Minimize)
+	buildExmip1 := func(asMIP bool) (*gb.Model, []gb.Var) {
+		m := gb.NewModel("exmip1", gb.Minimize)
 		collb := []float64{2.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0}
 		colub := []float64{math.Inf(1), 4.1, 1.0, 1.0, 4.0, math.Inf(1), math.Inf(1), 4.3}
 		obj := []float64{1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, -1.0}
-		v := make([]goblin.Var, 8)
-		var objTerms []goblin.Term
+		v := make([]gb.Var, 8)
+		var objTerms []gb.Term
 		for j := range 8 {
-			cat := goblin.Continuous
+			cat := gb.Continuous
 			if asMIP && (j == 2 || j == 3) {
-				cat = goblin.Binary
+				cat = gb.Binary
 			}
 			v[j] = m.AddVar(fmt.Sprintf("c%d", j), collb[j], colub[j], cat)
 			if obj[j] != 0 {
-				objTerms = append(objTerms, goblin.T(v[j], obj[j]))
+				objTerms = append(objTerms, gb.T(v[j], obj[j]))
 			}
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
+		m.SetObjective(gb.SumTerms(objTerms...))
 
 		// Row 0: 3*x0 + x1 - 2*x2 - x3 - x4 >= 2.5
-		m.AddConstraint("r0", goblin.Ge(
-			goblin.NewExpr(goblin.T(v[0], 3), goblin.T(v[1], 1), goblin.T(v[2], -2), goblin.T(v[3], -1), goblin.T(v[4], -1)),
+		m.AddConstraint("r0", gb.Ge(
+			gb.NewExpr(gb.T(v[0], 3), gb.T(v[1], 1), gb.T(v[2], -2), gb.T(v[3], -1), gb.T(v[4], -1)),
 			2.5,
 		))
 		// Row 1: 2*x1 + 1.1*x3 <= 2.1
-		m.AddConstraint("r1", goblin.Le(goblin.NewExpr(goblin.T(v[1], 2), goblin.T(v[3], 1.1)), 2.1))
+		m.AddConstraint("r1", gb.Le(gb.NewExpr(gb.T(v[1], 2), gb.T(v[3], 1.1)), 2.1))
 		// Row 2: x2 + x5 == 4.0
-		m.AddConstraint("r2", goblin.Eq(goblin.NewExpr(goblin.T(v[2], 1), goblin.T(v[5], 1)), 4.0))
+		m.AddConstraint("r2", gb.Eq(gb.NewExpr(gb.T(v[2], 1), gb.T(v[5], 1)), 4.0))
 		// Row 3: 1.8 <= 2.8*x3 - 1.2*x6 <= 5.0 (ranged row)
-		r3Expr := goblin.NewExpr(goblin.T(v[3], 2.8), goblin.T(v[6], -1.2))
-		m.AddConstraint("r3_lb", goblin.Ge(r3Expr, 1.8))
-		m.AddConstraint("r3_ub", goblin.Le(r3Expr, 5.0))
+		r3Expr := gb.NewExpr(gb.T(v[3], 2.8), gb.T(v[6], -1.2))
+		m.AddConstraint("r3_lb", gb.Ge(r3Expr, 1.8))
+		m.AddConstraint("r3_ub", gb.Le(r3Expr, 5.0))
 		// Row 4: 3.0 <= 5.6*x0 + x4 + 1.9*x7 <= 15.0 (ranged row)
-		r4Expr := goblin.NewExpr(goblin.T(v[0], 5.6), goblin.T(v[4], 1.0), goblin.T(v[7], 1.9))
-		m.AddConstraint("r4_lb", goblin.Ge(r4Expr, 3.0))
-		m.AddConstraint("r4_ub", goblin.Le(r4Expr, 15.0))
+		r4Expr := gb.NewExpr(gb.T(v[0], 5.6), gb.T(v[4], 1.0), gb.T(v[7], 1.9))
+		m.AddConstraint("r4_lb", gb.Ge(r4Expr, 3.0))
+		m.AddConstraint("r4_ub", gb.Le(r4Expr, 15.0))
 
 		return m, v
 	}
 
 	t.Run("exmip1_LP_and_MIP_OsiCbcSolverInterfaceTest", func(t *testing.T) {
 		lpMod, _ := buildExmip1(false)
-		resLP := lpMod.Solve()
-		if resLP.Status != goblin.StatusOptimal {
+		resLP := mustSolve(t, lpMod)
+		if resLP.Status != gb.StatusOptimal {
 			t.Fatalf("exmip1 LP status = %v", resLP.Status)
 		}
 		if math.Abs(resLP.Objective-3.2368421) > 1e-4 {
@@ -1098,8 +1098,8 @@ func TestCBCPorted_OsiExmip1AndModify(t *testing.T) {
 		}
 
 		mipMod, _ := buildExmip1(true)
-		resMIP := mipMod.Solve()
-		if resMIP.Status != goblin.StatusOptimal {
+		resMIP := mustSolve(t, mipMod)
+		if resMIP.Status != gb.StatusOptimal {
 			t.Fatalf("exmip1 MIP status = %v", resMIP.Status)
 		}
 		if math.Abs(resMIP.Objective-3.2368421) > 1e-4 {
@@ -1109,35 +1109,35 @@ func TestCBCPorted_OsiExmip1AndModify(t *testing.T) {
 
 	t.Run("modify_cpp_SequentialObjAndRowChanges", func(t *testing.T) {
 		mipMod, v := buildExmip1(true)
-		mipMod.SetObjective(goblin.NewExpr(goblin.T(v[0], -100.0), goblin.T(v[4], 2.0), goblin.T(v[7], -1.0)))
-		res1 := mipMod.Solve()
-		if res1.Status != goblin.StatusOptimal {
+		mipMod.SetObjective(gb.NewExpr(gb.T(v[0], -100.0), gb.T(v[4], 2.0), gb.T(v[7], -1.0)))
+		res1 := mustSolve(t, mipMod)
+		if res1.Status != gb.StatusOptimal {
 			t.Fatalf("modify step 1: status = %v", res1.Status)
 		}
 		if math.Abs(res1.Objective-(-257.9285714)) > 1e-3 {
 			t.Fatalf("modify step 1: got obj=%.6f, want -257.9285714", res1.Objective)
 		}
 
-		var sumAll []goblin.Term
+		var sumAll []gb.Term
 		for j := range 8 {
-			sumAll = append(sumAll, goblin.T(v[j], 1.0))
+			sumAll = append(sumAll, gb.T(v[j], 1.0))
 		}
-		mipMod.AddConstraint("r_sum", goblin.Ge(goblin.SumTerms(sumAll...), 7.8))
-		res2 := mipMod.Solve()
-		if res2.Status != goblin.StatusOptimal {
+		mipMod.AddConstraint("r_sum", gb.Ge(gb.SumTerms(sumAll...), 7.8))
+		res2 := mustSolve(t, mipMod)
+		if res2.Status != gb.StatusOptimal {
 			t.Fatalf("modify step 2: status = %v", res2.Status)
 		}
 	})
 
 	t.Run("simpleBAB_cpp", func(t *testing.T) {
-		m := goblin.NewModel("simpleBAB", goblin.Maximize)
+		m := gb.NewModel("simpleBAB", gb.Maximize)
 		x0 := m.AddIntVar("x0", 0, 10)
 		x1 := m.AddContVar("x1", 0, 10)
-		m.SetObjective(goblin.NewExpr(goblin.T(x0, 1.0), goblin.T(x1, 1.0)))
-		m.AddConstraint("c0", goblin.Le(goblin.NewExpr(goblin.T(x0, 1.0), goblin.T(x1, 2.0)), 3.9))
+		m.SetObjective(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 1.0)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 2.0)), 3.9))
 
-		res1 := m.Solve()
-		if res1.Status != goblin.StatusOptimal || math.Abs(res1.Objective-3.45) > 1e-5 {
+		res1 := mustSolve(t, m)
+		if res1.Status != gb.StatusOptimal || math.Abs(res1.Objective-3.45) > 1e-5 {
 			t.Fatalf("simpleBAB step 1: got %v %.6f, want Optimal 3.45", res1.Status, res1.Objective)
 		}
 		if math.Abs(res1.Value(x0)-3.0) > 1e-6 || math.Abs(res1.Value(x1)-0.45) > 1e-6 {
@@ -1145,8 +1145,8 @@ func TestCBCPorted_OsiExmip1AndModify(t *testing.T) {
 		}
 
 		m.SetVarBounds(x0, 0, 2)
-		res2 := m.Solve()
-		if res2.Status != goblin.StatusOptimal || math.Abs(res2.Objective-2.95) > 1e-5 {
+		res2 := mustSolve(t, m)
+		if res2.Status != gb.StatusOptimal || math.Abs(res2.Objective-2.95) > 1e-5 {
 			t.Fatalf("simpleBAB step 2: got %v %.6f, want Optimal 2.95", res2.Status, res2.Objective)
 		}
 	})
@@ -1155,24 +1155,24 @@ func TestCBCPorted_OsiExmip1AndModify(t *testing.T) {
 // TestCBCPorted_GAMSTestSuite ports sos1a, sos2a, semicon1, and semiint1 from Cbc/test/gamsTest.cpp.
 func TestCBCPorted_GAMSTestSuite(t *testing.T) {
 	t.Run("sos1a", func(t *testing.T) {
-		m := goblin.NewModel("sos1a", goblin.Maximize)
+		m := gb.NewModel("sos1a", gb.Maximize)
 		ub := []float64{0.8, 0.6, 0.6}
 		obj := []float64{0.9, 1.0, 1.1}
-		x := make([]goblin.Var, 3)
-		z := make([]goblin.Var, 3)
-		var objTerms, zTerms []goblin.Term
+		x := make([]gb.Var, 3)
+		z := make([]gb.Var, 3)
+		var objTerms, zTerms []gb.Term
 		for i := range 3 {
 			x[i] = m.AddContVar(fmt.Sprintf("x%d", i), 0, ub[i])
 			z[i] = m.AddBinaryVar(fmt.Sprintf("z%d", i))
-			objTerms = append(objTerms, goblin.T(x[i], obj[i]))
-			zTerms = append(zTerms, goblin.T(z[i], 1.0))
-			m.AddConstraint(fmt.Sprintf("vub_%d", i), goblin.Le(goblin.NewExpr(goblin.T(x[i], 1.0), goblin.T(z[i], -ub[i])), 0.0))
+			objTerms = append(objTerms, gb.T(x[i], obj[i]))
+			zTerms = append(zTerms, gb.T(z[i], 1.0))
+			m.AddConstraint(fmt.Sprintf("vub_%d", i), gb.Le(gb.NewExpr(gb.T(x[i], 1.0), gb.T(z[i], -ub[i])), 0.0))
 		}
-		m.SetObjective(goblin.SumTerms(objTerms...))
-		m.AddConstraint("sos1", goblin.Le(goblin.SumTerms(zTerms...), 1.0))
+		m.SetObjective(gb.SumTerms(objTerms...))
+		m.AddConstraint("sos1", gb.Le(gb.SumTerms(zTerms...), 1.0))
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal || math.Abs(res.Objective-0.72) > 1e-6 {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal || math.Abs(res.Objective-0.72) > 1e-6 {
 			t.Fatalf("sos1a: got %v %.6f, want Optimal 0.72", res.Status, res.Objective)
 		}
 		if math.Abs(res.Value(x[0])-0.8) > 1e-6 || math.Abs(res.Value(x[1])) > 1e-6 || math.Abs(res.Value(x[2])) > 1e-6 {
@@ -1190,8 +1190,8 @@ func TestCBCPorted_GAMSTestSuite(t *testing.T) {
 			{wLo: 0.8, wantObj: 0.1, wantP: []float64{0.8, 0.2, 0.0, 0.0, 0.1, 1.2, 1.2}},
 		}
 		for tcIdx, tc := range cases {
-			m := goblin.NewModel(fmt.Sprintf("sos2a_%d", tcIdx), goblin.Minimize)
-			x := make([]goblin.Var, 7)
+			m := gb.NewModel(fmt.Sprintf("sos2a_%d", tcIdx), gb.Minimize)
+			x := make([]gb.Var, 7)
 			for i := range 5 {
 				x[i] = m.AddContVar(fmt.Sprintf("x%d", i), 0, math.Inf(1))
 			}
@@ -1200,22 +1200,22 @@ func TestCBCPorted_GAMSTestSuite(t *testing.T) {
 			z0 := m.AddBinaryVar("z0")
 			z1 := m.AddBinaryVar("z1")
 
-			m.SetObjective(goblin.NewExpr(goblin.T(x[3], 1.0), goblin.T(x[4], 1.0)))
+			m.SetObjective(gb.NewExpr(gb.T(x[3], 1.0), gb.T(x[4], 1.0)))
 
-			m.AddConstraint("r0", goblin.Eq(goblin.NewExpr(goblin.T(x[0], -1), goblin.T(x[1], -1), goblin.T(x[2], -1)), -1.0))
-			m.AddConstraint("r1", goblin.Eq(goblin.NewExpr(goblin.T(x[0], -1), goblin.T(x[1], -2), goblin.T(x[2], -3), goblin.T(x[5], 1)), 0.0))
-			m.AddConstraint("r2", goblin.Eq(goblin.NewExpr(goblin.T(x[0], -1), goblin.T(x[1], -2), goblin.T(x[2], -3), goblin.T(x[6], 1)), 0.0))
-			m.AddConstraint("r3", goblin.Ge(goblin.NewExpr(goblin.T(x[3], 1), goblin.T(x[6], -1)), -1.3))
-			m.AddConstraint("r4", goblin.Ge(goblin.NewExpr(goblin.T(x[4], 1), goblin.T(x[6], 1)), 1.3))
-			m.AddConstraint("r5", goblin.Ge(goblin.NewExpr(goblin.T(x[0], 1)), tc.wLo))
+			m.AddConstraint("r0", gb.Eq(gb.NewExpr(gb.T(x[0], -1), gb.T(x[1], -1), gb.T(x[2], -1)), -1.0))
+			m.AddConstraint("r1", gb.Eq(gb.NewExpr(gb.T(x[0], -1), gb.T(x[1], -2), gb.T(x[2], -3), gb.T(x[5], 1)), 0.0))
+			m.AddConstraint("r2", gb.Eq(gb.NewExpr(gb.T(x[0], -1), gb.T(x[1], -2), gb.T(x[2], -3), gb.T(x[6], 1)), 0.0))
+			m.AddConstraint("r3", gb.Ge(gb.NewExpr(gb.T(x[3], 1), gb.T(x[6], -1)), -1.3))
+			m.AddConstraint("r4", gb.Ge(gb.NewExpr(gb.T(x[4], 1), gb.T(x[6], 1)), 1.3))
+			m.AddConstraint("r5", gb.Ge(gb.NewExpr(gb.T(x[0], 1)), tc.wLo))
 
-			m.AddConstraint("sos2_sum", goblin.Eq(goblin.NewExpr(goblin.T(z0, 1), goblin.T(z1, 1)), 1.0))
-			m.AddConstraint("sos2_0", goblin.Le(goblin.NewExpr(goblin.T(x[0], 1), goblin.T(z0, -1)), 0.0))
-			m.AddConstraint("sos2_1", goblin.Le(goblin.NewExpr(goblin.T(x[1], 1), goblin.T(z0, -1), goblin.T(z1, -1)), 0.0))
-			m.AddConstraint("sos2_2", goblin.Le(goblin.NewExpr(goblin.T(x[2], 1), goblin.T(z1, -1)), 0.0))
+			m.AddConstraint("sos2_sum", gb.Eq(gb.NewExpr(gb.T(z0, 1), gb.T(z1, 1)), 1.0))
+			m.AddConstraint("sos2_0", gb.Le(gb.NewExpr(gb.T(x[0], 1), gb.T(z0, -1)), 0.0))
+			m.AddConstraint("sos2_1", gb.Le(gb.NewExpr(gb.T(x[1], 1), gb.T(z0, -1), gb.T(z1, -1)), 0.0))
+			m.AddConstraint("sos2_2", gb.Le(gb.NewExpr(gb.T(x[2], 1), gb.T(z1, -1)), 0.0))
 
-			res := m.Solve()
-			if res.Status != goblin.StatusOptimal || math.Abs(res.Objective-tc.wantObj) > 1e-5 {
+			res := mustSolve(t, m)
+			if res.Status != gb.StatusOptimal || math.Abs(res.Objective-tc.wantObj) > 1e-5 {
 				t.Fatalf("sos2a case %d: got %v %.6f, want Optimal %.6f", tcIdx, res.Status, res.Objective, tc.wantObj)
 			}
 			for i := range 7 {
@@ -1234,8 +1234,8 @@ func TestCBCPorted_GAMSTestSuite(t *testing.T) {
 	runSemiCases := func(t *testing.T, prefix string, intS bool, cases []semiCase) {
 		t.Helper()
 		for tcIdx, tc := range cases {
-			m := goblin.NewModel(fmt.Sprintf("%s_%d", prefix, tcIdx), goblin.Minimize)
-			var s goblin.Var
+			m := gb.NewModel(fmt.Sprintf("%s_%d", prefix, tcIdx), gb.Minimize)
+			var s gb.Var
 			if intS {
 				s = m.AddIntVar("s", 0, 10)
 			} else {
@@ -1246,18 +1246,18 @@ func TestCBCPorted_GAMSTestSuite(t *testing.T) {
 			x := m.AddContVar("x", 0, math.Inf(1))
 			z := m.AddBinaryVar("z")
 
-			m.SetObjective(goblin.NewExpr(goblin.T(pup, 1.0), goblin.T(plo, 1.0)))
-			m.AddConstraint("bigx", goblin.Le(goblin.NewExpr(goblin.T(x, 1.0), goblin.T(pup, -1.0)), 8.9))
-			m.AddConstraint("smallx", goblin.Ge(goblin.NewExpr(goblin.T(x, 1.0), goblin.T(plo, 1.0)), 8.9))
-			m.AddConstraint("f", goblin.Eq(goblin.NewExpr(goblin.T(s, 1.0), goblin.T(x, 1.0)), 10.0))
-			m.AddConstraint("s_lb", goblin.Ge(goblin.NewExpr(goblin.T(s, 1.0), goblin.T(z, -tc.sLo)), 0.0))
-			m.AddConstraint("s_ub", goblin.Le(goblin.NewExpr(goblin.T(s, 1.0), goblin.T(z, -10.0)), 0.0))
+			m.SetObjective(gb.NewExpr(gb.T(pup, 1.0), gb.T(plo, 1.0)))
+			m.AddConstraint("bigx", gb.Le(gb.NewExpr(gb.T(x, 1.0), gb.T(pup, -1.0)), 8.9))
+			m.AddConstraint("smallx", gb.Ge(gb.NewExpr(gb.T(x, 1.0), gb.T(plo, 1.0)), 8.9))
+			m.AddConstraint("f", gb.Eq(gb.NewExpr(gb.T(s, 1.0), gb.T(x, 1.0)), 10.0))
+			m.AddConstraint("s_lb", gb.Ge(gb.NewExpr(gb.T(s, 1.0), gb.T(z, -tc.sLo)), 0.0))
+			m.AddConstraint("s_ub", gb.Le(gb.NewExpr(gb.T(s, 1.0), gb.T(z, -10.0)), 0.0))
 
-			res := m.Solve()
-			if res.Status != goblin.StatusOptimal || math.Abs(res.Objective-tc.wantObj) > 1e-5 {
+			res := mustSolve(t, m)
+			if res.Status != gb.StatusOptimal || math.Abs(res.Objective-tc.wantObj) > 1e-5 {
 				t.Fatalf("%s case %d: got %v %.6f, want Optimal %.6f", prefix, tcIdx, res.Status, res.Objective, tc.wantObj)
 			}
-			vars := []goblin.Var{s, pup, plo, x}
+			vars := []gb.Var{s, pup, plo, x}
 			for i, v := range vars {
 				if math.Abs(res.Value(v)-tc.wantP[i]) > 1e-5 {
 					t.Fatalf("%s case %d: var %d = %.6f, want %.6f", prefix, tcIdx, i, res.Value(v), tc.wantP[i])
@@ -1300,8 +1300,8 @@ func TestCBCPorted_Sudoku(t *testing.T) {
 		t.Fatalf("failed to read 9x9 sudoku CSV: %v", err)
 	}
 
-	m := goblin.NewModel("sudoku_9x9", goblin.Minimize)
-	var x [9][9][9]goblin.Var
+	m := gb.NewModel("sudoku_9x9", gb.Minimize)
+	var x [9][9][9]gb.Var
 	for r := range 9 {
 		for c := range 9 {
 			clue := 0
@@ -1318,54 +1318,54 @@ func TestCBCPorted_Sudoku(t *testing.T) {
 						lb, ub = 0.0, 0.0
 					}
 				}
-				x[r][c][d] = m.AddVar(fmt.Sprintf("x_%d_%d_%d", r, c, d+1), lb, ub, goblin.Binary)
+				x[r][c][d] = m.AddVar(fmt.Sprintf("x_%d_%d_%d", r, c, d+1), lb, ub, gb.Binary)
 			}
 		}
 	}
 
 	for r := range 9 {
 		for c := range 9 {
-			var terms []goblin.Term
+			var terms []gb.Term
 			for d := range 9 {
-				terms = append(terms, goblin.T(x[r][c][d], 1.0))
+				terms = append(terms, gb.T(x[r][c][d], 1.0))
 			}
-			m.AddConstraint(fmt.Sprintf("cell_%d_%d", r, c), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+			m.AddConstraint(fmt.Sprintf("cell_%d_%d", r, c), gb.Eq(gb.SumTerms(terms...), 1.0))
 		}
 	}
 	for r := range 9 {
 		for d := range 9 {
-			var terms []goblin.Term
+			var terms []gb.Term
 			for c := range 9 {
-				terms = append(terms, goblin.T(x[r][c][d], 1.0))
+				terms = append(terms, gb.T(x[r][c][d], 1.0))
 			}
-			m.AddConstraint(fmt.Sprintf("row_%d_%d", r, d), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+			m.AddConstraint(fmt.Sprintf("row_%d_%d", r, d), gb.Eq(gb.SumTerms(terms...), 1.0))
 		}
 	}
 	for c := range 9 {
 		for d := range 9 {
-			var terms []goblin.Term
+			var terms []gb.Term
 			for r := range 9 {
-				terms = append(terms, goblin.T(x[r][c][d], 1.0))
+				terms = append(terms, gb.T(x[r][c][d], 1.0))
 			}
-			m.AddConstraint(fmt.Sprintf("col_%d_%d", c, d), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+			m.AddConstraint(fmt.Sprintf("col_%d_%d", c, d), gb.Eq(gb.SumTerms(terms...), 1.0))
 		}
 	}
 	for br := range 3 {
 		for bc := range 3 {
 			for d := range 9 {
-				var terms []goblin.Term
+				var terms []gb.Term
 				for r := 3 * br; r < 3*br+3; r++ {
 					for c := 3 * bc; c < 3*bc+3; c++ {
-						terms = append(terms, goblin.T(x[r][c][d], 1.0))
+						terms = append(terms, gb.T(x[r][c][d], 1.0))
 					}
 				}
-				m.AddConstraint(fmt.Sprintf("box_%d_%d_%d", br, bc, d), goblin.Eq(goblin.SumTerms(terms...), 1.0))
+				m.AddConstraint(fmt.Sprintf("box_%d_%d_%d", br, bc, d), gb.Eq(gb.SumTerms(terms...), 1.0))
 			}
 		}
 	}
 
-	res := m.Solve()
-	if res.Status != goblin.StatusOptimal {
+	res := mustSolve(t, m)
+	if res.Status != gb.StatusOptimal {
 		t.Fatalf("Sudoku expected StatusOptimal, got %v", res.Status)
 	}
 
@@ -1405,18 +1405,18 @@ func TestSolverEdgeCaseRegressions(t *testing.T) {
 		// to see maxAct + a = -1 < 5 => delta = 6, new coeff = -2, rhs = 5.
 		// Then at x0=1, y1=0, y2=1: 10(1) - 5(0) - 2(1) = 8 > 5 (infeasible in presolved model!),
 		// even though in original model 10(1) - 8(0) - 8(1) = 2 <= 5 is strictly feasible!
-		m := goblin.NewModel("neg_bin_tighten", goblin.Maximize)
+		m := gb.NewModel("neg_bin_tighten", gb.Maximize)
 		x0 := m.AddBinaryVar("x0")
 		y1 := m.AddBinaryVar("y1")
 		y2 := m.AddBinaryVar("y2")
 		// Maximize 100*x0 - 50*y1 - 10*y2 => optimal is x0=1, y1=0, y2=1 (obj = 90)
-		m.SetObjective(goblin.NewExpr(goblin.T(x0, 100), goblin.T(y1, -50), goblin.T(y2, -10)))
-		m.AddConstraint("c0", goblin.Le(goblin.NewExpr(goblin.T(x0, 10), goblin.T(y1, -8), goblin.T(y2, -8)), 5.0))
+		m.SetObjective(gb.NewExpr(gb.T(x0, 100), gb.T(y1, -50), gb.T(y2, -10)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x0, 10), gb.T(y1, -8), gb.T(y2, -8)), 5.0))
 
-		resNoPre := m.Solve(goblin.WithPresolve(false))
-		resPre := m.Solve(goblin.WithPresolve(true))
+		resNoPre := mustSolve(t, m, gb.WithPresolve(false))
+		resPre := mustSolve(t, m, gb.WithPresolve(true))
 
-		if resNoPre.Status != goblin.StatusOptimal || resPre.Status != goblin.StatusOptimal {
+		if resNoPre.Status != gb.StatusOptimal || resPre.Status != gb.StatusOptimal {
 			t.Fatalf("status mismatch: noPre=%v, pre=%v", resNoPre.Status, resPre.Status)
 		}
 		if math.Abs(resPre.Objective-90.0) > 1e-6 || math.Abs(resNoPre.Objective-90.0) > 1e-6 {
@@ -1425,17 +1425,17 @@ func TestSolverEdgeCaseRegressions(t *testing.T) {
 	})
 
 	t.Run("PureLPDualsPreservedWithPresolveEnabled", func(t *testing.T) {
-		m := goblin.NewModel("lp_duals", goblin.Minimize)
+		m := gb.NewModel("lp_duals", gb.Minimize)
 		x0 := m.AddContVar("x0", 0, math.Inf(1))
 		x1 := m.AddContVar("x1", 0, math.Inf(1))
-		m.SetObjective(goblin.NewExpr(goblin.T(x0, 3.0), goblin.T(x1, 5.0)))
+		m.SetObjective(gb.NewExpr(gb.T(x0, 3.0), gb.T(x1, 5.0)))
 		// Singleton row: x0 >= 4
-		m.AddConstraint("r0", goblin.Ge(goblin.NewExpr(goblin.T(x0, 1.0)), 4.0))
+		m.AddConstraint("r0", gb.Ge(gb.NewExpr(gb.T(x0, 1.0)), 4.0))
 		// Coupling row: x0 + 2*x1 >= 10 => x0=4, x1=3, obj = 12 + 15 = 27
-		m.AddConstraint("r1", goblin.Ge(goblin.NewExpr(goblin.T(x0, 1.0), goblin.T(x1, 2.0)), 10.0))
+		m.AddConstraint("r1", gb.Ge(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 2.0)), 10.0))
 
-		res := m.Solve()
-		if res.Status != goblin.StatusOptimal || math.Abs(res.Objective-27.0) > 1e-6 {
+		res := mustSolve(t, m)
+		if res.Status != gb.StatusOptimal || math.Abs(res.Objective-27.0) > 1e-6 {
 			t.Fatalf("expected Optimal 27.0, got %v %.6f", res.Status, res.Objective)
 		}
 		if len(res.Duals) != 2 || len(res.ReducedCosts) != 2 {
@@ -1448,29 +1448,29 @@ func TestSolverEdgeCaseRegressions(t *testing.T) {
 	})
 
 	t.Run("SetStructuralBounds_FreeAndOneSidedTransitions", func(t *testing.T) {
-		m := goblin.NewModel("bound_transitions", goblin.Minimize)
+		m := gb.NewModel("bound_transitions", gb.Minimize)
 		x := m.AddContVar("x", 0, 10)
 		y := m.AddContVar("y", 0, 10)
-		m.SetObjective(goblin.NewExpr(goblin.T(x, 1.0), goblin.T(y, 2.0)))
-		m.AddConstraint("c0", goblin.Ge(goblin.NewExpr(goblin.T(x, 1.0), goblin.T(y, 1.0)), 4.0))
+		m.SetObjective(gb.NewExpr(gb.T(x, 1.0), gb.T(y, 2.0)))
+		m.AddConstraint("c0", gb.Ge(gb.NewExpr(gb.T(x, 1.0), gb.T(y, 1.0)), 4.0))
 
-		lp := goblin.NewLPSolver(m.Compile(), nil)
+		lp := gb.NewLPSolver(m.Compile(), nil)
 		r1 := lp.Solve()
-		if r1.Status != goblin.StatusOptimal || math.Abs(r1.Objective-4.0) > 1e-6 {
+		if r1.Status != gb.StatusOptimal || math.Abs(r1.Objective-4.0) > 1e-6 {
 			t.Fatalf("r1: %v %.6f", r1.Status, r1.Objective)
 		}
 
 		// Transition x to (-Inf, 1.0] and y to [-2.0, +Inf) -> x=1, y=3, obj = 1 + 6 = 7
 		lp.SetStructuralBounds([]float64{math.Inf(-1), -2.0}, []float64{1.0, math.Inf(1)})
 		r2 := lp.Solve()
-		if r2.Status != goblin.StatusOptimal || math.Abs(r2.Objective-7.0) > 1e-6 {
+		if r2.Status != gb.StatusOptimal || math.Abs(r2.Objective-7.0) > 1e-6 {
 			t.Fatalf("r2: got %v %.6f, want Optimal 7.0", r2.Status, r2.Objective)
 		}
 
 		// Transition both to free (-Inf, +Inf) -> Unbounded
 		lp.SetStructuralBounds([]float64{math.Inf(-1), math.Inf(-1)}, []float64{math.Inf(1), math.Inf(1)})
 		r3 := lp.Solve()
-		if r3.Status != goblin.StatusUnbounded {
+		if r3.Status != gb.StatusUnbounded {
 			t.Fatalf("r3: expected StatusUnbounded, got %v", r3.Status)
 		}
 	})

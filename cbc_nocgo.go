@@ -2,14 +2,17 @@
 
 package goblin
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // CBCAvailable reports whether the in-process C++ COIN-OR CBC/CLP backend is compiled in.
 // Under CGO_ENABLED=0 this stub always returns false, and callers requesting BackendCBC
 // receive StatusUndefined without invoking C++ symbols.
 func CBCAvailable() bool { return false }
 
-func solveCBC(p *CompiledProblem, _ Options, start time.Time) Result {
+func solveCBC(_ context.Context, p *CompiledProblem, _ Options, start, _ time.Time, _ <-chan struct{}) Result {
 	return Result{
 		modelID:   p.modelID,
 		Backend:   BackendCBC,

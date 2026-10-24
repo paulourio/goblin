@@ -6,10 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 	"github.com/paulourio/goblin/format"
 )
 
+// TestPuLPJSONRoundTrip verifies that a PuLP JSON model serializes and reloads with identical bounds and MPS markers.
 func TestPuLPJSONRoundTrip(t *testing.T) {
 	rawJSON := `{
   "parameters": {
@@ -48,7 +49,7 @@ func TestPuLPJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FromPuLPJSON failed: %v", err)
 	}
-	if m.Sense() != goblin.Maximize {
+	if m.Sense() != gb.Maximize {
 		t.Fatalf("expected Maximize sense, got %v", m.Sense())
 	}
 	p := m.Compile()

@@ -11,9 +11,11 @@ package goblin
 import "C"
 
 import (
+	"context"
 	"math"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -53,7 +55,7 @@ func boolToCInt(b bool) C.int {
 // CBCAvailable reports whether the in-process C++ COIN-OR CBC/CLP backend is compiled in.
 func CBCAvailable() bool { return true }
 
-func solveCBC(p *CompiledProblem, opt Options, start time.Time) Result {
+func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
 	n := p.NumVars
 	m := p.NumConstraints
 
@@ -95,9 +97,32 @@ func solveCBC(p *CompiledProblem, opt Options, start time.Time) Result {
 		return solveUnconstrainedCBC(p, start)
 	}
 
+	var cancelFlag C.int
+	var cancelPtr *C.int
 	timeLimitSec := 0.0
-	if opt.TimeLimit > 0 {
-		timeLimitSec = opt.TimeLimit.Seconds()
+	if !deadline.IsZero() {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return Result{
+				modelID:   p.modelID,
+				Backend:   BackendCBC,
+				Status:    StatusTimeLimit,
+				SolveTime: time.Since(start),
+			}
+		}
+		timeLimitSec = rem.Seconds()
+		cancelPtr = &cancelFlag
+		timer := time.AfterFunc(rem, func() {
+			atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
+		})
+		defer timer.Stop()
+	}
+	if done != nil && ctx != nil {
+		cancelPtr = &cancelFlag
+		stopCancel := context.AfterFunc(ctx, func() {
+			atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
+		})
+		defer stopCancel()
 	}
 
 	senseSign := 1.0
@@ -124,11 +149,15 @@ func solveCBC(p *CompiledProblem, opt Options, start time.Time) Result {
 			cFloat64Ptr(p.RowUBClp),
 			boolToCInt(opt.EnablePresolve),
 			C.double(timeLimitSec),
+			cancelPtr,
 			&cRes,
 			cFloat64Ptr(primal),
 			cFloat64Ptr(duals),
 			cFloat64Ptr(rc),
 		)
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
+		}
 
 		status := Status(cRes.status)
 		res := Result{
@@ -162,7 +191,7 @@ func solveCBC(p *CompiledProblem, opt Options, start time.Time) Result {
 	primal := make([]float64, n)
 	var cRes C.GoblinResult
 
-	// Map DefaultOptions (MaxCutPasses=12, MaxNodes=50000) to CBC's standard root cut pass limit (30)
+	// Map `DefaultOptions` (`MaxCutPasses=12`, `MaxNodes=50000`) to CBC's standard root cut pass limit (30)
 	// and unlimited nodes unless explicitly overridden by the caller.
 	cutPasses := opt.MaxCutPasses
 	if cutPasses == defaultMaxCutPasses {
@@ -194,9 +223,13 @@ func solveCBC(p *CompiledProblem, opt Options, start time.Time) Result {
 		C.double(opt.RelGapTol),
 		C.double(opt.AbsGapTol),
 		C.double(timeLimitSec),
+		cancelPtr,
 		&cRes,
 		cFloat64Ptr(primal),
 	)
+	if ctx != nil && ctx.Err() != nil {
+		return Result{}
+	}
 
 	status := Status(cRes.status)
 	res := Result{
@@ -330,7 +363,7 @@ func (s *CBCLPSolver) TotalRows() int {
 }
 
 // SetStructuralBounds updates the column bounds in place while preserving the
-// current simplex basis for warm-started dual/primal reoptimization.
+// current simplex basis for warm-started dual or primal resolves.
 func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 	n := s.Prob.NumVars
 	lbClp := make([]float64, n)

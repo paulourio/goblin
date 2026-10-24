@@ -5,13 +5,13 @@ import (
 	"io"
 	"math"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 )
 
 // WriteMPS writes a CompiledProblem in free-format MPS (with INTORG/INTEND markers
 // for integer and binary variables) suitable for direct execution by COIN-OR CBC.
 // Like PuLP's writeMPS, the objective is written in minimization form (negated when Maximize).
-func WriteMPS(p *goblin.CompiledProblem, w io.Writer) error {
+func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	objName := p.ObjName
 	if objName == "" {
 		objName = "OBJ"
@@ -31,9 +31,9 @@ func WriteMPS(p *goblin.CompiledProblem, w io.Writer) error {
 	for i := range p.NumConstraints {
 		senseChar := "E"
 		switch p.RowSense[i] {
-		case goblin.LessEqual:
+		case gb.LessEqual:
 			senseChar = "L"
-		case goblin.GreaterEqual:
+		case gb.GreaterEqual:
 			senseChar = "G"
 		}
 		if _, err := fmt.Fprintf(w, " %s  %s\n", senseChar, p.RowNames[i]); err != nil {
@@ -46,7 +46,7 @@ func WriteMPS(p *goblin.CompiledProblem, w io.Writer) error {
 	}
 	inIntBlock := false
 	for j := range p.NumVars {
-		isInt := p.VarCat[j] != goblin.Continuous
+		isInt := p.VarCat[j] != gb.Continuous
 		if isInt && !inIntBlock {
 			if _, err := io.WriteString(w, "    MARK      'MARKER'                 'INTORG'\n"); err != nil {
 				return err
@@ -95,7 +95,7 @@ func WriteMPS(p *goblin.CompiledProblem, w io.Writer) error {
 	for j := range p.NumVars {
 		vname := p.VarNames[j]
 		lb, ub := p.VarLB[j], p.VarUB[j]
-		if p.VarCat[j] == goblin.Binary && lb == 0 && ub == 1 {
+		if p.VarCat[j] == gb.Binary && lb == 0 && ub == 1 {
 			if _, err := fmt.Fprintf(w, " BV BND       %-10s\n", vname); err != nil {
 				return err
 			}
@@ -117,9 +117,9 @@ func WriteMPS(p *goblin.CompiledProblem, w io.Writer) error {
 			if _, err := fmt.Fprintf(w, " MI BND       %-10s\n", vname); err != nil {
 				return err
 			}
-		} else if lb != 0 || p.VarCat[j] != goblin.Continuous {
+		} else if lb != 0 || p.VarCat[j] != gb.Continuous {
 			bndType := "LO"
-			if p.VarCat[j] != goblin.Continuous {
+			if p.VarCat[j] != gb.Continuous {
 				bndType = "LI"
 			}
 			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15.12g\n", bndType, vname, lb); err != nil {
@@ -128,13 +128,13 @@ func WriteMPS(p *goblin.CompiledProblem, w io.Writer) error {
 		}
 		if !math.IsInf(ub, 1) {
 			bndType := "UP"
-			if p.VarCat[j] != goblin.Continuous {
+			if p.VarCat[j] != gb.Continuous {
 				bndType = "UI"
 			}
 			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15.12g\n", bndType, vname, ub); err != nil {
 				return err
 			}
-		} else if p.VarCat[j] != goblin.Continuous {
+		} else if p.VarCat[j] != gb.Continuous {
 			if _, err := fmt.Fprintf(w, " PL BND       %-10s\n", vname); err != nil {
 				return err
 			}

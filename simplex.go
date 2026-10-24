@@ -52,6 +52,7 @@ type LPSolver struct {
 	ExtraRows   []dynamicRow
 	MaxIter     int
 	Deadline    time.Time
+	Done        <-chan struct{}
 	DisableSIMD bool
 	luValid     bool
 	dualValid   bool
@@ -99,7 +100,7 @@ func columnFeasTolerances(p *CompiledProblem) ([]float64, []bool) {
 }
 
 func (s *LPSolver) timeExpired() bool {
-	return !s.Deadline.IsZero() && time.Now().After(s.Deadline)
+	return stopRequested(s.Deadline, s.Done)
 }
 
 // NewLPSolver creates an LPSolver initialized for the given CompiledProblem.

@@ -96,14 +96,23 @@ func (pc *pseudoCost) record(up bool, gain, dist float64) {
 	}
 }
 
-func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Result {
+func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, deadline time.Time, done <-chan struct{}) Result {
 	n := p.NumVars
-	var deadline time.Time
 	if opts.TimeLimit > 0 {
-		deadline = startTime.Add(opts.TimeLimit)
+		optDeadline := startTime.Add(opts.TimeLimit)
+		if deadline.IsZero() || optDeadline.Before(deadline) {
+			deadline = optDeadline
+		}
+	}
+	if stopRequested(deadline, done) {
+		return Result{
+			modelID:   p.modelID,
+			Status:    StatusTimeLimit,
+			SolveTime: time.Since(startTime),
+		}
 	}
 	timeExpired := func() bool {
-		return !deadline.IsZero() && time.Now().After(deadline)
+		return stopRequested(deadline, done)
 	}
 
 	ws := AcquireWorkspace(n, p.NumConstraints)
@@ -111,6 +120,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 
 	lpSolver := NewLPSolver(p, ws)
 	lpSolver.Deadline = deadline
+	lpSolver.Done = done
 	lpSolver.DisableSIMD = opts.DisableSIMD
 	defaultLPIter := lpSolver.MaxIter
 
@@ -196,6 +206,7 @@ func solveBranchAndCut(p *CompiledProblem, opts Options, startTime time.Time) Re
 		defer ReleaseWorkspace(heurWS)
 		heurSolver = NewLPSolver(p, heurWS)
 		heurSolver.Deadline = deadline
+		heurSolver.Done = done
 		heurSolver.DisableSIMD = opts.DisableSIMD
 		heurSolver.CopyRootBasisFrom(lpSolver)
 

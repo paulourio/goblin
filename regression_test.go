@@ -9,25 +9,43 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 	"github.com/paulourio/goblin/format"
 )
 
 // optionVariants exercises the bare branch-and-bound as well as the full setup:
 // primal heuristics previously masked the node-discard defect, so correctness must not
 // depend on them.
-func optionVariants() map[string][]goblin.Option {
-	return map[string][]goblin.Option{
+func optionVariants() map[string][]gb.Option {
+	return map[string][]gb.Option{
 		"default":          {},
-		"no-heuristics":    {goblin.WithHeuristics(false)},
-		"bare":             {goblin.WithHeuristics(false), goblin.WithCuts(false)},
-		"bare-no-presolve": {goblin.WithHeuristics(false), goblin.WithCuts(false), goblin.WithPresolve(false)},
+		"no-heuristics":    {gb.WithHeuristics(false)},
+		"bare":             {gb.WithHeuristics(false), gb.WithCuts(false)},
+		"bare-no-presolve": {gb.WithHeuristics(false), gb.WithCuts(false), gb.WithPresolve(false)},
 	}
 }
 
-func assertOptimal(t *testing.T, label string, p *goblin.CompiledProblem, res goblin.Result, want float64) {
+func mustSolve(tb testing.TB, m *gb.Model, opts ...gb.Option) gb.Result {
+	tb.Helper()
+	res, err := m.Solve(tb.Context(), opts...)
+	if err != nil {
+		tb.Fatalf("unexpected Solve error: %v", err)
+	}
+	return res
+}
+
+func mustSolveCompiled(tb testing.TB, p *gb.CompiledProblem, opts ...gb.Option) gb.Result {
+	tb.Helper()
+	res, err := gb.SolveCompiled(tb.Context(), p, opts...)
+	if err != nil {
+		tb.Fatalf("unexpected SolveCompiled error: %v", err)
+	}
+	return res
+}
+
+func assertOptimal(t *testing.T, label string, p *gb.CompiledProblem, res gb.Result, want float64) {
 	t.Helper()
-	if res.Status != goblin.StatusOptimal {
+	if res.Status != gb.StatusOptimal {
 		t.Fatalf("%s: status=%v (obj=%.6f bound=%.6f nodes=%d), want Optimal %.6f",
 			label, res.Status, res.Objective, res.BestBound, res.Nodes, want)
 	}
@@ -41,8 +59,8 @@ func assertOptimal(t *testing.T, label string, p *goblin.CompiledProblem, res go
 	// An incumbent may violate rows by up to the primal tolerance, so its objective can
 	// undercut the LP bound by a comparable amount; allow the default gap threshold.
 	boundTol := 1e-6 * max(1.0, math.Abs(res.Objective))
-	if p.Sense == goblin.Minimize && res.BestBound > res.Objective+boundTol ||
-		p.Sense == goblin.Maximize && res.BestBound < res.Objective-boundTol {
+	if p.Sense == gb.Minimize && res.BestBound > res.Objective+boundTol ||
+		p.Sense == gb.Maximize && res.BestBound < res.Objective-boundTol {
 		t.Fatalf("%s: BestBound %.8f is not a valid bound for objective %.8f", label, res.BestBound, res.Objective)
 	}
 }
@@ -50,18 +68,18 @@ func assertOptimal(t *testing.T, label string, p *goblin.CompiledProblem, res go
 // TestBigMNearIntegralRoot: the root LP is integral within 1e-6 (y1 = 5e-7) but rounding
 // y1 to 0 violates the demand row by 0.05. The solver previously returned NumericalError.
 func TestBigMNearIntegralRoot(t *testing.T) {
-	m := goblin.NewModel("bigm_root", goblin.Minimize)
+	m := gb.NewModel("bigm_root", gb.Minimize)
 	y1 := m.AddBinaryVar("y1")
 	y2 := m.AddBinaryVar("y2")
 	x1 := m.AddContVar("x1", 0, math.Inf(1))
 	x2 := m.AddContVar("x2", 0, math.Inf(1))
-	m.SetObjective(goblin.NewExpr(goblin.T(y1, 10), goblin.T(y2, 12), goblin.T(x1, 1), goblin.T(x2, 1)))
-	m.AddConstraint("dem", goblin.Ge(goblin.NewExpr(goblin.T(x1, 1), goblin.T(x2, 1)), 0.05))
-	m.AddConstraint("vub1", goblin.Le(goblin.NewExpr(goblin.T(x1, 1), goblin.T(y1, -1e5)), 0))
-	m.AddConstraint("vub2", goblin.Le(goblin.NewExpr(goblin.T(x2, 1), goblin.T(y2, -1e5)), 0))
+	m.SetObjective(gb.NewExpr(gb.T(y1, 10), gb.T(y2, 12), gb.T(x1, 1), gb.T(x2, 1)))
+	m.AddConstraint("dem", gb.Ge(gb.NewExpr(gb.T(x1, 1), gb.T(x2, 1)), 0.05))
+	m.AddConstraint("vub1", gb.Le(gb.NewExpr(gb.T(x1, 1), gb.T(y1, -1e5)), 0))
+	m.AddConstraint("vub2", gb.Le(gb.NewExpr(gb.T(x2, 1), gb.T(y2, -1e5)), 0))
 	p := m.Compile()
 	for name, o := range optionVariants() {
-		assertOptimal(t, name, p, goblin.SolveCompiled(p, o...), 10.05)
+		assertOptimal(t, name, p, mustSolveCompiled(t, p, o...), 10.05)
 	}
 }
 
@@ -69,25 +87,25 @@ func TestBigMNearIntegralRoot(t *testing.T) {
 // knapsack so that the search must branch. Nodes whose LP is integral within tolerance but
 // whose rounding is infeasible were previously discarded, which produced a false Infeasible.
 func TestBigMUnderBranching(t *testing.T) {
-	m := goblin.NewModel("bigm_node", goblin.Minimize)
+	m := gb.NewModel("bigm_node", gb.Minimize)
 	y1 := m.AddBinaryVar("y1")
 	y2 := m.AddBinaryVar("y2")
 	x1 := m.AddContVar("x1", 0, math.Inf(1))
 	x2 := m.AddContVar("x2", 0, math.Inf(1))
 	w := []float64{7, 5, 4, 3, 2}
 	val := []float64{9, 6, 5, 3, 2.5}
-	obj := goblin.NewExpr(goblin.T(y1, 10), goblin.T(y2, 12), goblin.T(x1, 1), goblin.T(x2, 1))
-	kn := goblin.NewExpr()
+	obj := gb.NewExpr(gb.T(y1, 10), gb.T(y2, 12), gb.T(x1, 1), gb.T(x2, 1))
+	kn := gb.NewExpr()
 	for i := range w {
 		z := m.AddBinaryVar(fmt.Sprintf("z%d", i))
 		obj = obj.AddTerm(z, -val[i])
 		kn = kn.AddTerm(z, w[i])
 	}
 	m.SetObjective(obj)
-	m.AddConstraint("knap", goblin.Le(kn, 10.5))
-	m.AddConstraint("dem", goblin.Ge(goblin.NewExpr(goblin.T(x1, 1), goblin.T(x2, 1)), 0.05))
-	m.AddConstraint("vub1", goblin.Le(goblin.NewExpr(goblin.T(x1, 1), goblin.T(y1, -1e5)), 0))
-	m.AddConstraint("vub2", goblin.Le(goblin.NewExpr(goblin.T(x2, 1), goblin.T(y2, -1e5)), 0))
+	m.AddConstraint("knap", gb.Le(kn, 10.5))
+	m.AddConstraint("dem", gb.Ge(gb.NewExpr(gb.T(x1, 1), gb.T(x2, 1)), 0.05))
+	m.AddConstraint("vub1", gb.Le(gb.NewExpr(gb.T(x1, 1), gb.T(y1, -1e5)), 0))
+	m.AddConstraint("vub2", gb.Le(gb.NewExpr(gb.T(x2, 1), gb.T(y2, -1e5)), 0))
 	p := m.Compile()
 
 	// Ground truth by brute-force search: open the cheaper depot, pick the best knapsack subset.
@@ -105,26 +123,26 @@ func TestBigMUnderBranching(t *testing.T) {
 		}
 	}
 	for name, o := range optionVariants() {
-		assertOptimal(t, name, p, goblin.SolveCompiled(p, o...), best)
+		assertOptimal(t, name, p, mustSolveCompiled(t, p, o...), best)
 	}
 }
 
 // buildFixedCharge builds a capacitated-by-big-M depot siting model with small demands.
-func buildFixedCharge(seed uint64) (m *goblin.Model, y []goblin.Var, fixed []float64) {
+func buildFixedCharge(seed uint64) (m *gb.Model, y []gb.Var, fixed []float64) {
 	r := rand.New(rand.NewPCG(seed, 2026))
 	nf, nc := 3+r.IntN(3), 3+r.IntN(5)
 	bigM := []float64{1e4, 1e5, 1e6}[r.IntN(3)]
 	demands := []float64{0.01, 0.05, 0.2, 1, 3}
-	m = goblin.NewModel(fmt.Sprintf("fc_%d", seed), goblin.Minimize)
-	y = make([]goblin.Var, nf)
+	m = gb.NewModel(fmt.Sprintf("fc_%d", seed), gb.Minimize)
+	y = make([]gb.Var, nf)
 	fixed = make([]float64, nf)
-	x := make([][]goblin.Var, nf)
-	obj := goblin.NewExpr()
+	x := make([][]gb.Var, nf)
+	obj := gb.NewExpr()
 	for i := range nf {
 		y[i] = m.AddBinaryVar(fmt.Sprintf("y%d", i))
 		fixed[i] = float64(5 + r.IntN(36))
 		obj = obj.AddTerm(y[i], fixed[i])
-		x[i] = make([]goblin.Var, nc)
+		x[i] = make([]gb.Var, nc)
 		for j := range nc {
 			x[i][j] = m.AddContVar(fmt.Sprintf("x%d_%d", i, j), 0, math.Inf(1))
 			obj = obj.AddTerm(x[i][j], float64(1+r.IntN(20)))
@@ -132,18 +150,18 @@ func buildFixedCharge(seed uint64) (m *goblin.Model, y []goblin.Var, fixed []flo
 	}
 	m.SetObjective(obj)
 	for j := range nc {
-		e := goblin.NewExpr()
+		e := gb.NewExpr()
 		for i := range nf {
 			e = e.AddTerm(x[i][j], 1)
 		}
-		m.AddConstraint(fmt.Sprintf("d%d", j), goblin.Ge(e, demands[r.IntN(len(demands))]))
+		m.AddConstraint(fmt.Sprintf("d%d", j), gb.Ge(e, demands[r.IntN(len(demands))]))
 	}
 	for i := range nf {
-		e := goblin.NewExpr(goblin.T(y[i], -bigM))
+		e := gb.NewExpr(gb.T(y[i], -bigM))
 		for j := range nc {
 			e = e.AddTerm(x[i][j], 1)
 		}
-		m.AddConstraint(fmt.Sprintf("vub%d", i), goblin.Le(e, 0))
+		m.AddConstraint(fmt.Sprintf("vub%d", i), gb.Le(e, 0))
 	}
 	return m, y, fixed
 }
@@ -163,14 +181,14 @@ func TestFixedChargeGroundTruth(t *testing.T) {
 				val := float64(mask >> i & 1)
 				lb[v.Index()], ub[v.Index()] = val, val
 			}
-			s := goblin.NewLPSolver(p, nil)
+			s := gb.NewLPSolver(p, nil)
 			s.SetStructuralBounds(lb, ub)
-			if res := s.Solve(); res.Status == goblin.StatusOptimal {
+			if res := s.Solve(); res.Status == gb.StatusOptimal {
 				best = min(best, res.Objective)
 			}
 		}
 		for name, o := range optionVariants() {
-			assertOptimal(t, fmt.Sprintf("seed=%d/%s", seed, name), p, goblin.SolveCompiled(p, o...), best)
+			assertOptimal(t, fmt.Sprintf("seed=%d/%s", seed, name), p, mustSolveCompiled(t, p, o...), best)
 		}
 	}
 }
@@ -208,7 +226,7 @@ func TestRegressionInstances(t *testing.T) {
 			t.Fatal(err)
 		}
 		for name, o := range optionVariants() {
-			assertOptimal(t, fx.ID+"/"+name, p, goblin.SolveCompiled(p, o...), fx.ExpectedObjective)
+			assertOptimal(t, fx.ID+"/"+name, p, mustSolveCompiled(t, p, o...), fx.ExpectedObjective)
 		}
 	}
 }
@@ -216,28 +234,28 @@ func TestRegressionInstances(t *testing.T) {
 // TestInvalidConstraintSenseRejected: an out-of-range ConstraintSense was previously solved
 // as an equation while MaxViolation treated it as 0 <= a'x <= 0.
 func TestInvalidConstraintSenseRejected(t *testing.T) {
-	m := goblin.NewModel("badsense", goblin.Maximize)
+	m := gb.NewModel("badsense", gb.Maximize)
 	x := m.AddContVar("x", 0, 10)
-	m.SetObjective(goblin.NewExpr(goblin.T(x, 1)))
-	m.AddConstraint("c", goblin.Constraint{Expr: goblin.NewExpr(goblin.T(x, 1)), Sense: goblin.ConstraintSense(7), RHS: 3})
+	m.SetObjective(gb.NewExpr(gb.T(x, 1)))
+	m.AddConstraint("c", gb.Constraint{Expr: gb.NewExpr(gb.T(x, 1)), Sense: gb.ConstraintSense(7), RHS: 3})
 	if err := m.Validate(); err == nil {
 		t.Fatal("Validate accepted ConstraintSense(7)")
 	}
-	if res := m.Solve(); res.Status != goblin.StatusUndefined {
-		t.Fatalf("Solve on invalid model returned %v, want Undefined", res.Status)
+	if res, err := m.Solve(t.Context()); err == nil || res.Status != gb.StatusUndefined {
+		t.Fatalf("Solve on invalid model returned (%v, %v), want Undefined with error", res.Status, err)
 	}
 }
 
 // TestEmptyIntegerDomainIsInfeasible: rounding [0.5, 0.7] leaves an empty integer domain.
 func TestEmptyIntegerDomainIsInfeasible(t *testing.T) {
-	m := goblin.NewModel("emptyint", goblin.Minimize)
+	m := gb.NewModel("emptyint", gb.Minimize)
 	x := m.AddIntVar("x", 0.5, 0.7)
-	m.SetObjective(goblin.NewExpr(goblin.T(x, 1)))
-	if cat := m.VarCategoryOf(x); cat != goblin.Integer {
+	m.SetObjective(gb.NewExpr(gb.T(x, 1)))
+	if cat := m.VarCategoryOf(x); cat != gb.Integer {
 		t.Fatalf("empty-domain integer variable recategorized as %v", cat)
 	}
 	for name, o := range optionVariants() {
-		if res := m.Solve(o...); res.Status != goblin.StatusInfeasible {
+		if res := mustSolve(t, m, o...); res.Status != gb.StatusInfeasible {
 			t.Fatalf("%s: status=%v, want Infeasible", name, res.Status)
 		}
 	}
@@ -246,9 +264,9 @@ func TestEmptyIntegerDomainIsInfeasible(t *testing.T) {
 // TestMaxIterLimit: Options.MaxIter caps Result.Iterations and reports IterationLimit with
 // a valid global bound.
 func TestMaxIterLimit(t *testing.T) {
-	m := goblin.NewModel("maxiter", goblin.Maximize)
+	m := gb.NewModel("maxiter", gb.Maximize)
 	r := rand.New(rand.NewPCG(5, 6))
-	e, k1, k2 := goblin.NewExpr(), goblin.NewExpr(), goblin.NewExpr()
+	e, k1, k2 := gb.NewExpr(), gb.NewExpr(), gb.NewExpr()
 	for i := range 40 {
 		v := m.AddIntVar(fmt.Sprintf("x%d", i), 0, 3)
 		e = e.AddTerm(v, float64(1+r.IntN(20)))
@@ -256,19 +274,19 @@ func TestMaxIterLimit(t *testing.T) {
 		k2 = k2.AddTerm(v, float64(1+r.IntN(15)))
 	}
 	m.SetObjective(e)
-	m.AddConstraint("a", goblin.Le(k1, 90))
-	m.AddConstraint("b", goblin.Le(k2, 95))
+	m.AddConstraint("a", gb.Le(k1, 90))
+	m.AddConstraint("b", gb.Le(k2, 95))
 	p := m.Compile()
-	full := goblin.SolveCompiled(p)
-	if full.Status != goblin.StatusOptimal {
+	full := mustSolveCompiled(t, p)
+	if full.Status != gb.StatusOptimal {
 		t.Fatalf("reference solve: %v", full.Status)
 	}
 	if full.Iterations < 50 {
 		t.Skipf("instance too easy for an iteration-limit test (%d iterations)", full.Iterations)
 	}
 	maxIter := full.Iterations / 4
-	res := goblin.SolveCompiled(p, goblin.WithMaxIter(maxIter))
-	if res.Status != goblin.StatusIterationLimit {
+	res := mustSolveCompiled(t, p, gb.WithMaxIter(maxIter))
+	if res.Status != gb.StatusIterationLimit {
 		t.Fatalf("MaxIter=%d: status=%v (iters=%d), want IterationLimit", maxIter, res.Status, res.Iterations)
 	}
 	if res.Iterations > maxIter {
@@ -285,8 +303,8 @@ func TestBestBoundIsTrueDualBound(t *testing.T) {
 	for seed := range uint64(10) {
 		m, _, _ := buildFixedCharge(100 + seed)
 		p := m.Compile()
-		res := goblin.SolveCompiled(p)
-		if res.Status != goblin.StatusOptimal {
+		res := mustSolveCompiled(t, p)
+		if res.Status != gb.StatusOptimal {
 			t.Fatalf("seed %d: %v", seed, res.Status)
 		}
 		if res.BestBound > res.Objective+1e-9 {

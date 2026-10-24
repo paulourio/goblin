@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 	"github.com/paulourio/goblin/bench"
 	"github.com/paulourio/goblin/format"
 )
@@ -140,14 +140,14 @@ func TestCanonicalMADFormulation(t *testing.T) {
 	}
 
 	for name, opts := range optionVariants() {
-		assertOptimal(t, "mad_canonical/"+name, p, goblin.SolveCompiled(p, opts...), wantObj)
+		assertOptimal(t, "mad_canonical/"+name, p, mustSolveCompiled(t, p, opts...), wantObj)
 	}
-	if goblin.CBCAvailable() {
-		assertOptimal(t, "mad_canonical/cbc", p, goblin.SolveCompiled(p, goblin.WithCBC()), wantObj)
+	if gb.CBCAvailable() {
+		assertOptimal(t, "mad_canonical/cbc", p, mustSolveCompiled(t, p, gb.WithCBC()), wantObj)
 	}
 }
 
-func buildFuzzMAD(rng *rand.Rand, tag string) (*goblin.Model, float64) {
+func buildFuzzMAD(rng *rand.Rand, tag string) (*gb.Model, float64) {
 	nG := 2 + rng.IntN(2) // 2 or 3 groups
 	nI := nG + 1 + rng.IntN(4)
 	nT := 3 + rng.IntN(4)
@@ -173,16 +173,16 @@ func buildFuzzMAD(rng *rand.Rand, tag string) (*goblin.Model, float64) {
 	return mdl, want
 }
 
-func buildFuzzGeneralMILP(rng *rand.Rand, tag string) *goblin.Model {
+func buildFuzzGeneralMILP(rng *rand.Rand, tag string) *gb.Model {
 	n := 3 + rng.IntN(8)
 	mRows := 2 + rng.IntN(6)
-	sense := goblin.Minimize
+	sense := gb.Minimize
 	if rng.IntN(2) == 1 {
-		sense = goblin.Maximize
+		sense = gb.Maximize
 	}
-	mdl := goblin.NewModel(tag, sense)
-	xs := make([]goblin.Var, n)
-	obj := goblin.NewExpr()
+	mdl := gb.NewModel(tag, sense)
+	xs := make([]gb.Var, n)
+	obj := gb.NewExpr()
 	for j := range n {
 		vname := fmt.Sprintf("x%d", j)
 		switch rng.IntN(3) {
@@ -205,7 +205,7 @@ func buildFuzzGeneralMILP(rng *rand.Rand, tag string) *goblin.Model {
 	mdl.SetObjective(obj)
 
 	for i := range mRows {
-		e := goblin.NewExpr()
+		e := gb.NewExpr()
 		for j := range n {
 			if rng.Float64() < 0.65 {
 				a := float64(rng.IntN(13)-6) + 0.5*float64(rng.IntN(2))
@@ -221,31 +221,31 @@ func buildFuzzGeneralMILP(rng *rand.Rand, tag string) *goblin.Model {
 		cname := fmt.Sprintf("c%d", i)
 		switch rng.IntN(3) {
 		case 0:
-			mdl.AddConstraint(cname, goblin.Le(e, rhs))
+			mdl.AddConstraint(cname, gb.Le(e, rhs))
 		case 1:
-			mdl.AddConstraint(cname, goblin.Ge(e, rhs-6))
+			mdl.AddConstraint(cname, gb.Ge(e, rhs-6))
 		default:
-			mdl.AddConstraint(cname, goblin.Eq(e, rhs))
+			mdl.AddConstraint(cname, gb.Eq(e, rhs))
 		}
 	}
 	return mdl
 }
 
-func buildFuzzEqKnapsack(rng *rand.Rand, tag string) *goblin.Model {
+func buildFuzzEqKnapsack(rng *rand.Rand, tag string) *gb.Model {
 	n := 4 + rng.IntN(5)
-	mdl := goblin.NewModel(tag, goblin.Minimize)
-	xs := make([]goblin.Var, n)
-	obj := goblin.NewExpr()
-	eq := goblin.NewExpr()
+	mdl := gb.NewModel(tag, gb.Minimize)
+	xs := make([]gb.Var, n)
+	obj := gb.NewExpr()
+	eq := gb.NewExpr()
 	for j := range n {
 		xs[j] = mdl.AddIntVar(fmt.Sprintf("x%d", j), 0, float64(2+rng.IntN(5)))
 		obj = obj.AddTerm(xs[j], float64(1+rng.IntN(15)))
 		eq = eq.AddTerm(xs[j], float64(3+rng.IntN(30)))
 	}
 	mdl.SetObjective(obj)
-	mdl.AddConstraint("eq", goblin.Eq(eq, float64(20+rng.IntN(90))))
+	mdl.AddConstraint("eq", gb.Eq(eq, float64(20+rng.IntN(90))))
 	if rng.IntN(2) == 1 {
-		side := goblin.NewExpr()
+		side := gb.NewExpr()
 		for j := range n {
 			a := float64(rng.IntN(17) - 8)
 			if a != 0 {
@@ -253,18 +253,18 @@ func buildFuzzEqKnapsack(rng *rand.Rand, tag string) *goblin.Model {
 			}
 		}
 		if len(side.Terms) > 0 {
-			mdl.AddConstraint("side", goblin.Le(side, float64(rng.IntN(20))))
+			mdl.AddConstraint("side", gb.Le(side, float64(rng.IntN(20))))
 		}
 	}
 	return mdl
 }
 
-func buildFuzzScaledMILP(rng *rand.Rand, tag string) *goblin.Model {
+func buildFuzzScaledMILP(rng *rand.Rand, tag string) *gb.Model {
 	n := 4 + rng.IntN(6)
 	mRows := 2 + rng.IntN(4)
-	mdl := goblin.NewModel(tag, goblin.Maximize)
-	xs := make([]goblin.Var, n)
-	obj := goblin.NewExpr()
+	mdl := gb.NewModel(tag, gb.Maximize)
+	xs := make([]gb.Var, n)
+	obj := gb.NewExpr()
 	bounds := []float64{1, 5, 25}
 	for j := range n {
 		ub := bounds[rng.IntN(len(bounds))]
@@ -279,20 +279,20 @@ func buildFuzzScaledMILP(rng *rand.Rand, tag string) *goblin.Model {
 	exps := []float64{1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3}
 	for i := range mRows {
 		scale := exps[rng.IntN(len(exps))]
-		e := goblin.NewExpr()
+		e := gb.NewExpr()
 		for j := range n {
 			coeff := math.Round((0.1+rng.Float64()*4.0)*scale*1e4) / 1e4
 			e = e.AddTerm(xs[j], coeff)
 		}
 		rhs := math.Round((3.0+rng.Float64()*30.0)*scale*1e4) / 1e4
-		mdl.AddConstraint(fmt.Sprintf("r%d", i), goblin.Le(e, rhs))
+		mdl.AddConstraint(fmt.Sprintf("r%d", i), gb.Le(e, rhs))
 	}
 	return mdl
 }
 
-func verifyMILPInvariants(t *testing.T, label string, p *goblin.CompiledProblem, res goblin.Result) {
+func verifyMILPInvariants(t *testing.T, label string, p *gb.CompiledProblem, res gb.Result) {
 	t.Helper()
-	if res.Status != goblin.StatusOptimal {
+	if res.Status != gb.StatusOptimal {
 		return
 	}
 	if len(res.Values) != p.NumVars {
@@ -307,7 +307,7 @@ func verifyMILPInvariants(t *testing.T, label string, p *goblin.CompiledProblem,
 		t.Fatalf("[%s] EvaluateObjective=%.8f != res.Objective=%.8f", label, evalObj, res.Objective)
 	}
 	boundTol := 1e-5 * max(1.0, math.Abs(res.Objective))
-	if p.Sense == goblin.Minimize {
+	if p.Sense == gb.Minimize {
 		if res.BestBound > res.Objective+boundTol {
 			t.Fatalf("[%s] Minimize BestBound %.8f > Objective %.8f", label, res.BestBound, res.Objective)
 		}
@@ -335,7 +335,7 @@ func FuzzMILPSolver(f *testing.F) {
 		rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 		tag := fmt.Sprintf("fuzz_%d_%d", family%5, seed)
 
-		var mdl *goblin.Model
+		var mdl *gb.Model
 		var exactWant float64
 		hasExactWant := false
 
@@ -358,24 +358,24 @@ func FuzzMILPSolver(f *testing.F) {
 			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
 		}
 
-		baseLimits := []goblin.Option{
-			goblin.WithTimeLimit(1500 * time.Millisecond),
-			goblin.WithMaxNodes(3000),
+		baseLimits := []gb.Option{
+			gb.WithTimeLimit(1500 * time.Millisecond),
+			gb.WithMaxNodes(3000),
 		}
 
-		results := make(map[string]goblin.Result, 4)
+		results := make(map[string]gb.Result, 4)
 		var firstOptName string
 		var firstOptObj float64
 		sawInfeasible := ""
 
 		for name, vOpts := range optionVariants() {
-			opts := append(append([]goblin.Option(nil), baseLimits...), vOpts...)
-			res := goblin.SolveCompiled(p, opts...)
+			opts := append(append([]gb.Option(nil), baseLimits...), vOpts...)
+			res := mustSolveCompiled(t, p, opts...)
 			results[name] = res
 			verifyMILPInvariants(t, tag+"/"+name, p, res)
 
 			switch res.Status {
-			case goblin.StatusOptimal:
+			case gb.StatusOptimal:
 				if hasExactWant {
 					rel := math.Abs(res.Objective-exactWant) / max(1.0, math.Abs(exactWant))
 					if rel > 1e-5 {
@@ -393,7 +393,7 @@ func FuzzMILPSolver(f *testing.F) {
 							tag, firstOptName, firstOptObj, name, res.Objective, rel)
 					}
 				}
-			case goblin.StatusInfeasible:
+			case gb.StatusInfeasible:
 				sawInfeasible = name
 			}
 		}
@@ -415,13 +415,13 @@ func FuzzLPSolver(f *testing.F) {
 		nRows := 1 + int(rawRows%10)
 		rng := rand.New(rand.NewPCG(seed, seed^0x517cc1b727220a95))
 
-		sense := goblin.Minimize
+		sense := gb.Minimize
 		if rng.IntN(2) == 1 {
-			sense = goblin.Maximize
+			sense = gb.Maximize
 		}
-		m := goblin.NewModel(fmt.Sprintf("fuzz_lp_%d", seed), sense)
-		xs := make([]goblin.Var, nVars)
-		obj := goblin.NewExpr()
+		m := gb.NewModel(fmt.Sprintf("fuzz_lp_%d", seed), sense)
+		xs := make([]gb.Var, nVars)
+		obj := gb.NewExpr()
 		for j := range nVars {
 			lo := float64(rng.IntN(7) - 3)
 			hi := lo + float64(1+rng.IntN(10))
@@ -434,7 +434,7 @@ func FuzzLPSolver(f *testing.F) {
 		m.SetObjective(obj)
 
 		for i := range nRows {
-			e := goblin.NewExpr()
+			e := gb.NewExpr()
 			for j := range nVars {
 				if rng.Float64() < 0.55 {
 					a := float64(rng.IntN(15)-7) * 0.5
@@ -449,31 +449,31 @@ func FuzzLPSolver(f *testing.F) {
 			rhs := float64(rng.IntN(21) - 5)
 			switch rng.IntN(3) {
 			case 0:
-				m.AddConstraint(fmt.Sprintf("r%d", i), goblin.Le(e, rhs))
+				m.AddConstraint(fmt.Sprintf("r%d", i), gb.Le(e, rhs))
 			case 1:
-				m.AddConstraint(fmt.Sprintf("r%d", i), goblin.Ge(e, rhs))
+				m.AddConstraint(fmt.Sprintf("r%d", i), gb.Ge(e, rhs))
 			default:
-				m.AddConstraint(fmt.Sprintf("r%d", i), goblin.Eq(e, rhs))
+				m.AddConstraint(fmt.Sprintf("r%d", i), gb.Eq(e, rhs))
 			}
 		}
 
 		p := m.Compile()
-		ws := goblin.AcquireWorkspace(p.NumVars, p.NumConstraints)
-		defer goblin.ReleaseWorkspace(ws)
+		ws := gb.AcquireWorkspace(p.NumVars, p.NumConstraints)
+		defer gb.ReleaseWorkspace(ws)
 
-		lpSIMD := goblin.NewLPSolver(p, ws)
+		lpSIMD := gb.NewLPSolver(p, ws)
 		resSIMD := lpSIMD.Solve()
 
-		wsScalar := goblin.AcquireWorkspace(p.NumVars, p.NumConstraints)
-		defer goblin.ReleaseWorkspace(wsScalar)
-		lpScalar := goblin.NewLPSolver(p, wsScalar)
+		wsScalar := gb.AcquireWorkspace(p.NumVars, p.NumConstraints)
+		defer gb.ReleaseWorkspace(wsScalar)
+		lpScalar := gb.NewLPSolver(p, wsScalar)
 		lpScalar.DisableSIMD = true
 		resScalar := lpScalar.Solve()
 
 		if resSIMD.Status != resScalar.Status {
 			t.Fatalf("[seed=%d] LP status mismatch: simd=%v scalar=%v", seed, resSIMD.Status, resScalar.Status)
 		}
-		if resSIMD.Status == goblin.StatusOptimal {
+		if resSIMD.Status == gb.StatusOptimal {
 			bV, rV, _ := p.MaxViolation(resSIMD.Primal, false)
 			if bV > 1e-5 || rV > 1e-5 {
 				t.Fatalf("[seed=%d] LP primal violation: bound=%.2e row=%.2e", seed, bV, rV)

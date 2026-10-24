@@ -1,6 +1,13 @@
 package goblin
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// ErrNilProblem indicates that a nil *CompiledProblem was passed to SolveCompiled.
+var ErrNilProblem = errors.New("goblin: nil CompiledProblem")
 
 // Backend selects the underlying LP and MILP solver engine.
 type Backend uint8
@@ -51,6 +58,7 @@ type Options struct {
 	AbsGapTol float64
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
+
 }
 
 const (
@@ -164,6 +172,17 @@ func WithTimeLimit(d time.Duration) Option {
 	return func(cfg *Options) { cfg.TimeLimit = d }
 }
 
+func stopRequested(deadline time.Time, done <-chan struct{}) bool {
+	if done != nil {
+		select {
+		case <-done:
+			return true
+		default:
+		}
+	}
+	return !deadline.IsZero() && time.Now().After(deadline)
+}
+
 // Result holds the terminal status, objective value, primal and dual vectors,
 // and search counters returned by Solve and SolveCompiled.
 type Result struct {
@@ -192,43 +211,80 @@ func (r *Result) Value(v Var) float64 {
 	return 0
 }
 
-// Solve compiles and solves the Model, applying any supplied functional modifiers to the default settings.
-func (m *Model) Solve(opts ...Option) Result {
+// Solve compiles and solves the Model under ctx, applying any supplied functional modifiers to the default settings.
+// When ctx is canceled or its deadline expires, Solve aborts and returns (Result{}, ctx.Err()).
+// When WithTimeLimit expires, Solve returns (res, nil) with res.Status == StatusTimeLimit and the best incumbent found.
+func (m *Model) Solve(ctx context.Context, opts ...Option) (Result, error) {
 	p := m.Compile()
-	return SolveCompiled(p, opts...)
+	return SolveCompiled(ctx, p, opts...)
 }
 
-// SolveCompiled solves a pre-compiled CompiledProblem using the selected backend
+// SolveCompiled solves a pre-compiled CompiledProblem under ctx using the selected backend
 // (pure-Go Branch-and-Cut by default, or COIN-OR CBC/CLP when WithCBC() / WithBackend(BackendCBC) is passed).
-func SolveCompiled(p *CompiledProblem, opts ...Option) Result {
+// When ctx is canceled or its deadline expires, SolveCompiled aborts and returns (Result{}, ctx.Err()).
+// When WithTimeLimit expires, SolveCompiled returns (res, nil) with res.Status == StatusTimeLimit and the best incumbent found.
+func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Result, error) {
 	start := time.Now()
 	opt := ApplyOptions(opts...)
-	if p == nil || p.InvalidErr != nil {
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+	}
+	if p == nil {
 		return Result{
 			Backend:   opt.Backend,
 			Status:    StatusUndefined,
 			SolveTime: time.Since(start),
-		}
+		}, ErrNilProblem
 	}
-	if opt.Backend == BackendCBC {
-		return solveCBC(p, opt, start)
+	if p.InvalidErr != nil {
+		return Result{
+			modelID:   p.modelID,
+			Backend:   opt.Backend,
+			Status:    StatusUndefined,
+			SolveTime: time.Since(start),
+		}, p.InvalidErr
 	}
-
 	var deadline time.Time
 	if opt.TimeLimit > 0 {
 		deadline = start.Add(opt.TimeLimit)
+		if !start.Before(deadline) {
+			return Result{
+				modelID:   p.modelID,
+				Backend:   opt.Backend,
+				Status:    StatusTimeLimit,
+				SolveTime: time.Since(start),
+			}, nil
+		}
+	}
+	if opt.Backend == BackendCBC {
+		res := solveCBC(ctx, p, opt, start, deadline, done)
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
+		}
+		return res, nil
 	}
 
 	workProb := p
 	if opt.EnablePresolve && p.IsMIP {
-		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline)
+		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
+		}
 		if preRes.TimedOut {
 			return Result{
 				modelID:   p.modelID,
 				Backend:   BackendGo,
 				Status:    StatusTimeLimit,
 				SolveTime: time.Since(start),
-			}
+			}, nil
 		}
 		if preRes.Infeasible {
 			return Result{
@@ -236,12 +292,17 @@ func SolveCompiled(p *CompiledProblem, opts ...Option) Result {
 				Backend:   BackendGo,
 				Status:    StatusInfeasible,
 				SolveTime: time.Since(start),
-			}
+			}, nil
 		}
 		workProb = preRes.Reduced
 	}
 
-	res := solveBranchAndCut(workProb, opt, start)
+	res := solveBranchAndCutWithDone(workProb, opt, start, deadline, done)
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+	}
 	res.Backend = BackendGo
-	return res
+	return res, nil
 }

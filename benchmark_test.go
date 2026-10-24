@@ -2,24 +2,26 @@ package goblin_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
 	"github.com/paulourio/goblin/bench"
 	"github.com/paulourio/goblin/format"
 )
 
-func corpusLookup(tb testing.TB) map[string]*goblin.Model {
+// corpusLookup indexes the canonical benchmark corpus by instance ID for fast lookup in benchmarks.
+func corpusLookup(tb testing.TB) map[string]*gb.Model {
 	tb.Helper()
 	cases := bench.BuildCorpus()
-	m := make(map[string]*goblin.Model, len(cases))
+	m := make(map[string]*gb.Model, len(cases))
 	for _, c := range cases {
 		m[c.ID] = c.Model
 	}
 	return m
 }
 
-func canonicalMADSmallModel() *goblin.Model {
+func canonicalMADSmallModel() *gb.Model {
 	w := [][]float64{
 		{8313, 0, 5258, 10400},
 		{4344, 50, 8917, 10350},
@@ -44,14 +46,19 @@ func BenchmarkSolveMAD(b *testing.B) {
 	}
 
 	b.Run("mad_canonical_g2_i4_t5", func(b *testing.B) {
+		ctx := b.Context()
 		p := canonicalMADSmallModel().Compile()
 		b.ReportAllocs()
 		b.ResetTimer()
-		var last goblin.Result
+		var last gb.Result
 		for range b.N {
-			last = goblin.SolveCompiled(p)
+			var err error
+			last, err = gb.SolveCompiled(ctx, p)
+			if err != nil {
+				b.Fatal(err)
+			}
 		}
-		if last.Status != goblin.StatusOptimal {
+		if last.Status != gb.StatusOptimal {
 			b.Fatalf("expected Optimal, got %v", last.Status)
 		}
 		b.ReportMetric(float64(last.Nodes), "nodes/op")
@@ -65,13 +72,18 @@ func BenchmarkSolveMAD(b *testing.B) {
 		}
 		p := mdl.Compile()
 		b.Run(id, func(b *testing.B) {
+			ctx := b.Context()
 			b.ReportAllocs()
 			b.ResetTimer()
-			var last goblin.Result
+			var last gb.Result
 			for range b.N {
-				last = goblin.SolveCompiled(p)
+				var err error
+				last, err = gb.SolveCompiled(ctx, p)
+				if err != nil {
+					b.Fatal(err)
+				}
 			}
-			if last.Status != goblin.StatusOptimal {
+			if last.Status != gb.StatusOptimal {
 				b.Fatalf("[%s] expected Optimal, got %v", id, last.Status)
 			}
 			b.ReportMetric(float64(last.Nodes), "nodes/op")
@@ -102,13 +114,18 @@ func BenchmarkSolveCorpus(b *testing.B) {
 		}
 		p := mdl.Compile()
 		b.Run(id, func(b *testing.B) {
+			ctx := b.Context()
 			b.ReportAllocs()
 			b.ResetTimer()
-			var last goblin.Result
+			var last gb.Result
 			for range b.N {
-				last = goblin.SolveCompiled(p)
+				var err error
+				last, err = gb.SolveCompiled(ctx, p)
+				if err != nil {
+					b.Fatal(err)
+				}
 			}
-			if last.Status != goblin.StatusOptimal {
+			if last.Status != gb.StatusOptimal {
 				b.Fatalf("[%s] expected Optimal, got %v", id, last.Status)
 			}
 			b.ReportMetric(float64(last.Nodes), "nodes/op")
@@ -135,16 +152,16 @@ func BenchmarkRootLP(b *testing.B) {
 		}
 		p := mdl.Compile()
 		b.Run(id, func(b *testing.B) {
-			ws := goblin.AcquireWorkspace(p.NumVars, p.NumConstraints)
-			defer goblin.ReleaseWorkspace(ws)
+			ws := gb.AcquireWorkspace(p.NumVars, p.NumConstraints)
+			defer gb.ReleaseWorkspace(ws)
 			b.ReportAllocs()
 			b.ResetTimer()
-			var last goblin.LPResult
+			var last gb.LPResult
 			for range b.N {
-				s := goblin.NewLPSolver(p, ws)
+				s := gb.NewLPSolver(p, ws)
 				last = s.Solve()
 			}
-			if last.Status != goblin.StatusOptimal {
+			if last.Status != gb.StatusOptimal {
 				b.Fatalf("[%s] expected Optimal root LP, got %v", id, last.Status)
 			}
 			b.ReportMetric(float64(last.Iterations), "iters/op")
@@ -166,7 +183,7 @@ func BenchmarkCompileAndFormats(b *testing.B) {
 		b.Run(id+"/Compile", func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
-			var cp *goblin.CompiledProblem
+			var cp *gb.CompiledProblem
 			for range b.N {
 				cp = mdl.Compile()
 			}
@@ -198,6 +215,36 @@ func BenchmarkCompileAndFormats(b *testing.B) {
 				mpsBuf.Reset()
 				if err := format.WriteMPS(p, &mpsBuf); err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkContextOverhead(b *testing.B) {
+	byID := corpusLookup(b)
+	bgCtx := context.Background()
+	for _, id := range []string{"t1_whiskas", "t2_mad_g4_i12", "t2_cflp_36", "t3_sched_1000"} {
+		p := byID[id].Compile()
+		cancelCtx := b.Context()
+
+		b.Run(id+"/Background", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				res, err := gb.SolveCompiled(bgCtx, p)
+				if err != nil || res.Status != gb.StatusOptimal {
+					b.Fatalf("err=%v status=%v", err, res.Status)
+				}
+			}
+		})
+		b.Run(id+"/Cancellable", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				res, err := gb.SolveCompiled(cancelCtx, p)
+				if err != nil || res.Status != gb.StatusOptimal {
+					b.Fatalf("err=%v status=%v", err, res.Status)
 				}
 			}
 		})

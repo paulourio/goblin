@@ -27,14 +27,14 @@ type PresolveResult struct {
 // variable bound interval becomes empty or an integer row proves unreachable, it
 // returns Infeasible without allocating a reduced matrix.
 func Presolve(orig *CompiledProblem, maxPasses int) PresolveResult {
-	return presolveWithDeadline(orig, maxPasses, time.Time{})
+	return presolveWithDeadline(orig, maxPasses, time.Time{}, nil)
 }
 
-func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time) PresolveResult {
+func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}) PresolveResult {
 	if maxPasses <= 0 {
 		maxPasses = defaultPresolveMaxPass
 	}
-	if !deadline.IsZero() && time.Now().After(deadline) {
+	if stopRequested(deadline, done) {
 		return PresolveResult{Reduced: orig, TimedOut: true}
 	}
 	n := orig.NumVars
@@ -170,13 +170,13 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 
 	// 2. Iterative Savelsbergh activity bound tightening & redundant row dropping
 	for range maxPasses {
-		if !deadline.IsZero() && time.Now().After(deadline) {
+		if stopRequested(deadline, done) {
 			return PresolveResult{Reduced: orig, TimedOut: true}
 		}
 		changedInPass := false
 
 		for i := range m {
-			if (i&63 == 0) && !deadline.IsZero() && time.Now().After(deadline) {
+			if (i&63 == 0) && stopRequested(deadline, done) {
 				return PresolveResult{Reduced: orig, TimedOut: true}
 			}
 			r := &rows[i]
