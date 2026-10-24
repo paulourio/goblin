@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/paulourio/goblin"
+	gb "github.com/paulourio/goblin"
+	"github.com/paulourio/goblin/assign"
 	"github.com/paulourio/goblin/bench"
 	"github.com/paulourio/goblin/format"
 	"github.com/paulourio/goblin/internal/simd"
@@ -27,6 +28,7 @@ const (
 	minSampleForSD     = 2
 	warmMaxVars        = 4036
 	warmMaxRows        = 5000
+	warmAssignMaxDim   = 2000
 	mpsInitBufBytes    = 1 << 20
 	reportFilePerm     = 0o644
 	outDirPerm         = 0o755
@@ -39,6 +41,7 @@ const (
 	cpMaxCutPasses     = 12
 	cpGapTol           = 1e-6
 	parityObjectiveTol = 1e-5
+	assignParityObjTol = 1e-9
 )
 
 func medianDurationMS(d []time.Duration) float64 {
@@ -139,45 +142,51 @@ func loadTrialPayloads(corpusDir, id string, nTrials int) ([][]byte, error) {
 	return payloads, nil
 }
 
-func warmWorker(corpusDir string, mpsBuf *bytes.Buffer, opts ...goblin.Option) {
-	ws := goblin.AcquireWorkspace(warmMaxVars, warmMaxRows)
-	goblin.ReleaseWorkspace(ws)
+func warmWorker(corpusDir string, mpsBuf *bytes.Buffer, opts ...gb.Option) {
+	ws := gb.AcquireWorkspace(warmMaxVars, warmMaxRows)
+	gb.ReleaseWorkspace(ws)
 	mpsBuf.Grow(mpsInitBufBytes)
 
-	for _, id := range []string{"t1_whiskas", "t2_mkp_30"} {
-		p := filepath.Join(corpusDir, id+".json")
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
+	for range 5 {
+		for _, id := range []string{"t1_whiskas", "t2_mkp_30"} {
+			p := filepath.Join(corpusDir, id+".json")
+			raw, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			doc, err := format.ParsePuLPJSON(raw)
+			if err != nil {
+				continue
+			}
+			m, err := format.BuildModelFromPuLPJSON(doc)
+			if err != nil {
+				continue
+			}
+			cp := m.Compile()
+			_, _ = gb.SolveCompiled(context.Background(), cp, opts...)
+			mpsBuf.Reset()
+			_ = format.WriteMPS(cp, mpsBuf)
 		}
-		doc, err := format.ParsePuLPJSON(raw)
-		if err != nil {
-			continue
-		}
-		m, err := format.BuildModelFromPuLPJSON(doc)
-		if err != nil {
-			continue
-		}
-		cp := m.Compile()
-		_ = goblin.SolveCompiled(cp, opts...)
-		mpsBuf.Reset()
-		_ = format.WriteMPS(cp, mpsBuf)
 	}
 }
 
-func runCheckpoint(compiledTrials []*goblin.CompiledProblem, trials int, opts ...goblin.Option) bench.CheckpointMetrics {
+func runCheckpoint(compiledTrials []*gb.CompiledProblem, trials int, opts ...gb.Option) bench.CheckpointMetrics {
 	if len(compiledTrials) == 0 {
 		return bench.CheckpointMetrics{}
 	}
+	ctx := context.Background()
 	// Always perform an untimed warmup pass so even 1-trial Tier 3 checkpoints execute in warm state.
-	_ = goblin.SolveCompiled(compiledTrials[0], opts...)
+	_, _ = gb.SolveCompiled(ctx, compiledTrials[0], opts...)
 
-	var canonical goblin.Result
+	var canonical gb.Result
 	times := make([]time.Duration, 0, trials)
 	for i := range trials {
 		p := compiledTrials[i%len(compiledTrials)]
 		t0 := time.Now()
-		res := goblin.SolveCompiled(p, opts...)
+		res, err := gb.SolveCompiled(ctx, p, opts...)
+		if err != nil {
+			panic(err)
+		}
 		dt := time.Since(t0)
 		if i == 0 {
 			canonical = res
@@ -238,21 +247,187 @@ func syncAllDocs(corpusDir, pyPath, scalarPath, simdPath, reportPath string, che
 	return nil
 }
 
-func parseBackend(name string) (goblin.Backend, error) {
+func parseBackend(name string) (gb.Backend, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "go", "purego", "pure-go":
-		return goblin.BackendGo, nil
+		return gb.BackendGo, nil
 	case "cbc", "cpp", "c++":
-		return goblin.BackendCBC, nil
+		return gb.BackendCBC, nil
 	default:
-		return goblin.BackendGo, fmt.Errorf("unknown -backend %q (want 'go' or 'cbc')", name)
+		return gb.BackendGo, fmt.Errorf("unknown -backend %q (want 'go' or 'cbc')", name)
+	}
+}
+
+func runAssignBenchSuite(scipyRefPath, outPath string, noSIMD bool, defaultTrials int) {
+	var assignOpts []assign.Option
+	if noSIMD {
+		assignOpts = append(assignOpts, assign.WithoutSIMD())
+	}
+	var scipyRef map[string]bench.SciPyAssignEntry
+	if rawRef, err := os.ReadFile(scipyRefPath); err == nil {
+		_ = json.Unmarshal(rawRef, &scipyRef)
+	}
+
+	assignCases := bench.BuildAssignCorpus()
+	results := make(map[string]bench.AssignBenchResult, len(assignCases))
+	gitCommit, gitDirty := gitProvenance()
+	fingerprint, err := bench.SourceFingerprint(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
+		os.Exit(1)
+	}
+	if gitDirty && outPath != "" {
+		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
+	}
+
+	// Warm up workspace pool and solver paths before timed trials.
+	ctx := context.Background()
+	ws := assign.AcquireWorkspace(warmAssignMaxDim, warmAssignMaxDim)
+	assign.ReleaseWorkspace(ws)
+	for range 5 {
+		for _, warmID := range []string{"a1_unif_10x10", "a2_unif_100x100", "a2_unif_256x256"} {
+			for _, ac := range assignCases {
+				if ac.ID == warmID {
+					mat := bench.GenerateAssignMatrix(ac, 0)
+					_, _ = assign.LinearSumFlat(ctx, ac.Rows, ac.Cols, mat, assign.Minimize, assignOpts...)
+					_, _ = assign.LinearSumFlat(ctx, ac.Rows, ac.Cols, mat, assign.Maximize, assignOpts...)
+				}
+			}
+		}
+	}
+
+	simdActive := simd.UsingHardwareSIMDWith(noSIMD)
+	fmt.Printf("=== GOBLIN ASSIGN WARM-STATE BENCHMARK SUITE (SIMD=%v) ===\n\n", simdActive)
+	fmt.Printf("%-18s | %9s | %10s %10s | %10s %10s | %8s | %7s\n",
+		"Problem ID", "Shape",
+		"SciPySolve", "GoSolve",
+		"SciPyTotal", "GoTotal",
+		"Speedup", "Parity")
+	fmt.Println(strings.Repeat("-", tableRuleWidth))
+
+	for _, ac := range assignCases {
+		nTrials := defaultTrials
+		if ac.Tier == "tier3_large" {
+			nTrials = min(nTrials, tier3MaxTrials)
+		}
+		warmup := 2
+		if ac.Tier == "tier3_large" {
+			warmup = 1
+		}
+
+		tPrep := make([]time.Duration, 0, nTrials)
+		tSolve := make([]time.Duration, 0, nTrials)
+		tTotal := make([]time.Duration, 0, nTrials)
+		trialObjs := make([]float64, 0, nTrials)
+
+		for i := range warmup + nTrials {
+			trialIdx := 0
+			if i >= warmup {
+				trialIdx = i - warmup
+			}
+			t0 := time.Now()
+			mat := bench.GenerateAssignMatrix(ac, trialIdx)
+			t1 := time.Now()
+			res, err := assign.LinearSumFlat(ctx, ac.Rows, ac.Cols, mat, ac.Sense, assignOpts...)
+			if err != nil {
+				panic(fmt.Sprintf("%s trial %d failed: %v", ac.ID, trialIdx, err))
+			}
+			t2 := time.Now()
+
+			if i >= warmup {
+				tPrep = append(tPrep, t1.Sub(t0))
+				tSolve = append(tSolve, t2.Sub(t1))
+				tTotal = append(tTotal, t2.Sub(t0))
+				trialObjs = append(trialObjs, res.Objective)
+			}
+		}
+
+		goPrepMS := medianDurationMS(tPrep)
+		goSolveMS := medianDurationMS(tSolve)
+		goTotalMS := medianDurationMS(tTotal)
+		solveMeanMS, solveSDMS := meanSDDurationMS(tSolve)
+		totalMeanMS, totalSDMS := meanSDDurationMS(tTotal)
+
+		r := bench.AssignBenchResult{
+			ID:                ac.ID,
+			Tier:              ac.Tier,
+			Rows:              ac.Rows,
+			Cols:              ac.Cols,
+			Sense:             int(ac.Sense),
+			Family:            ac.Family,
+			SIMDEnabled:       simdActive,
+			Objective:         trialObjs[0],
+			TrialObjectives:   trialObjs,
+			TPrepMS:           goPrepMS,
+			TSolveMS:          goSolveMS,
+			TTotalMS:          goTotalMS,
+			TSolveMeanMS:      solveMeanMS,
+			TSolveSDMS:        solveSDMS,
+			TTotalMeanMS:      totalMeanMS,
+			TTotalSDMS:        totalSDMS,
+			TSolveTrialsMS:    durationsMS(tSolve),
+			TTotalTrialsMS:    durationsMS(tTotal),
+			GitCommit:         gitCommit,
+			GitDirty:          gitDirty,
+			GoVersion:         runtime.Version(),
+			SourceFingerprint: fingerprint,
+			CPUAffinity:       cpuAffinity(),
+		}
+		results[ac.ID] = r
+
+		spSolveMS, spTotalMS := 0.0, 0.0
+		speedupStr := "N/A"
+		parityStr := "OK"
+		if ref, ok := scipyRef[ac.ID]; ok {
+			spSolveMS = ref.TSolveMedianMS
+			spTotalMS = ref.TTotalMedianMS
+			if goSolveMS > 0 {
+				speedupStr = fmt.Sprintf("%.2fx", spSolveMS/goSolveMS)
+			}
+			diff := math.Abs(r.Objective-ref.Objective) / max(1.0, math.Abs(ref.Objective))
+			if diff > assignParityObjTol {
+				parityStr = fmt.Sprintf("%.1e", diff)
+			}
+			for k, want := range ref.TrialObjectives {
+				if k < len(r.TrialObjectives) {
+					td := math.Abs(r.TrialObjectives[k]-want) / max(1.0, math.Abs(want))
+					if td > assignParityObjTol {
+						parityStr = fmt.Sprintf("T%d:%.1e", k, td)
+						break
+					}
+				}
+			}
+		}
+
+		shapeStr := fmt.Sprintf("%dx%d", ac.Rows, ac.Cols)
+		fmt.Printf("%-18s | %9s | %8.4fms %8.4fms | %8.4fms %8.4fms | %8s | %7s\n",
+			ac.ID, shapeStr,
+			spSolveMS, goSolveMS,
+			spTotalMS, goTotalMS,
+			speedupStr, parityStr)
+	}
+
+	if outPath != "" {
+		if err := os.MkdirAll(filepath.Dir(outPath), outDirPerm); err != nil {
+			panic(err)
+		}
+		rawOut, err := json.MarshalIndent(results, "", "  ")
+		if err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(outPath, rawOut, reportFilePerm); err != nil {
+			panic(err)
+		}
+		fmt.Printf("\nSaved assign benchmark telemetry to %s\n", outPath)
 	}
 }
 
 func main() {
 	corpusDir := flag.String("corpus", "testdata/corpus", "Directory for JSON benchmark corpus")
 	genCorpus := flag.Bool("generate-corpus", false, "Generate deterministic 3-tier JSON corpus")
+	assignFlag := flag.Bool("assign", false, "Run Linear Sum Assignment (LSAP) benchmark suite")
 	pyRefPath := flag.String("python-ref", "bench/results/python_baseline.json", "Path to Python baseline JSON")
+	scipyRefPath := flag.String("scipy-ref", "bench/results/scipy_assign_baseline.json", "Path to SciPy LSAP baseline JSON")
 	outPath := flag.String("out", "", "Optional output JSON path for benchmark results")
 	reportPath := flag.String("report", "", "Generate markdown benchmark report and sync docs from saved JSON files")
 	syncDocs := flag.Bool("sync-docs", false, "Synchronize README.md, docs/benchmarks.md, and final_report.md from JSON telemetry")
@@ -260,7 +435,7 @@ func main() {
 	scalarJSONPath := flag.String("scalar-json", "bench/results/goblin_scalar.json", "Scalar JSON path for report")
 	simdJSONPath := flag.String("simd-json", "bench/results/goblin_simd.json", "SIMD JSON path for report")
 	backendFlag := flag.String("backend", "go", "Solver backend to benchmark ('go' or 'cbc')")
-	noSIMD := flag.Bool("no-simd", false, "Disable hardware SIMD kernels via goblin.WithoutSIMD()")
+	noSIMD := flag.Bool("no-simd", false, "Disable hardware SIMD kernels via gb.WithoutSIMD()")
 	trials := flag.Int("trials", defaultTrialsCount, "Number of measured trials per problem")
 	workers := flag.Int("workers", 1, "Number of concurrent benchmark workers")
 	flag.Parse()
@@ -271,7 +446,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "failed to write corpus: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Generated %d benchmark instances (plus randomized trial ensembles) in %s\n", len(cases), *corpusDir)
+		assignDir := filepath.Join(filepath.Dir(*corpusDir), "assign_corpus")
+		assignCases, err := bench.WriteAssignCorpusManifest(assignDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write assign corpus manifest: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated %d MILP benchmark families in %s and %d LSAP families in %s\n",
+			len(cases), *corpusDir, len(assignCases), assignDir)
+		return
+	}
+
+	if *assignFlag {
+		runAssignBenchSuite(*scipyRefPath, *outPath, *noSIMD, *trials)
 		return
 	}
 
@@ -306,19 +493,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitCodeBadFlag)
 	}
-	if backend == goblin.BackendCBC && !goblin.CBCAvailable() {
+	if backend == gb.BackendCBC && !gb.CBCAvailable() {
 		fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built with CGO_ENABLED=0")
 		os.Exit(1)
 	}
 
-	var baseOpts []goblin.Option
-	if backend == goblin.BackendCBC {
-		baseOpts = append(baseOpts, goblin.WithCBC())
+	var baseOpts []gb.Option
+	if backend == gb.BackendCBC {
+		baseOpts = append(baseOpts, gb.WithCBC())
 	} else {
-		baseOpts = append(baseOpts, goblin.WithPureGo())
+		baseOpts = append(baseOpts, gb.WithPureGo())
 	}
 	if *noSIMD {
-		baseOpts = append(baseOpts, goblin.WithoutSIMD())
+		baseOpts = append(baseOpts, gb.WithoutSIMD())
 	}
 
 	var pyRef map[string]bench.PythonBaselineEntry
@@ -338,7 +525,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
 	}
 
-	simdActive := backend == goblin.BackendGo && simd.UsingHardwareSIMDWith(*noSIMD)
+	simdActive := backend == gb.BackendGo && simd.UsingHardwareSIMDWith(*noSIMD)
 	nWorkers := max(1, *workers)
 	fmt.Printf("=== GOBLIN WARM-STATE MULTI-TRIAL BENCHMARK SUITE (Backend=%s, SIMD=%v, Workers=%d) ===\n\n",
 		backend, simdActive, nWorkers)
@@ -353,7 +540,7 @@ func main() {
 	type jobResult struct {
 		idx          int
 		res          bench.ProblemBenchResult
-		canonicalRes goblin.Result
+		canonicalRes gb.Result
 	}
 
 	jobCh := make(chan int, len(cases))
@@ -393,10 +580,10 @@ func main() {
 				tSolve := make([]time.Duration, 0, nTrials)
 				tTotal := make([]time.Duration, 0, nTrials)
 				trialObjs := make([]float64, 0, nTrials)
-				compiledTrials := make([]*goblin.CompiledProblem, 0, nTrials)
+				compiledTrials := make([]*gb.CompiledProblem, 0, nTrials)
 
-				var canonicalRes goblin.Result
-				var canonicalCompiled *goblin.CompiledProblem
+				var canonicalRes gb.Result
+				var canonicalCompiled *gb.CompiledProblem
 
 				for i := range warmup + nTrials {
 					rawBytes := trialPayloads[0]
@@ -417,7 +604,10 @@ func main() {
 					t2 := time.Now()
 					compiled := model.Compile()
 					t3 := time.Now()
-					res := goblin.SolveCompiled(compiled, baseOpts...)
+					res, err := gb.SolveCompiled(context.Background(), compiled, baseOpts...)
+					if err != nil {
+						panic(err)
+					}
 					t4 := time.Now()
 
 					mpsBuf.Reset()
@@ -445,28 +635,28 @@ func main() {
 
 				// Measure Root LP Relaxation (Checkpoint 2/3) across warm randomized trials
 				lpTimes := make([]time.Duration, 0, nTrials)
-				var canonicalRootLP goblin.LPResult
+				var canonicalRootLP gb.LPResult
 				for i := range warmup + nTrials {
 					cp := canonicalCompiled
 					if i >= warmup {
 						cp = compiledTrials[i-warmup]
 					}
 					var dt time.Duration
-					var lpRes goblin.LPResult
-					if backend == goblin.BackendCBC {
+					var lpRes gb.LPResult
+					if backend == gb.BackendCBC {
 						t0 := time.Now()
-						lpSolver := goblin.NewCBCLPSolver(cp)
+						lpSolver := gb.NewCBCLPSolver(cp)
 						lpRes = lpSolver.Solve()
 						dt = time.Since(t0)
 						lpSolver.Close()
 					} else {
-						ws := goblin.AcquireWorkspace(cp.NumVars, cp.NumConstraints)
+						ws := gb.AcquireWorkspace(cp.NumVars, cp.NumConstraints)
 						t0 := time.Now()
-						lpSolver := goblin.NewLPSolver(cp, ws)
+						lpSolver := gb.NewLPSolver(cp, ws)
 						lpSolver.DisableSIMD = *noSIMD
 						lpRes = lpSolver.Solve()
 						dt = time.Since(t0)
-						goblin.ReleaseWorkspace(ws)
+						gb.ReleaseWorkspace(ws)
 					}
 					if i >= warmup {
 						if i == warmup {
@@ -483,40 +673,40 @@ func main() {
 				cpTimeout := cpTimeoutMS * time.Millisecond
 
 				cp4 := runCheckpoint(compiledTrials, cpTrials,
-					goblin.WithBackend(backend),
-					goblin.WithSIMD(!*noSIMD),
-					goblin.WithPresolve(false),
-					goblin.WithCuts(false),
-					goblin.WithHeuristics(false),
-					goblin.WithMaxNodes(cpMaxNodes),
-					goblin.WithRelGapTol(cpGapTol),
-					goblin.WithAbsGapTol(cpGapTol),
-					goblin.WithTimeLimit(cpTimeout),
+					gb.WithBackend(backend),
+					gb.WithSIMD(!*noSIMD),
+					gb.WithPresolve(false),
+					gb.WithCuts(false),
+					gb.WithHeuristics(false),
+					gb.WithMaxNodes(cpMaxNodes),
+					gb.WithRelGapTol(cpGapTol),
+					gb.WithAbsGapTol(cpGapTol),
+					gb.WithTimeLimit(cpTimeout),
 				)
 
 				cp5 := runCheckpoint(compiledTrials, cpTrials,
-					goblin.WithBackend(backend),
-					goblin.WithSIMD(!*noSIMD),
-					goblin.WithPresolve(true),
-					goblin.WithCuts(false),
-					goblin.WithHeuristics(false),
-					goblin.WithMaxNodes(cpMaxNodes),
-					goblin.WithRelGapTol(cpGapTol),
-					goblin.WithAbsGapTol(cpGapTol),
-					goblin.WithTimeLimit(cpTimeout),
+					gb.WithBackend(backend),
+					gb.WithSIMD(!*noSIMD),
+					gb.WithPresolve(true),
+					gb.WithCuts(false),
+					gb.WithHeuristics(false),
+					gb.WithMaxNodes(cpMaxNodes),
+					gb.WithRelGapTol(cpGapTol),
+					gb.WithAbsGapTol(cpGapTol),
+					gb.WithTimeLimit(cpTimeout),
 				)
 
 				cp6 := runCheckpoint(compiledTrials, cpTrials,
-					goblin.WithBackend(backend),
-					goblin.WithSIMD(!*noSIMD),
-					goblin.WithPresolve(true),
-					goblin.WithCuts(true),
-					goblin.WithHeuristics(false),
-					goblin.WithMaxNodes(cpMaxNodes),
-					goblin.WithMaxCutPasses(cpMaxCutPasses),
-					goblin.WithRelGapTol(cpGapTol),
-					goblin.WithAbsGapTol(cpGapTol),
-					goblin.WithTimeLimit(cpTimeout),
+					gb.WithBackend(backend),
+					gb.WithSIMD(!*noSIMD),
+					gb.WithPresolve(true),
+					gb.WithCuts(true),
+					gb.WithHeuristics(false),
+					gb.WithMaxNodes(cpMaxNodes),
+					gb.WithMaxCutPasses(cpMaxCutPasses),
+					gb.WithRelGapTol(cpGapTol),
+					gb.WithAbsGapTol(cpGapTol),
+					gb.WithTimeLimit(cpTimeout),
 				)
 
 				cp7 := bench.CheckpointMetrics{

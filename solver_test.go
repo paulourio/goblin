@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gb "github.com/paulourio/goblin"
+	"github.com/paulourio/goblin/assign"
 	"github.com/paulourio/goblin/bench"
 	"github.com/paulourio/goblin/format"
 )
@@ -576,3 +577,51 @@ func TestRandomMADNegativeControls(t *testing.T) {
 	}
 }
 
+func TestAssignCorpusSciPyParity(t *testing.T) {
+	rawRef, err := os.ReadFile("bench/results/scipy_assign_baseline.json")
+	if err != nil {
+		t.Fatalf("failed to read bench/results/scipy_assign_baseline.json: %v", err)
+	}
+	var scipyRef map[string]bench.SciPyAssignEntry
+	if err := json.Unmarshal(rawRef, &scipyRef); err != nil {
+		t.Fatalf("failed to unmarshal scipy_assign_baseline.json: %v", err)
+	}
+
+	cases := bench.BuildAssignCorpus()
+	for _, ac := range cases {
+		ref, ok := scipyRef[ac.ID]
+		if !ok {
+			t.Fatalf("missing %q in scipy_assign_baseline.json", ac.ID)
+		}
+		if len(ref.TrialObjectives) != ac.Trials {
+			t.Fatalf("[%s] expected %d trial objectives, got %d", ac.ID, ac.Trials, len(ref.TrialObjectives))
+		}
+		for k := range ac.Trials {
+			mat := bench.GenerateAssignMatrix(ac, k)
+			if k == 0 {
+				gotSHA := bench.MatrixSHA256(mat)
+				if gotSHA != ac.Trial0SHA {
+					t.Fatalf("[%s] Trial 0 SHA256 mismatch: got %s, want %s", ac.ID, gotSHA, ac.Trial0SHA)
+				}
+			}
+			wantObj := ref.TrialObjectives[k]
+			for _, disableSIMD := range []bool{false, true} {
+				var opt assign.Option
+				if disableSIMD {
+					opt = assign.WithoutSIMD()
+				} else {
+					opt = assign.WithSIMD(true)
+				}
+				res, err := assign.LinearSumFlat(t.Context(), ac.Rows, ac.Cols, mat, ac.Sense, opt)
+				if err != nil {
+					t.Fatalf("[%s trial %d disableSIMD=%v] unexpected error: %v", ac.ID, k, disableSIMD, err)
+				}
+				rel := math.Abs(res.Objective-wantObj) / max(1.0, math.Abs(wantObj))
+				if rel > 1e-9 {
+					t.Fatalf("[%s trial %d disableSIMD=%v] objective mismatch: got %.10f, SciPy %.10f (rel=%.2e)",
+						ac.ID, k, disableSIMD, res.Objective, wantObj, rel)
+				}
+			}
+		}
+	}
+}

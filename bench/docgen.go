@@ -93,16 +93,73 @@ type ProblemBenchResult struct {
 	CPUAffinity string `json:"cpu_affinity,omitempty"`
 }
 
+// SciPyAssignEntry matches the JSON output produced by bench/scipy_assign_baseline.py.
+type SciPyAssignEntry struct {
+	ID              string    `json:"id"`
+	Tier            string    `json:"tier"`
+	Rows            int       `json:"rows"`
+	Cols            int       `json:"cols"`
+	Sense           int       `json:"sense"`
+	Family          string    `json:"family"`
+	Trials          int       `json:"trials"`
+	SciPyVersion    string    `json:"scipy_version"`
+	NumPyVersion    string    `json:"numpy_version"`
+	CPUAffinity     string    `json:"cpu_affinity,omitempty"`
+	Objective       float64   `json:"objective"`
+	TrialObjectives []float64 `json:"trial_objectives,omitempty"`
+	TPrepMedianMS   float64   `json:"t_prep_median_ms"`
+	TSolveMedianMS  float64   `json:"t_solve_median_ms"`
+	TTotalMedianMS  float64   `json:"t_total_median_ms"`
+	TSolveMeanMS    float64   `json:"t_solve_mean_ms"`
+	TSolveSDMS      float64   `json:"t_solve_sd_ms"`
+	TTotalMeanMS    float64   `json:"t_total_mean_ms"`
+	TTotalSDMS      float64   `json:"t_total_sd_ms"`
+	TSolveTrialsMS  []float64 `json:"t_solve_trials_ms,omitempty"`
+	TTotalTrialsMS  []float64 `json:"t_total_trials_ms,omitempty"`
+}
+
+// AssignBenchResult stores all pipeline and solve measurements for one LSAP corpus family.
+type AssignBenchResult struct {
+	ID                string    `json:"id"`
+	Tier              string    `json:"tier"`
+	Rows              int       `json:"rows"`
+	Cols              int       `json:"cols"`
+	Sense             int       `json:"sense"`
+	Family            string    `json:"family"`
+	SIMDEnabled       bool      `json:"simd_enabled"`
+	Objective         float64   `json:"objective"`
+	TrialObjectives   []float64 `json:"trial_objectives,omitempty"`
+	TPrepMS           float64   `json:"t_prep_ms"`
+	TSolveMS          float64   `json:"t_solve_ms"`
+	TTotalMS          float64   `json:"t_total_ms"`
+	TSolveMeanMS      float64   `json:"t_solve_mean_ms"`
+	TSolveSDMS        float64   `json:"t_solve_sd_ms"`
+	TTotalMeanMS      float64   `json:"t_total_mean_ms"`
+	TTotalSDMS        float64   `json:"t_total_sd_ms"`
+	TSolveTrialsMS    []float64 `json:"t_solve_trials_ms,omitempty"`
+	TTotalTrialsMS    []float64 `json:"t_total_trials_ms,omitempty"`
+	GitCommit         string    `json:"git_commit,omitempty"`
+	GitDirty          bool      `json:"git_dirty,omitempty"`
+	GoVersion         string    `json:"go_version,omitempty"`
+	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
+	CPUAffinity       string    `json:"cpu_affinity,omitempty"`
+}
+
 // TelemetryBundle holds the loaded benchmark results from canonical JSON files.
 type TelemetryBundle struct {
-	Python map[string]PythonBaselineEntry
-	Goblin map[string]ProblemBenchResult
-	Scalar map[string]ProblemBenchResult
-	SIMD   map[string]ProblemBenchResult
+	Python       map[string]PythonBaselineEntry
+	Goblin       map[string]ProblemBenchResult
+	Scalar       map[string]ProblemBenchResult
+	SIMD         map[string]ProblemBenchResult
+	SciPyAssign  map[string]SciPyAssignEntry
+	AssignScalar map[string]AssignBenchResult
+	AssignSIMD   map[string]AssignBenchResult
 }
 
 // LoadTelemetryBundle reads the Python, pure-Go scalar, and pure-Go SIMD telemetry files plus the
-// in-process CBC backend telemetry (goblin_cbc.json) stored next to the scalar file, when present.
+// in-process CBC backend telemetry (goblin_cbc.json) and the LSAP telemetry files
+// (scipy_assign_baseline.json, goblin_assign_scalar.json, goblin_assign_simd.json) stored next to
+// the scalar file.
 func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle, error) {
 	var pyMap map[string]PythonBaselineEntry
 	if err := readJSON(pyPath, &pyMap); err != nil {
@@ -115,18 +172,33 @@ func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle,
 	if err := readJSON(simdPath, &simdMap); err != nil {
 		return nil, fmt.Errorf("simd telemetry: %w", err)
 	}
+	resultsDir := filepath.Dir(scalarPath)
 	var goblinMap map[string]ProblemBenchResult
-	goblinPath := filepath.Join(filepath.Dir(scalarPath), "goblin_cbc.json")
+	goblinPath := filepath.Join(resultsDir, "goblin_cbc.json")
 	if _, err := os.Stat(goblinPath); err == nil {
 		if err := readJSON(goblinPath, &goblinMap); err != nil {
 			return nil, fmt.Errorf("goblin cbc telemetry: %w", err)
 		}
 	}
+	var scipyAssignMap map[string]SciPyAssignEntry
+	if err := readJSON(filepath.Join(resultsDir, "scipy_assign_baseline.json"), &scipyAssignMap); err != nil {
+		return nil, fmt.Errorf("scipy assign baseline: %w", err)
+	}
+	var assignScalarMap, assignSIMDMap map[string]AssignBenchResult
+	if err := readJSON(filepath.Join(resultsDir, "goblin_assign_scalar.json"), &assignScalarMap); err != nil {
+		return nil, fmt.Errorf("assign scalar telemetry: %w", err)
+	}
+	if err := readJSON(filepath.Join(resultsDir, "goblin_assign_simd.json"), &assignSIMDMap); err != nil {
+		return nil, fmt.Errorf("assign simd telemetry: %w", err)
+	}
 	return &TelemetryBundle{
-		Python: pyMap,
-		Goblin: goblinMap,
-		Scalar: scalarMap,
-		SIMD:   simdMap,
+		Python:       pyMap,
+		Goblin:       goblinMap,
+		Scalar:       scalarMap,
+		SIMD:         simdMap,
+		SciPyAssign:  scipyAssignMap,
+		AssignScalar: assignScalarMap,
+		AssignSIMD:   assignSIMDMap,
 	}, nil
 }
 
@@ -186,6 +258,43 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 		}
 		mismatches = append(mismatches, CheckParity(tb, c.ID)...)
 	}
+
+	assignCases := BuildAssignCorpus()
+	assignManifest := filepath.Join(filepath.Dir(corpusDir), "assign_corpus", "manifest.json")
+	if _, err := os.Stat(assignManifest); err != nil {
+		return fmt.Errorf("missing assign corpus manifest %s: %w", assignManifest, err)
+	}
+	if len(tb.SciPyAssign) != len(assignCases) {
+		return fmt.Errorf("scipy assign baseline has %d entries, assign corpus has %d", len(tb.SciPyAssign), len(assignCases))
+	}
+	if len(tb.AssignScalar) != len(assignCases) {
+		return fmt.Errorf("assign scalar telemetry has %d entries, assign corpus has %d", len(tb.AssignScalar), len(assignCases))
+	}
+	if len(tb.AssignSIMD) != len(assignCases) {
+		return fmt.Errorf("assign simd telemetry has %d entries, assign corpus has %d", len(tb.AssignSIMD), len(assignCases))
+	}
+	for _, ac := range assignCases {
+		sp, ok := tb.SciPyAssign[ac.ID]
+		if !ok {
+			return fmt.Errorf("missing %q in scipy assign baseline", ac.ID)
+		}
+		if sp.Rows != ac.Rows || sp.Cols != ac.Cols {
+			return fmt.Errorf("scipy assign dimension mismatch for %q: got (%d, %d), want (%d, %d)",
+				ac.ID, sp.Rows, sp.Cols, ac.Rows, ac.Cols)
+		}
+		for label, m := range map[string]map[string]AssignBenchResult{"assign_scalar": tb.AssignScalar, "assign_simd": tb.AssignSIMD} {
+			r, ok := m[ac.ID]
+			if !ok {
+				return fmt.Errorf("missing %q in %s telemetry", ac.ID, label)
+			}
+			if r.Rows != ac.Rows || r.Cols != ac.Cols {
+				return fmt.Errorf("%s telemetry dimension mismatch for %q: got (%d, %d), want (%d, %d)",
+					label, ac.ID, r.Rows, r.Cols, ac.Rows, ac.Cols)
+			}
+		}
+		mismatches = append(mismatches, CheckAssignParity(tb, ac.ID)...)
+	}
+
 	if len(mismatches) > 0 {
 		return fmt.Errorf("parity check failed (%d mismatches):\n  %s", len(mismatches), strings.Join(mismatches, "\n  "))
 	}
@@ -193,6 +302,46 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 		return err
 	}
 	return nil
+}
+
+// CheckAssignParity compares the scalar and SIMD goblin/assign telemetry for id against
+// the SciPy reference and returns one message per mismatch.
+func CheckAssignParity(tb *TelemetryBundle, id string) []string {
+	sp, ok := tb.SciPyAssign[id]
+	if !ok {
+		return []string{id + ": missing scipy assign reference"}
+	}
+	builds := []struct {
+		label string
+		res   AssignBenchResult
+		ok    bool
+	}{
+		{label: "assign_scalar"},
+		{label: "assign_simd"},
+	}
+	builds[0].res, builds[0].ok = tb.AssignScalar[id]
+	builds[1].res, builds[1].ok = tb.AssignSIMD[id]
+
+	var out []string
+	for _, b := range builds {
+		if !b.ok {
+			out = append(out, fmt.Sprintf("%s/%s: missing telemetry", id, b.label))
+			continue
+		}
+		if relDiff(b.res.Objective, sp.Objective) > assignParityRelTol {
+			out = append(out, fmt.Sprintf("%s/%s: objective %.10g, SciPy %.10g", id, b.label, b.res.Objective, sp.Objective))
+		}
+		for k, want := range sp.TrialObjectives {
+			if k >= len(b.res.TrialObjectives) {
+				out = append(out, fmt.Sprintf("%s/%s: trial %d missing", id, b.label, k))
+				break
+			}
+			if got := b.res.TrialObjectives[k]; relDiff(got, want) > assignParityRelTol {
+				out = append(out, fmt.Sprintf("%s/%s: trial %d objective %.10g, SciPy %.10g", id, b.label, k, got, want))
+			}
+		}
+	}
+	return out
 }
 
 // CheckParity compares the scalar, SIMD, and CBC goblin telemetry (when present) for id
@@ -247,15 +396,16 @@ func CheckParity(tb *TelemetryBundle, id string) []string {
 }
 
 const (
-	parityRelTol      = 1e-5
-	minRequiredBuilds = 2
-	madTimeHorizon    = 6
-	geoMeanMinFloor   = 1e-6
-	evenMedianHalf    = 0.5
-	zCrit975          = 1.96
-	minPairedSamples  = 2
-	minNetSolveMS     = 0.001
-	syncedDocPerm     = 0o644
+	parityRelTol       = 1e-5
+	assignParityRelTol = 1e-9
+	minRequiredBuilds  = 2
+	madTimeHorizon     = 6
+	geoMeanMinFloor    = 1e-6
+	evenMedianHalf     = 0.5
+	zCrit975           = 1.96
+	minPairedSamples   = 2
+	minNetSolveMS      = 0.001
+	syncedDocPerm      = 0o644
 )
 
 func relDiff(a, b float64) float64 { return math.Abs(a-b) / max(1.0, math.Abs(b)) }
@@ -269,7 +419,7 @@ type provenance struct {
 	affinity    map[string]bool
 }
 
-// telemetryProvenance requires every scalar, SIMD, and CBC entry to carry the same git commit
+// telemetryProvenance requires every scalar, SIMD, CBC, and LSAP entry to carry the same git commit
 // and source fingerprint.
 func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 	pv := provenance{affinity: map[string]bool{}}
@@ -287,6 +437,22 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 			}
 			if r.GitCommit != pv.commit || r.SourceFingerprint != pv.fingerprint {
 				return pv, fmt.Errorf("telemetry mixes sources (%s/%s vs %s/%s, entry %q)",
+					pv.commit, pv.fingerprint, r.GitCommit, r.SourceFingerprint, id)
+			}
+			pv.dirty = pv.dirty || r.GitDirty
+			pv.affinity[r.CPUAffinity] = true
+		}
+	}
+	for _, m := range []map[string]AssignBenchResult{tb.AssignScalar, tb.AssignSIMD} {
+		for id, r := range m {
+			if r.GitCommit == "" || r.SourceFingerprint == "" {
+				return pv, fmt.Errorf("assign telemetry entry %q lacks git_commit/source_fingerprint provenance (re-run goblin-bench -assign)", id)
+			}
+			if pv.commit == "" {
+				pv.commit, pv.goVersion, pv.fingerprint = r.GitCommit, r.GoVersion, r.SourceFingerprint
+			}
+			if r.GitCommit != pv.commit || r.SourceFingerprint != pv.fingerprint {
+				return pv, fmt.Errorf("assign telemetry mixes sources (%s/%s vs %s/%s, entry %q)",
 					pv.commit, pv.fingerprint, r.GitCommit, r.SourceFingerprint, id)
 			}
 			pv.dirty = pv.dirty || r.GitDirty
@@ -415,6 +581,20 @@ func parityCell(tb *TelemetryBundle, id string) string {
 	return "`MISMATCH`"
 }
 
+func assignParityCell(tb *TelemetryBundle, id string) string {
+	if len(CheckAssignParity(tb, id)) == 0 {
+		return "`OK`"
+	}
+	return "`MISMATCH`"
+}
+
+func formatAssignMS(ms float64) string {
+	if ms < 0.1 {
+		return fmt.Sprintf("%.4f", ms)
+	}
+	return fmt.Sprintf("%.3f", ms)
+}
+
 // affinityList renders the recorded CPU affinity sets; "unrecorded" marks missing values.
 func affinityList(set map[string]bool) string {
 	var parts []string
@@ -428,9 +608,9 @@ func affinityList(set map[string]bool) string {
 	return strings.Join(parts, ", ")
 }
 
-// simdReachSize is the smallest n + m for which an AVX2 Dot64/Axpy64 call (slice length
-// >= 256) can occur; below it both builds run the same scalar kernels.
-const simdReachSize = 256
+// simdReachSize is the smallest n + m for which an AVX2 Dot64/Axpy64/Scale64 call (slice length
+// >= 32) can occur; below it both builds run the same scalar kernels.
+const simdReachSize = 32
 
 // simdVerdict classifies one paired scalar/SIMD comparison. Instances below simdReachSize
 // are negative controls: an interval excluding 1 there is noise, never a SIMD effect.
@@ -453,7 +633,7 @@ func simdVerdict(size int, lo, hi float64, n int) (reach, verdict string) {
 }
 
 // cbcBackendDescription states which CBC build and flag mapping produced goblin_cbc.json.
-const cbcBackendDescription = "COIN-OR CBC/CLP `master` (commit `c1c171ec`, vendored in `third_party/Cbc`), linked in-process through `cgo` (`goblin.WithCBC()`). " +
+const cbcBackendDescription = "COIN-OR CBC/CLP `master` (commit `c1c171ec`, vendored in `third_party/Cbc`), linked in-process through `cgo` (`gb.WithCBC()`). " +
 	"The C++ backend maps default settings onto CBC with two deliberate differences: `MaxCutPasses = 12` becomes " +
 	"`passC = 30` and `MaxNodes = 50000` becomes unlimited. It is therefore not a like-for-like setup and " +
 	"not the CBC 2.10.3 binary used by the Python baseline."
@@ -706,6 +886,10 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 			anyPy = tb.Python[c.ID]
 			floors = append(floors, tb.Python[c.ID].CBCSpawnFloorMS)
 		}
+		var anySciPy SciPyAssignEntry
+		for _, ac := range BuildAssignCorpus() {
+			anySciPy = tb.SciPyAssign[ac.ID]
+		}
 		floorMed, _, _ := medianMinMax(floors)
 		base := fmt.Sprintf("commit `%s`", pv.commit)
 		if pv.dirty {
@@ -713,10 +897,127 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 		}
 		fmt.Fprintf(&b, "- **goblin telemetry source**: fingerprint `%s` (%s), `%s`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources.\n",
 			pv.fingerprint, base, pv.goVersion)
-		fmt.Fprintf(&b, "- **CPU affinity**: goblin %s; Python + CBC %s.\n", affinityList(pv.affinity), affinityList(map[string]bool{anyPy.CPUAffinity: true}))
-		fmt.Fprintf(&b, "- **Python reference**: PuLP `%s`, CBC `%s` (`%s`).\n", anyPy.PuLPVersion, anyPy.CBCVersion, filepath.Base(anyPy.CBCPath))
+		fmt.Fprintf(&b, "- **CPU affinity**: goblin %s; Python + CBC %s; Python + SciPy %s.\n",
+			affinityList(pv.affinity),
+			affinityList(map[string]bool{anyPy.CPUAffinity: true}),
+			affinityList(map[string]bool{anySciPy.CPUAffinity: true}))
+		fmt.Fprintf(&b, "- **Python MILP reference**: PuLP `%s`, CBC `%s` (`%s`).\n", anyPy.PuLPVersion, anyPy.CBCVersion, filepath.Base(anyPy.CBCPath))
+		fmt.Fprintf(&b, "- **Python LSAP reference**: SciPy `%s` (`scipy.optimize.linear_sum_assignment`, C++ `rectangular_lsap`), NumPy `%s`.\n", anySciPy.SciPyVersion, anySciPy.NumPyVersion)
 		fmt.Fprintf(&b, "- **CBC subprocess spawn floor**: %.2f ms median (`prob.solve()` on a 1-variable MILP); the \"Net of Spawn\" columns subtract it.\n", floorMed)
 		fmt.Fprintf(&b, "- **goblin `WithCBC()` backend**: %s\n", cbcBackendDescription)
+
+	case "ASSIGN_TIER_SUMMARY_TABLE":
+		assignCases := BuildAssignCorpus()
+		type assignGroupSpec struct {
+			label  string
+			filter func(c AssignCorpusCase) bool
+		}
+		groups := []assignGroupSpec{
+			{"Tier 1: Micro/Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
+			{"Tier 2: Medium / Target p90 (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
+			{"Tier 3: Large Tail (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
+			{"Square families ($m = n$)", func(c AssignCorpusCase) bool { return c.Rows == c.Cols }},
+			{"Rectangular families ($m \\neq n$, wide and tall)", func(c AssignCorpusCase) bool { return c.Rows != c.Cols }},
+			{"Degenerate / structured (ties, rank-1, geometric, sparse)", func(c AssignCorpusCase) bool {
+				return c.Family == "integer_ties" || c.Family == "rank1" || c.Family == "geometric" || c.Family == "sparse"
+			}},
+			{"**All 22 LSAP corpus families**", func(_ AssignCorpusCase) bool { return true }},
+		}
+
+		b.WriteString("| Workload Subset | Families | `SciPy Solve / goblin` GeoMean | `SciPy Total / goblin` GeoMean | `goblin` Solve (ms) | SciPy Solve (ms) | `goblin` Total (ms) | SciPy Total (ms) | `SciPy Solve / goblin` Median [Min-Max] |\n")
+		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+		for _, grp := range groups {
+			var spSolveVals, spTotVals, goSolveVals, goTotVals, solveSpeedups []float64
+			for _, ac := range assignCases {
+				if !grp.filter(ac) {
+					continue
+				}
+				sp := tb.SciPyAssign[ac.ID]
+				sc := tb.AssignScalar[ac.ID]
+				spSolveVals = append(spSolveVals, sp.TSolveMedianMS)
+				spTotVals = append(spTotVals, sp.TTotalMedianMS)
+				goSolveVals = append(goSolveVals, sc.TSolveMS)
+				goTotVals = append(goTotVals, sc.TTotalMS)
+				if sc.TSolveMS > 0 {
+					solveSpeedups = append(solveSpeedups, sp.TSolveMedianMS/sc.TSolveMS)
+				}
+			}
+			spSolveGM, spTotGM := geoMean(spSolveVals), geoMean(spTotVals)
+			goSolveGM, goTotGM := geoMean(goSolveVals), geoMean(goTotVals)
+			medSp, minSp, maxSp := medianMinMax(solveSpeedups)
+			fmt.Fprintf(&b, "| %s | %d | **%.2fx** | %.2fx | %s | %s | %s | %s | %.2fx [%.2fx-%.2fx] |\n",
+				grp.label, len(goSolveVals),
+				spSolveGM/goSolveGM, spTotGM/goTotGM,
+				formatAssignMS(goSolveGM), formatAssignMS(spSolveGM),
+				formatAssignMS(goTotGM), formatAssignMS(spTotGM),
+				medSp, minSp, maxSp)
+		}
+
+	case "ASSIGN_PIPELINE_TABLE":
+		assignCases := BuildAssignCorpus()
+		b.WriteString("| Problem ID | Shape ($m \\times n$) | Family | `SciPy Solve / goblin` | GoSolve (ms) | SciPySolve (ms) | GoTotal (ms) | SciPyTotal (ms) | Go Solve Mean $\\pm$ SD (ms) | SciPy Solve Mean $\\pm$ SD (ms) | Optimal Obj | Parity |\n")
+		b.WriteString("| :--- | :---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+		for _, ac := range assignCases {
+			sp := tb.SciPyAssign[ac.ID]
+			sc := tb.AssignScalar[ac.ID]
+			solveRatio := sp.TSolveMedianMS / max(sc.TSolveMS, geoMeanMinFloor)
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | `%s` | **%.2fx** | %s | %s | %s | %s | $%s \\pm %s$ | $%s \\pm %s$ | %.2f | %s |\n",
+				ac.ID, ac.Rows, ac.Cols, ac.Family,
+				solveRatio,
+				formatAssignMS(sc.TSolveMS), formatAssignMS(sp.TSolveMedianMS),
+				formatAssignMS(sc.TTotalMS), formatAssignMS(sp.TTotalMedianMS),
+				formatAssignMS(sc.TSolveMeanMS), formatAssignMS(sc.TSolveSDMS),
+				formatAssignMS(sp.TSolveMeanMS), formatAssignMS(sp.TSolveSDMS),
+				sc.Objective,
+				assignParityCell(tb, ac.ID))
+		}
+
+	case "ASSIGN_SIMD_SUMMARY":
+		assignCases := BuildAssignCorpus()
+		var controls, controlsFlagged, reachable, faster, slower int
+		for _, ac := range assignCases {
+			sc := tb.AssignScalar[ac.ID]
+			sm := tb.AssignSIMD[ac.ID]
+			size := max(sm.Rows, sm.Cols)
+			_, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
+			if n < minPairedSamples {
+				continue
+			}
+			excludesOne := lo > 1 || hi < 1
+			if size < simdReachSize {
+				controls++
+				if excludesOne {
+					controlsFlagged++
+				}
+				continue
+			}
+			reachable++
+			switch {
+			case lo > 1:
+				faster++
+			case hi < 1:
+				slower++
+			}
+		}
+		fmt.Fprintf(&b, "- **Negative controls** (`max(rows, cols) < %d`, no AVX2 row-reduction kernel runs): %d of %d have a 95%% interval excluding 1.\n",
+			simdReachSize, controlsFlagged, controls)
+		fmt.Fprintf(&b, "- **Instances where AVX2 row kernels run** (`max(rows, cols) >= %d`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
+			simdReachSize, faster, slower, reachable-faster-slower, reachable)
+
+	case "ASSIGN_SIMD_TABLE":
+		assignCases := BuildAssignCorpus()
+		b.WriteString("| Problem ID | Shape ($m \\times n$) | `max(m, n)` | AVX2 row kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
+		b.WriteString("| :--- | :---: | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
+		for _, ac := range assignCases {
+			sc := tb.AssignScalar[ac.ID]
+			sm := tb.AssignSIMD[ac.ID]
+			size := max(sm.Rows, sm.Cols)
+			gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
+			reach, verdict := simdVerdict(size, lo, hi, n)
+			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %s | %s | %d |\n",
+				ac.ID, ac.Rows, ac.Cols, size, reach, verdict, gm, lo, hi,
+				formatAssignMS(sc.TSolveMS), formatAssignMS(sm.TSolveMS), n)
+		}
 
 	default:
 		return "", fmt.Errorf("unknown generated block %q", blockName)
@@ -799,8 +1100,8 @@ func BuildFinalReportMarkdown(tb *TelemetryBundle) (string, error) {
 
 - **CPU**: ` + "`13th Gen Intel(R) Core(TM) i9-13900K`" + ` (x86_64, 30 logical CPUs exposed by ` + "`lscpu`" + `, AVX2 + FMA).
 - **Default pure-Go backend**: ` + "`goblin`" + ` default (` + "`BackendGo`" + `, scalar kernels or ` + "`WithoutSIMD()`" + `). All headline ` + "`goblin (Go)`" + ` timings use this setup.
-- **Experimental SIMD build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels only for slices of length 256 or more; see section 4.
-- **Optional C++ backend**: ` + "`goblin.WithCBC()`" + ` (` + "`BackendCBC`" + `), driving in-process COIN-OR CBC/CLP through ` + "`cgo`" + ` under the same unified ` + "`goblin`" + ` API.
+- **Experimental SIMD build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels for slices of length 32 or more; see section 4.
+- **Optional C++ backend**: ` + "`gb.WithCBC()`" + ` (` + "`BackendCBC`" + `), driving in-process COIN-OR CBC/CLP through ` + "`cgo`" + ` under the same unified ` + "`goblin`" + ` API.
 - **Python baseline**: Python 3.14 + ` + "`PuLP`" + ` + ` + "`COIN-OR CBC`" + ` subprocess (` + "`threads=1`" + `). Its solve time includes MPS writing, process spawn, and ` + "`.sol`" + ` parsing.
 - **Corpus**: 31 deterministic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state.
 
@@ -818,7 +1119,7 @@ The planted-gap MAD family is constructed so that a root heuristic closes the ga
 
 Pipeline stages measured per instance (median across trials after warmup):
 1. **Prep (` + "`t_parse + t_build + t_format/t_compile`" + `)**: JSON unmarshaling, model construction, and MPS formatting (Python) or ` + "`Model.Compile()`" + ` matrix assembly (Go).
-2. **Solve (` + "`t_solve`" + `)**: CBC subprocess execution and ` + "`.sol`" + ` parsing (Python) vs. in-memory ` + "`goblin.SolveCompiled`" + ` (Go).
+2. **Solve (` + "`t_solve`" + `)**: CBC subprocess execution and ` + "`.sol`" + ` parsing (Python) vs. in-memory ` + "`gb.SolveCompiled`" + ` (Go).
 3. **Total (` + "`t_total`" + `)**: Complete end-to-end latency from raw JSON bytes to verified primal solution.
 
 The Parity column is computed by ` + "`bench.CheckParity`" + `: status, canonical objective, and every per-trial objective of all ` + "`goblin`" + ` builds (` + "`scalar`" + `, ` + "`simd`" + `, and ` + "`cbc`" + `) must match CBC within a relative tolerance of 1e-5, and ` + "`ValidateTelemetryAgainstCorpus`" + ` rejects the telemetry otherwise.
@@ -828,7 +1129,7 @@ The Parity column is computed by ` + "`bench.CheckParity`" + `: status, canonica
 
 ## 4. Scalar vs. ` + "`GOEXPERIMENT=simd`" + ` Build
 
-Ratios are geometric means of per-trial ` + "`scalar / SIMD`" + ` solve times over the same instances, with 95% t-intervals on the log ratios. "Reachable" is a necessary condition only: the AVX2 ` + "`Dot64`" + `/` + "`Axpy64`" + ` paths need a slice of length at least 256, which requires ` + "`n + m >= 256`" + `.
+Ratios are geometric means of per-trial ` + "`scalar / SIMD`" + ` solve times over the same instances, with 95% t-intervals on the log ratios. "Reachable" is a necessary condition only: the AVX2 ` + "`Dot64`" + `/` + "`Axpy64`" + `/` + "`Scale64`" + ` paths need a slice of length at least 32, which requires ` + "`n + m >= 32`" + `.
 
 <!-- BEGIN GENERATED:SIMD_SUMMARY -->
 <!-- END GENERATED:SIMD_SUMMARY -->
@@ -847,6 +1148,28 @@ Progression across checkpoints on pre-compiled ` + "`CompiledProblem`" + ` insta
 
 <!-- BEGIN GENERATED:FULL_CHECKPOINT_TABLE -->
 <!-- END GENERATED:FULL_CHECKPOINT_TABLE -->
+
+## 6. Linear Sum Assignment (` + "`goblin/assign`" + ` vs. ` + "`scipy.optimize.linear_sum_assignment`" + `)
+
+The 22-family Linear Sum Assignment corpus (` + "`testdata/assign_corpus/manifest.json`" + `; 11 randomized trials per family for Tiers 1-2 and 5 for Tier 3, 200 instances in total) compares pure-Go ` + "`assign.LinearSumFlat`" + ` against SciPy's C++ ` + "`rectangular_lsap`" + ` extension in warm state on bit-identical ` + "`float64`" + ` cost matrices.
+
+### 6.1 Aggregate LSAP Tier Summary
+
+<!-- BEGIN GENERATED:ASSIGN_TIER_SUMMARY_TABLE -->
+<!-- END GENERATED:ASSIGN_TIER_SUMMARY_TABLE -->
+
+### 6.2 Full 22-Family LSAP Pipeline Comparison
+
+<!-- BEGIN GENERATED:ASSIGN_PIPELINE_TABLE -->
+<!-- END GENERATED:ASSIGN_PIPELINE_TABLE -->
+
+### 6.3 LSAP Scalar vs. ` + "`GOEXPERIMENT=simd`" + ` (` + "`AllAbsLE64`" + `, ` + "`MinReducedSlice64`" + `, ` + "`InitReducedRow64`" + `, and ` + "`Min2ReducedRow64`" + `)
+
+<!-- BEGIN GENERATED:ASSIGN_SIMD_SUMMARY -->
+<!-- END GENERATED:ASSIGN_SIMD_SUMMARY -->
+
+<!-- BEGIN GENERATED:ASSIGN_SIMD_TABLE -->
+<!-- END GENERATED:ASSIGN_SIMD_TABLE -->
 `
 	return SyncMarkdownContent(tpl, tb)
 }

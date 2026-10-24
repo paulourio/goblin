@@ -32,10 +32,12 @@ if grep -rnI --exclude-dir=.git --exclude-dir=third_party $'\r' . >/dev/null 2>&
     fail "Files with CRLF line endings detected. Normalize to LF."
 fi
 
-# Ensure zero references to legacy package name, unprefixed module path, or machine-specific home paths.
+# Ensure zero references to legacy package name, unprefixed module path, unaliased root import/qualifier, or machine-specific home paths.
 legacy_pkg="g""opt"
 unprefixed_import='"gob'"lin"'(/|")'
-forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${HOME})"
+unaliased_root_import='^[[:space:]]*"github\.com/paulourio/gob'"lin"'"'
+unaliased_pkg_qual='gob'"lin"'\.[A-Z]'
+forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${unaliased_root_import}|${unaliased_pkg_qual}|${HOME})"
 if grep -rnI --exclude-dir=.git --exclude-dir=third_party -E "${forbidden_pattern}" . >/dev/null 2>&1; then
     grep -rnI --exclude-dir=.git --exclude-dir=third_party -E "${forbidden_pattern}" . >&2 || true
     fail "Forbidden legacy identifier, unprefixed module import, or hardcoded home directory path detected."
@@ -69,23 +71,119 @@ ruff format --check --no-cache bench/
 if command -v mypy >/dev/null 2>&1; then
     mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/
 elif command -v uvx >/dev/null 2>&1; then
-    uvx mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/
+    uvx --no-config mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/
 else
     fail "Neither 'mypy' nor 'uvx' is available in PATH to type-check bench/."
 fi
 
-# 5. Documentation Writing Quality Gate & Canonical Telemetry Sync
-log_step "5/6 Verifying documentation quality gate and canonical telemetry sync..."
+# 5. Documentation & Source Comments Writing Quality Gate & Canonical Telemetry Sync
+log_step "5/6 Verifying documentation and source comments quality gate and canonical telemetry sync..."
 QUALITY_GATE_BIN="${QUALITY_GATE_BIN:-${HOME}/.gemini/config/skills/writing/bin/quality_gate}"
-if [ -x "${QUALITY_GATE_BIN}" ]; then
-    "${QUALITY_GATE_BIN}" --profile rfc --level strict --format compact \
-        README.md docs/*.md bench/results/final_report.md
-elif command -v quality_gate >/dev/null 2>&1; then
-    quality_gate --profile rfc --level strict --format compact \
-        README.md docs/*.md bench/results/final_report.md
-else
-    fail "writing quality_gate binary not found at ${QUALITY_GATE_BIN} or in PATH."
+if [ ! -x "${QUALITY_GATE_BIN}" ]; then
+    if command -v quality_gate >/dev/null 2>&1; then
+        QUALITY_GATE_BIN="$(command -v quality_gate)"
+    else
+        fail "writing quality_gate binary not found at ${QUALITY_GATE_BIN} or in PATH."
+    fi
 fi
+
+"${QUALITY_GATE_BIN}" --profile rfc --level strict --format compact \
+    README.md docs/*.md bench/results/final_report.md
+
+python3 - "${QUALITY_GATE_BIN}" << 'PYEOF'
+import ast, pathlib, re, subprocess, sys, tempfile
+
+qg = sys.argv[1]
+root = pathlib.Path(".")
+go_c_files = sorted(
+    p for ext in ("*.go", "*.cpp", "*.h")
+    for p in root.rglob(ext)
+    if "third_party" not in p.parts
+)
+py_files = sorted(p for p in root.rglob("*.py") if "third_party" not in p.parts)
+sh_files = sorted(p for p in root.rglob("*.sh") if "third_party" not in p.parts)
+
+def extract_go_c(path: pathlib.Path) -> str:
+    blocks, cur, in_block = [], [], False
+    for line in path.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("/*"):
+            in_block = True
+        if in_block:
+            if "*/" in s:
+                in_block = False
+            continue
+        if s.startswith("//"):
+            if re.match(r"^//(go:|#cgo|nolint|\s*#include|\s*#define|\s*#stdlib|\s*Output:)", s):
+                if cur:
+                    blocks.append("\n".join(cur))
+                    cur = []
+                continue
+            cur.append(re.sub(r"^//\s?", "", s))
+        else:
+            if cur:
+                blocks.append("\n".join(cur))
+                cur = []
+            m = re.search(r'(?<!:)//\s*(.+)$', s)
+            if m and not ('"http' in s or "'//" in s or '"//' in s):
+                tr = m.group(1).strip()
+                if not tr.startswith(("nolint", "GOBLIN_CBC_BRIDGE_H")):
+                    blocks.append(tr)
+    if cur:
+        blocks.append("\n".join(cur))
+    return "\n\n".join(blocks)
+
+def extract_py(path: pathlib.Path) -> str:
+    src = path.read_text()
+    tree = ast.parse(src)
+    docs = [
+        ast.get_docstring(n)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and ast.get_docstring(n)
+    ]
+    cur = []
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("#") and not s.startswith("#!"):
+            cur.append(re.sub(r"^#\s?", "", s))
+        elif cur:
+            docs.append("\n".join(cur))
+            cur = []
+    if cur:
+        docs.append("\n".join(cur))
+    return "\n\n".join(docs)
+
+def extract_sh(path: pathlib.Path) -> str:
+    docs, cur = [], []
+    for line in path.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("#") and not s.startswith("#!"):
+            cur.append(re.sub(r"^#\s?", "", s))
+        elif cur:
+            docs.append("\n".join(cur))
+            cur = []
+    if cur:
+        docs.append("\n".join(cur))
+    return "\n\n".join(docs)
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    extracted = []
+    for p in go_c_files + py_files + sh_files:
+        txt = (
+            extract_go_c(p) if p.suffix in (".go", ".cpp", ".h")
+            else extract_py(p) if p.suffix == ".py"
+            else extract_sh(p)
+        )
+        if not txt.strip():
+            continue
+        out_p = pathlib.Path(tmpdir) / (str(p).replace("/", "__") + ".md")
+        out_p.write_text(txt + "\n")
+        extracted.append(str(out_p))
+    res = subprocess.run([qg, "--profile", "rfc", "--level", "strict", "--format", "compact"] + extracted)
+    if res.returncode != 0:
+        sys.exit(res.returncode)
+PYEOF
 
 go run ./cmd/goblin-bench -check-docs
 

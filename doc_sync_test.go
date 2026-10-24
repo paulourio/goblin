@@ -7,6 +7,8 @@ import (
 	"github.com/paulourio/goblin/bench"
 )
 
+// TestDocumentationAndBenchmarkSync verifies that all Markdown tables and the final benchmark
+// report match the canonical JSON telemetry artifacts on disk.
 func TestDocumentationAndBenchmarkSync(t *testing.T) {
 	requiredDocs := []string{
 		"README.md",

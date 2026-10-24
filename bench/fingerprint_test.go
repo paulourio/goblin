@@ -24,6 +24,7 @@ func TestSourceFingerprintScope(t *testing.T) {
 	write("go.mod", "module github.com/paulourio/goblin\n")
 	write("solver.go", "package goblin\n")
 	write("solver_test.go", "package goblin\n")
+	write("assign/solver.go", "package assign\n")
 	write("format/mps.go", "package format\n")
 	write("internal/simd/k.go", "package simd\n")
 	write("bench/corpus.go", "package bench\n")
@@ -47,7 +48,7 @@ func TestSourceFingerprintScope(t *testing.T) {
 			t.Fatalf("editing %s changed the fingerprint", rel)
 		}
 	}
-	for _, rel := range []string{"solver.go", "format/mps.go", "internal/simd/k.go", "bench/corpus.go", "cmd/goblin-bench/main.go", "go.mod"} {
+	for _, rel := range []string{"solver.go", "assign/solver.go", "format/mps.go", "internal/simd/k.go", "bench/corpus.go", "cmd/goblin-bench/main.go", "go.mod"} {
 		write(rel, "package x // edited "+rel+"\n")
 		got := fp()
 		if got == base {
