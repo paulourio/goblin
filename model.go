@@ -234,9 +234,6 @@ func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
 		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
 			ub = math.Floor(ub + intBoundRoundTol)
 		}
-		if lb >= 0 && ub <= 1 && lb <= ub {
-			cat = Binary
-		}
 	}
 	idx := len(m.vars)
 	id := makeVar(m.id, idx)
@@ -392,6 +389,9 @@ func (m *Model) IsMIP() bool {
 // Validate checks that all variable bounds, objective terms, and constraint terms
 // belong to this Model and contain only finite coefficients and valid bounds.
 func (m *Model) Validate() error {
+	if m == nil {
+		return ErrNilProblem
+	}
 	if m.err != nil {
 		return m.err
 	}
@@ -403,13 +403,29 @@ func (m *Model) Validate() error {
 	if math.IsNaN(m.objConst) || math.IsInf(m.objConst, 0) {
 		return fmt.Errorf("objective constant is non-finite (%v)", m.objConst)
 	}
+	acc := make([]float64, len(m.vars))
+	touched := make([]int, 0, min(len(m.vars), defaultModelCap))
+	inTouched := make([]bool, len(m.vars))
 	for _, t := range m.objTerms {
-		if _, ok := m.validVar(t.Var); !ok {
+		col, ok := m.validVar(t.Var)
+		if !ok {
 			return fmt.Errorf("objective references invalid or foreign Var handle %v", t.Var)
 		}
 		if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
 			return fmt.Errorf("objective has non-finite coefficient %v", t.Coeff)
 		}
+		if !inTouched[col] {
+			inTouched[col] = true
+			touched = append(touched, col)
+		}
+		acc[col] += t.Coeff
+		if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+			return fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
+		}
+	}
+	for _, col := range touched {
+		acc[col] = 0
+		inTouched[col] = false
 	}
 	for _, c := range m.constraints {
 		if !c.sense.valid() {
@@ -418,13 +434,27 @@ func (m *Model) Validate() error {
 		if math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) {
 			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
 		}
+		touched = touched[:0]
 		for _, t := range c.terms {
-			if _, ok := m.validVar(t.Var); !ok {
+			col, ok := m.validVar(t.Var)
+			if !ok {
 				return fmt.Errorf("constraint %q references invalid or foreign Var handle %v", c.name, t.Var)
 			}
 			if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
 				return fmt.Errorf("constraint %q has non-finite coefficient %v", c.name, t.Coeff)
 			}
+			if !inTouched[col] {
+				inTouched[col] = true
+				touched = append(touched, col)
+			}
+			acc[col] += t.Coeff
+			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+				return fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
+			}
+		}
+		for _, col := range touched {
+			acc[col] = 0
+			inTouched[col] = false
 		}
 	}
 	return nil

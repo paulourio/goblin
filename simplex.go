@@ -535,10 +535,23 @@ func (s *LPSolver) Solve() LPResult {
 		}
 	}
 	if n == 0 {
+		for i := range p.NumConstraints {
+			if 0 < p.RowLB[i]-primalTol || 0 > p.RowUB[i]+primalTol {
+				return LPResult{Status: StatusInfeasible}
+			}
+		}
+		for _, dr := range s.ExtraRows {
+			if 0 > dr.RHS+primalTol {
+				return LPResult{Status: StatusInfeasible}
+			}
+		}
 		return LPResult{
 			Status:       StatusOptimal,
 			ObjectiveMin: 0,
 			Objective:    p.ObjConstant,
+			Primal:       []float64{},
+			Dual:         make([]float64, p.NumConstraints),
+			ReducedCosts: []float64{},
 		}
 	}
 	if m == 0 {
@@ -605,24 +618,32 @@ func (s *LPSolver) solveUnconstrained() LPResult {
 	for j := range n {
 		c := ws.Cost[j]
 		dj[j] = c
-		if c > dualTol {
+		if c > 0 {
 			if math.IsInf(ws.LB[j], -1) {
 				return LPResult{Status: StatusUnbounded}
 			}
 			primal[j] = ws.LB[j]
-		} else if c < -dualTol {
+		} else if c < 0 {
 			if math.IsInf(ws.UB[j], 1) {
 				return LPResult{Status: StatusUnbounded}
 			}
 			primal[j] = ws.UB[j]
 		} else {
-			if !math.IsInf(ws.LB[j], -1) {
-				primal[j] = ws.LB[j]
+			if !math.IsInf(ws.LB[j], -1) && !math.IsInf(ws.UB[j], 1) {
+				if ws.LB[j] <= 0 && 0 <= ws.UB[j] {
+					primal[j] = 0
+				} else {
+					primal[j] = ws.LB[j]
+				}
+			} else if !math.IsInf(ws.LB[j], -1) {
+				primal[j] = max(0.0, ws.LB[j])
 			} else if !math.IsInf(ws.UB[j], 1) {
-				primal[j] = ws.UB[j]
+				primal[j] = min(0.0, ws.UB[j])
 			}
 		}
-		objMin += c * primal[j]
+		if c != 0 {
+			objMin += c * primal[j]
+		}
 	}
 	return LPResult{
 		Status:       StatusOptimal,
@@ -1834,7 +1855,9 @@ func (s *LPSolver) solveTwoPhasePrimalWithLimit(maxIter int) (Status, int) {
 		totalIter++
 		if stepStatus == StatusOptimal {
 			if len(ws.LU.etas) > 0 {
-				_ = s.factorizeBasis()
+				if err := s.factorizeBasis(); err != nil {
+					return StatusNumericalError, totalIter
+				}
 				s.computePrimalValues()
 				continue
 			}
@@ -2084,7 +2107,9 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 	ws.Status[enterVar] = statusBasic
 
 	if err := ws.LU.PushEta(leaveRow, ws.FCol); err != nil {
-		_ = s.factorizeBasis()
+		if err := s.factorizeBasis(); err != nil {
+			return StatusNumericalError
+		}
 		s.computePrimalValues()
 	}
 

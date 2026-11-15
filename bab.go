@@ -151,6 +151,40 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	totalLPIters = rootRes.Iterations
 
 	if rootRes.Status != StatusOptimal {
+		if rootRes.Status == StatusUnbounded && p.IsMIP && len(p.IntCols) > 0 {
+			// By Meyer's theorem for rational MILPs, an LP-unbounded MILP is unbounded if
+			// and only if its integer hull is non-empty; otherwise it is infeasible.
+			feasProb := *p
+			feasProb.ObjCoeffs = make([]float64, n)
+			feasProb.ObjMin = make([]float64, n)
+			feasProb.ObjConstant = 0
+			feasOpts := opts
+			if opts.MaxIter > 0 {
+				rem := opts.MaxIter - totalLPIters
+				if rem <= 0 {
+					return Result{
+						modelID:    p.modelID,
+						Status:     StatusIterationLimit,
+						Iterations: totalLPIters,
+						SolveTime:  time.Since(startTime),
+					}
+				}
+				feasOpts.MaxIter = rem
+			}
+			feasRes := solveBranchAndCutWithDone(&feasProb, feasOpts, startTime, deadline, done)
+			st := feasRes.Status
+			if st == StatusOptimal {
+				st = StatusUnbounded
+			}
+			return Result{
+				modelID:    p.modelID,
+				Status:     st,
+				Nodes:      feasRes.Nodes,
+				Iterations: totalLPIters + feasRes.Iterations,
+				CutsAdded:  feasRes.CutsAdded,
+				SolveTime:  time.Since(startTime),
+			}
+		}
 		return Result{
 			modelID:    p.modelID,
 			Status:     rootRes.Status,

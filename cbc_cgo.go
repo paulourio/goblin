@@ -23,7 +23,6 @@ import (
 const (
 	cbcDefaultCutPasses = 30
 	cbcUnboundedBound   = 1e48
-	cbcObjZeroTol       = 1e-9
 )
 
 var (
@@ -89,6 +88,9 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			BestBound:    p.ObjConstant,
 			RootLPBound:  p.ObjConstant,
 			RootCutBound: p.ObjConstant,
+			Values:       []float64{},
+			Duals:        make([]float64, m),
+			ReducedCosts: []float64{},
 			SolveTime:    time.Since(start),
 		}
 	}
@@ -148,6 +150,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			cFloat64Ptr(p.RowLBClp),
 			cFloat64Ptr(p.RowUBClp),
 			boolToCInt(opt.EnablePresolve),
+			C.int(opt.MaxIter),
 			C.double(timeLimitSec),
 			cancelPtr,
 			&cRes,
@@ -220,6 +223,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		boolToCInt(opt.EnableHeuristics),
 		C.int(maxNodes),
 		C.int(cutPasses),
+		C.int(opt.MaxIter),
 		C.double(opt.RelGapTol),
 		C.double(opt.AbsGapTol),
 		C.double(timeLimitSec),
@@ -232,6 +236,45 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	}
 
 	status := Status(cRes.status)
+	if status == StatusUnbounded && len(p.IntCols32) > 0 {
+		feasProb := *p
+		feasProb.ObjCoeffs = make([]float64, n)
+		feasProb.ObjMin = make([]float64, n)
+		feasProb.ObjConstant = 0
+		feasOpts := opt
+		if opt.MaxIter > 0 {
+			rem := opt.MaxIter - int(cRes.iterations)
+			if rem <= 0 {
+				return Result{
+					modelID:    p.modelID,
+					Backend:    BackendCBC,
+					Status:     StatusIterationLimit,
+					Nodes:      int(cRes.nodes),
+					Iterations: int(cRes.iterations),
+					CutsAdded:  int(cRes.cuts_added),
+					SolveTime:  time.Since(start),
+				}
+			}
+			feasOpts.MaxIter = rem
+		}
+		feasRes := solveCBC(ctx, &feasProb, feasOpts, start, deadline, done)
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
+		}
+		st := feasRes.Status
+		if st == StatusOptimal {
+			st = StatusUnbounded
+		}
+		return Result{
+			modelID:    p.modelID,
+			Backend:    BackendCBC,
+			Status:     st,
+			Nodes:      int(cRes.nodes) + feasRes.Nodes,
+			Iterations: int(cRes.iterations) + feasRes.Iterations,
+			CutsAdded:  int(cRes.cuts_added) + feasRes.CutsAdded,
+			SolveTime:  time.Since(start),
+		}
+	}
 	res := Result{
 		modelID:      p.modelID,
 		Backend:      BackendCBC,
@@ -268,12 +311,12 @@ func solveUnconstrainedCBC(p *CompiledProblem, start time.Time) Result {
 	for j := range n {
 		c := p.ObjMin[j]
 		lb, ub := p.VarLB[j], p.VarUB[j]
-		if c < -cbcObjZeroTol {
+		if c < 0 {
 			if math.IsInf(ub, 1) {
 				return Result{modelID: p.modelID, Backend: BackendCBC, Status: StatusUnbounded, SolveTime: time.Since(start)}
 			}
 			primal[j] = ub
-		} else if c > cbcObjZeroTol {
+		} else if c > 0 {
 			if math.IsInf(lb, -1) {
 				return Result{modelID: p.modelID, Backend: BackendCBC, Status: StatusUnbounded, SolveTime: time.Since(start)}
 			}
@@ -322,6 +365,7 @@ type CBCLPSolver struct {
 	handle *C.GoblinLPSolver
 	curLB  []float64
 	curUB  []float64
+	cutRHS []float64
 	numCut int
 }
 
@@ -395,6 +439,7 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 			cFloat64Ptr(val),
 			C.double(clampCBCBound(rhs)),
 		)
+		s.cutRHS = append(s.cutRHS, rhs)
 		s.numCut++
 	}
 }
@@ -402,6 +447,9 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 // Solve solves or warm-start resolves the current LP relaxation via COIN-OR CLP.
 func (s *CBCLPSolver) Solve() LPResult {
 	p := s.Prob
+	if p == nil || p.InvalidErr != nil {
+		return LPResult{Status: StatusUndefined}
+	}
 	n := p.NumVars
 	m := s.TotalRows()
 
@@ -411,10 +459,23 @@ func (s *CBCLPSolver) Solve() LPResult {
 		}
 	}
 	if n == 0 {
+		for i := range p.NumConstraints {
+			if 0 < p.RowLB[i]-1e-7 || 0 > p.RowUB[i]+1e-7 {
+				return LPResult{Status: StatusInfeasible}
+			}
+		}
+		for _, rhs := range s.cutRHS {
+			if 0 > rhs+1e-7 {
+				return LPResult{Status: StatusInfeasible}
+			}
+		}
 		return LPResult{
 			Status:       StatusOptimal,
 			ObjectiveMin: 0,
 			Objective:    p.ObjConstant,
+			Primal:       []float64{},
+			Dual:         make([]float64, p.NumConstraints),
+			ReducedCosts: []float64{},
 		}
 	}
 

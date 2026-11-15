@@ -525,8 +525,9 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		invOut  int
 		demand  float64
 	}
-	nodeByInvIn := make(map[int]flowNode)
-	var startNodes []flowNode
+	var candNodes []flowNode
+	invInCount := make(map[int]int)
+	invOutCount := make(map[int]int)
 
 	for i := range m {
 		if p.RowSense[i] != Equal || p.RowRHS[i] <= unitCoeffTol {
@@ -547,15 +548,15 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			col := p.ColIdx[k]
 			val := p.RowVal[k]
 			if math.Abs(val-1.0) <= unitCoeffTol {
-				if vubBinCol[col] != -1 && prodCol == -1 {
+				if vubBinCol[col] != -1 && p.VarLB[col] >= 0 && prodCol == -1 {
 					prodCol = col
-				} else if p.VarLB[col] >= -cutCoeffZeroTol && invIn == -1 {
+				} else if p.VarLB[col] >= 0 && invIn == -1 {
 					invIn = col
 				} else {
 					valid = false
 					break
 				}
-			} else if math.Abs(val+1.0) <= unitCoeffTol && p.VarLB[col] >= -cutCoeffZeroTol && invOut == -1 {
+			} else if math.Abs(val+1.0) <= unitCoeffTol && p.VarLB[col] >= 0 && invOut == -1 {
 				invOut = col
 			} else {
 				valid = false
@@ -577,21 +578,52 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			invOut:  invOut,
 			demand:  p.RowRHS[i],
 		}
-		if invIn == -1 {
+		candNodes = append(candNodes, fn)
+		if invIn != -1 {
+			invInCount[invIn]++
+		}
+		invOutCount[invOut]++
+	}
+
+	nodeByInvIn := make(map[int]flowNode, len(candNodes))
+	for _, fn := range candNodes {
+		if fn.invIn != -1 && invInCount[fn.invIn] == 1 && invOutCount[fn.invIn] == 1 {
+			nodeByInvIn[fn.invIn] = fn
+		}
+	}
+
+	var startNodes []flowNode
+	for _, fn := range candNodes {
+		if fn.invIn == -1 || invOutCount[fn.invIn] != 1 || invInCount[fn.invIn] != 1 {
 			startNodes = append(startNodes, fn)
-		} else {
-			nodeByInvIn[invIn] = fn
 		}
 	}
 
 	var chain []flowNode
+	var seenBins [maxFlowLookahead + 1]int
 	for _, root := range startNodes {
 		chain = chain[:0]
 		cur := root
 		for {
 			chain = append(chain, cur)
+			if len(chain) >= 64 || invOutCount[cur.invOut] != 1 || invInCount[cur.invOut] != 1 {
+				break
+			}
 			next, ok := nodeByInvIn[cur.invOut]
-			if !ok || len(chain) >= 64 {
+			if !ok {
+				break
+			}
+			collision := next.invOut == root.invIn || next.prodCol == root.invIn
+			if !collision {
+				for _, prev := range chain {
+					if next.invOut == prev.invOut || next.invOut == prev.prodCol ||
+						next.prodCol == prev.invOut || next.prodCol == prev.prodCol {
+						collision = true
+						break
+					}
+				}
+			}
+			if collision {
 				break
 			}
 			cur = next
@@ -612,11 +644,25 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				}
 				remDem := cumDem
 				anyInS := false
+				numSeen := 0
 				for tau := t; tau <= q; tau++ {
 					nd := chain[tau]
+					alreadyInS := false
+					for k := range numSeen {
+						if seenBins[k] == nd.binCol {
+							alreadyInS = true
+							break
+						}
+					}
+					if alreadyInS {
+						remDem -= nd.demand
+						continue
+					}
 					yTerm := remDem * lpPrimal[nd.binCol]
 					pTerm := lpPrimal[nd.prodCol]
 					if yTerm < pTerm-1e-6 {
+						seenBins[numSeen] = nd.binCol
+						numSeen++
 						lhsStar += yTerm
 						anyInS = true
 					} else {
@@ -631,17 +677,31 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 
 				clear(denseCut)
 				if chain[t].invIn != -1 {
-					denseCut[chain[t].invIn] = -1.0
+					denseCut[chain[t].invIn] -= 1.0
 				}
 				remDem = cumDem
+				numSeen = 0
 				for tau := t; tau <= q; tau++ {
 					nd := chain[tau]
+					alreadyInS := false
+					for k := range numSeen {
+						if seenBins[k] == nd.binCol {
+							alreadyInS = true
+							break
+						}
+					}
+					if alreadyInS {
+						remDem -= nd.demand
+						continue
+					}
 					yTerm := remDem * lpPrimal[nd.binCol]
 					pTerm := lpPrimal[nd.prodCol]
 					if yTerm < pTerm-1e-6 {
-						denseCut[nd.binCol] = -remDem
+						seenBins[numSeen] = nd.binCol
+						numSeen++
+						denseCut[nd.binCol] -= remDem
 					} else {
-						denseCut[nd.prodCol] = -1.0
+						denseCut[nd.prodCol] -= 1.0
 					}
 					remDem -= nd.demand
 				}

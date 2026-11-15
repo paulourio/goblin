@@ -40,6 +40,11 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	n := orig.NumVars
 	m := orig.NumConstraints
 	if n == 0 {
+		for i := range m {
+			if 0 < orig.RowLB[i]-presolveFeasTol || 0 > orig.RowUB[i]+presolveFeasTol {
+				return PresolveResult{Infeasible: true}
+			}
+		}
 		return PresolveResult{Reduced: orig}
 	}
 

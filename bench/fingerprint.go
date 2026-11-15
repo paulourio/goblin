@@ -32,11 +32,21 @@ var fingerprintExcluded = map[string]bool{
 	filepath.Join("bench", "fingerprint.go"): true,
 }
 
+func isFingerprintSource(rel string) bool {
+	if fingerprintExcluded[rel] {
+		return false
+	}
+	if strings.HasSuffix(rel, ".go") {
+		return !strings.HasSuffix(rel, "_test.go")
+	}
+	return strings.HasSuffix(rel, ".c") || strings.HasSuffix(rel, ".cpp") || strings.HasSuffix(rel, ".h")
+}
+
 // SourceFingerprint returns a SHA-256 digest (first 16 hex digits) over go.mod and every
-// non-test Go source that influences benchmark telemetry, relative to the module root.
-// goblin-bench stores it in each telemetry entry, and the documentation gate rejects
-// telemetry whose fingerprint differs from the current tree, so published timings always
-// describe the code that is checked in.
+// non-test Go or C/C++ bridge source that influences benchmark telemetry, relative to the
+// module root. The goblin-bench CLI stores this digest in each telemetry entry, and the
+// documentation gate rejects telemetry whose fingerprint differs from the current tree, so
+// published timings always describe the code that is checked in.
 func SourceFingerprint(root string) (string, error) {
 	files := []string{"go.mod"}
 	for _, in := range fingerprintInputs {
@@ -55,7 +65,7 @@ func SourceFingerprint(root string) (string, error) {
 			if err != nil {
 				return err
 			}
-			if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") && !fingerprintExcluded[rel] {
+			if isFingerprintSource(rel) {
 				files = append(files, rel)
 			}
 			return nil

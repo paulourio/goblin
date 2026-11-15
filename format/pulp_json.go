@@ -1,9 +1,10 @@
-// Package format provides serialization and deserialization for PuLP JSON,
-// MPS, and CPLEX LP problem representations.
+// Package format provides serialization and deserialization for PuLP JSON and
+// MPS problem representations.
 package format
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -40,6 +41,7 @@ type PuLPCoefficient struct {
 type PuLPObjective struct {
 	Name         *string           `json:"name"`
 	Coefficients []PuLPCoefficient `json:"coefficients"`
+	Constant     float64           `json:"constant,omitempty"`
 }
 
 // PuLPVariable holds a variable specification in PuLP's JSON schema.
@@ -74,6 +76,12 @@ func ParsePuLPJSON(data []byte) (*PuLPJSON, error) {
 
 // BuildModelFromPuLPJSON constructs a *gb.Model from a decoded PuLPJSON structure.
 func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
+	if doc == nil {
+		return nil, errors.New("nil PuLPJSON document")
+	}
+	if len(doc.SOS1) > 0 || len(doc.SOS2) > 0 {
+		return nil, fmt.Errorf("PuLP JSON contains unsupported SOS constraints (sos1=%d, sos2=%d)", len(doc.SOS1), len(doc.SOS2))
+	}
 	sense := gb.Minimize
 	if doc.Parameters.Sense == -1 {
 		sense = gb.Maximize
@@ -82,6 +90,12 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 
 	varMap := make(map[string]gb.Var, len(doc.Variables))
 	for _, v := range doc.Variables {
+		if v.Name == "" {
+			return nil, errors.New("PuLP JSON contains variable with empty name")
+		}
+		if _, exists := varMap[v.Name]; exists {
+			return nil, fmt.Errorf("PuLP JSON contains duplicate variable name %q", v.Name)
+		}
 		lb := math.Inf(-1)
 		if v.LowBound != nil {
 			lb = *v.LowBound
@@ -119,7 +133,7 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 	if doc.Objective.Name != nil {
 		objName = *doc.Objective.Name
 	}
-	m.SetObjectiveNamed(objName, gb.Expr{Terms: objTerms})
+	m.SetObjectiveNamed(objName, gb.Expr{Terms: objTerms, Constant: doc.Objective.Constant})
 
 	for _, c := range doc.Constraints {
 		terms := make([]gb.Term, 0, len(c.Coefficients))
@@ -178,6 +192,7 @@ func toPuLPJSONDoc(p *gb.CompiledProblem) PuLPJSON {
 		nameCopy := p.ObjName
 		doc.Objective.Name = &nameCopy
 	}
+	doc.Objective.Constant = p.ObjConstant
 	doc.Objective.Coefficients = make([]PuLPCoefficient, 0, p.NumVars)
 	for j := range p.NumVars {
 		if p.ObjCoeffs[j] != 0 {
@@ -230,6 +245,12 @@ func toPuLPJSONDoc(p *gb.CompiledProblem) PuLPJSON {
 // ToPuLPJSON serializes a CompiledProblem into PuLP's native JSON schema so both
 // Python PuLP (LpProblem.fromJson) and goblin can consume the exact same JSON file.
 func ToPuLPJSON(p *gb.CompiledProblem, w io.Writer) error {
+	if p == nil {
+		return gb.ErrNilProblem
+	}
+	if p.InvalidErr != nil {
+		return p.InvalidErr
+	}
 	doc := toPuLPJSONDoc(p)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -238,6 +259,12 @@ func ToPuLPJSON(p *gb.CompiledProblem, w io.Writer) error {
 
 // ToPuLPJSONCompact serializes a CompiledProblem into a single-line compact PuLP JSON record.
 func ToPuLPJSONCompact(p *gb.CompiledProblem, w io.Writer) error {
+	if p == nil {
+		return gb.ErrNilProblem
+	}
+	if p.InvalidErr != nil {
+		return p.InvalidErr
+	}
 	doc := toPuLPJSONDoc(p)
 	enc := json.NewEncoder(w)
 	return enc.Encode(&doc)

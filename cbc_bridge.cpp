@@ -33,17 +33,24 @@ thread_local double tl_root_cut_min = 0.0;
 thread_local bool tl_has_root_lp = false;
 thread_local bool tl_has_root_cut = false;
 thread_local const int *tl_cancel_flag = nullptr;
+thread_local int tl_max_iter = 0;
+thread_local bool tl_iter_limit_hit = false;
 
 class GoblinClpCancelHandler : public ClpEventHandler {
 public:
-    explicit GoblinClpCancelHandler(const int *cancel_flag)
-        : ClpEventHandler(), cancel_flag_(cancel_flag) {}
+    GoblinClpCancelHandler(const int *cancel_flag, int max_iter = 0, bool *iter_hit = nullptr)
+        : ClpEventHandler(), cancel_flag_(cancel_flag), max_iter_(max_iter), iter_hit_(iter_hit) {}
     GoblinClpCancelHandler(const GoblinClpCancelHandler &rhs)
-        : ClpEventHandler(rhs), cancel_flag_(rhs.cancel_flag_) {}
+        : ClpEventHandler(rhs),
+          cancel_flag_(rhs.cancel_flag_),
+          max_iter_(rhs.max_iter_),
+          iter_hit_(rhs.iter_hit_) {}
     GoblinClpCancelHandler &operator=(const GoblinClpCancelHandler &rhs) {
         if (this != &rhs) {
             ClpEventHandler::operator=(rhs);
             cancel_flag_ = rhs.cancel_flag_;
+            max_iter_ = rhs.max_iter_;
+            iter_hit_ = rhs.iter_hit_;
         }
         return *this;
     }
@@ -52,25 +59,38 @@ public:
     }
     int event(Event) override {
         if (cancel_flag_ && __atomic_load_n(cancel_flag_, __ATOMIC_RELAXED) != 0) {
-            return 0; // 0 sets ClpModel::status() = 5 (stopped by event)
+            return 0; // Returning zero sets ClpModel status to five (stopped by event).
+        }
+        if (max_iter_ > 0 && model_ && model_->numberIterations() >= max_iter_) {
+            if (iter_hit_) {
+                *iter_hit_ = true;
+            }
+            return 0;
         }
         return -1;
     }
 
 private:
     const int *cancel_flag_;
+    int max_iter_;
+    bool *iter_hit_;
 };
 
 class GoblinCbcCancelHandler : public CbcEventHandler {
 public:
-    explicit GoblinCbcCancelHandler(const int *cancel_flag)
-        : CbcEventHandler(), cancel_flag_(cancel_flag) {}
+    GoblinCbcCancelHandler(const int *cancel_flag, int max_iter = 0, bool *iter_hit = nullptr)
+        : CbcEventHandler(), cancel_flag_(cancel_flag), max_iter_(max_iter), iter_hit_(iter_hit) {}
     GoblinCbcCancelHandler(const GoblinCbcCancelHandler &rhs)
-        : CbcEventHandler(rhs), cancel_flag_(rhs.cancel_flag_) {}
+        : CbcEventHandler(rhs),
+          cancel_flag_(rhs.cancel_flag_),
+          max_iter_(rhs.max_iter_),
+          iter_hit_(rhs.iter_hit_) {}
     GoblinCbcCancelHandler &operator=(const GoblinCbcCancelHandler &rhs) {
         if (this != &rhs) {
             CbcEventHandler::operator=(rhs);
             cancel_flag_ = rhs.cancel_flag_;
+            max_iter_ = rhs.max_iter_;
+            iter_hit_ = rhs.iter_hit_;
         }
         return *this;
     }
@@ -81,11 +101,19 @@ public:
         if (cancel_flag_ && __atomic_load_n(cancel_flag_, __ATOMIC_RELAXED) != 0) {
             return CbcEventHandler::stop;
         }
+        if (max_iter_ > 0 && model_ && model_->getIterationCount() >= max_iter_) {
+            if (iter_hit_) {
+                *iter_hit_ = true;
+            }
+            return CbcEventHandler::stop;
+        }
         return CbcEventHandler::noAction;
     }
 
 private:
     const int *cancel_flag_;
+    int max_iter_;
+    bool *iter_hit_;
 };
 
 int goblin_cbc_callback(CbcModel *currentSolver, int whereFrom) {
@@ -93,6 +121,10 @@ int goblin_cbc_callback(CbcModel *currentSolver, int whereFrom) {
         return 0;
     }
     if (tl_cancel_flag && __atomic_load_n(tl_cancel_flag, __ATOMIC_RELAXED) != 0) {
+        return 1;
+    }
+    if (tl_max_iter > 0 && currentSolver->getIterationCount() >= tl_max_iter) {
+        tl_iter_limit_hit = true;
         return 1;
     }
     if (whereFrom == 1) {
@@ -165,6 +197,7 @@ void goblin_solve_lp(
     const double *row_lb,
     const double *row_ub,
     int enable_presolve,
+    int max_iter,
     double time_limit_sec,
     const int *cancel_flag,
     GoblinResult *out,
@@ -210,11 +243,18 @@ void goblin_solve_lp(
     }
     solver.setSolveOptions(solveOpts);
 
+    if (max_iter > 0) {
+        solver.setIntParam(OsiMaxNumIteration, max_iter);
+        if (solver.getModelPtr()) {
+            solver.getModelPtr()->setMaximumIterations(max_iter);
+        }
+    }
     if (time_limit_sec > 0.0 && solver.getModelPtr()) {
         solver.getModelPtr()->setMaximumWallSeconds(time_limit_sec);
     }
-    if (cancel_flag && solver.getModelPtr()) {
-        GoblinClpCancelHandler cancelHandler(cancel_flag);
+    bool iterHit = false;
+    if ((cancel_flag || max_iter > 0) && solver.getModelPtr()) {
+        GoblinClpCancelHandler cancelHandler(cancel_flag, max_iter, &iterHit);
         solver.getModelPtr()->passInEventHandler(&cancelHandler);
     }
 
@@ -224,9 +264,12 @@ void goblin_solve_lp(
     out->nodes = 0;
     out->cuts_added = 0;
 
-    bool canceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) ||
-                    (solver.getModelPtr() && solver.getModelPtr()->status() == 5);
-    if (canceled) {
+    bool userCanceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0);
+    bool iterLimited = iterHit || (max_iter > 0 && out->iterations >= max_iter &&
+                                   !solver.isProvenOptimal() &&
+                                   !solver.isProvenPrimalInfeasible() &&
+                                   !solver.isProvenDualInfeasible());
+    if (userCanceled) {
         out->status = -4; // StatusTimeLimit
     } else if (solver.isProvenOptimal()) {
         out->status = 1; // StatusOptimal
@@ -249,8 +292,10 @@ void goblin_solve_lp(
         out->status = -1; // StatusInfeasible
     } else if (solver.isProvenDualInfeasible()) {
         out->status = -2; // StatusUnbounded
+    } else if (iterLimited) {
+        out->status = -8; // StatusIterationLimit
     } else if (solver.isIterationLimitReached() ||
-               (solver.getModelPtr() && solver.getModelPtr()->hitMaximumIterations())) {
+               (solver.getModelPtr() && solver.getModelPtr()->status() == 5)) {
         out->status = -4; // StatusTimeLimit
     } else {
         out->status = -12; // StatusNumericalError
@@ -275,6 +320,7 @@ void goblin_solve_mip(
     int enable_heuristics,
     int max_nodes,
     int max_cut_passes,
+    int max_iter,
     double rel_gap_tol,
     double abs_gap_tol,
     double time_limit_sec,
@@ -294,6 +340,8 @@ void goblin_solve_mip(
     tl_has_root_lp = false;
     tl_has_root_cut = false;
     tl_cancel_flag = cancel_flag;
+    tl_max_iter = max_iter;
+    tl_iter_limit_hit = false;
 
     OsiClpSolverInterface solver;
     configure_silent_clp(solver);
@@ -317,8 +365,15 @@ void goblin_solve_mip(
     if (num_ints > 0 && int_cols) {
         solver.setInteger(int_cols, num_ints);
     }
-    if (cancel_flag && solver.getModelPtr()) {
-        GoblinClpCancelHandler clpCancelHandler(cancel_flag);
+    if (max_iter > 0) {
+        solver.setIntParam(OsiMaxNumIteration, max_iter);
+        if (solver.getModelPtr()) {
+            solver.getModelPtr()->setMaximumIterations(max_iter);
+        }
+    }
+    bool iterHit = false;
+    if ((cancel_flag || max_iter > 0) && solver.getModelPtr()) {
+        GoblinClpCancelHandler clpCancelHandler(cancel_flag, max_iter, &iterHit);
         solver.getModelPtr()->passInEventHandler(&clpCancelHandler);
     }
 
@@ -331,13 +386,21 @@ void goblin_solve_mip(
     cbcSolver.parameters().disableWelcomePrinting();
     cbcSolver.parameters().disableSignalHandler();
     cbcSolver.setPrinting(false);
-    if (cancel_flag && cbcSolver.model()) {
-        GoblinCbcCancelHandler cbcCancelHandler(cancel_flag);
+    if ((cancel_flag || max_iter > 0) && cbcSolver.model()) {
+        GoblinCbcCancelHandler cbcCancelHandler(cancel_flag, max_iter, &iterHit);
         cbcSolver.model()->passInEventHandler(&cbcCancelHandler);
         OsiClpSolverInterface *cbcClp = dynamic_cast<OsiClpSolverInterface *>(cbcSolver.model()->solver());
-        if (cbcClp && cbcClp->getModelPtr()) {
-            GoblinClpCancelHandler clpCancelHandler(cancel_flag);
-            cbcClp->getModelPtr()->passInEventHandler(&clpCancelHandler);
+        if (cbcClp) {
+            if (max_iter > 0) {
+                cbcClp->setIntParam(OsiMaxNumIteration, max_iter);
+            }
+            if (cbcClp->getModelPtr()) {
+                if (max_iter > 0) {
+                    cbcClp->getModelPtr()->setMaximumIterations(max_iter);
+                }
+                GoblinClpCancelHandler clpCancelHandler(cancel_flag, max_iter, &iterHit);
+                cbcClp->getModelPtr()->passInEventHandler(&clpCancelHandler);
+            }
         }
     }
 
@@ -408,6 +471,7 @@ void goblin_solve_mip(
 
     cbcSolver.run(inputQueue, goblin_cbc_callback);
     tl_cancel_flag = nullptr;
+    tl_max_iter = 0;
 
     CbcModel &m = *cbcSolver.model();
     const CbcSolverStatistics &stats = cbcSolver.getStatistics();
@@ -458,38 +522,47 @@ void goblin_solve_mip(
     double bestBnd = m.getBestPossibleObjValue();
     if (std::fabs(bestBnd) < 1e49) {
         out->best_bound_min = bestBnd;
-    } else if (hasSol) {
-        out->best_bound_min = out->obj_min;
+    } else if (tl_has_root_cut) {
+        out->best_bound_min = tl_root_cut_min;
+    } else if (tl_has_root_lp) {
+        out->best_bound_min = tl_root_lp_min;
+    } else {
+        out->best_bound_min = bestBnd;
     }
 
     bool gapClosed = false;
-    if (hasSol && std::fabs(out->best_bound_min) < 1e49) {
-        double gap = std::fabs(out->obj_min - out->best_bound_min);
+    if (hasSol && std::fabs(bestBnd) < 1e49) {
+        double gap = std::fabs(out->obj_min - bestBnd);
         double tol = std::max(abs_gap_tol, rel_gap_tol * std::max(1.0, std::fabs(out->obj_min)));
         gapClosed = (gap <= tol + 1e-6);
     }
 
-    bool canceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) ||
-                    m.status() == 5;
+    bool userCanceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0);
+    bool iterLimited = iterHit || tl_iter_limit_hit || m.secondaryStatus() == 8 ||
+                       (max_iter > 0 && out->iterations >= max_iter &&
+                        !m.isProvenOptimal() && !m.isProvenInfeasible() && !gapClosed);
 
-    if (!canceled && (m.isProvenOptimal() || gapClosed)) {
+    if (!userCanceled && !iterLimited &&
+        (m.isProvenOptimal() || gapClosed || (m.status() == 0 && hasSol && m.secondaryStatus() == 0))) {
         out->status = 1; // StatusOptimal
         out->best_bound_min = out->obj_min;
-    } else if (!canceled && (m.isProvenInfeasible() || m.isInitialSolveProvenPrimalInfeasible())) {
+    } else if (!userCanceled && !iterLimited &&
+               (m.isProvenInfeasible() || m.isInitialSolveProvenPrimalInfeasible() ||
+                (m.status() == 0 && !hasSol && m.secondaryStatus() == 1))) {
         out->status = -1; // StatusInfeasible
-    } else if (!canceled && (m.isContinuousUnbounded() || m.isInitialSolveProvenDualInfeasible())) {
+    } else if (!userCanceled && !iterLimited &&
+               (m.isContinuousUnbounded() || m.isInitialSolveProvenDualInfeasible() || m.secondaryStatus() == 7)) {
         out->status = -2; // StatusUnbounded
-    } else if (canceled || m.isSecondsLimitReached()) {
+    } else if (userCanceled || m.isSecondsLimitReached() || m.secondaryStatus() == 4) {
         out->status = -4; // StatusTimeLimit
-    } else if (m.isNodeLimitReached()) {
+    } else if (iterLimited) {
+        out->status = -8; // StatusIterationLimit
+    } else if (m.isNodeLimitReached() || m.secondaryStatus() == 3) {
         out->status = -6; // StatusNodeLimit
-    } else if (m.isAbandoned() || m.isInitialSolveAbandoned()) {
+    } else if (m.isAbandoned() || m.isInitialSolveAbandoned() || m.status() == 2) {
         out->status = -12; // StatusNumericalError
-    } else if (hasSol) {
-        out->status = 1; // StatusOptimal
-        out->best_bound_min = out->obj_min;
     } else {
-        out->status = -1; // StatusInfeasible
+        out->status = -3; // StatusUndefined
     }
 }
 
@@ -566,7 +639,7 @@ void goblin_lp_solve(
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
     std::memset(out, 0, sizeof(GoblinResult));
     if (!s) {
-        out->status = 7;
+        out->status = -3; // StatusUndefined
         return;
     }
 
@@ -603,7 +676,7 @@ void goblin_lp_solve(
     } else if (s->solver.isProvenDualInfeasible()) {
         out->status = -2; // StatusUnbounded
     } else if (s->solver.isIterationLimitReached()) {
-        out->status = -4; // StatusTimeLimit
+        out->status = -8; // StatusIterationLimit
     } else {
         out->status = -12; // StatusNumericalError
     }

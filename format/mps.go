@@ -4,18 +4,65 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 
 	gb "github.com/paulourio/goblin"
 )
+
+func formatMPSFloat(v float64) string {
+	return strconv.FormatFloat(v, 'g', -1, 64)
+}
+
+func validateMPSIdent(kind, s string, allowEmpty bool) error {
+	if s == "" {
+		if allowEmpty {
+			return nil
+		}
+		return fmt.Errorf("MPS %s identifier cannot be empty", kind)
+	}
+	for i := range len(s) {
+		ch := s[i]
+		if ch <= ' ' || ch >= 0x7f {
+			return fmt.Errorf("MPS %s identifier %q contains whitespace or non-printable ASCII", kind, s)
+		}
+	}
+	return nil
+}
 
 // WriteMPS writes a CompiledProblem in free-format MPS (with INTORG/INTEND markers
 // for integer and binary variables) suitable for direct execution by COIN-OR CBC.
 // Like PuLP's writeMPS, the objective is written in minimization form (negated when Maximize).
 func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
+	if p == nil {
+		return gb.ErrNilProblem
+	}
+	if p.InvalidErr != nil {
+		return p.InvalidErr
+	}
+	if err := validateMPSIdent("problem", p.Name, true); err != nil {
+		return err
+	}
 	objName := p.ObjName
 	if objName == "" {
 		objName = "OBJ"
 	}
+	if err := validateMPSIdent("objective", objName, false); err != nil {
+		return err
+	}
+	for i := range p.NumConstraints {
+		if err := validateMPSIdent("row", p.RowNames[i], false); err != nil {
+			return err
+		}
+		if p.RowNames[i] == objName {
+			return fmt.Errorf("MPS row name %q collides with objective row name", objName)
+		}
+	}
+	for j := range p.NumVars {
+		if err := validateMPSIdent("column", p.VarNames[j], false); err != nil {
+			return err
+		}
+	}
+
 	if _, err := fmt.Fprintf(w, "*SENSE:%s\n", p.Sense.String()); err != nil {
 		return err
 	}
@@ -60,14 +107,14 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		}
 		vname := p.VarNames[j]
 		if p.ObjMin[j] != 0 {
-			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15.12g\n", vname, objName, p.ObjMin[j]); err != nil {
+			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, formatMPSFloat(p.ObjMin[j])); err != nil {
 				return err
 			}
 		}
 		for k := p.ColPtr[j]; k < p.ColPtr[j+1]; k++ {
 			r := p.RowIdx[k]
 			val := p.ColVal[k]
-			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15.12g\n", vname, p.RowNames[r], val); err != nil {
+			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, p.RowNames[r], formatMPSFloat(val)); err != nil {
 				return err
 			}
 		}
@@ -81,9 +128,19 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	if _, err := io.WriteString(w, "RHS\n"); err != nil {
 		return err
 	}
+	if p.ObjConstant != 0 {
+		senseSign := 1.0
+		if p.Sense == gb.Maximize {
+			senseSign = -1.0
+		}
+		objRHS := -senseSign * p.ObjConstant
+		if _, err := fmt.Fprintf(w, "    RHS       %-10s %15s\n", objName, formatMPSFloat(objRHS)); err != nil {
+			return err
+		}
+	}
 	for i := range p.NumConstraints {
 		if p.RowRHS[i] != 0 {
-			if _, err := fmt.Fprintf(w, "    RHS       %-10s %15.12g\n", p.RowNames[i], p.RowRHS[i]); err != nil {
+			if _, err := fmt.Fprintf(w, "    RHS       %-10s %15s\n", p.RowNames[i], formatMPSFloat(p.RowRHS[i])); err != nil {
 				return err
 			}
 		}
@@ -108,7 +165,7 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			continue
 		}
 		if lb == ub {
-			if _, err := fmt.Fprintf(w, " FX BND       %-10s %15.12g\n", vname, lb); err != nil {
+			if _, err := fmt.Fprintf(w, " FX BND       %-10s %15s\n", vname, formatMPSFloat(lb)); err != nil {
 				return err
 			}
 			continue
@@ -122,7 +179,7 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			if p.VarCat[j] != gb.Continuous {
 				bndType = "LI"
 			}
-			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15.12g\n", bndType, vname, lb); err != nil {
+			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, formatMPSFloat(lb)); err != nil {
 				return err
 			}
 		}
@@ -131,7 +188,7 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			if p.VarCat[j] != gb.Continuous {
 				bndType = "UI"
 			}
-			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15.12g\n", bndType, vname, ub); err != nil {
+			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, formatMPSFloat(ub)); err != nil {
 				return err
 			}
 		} else if p.VarCat[j] != gb.Continuous {

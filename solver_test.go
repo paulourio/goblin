@@ -231,7 +231,11 @@ func TestAllTrialParity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s[%d]: %v", c.ID, k, err)
 			}
-			res := mustSolveCompiled(t, p, gb.WithTimeLimit(30*time.Second))
+			trialLimit := 30 * time.Second
+			if raceEnabled {
+				trialLimit = 180 * time.Second
+			}
+			res := mustSolveCompiled(t, p, gb.WithTimeLimit(trialLimit))
 			solved++
 
 			if k >= len(py.TrialObjectives) {

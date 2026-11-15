@@ -13,12 +13,13 @@ least as good as every CBC answer. Any other mismatch is a goblin failure and ma
 script exit with status 1.
 
 CBC is located through PuLP's bundled binary (PULP_CBC_CMD), the CBC_BIN shell
-variable, or ``cbc`` on PATH.
+variable, ``cbc`` on PATH, or the repository build under ``third_party/Cbc/dist/bin/cbc``.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -29,6 +30,24 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# Support running directly from the workspace with the sibling PuLP checkout and virtualenv.
+_GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
+_CBC_DIST_DIR = os.path.join(_GOBLIN_ROOT, "third_party", "Cbc", "dist")
+for _cand_site in sorted(
+    glob.glob(
+        os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
+    )
+):
+    if _cand_site not in sys.path:
+        sys.path.insert(0, _cand_site)
+_VENDORED_PULP = os.path.join(_REPO_ROOT, "pulp")
+if (
+    os.path.isdir(os.path.join(_VENDORED_PULP, "pulp"))
+    and _VENDORED_PULP not in sys.path
+):
+    sys.path.insert(0, _VENDORED_PULP)
 
 import pulp
 
@@ -44,18 +63,75 @@ MODES: dict[str, list[str]] = {
 def make_cbc(options: list[str] | None = None) -> Any:
     """Return a single-threaded CBC solver with a 60 s time limit."""
     opts = options or []
+    cbc_lib_dir = os.path.join(_CBC_DIST_DIR, "lib")
+    if os.path.isdir(cbc_lib_dir):
+        ld = os.environ.get("LD_LIBRARY_PATH", "")
+        if cbc_lib_dir not in ld.split(":"):
+            os.environ["LD_LIBRARY_PATH"] = f"{cbc_lib_dir}:{ld}" if ld else cbc_lib_dir
+
     bundled = getattr(pulp, "PULP_CBC_CMD", None)
     if bundled is not None:
-        solver = bundled(msg=False, threads=1, timeLimit=60, options=opts)
+        solver = bundled(
+            msg=False, threads=1, timeLimit=60, gapRel=0.0, gapAbs=0.0, options=opts
+        )
         if solver.available():
             return solver
-    path = os.environ.get("CBC_BIN") or shutil.which("cbc")
-    if not path:
-        sys.exit("CBC not found: install PuLP with its bundled CBC or set CBC_BIN")
-    return pulp.COIN_CMD(path=path, msg=False, threads=1, timeLimit=60, options=opts)
+
+    candidates = [
+        os.environ.get("CBC_BIN", ""),
+        shutil.which("cbc") or "",
+        os.path.join(_CBC_DIST_DIR, "bin", "cbc"),
+    ]
+    for cand in candidates:
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return pulp.COIN_CMD(
+                path=cand,
+                msg=False,
+                threads=1,
+                timeLimit=60,
+                gapRel=0.0,
+                gapAbs=0.0,
+                options=opts,
+            )
+
+    sys.exit(
+        "CBC not found: install PuLP with bundled CBC, build third_party/Cbc, or set CBC_BIN"
+    )
 
 
-def fam_general(rng: random.Random, k: int) -> pulp.LpProblem:
+def add_var(
+    prob: Any,
+    name: str,
+    low: float | None = None,
+    up: float | None = None,
+    cat: str = "Continuous",
+) -> Any:
+    """Create a decision variable across both PuLP 4.x and legacy PuLP 2.x/3.x."""
+    if hasattr(prob, "add_variable"):
+        return prob.add_variable(name, low, up, cat=cat)
+    return pulp.LpVariable(name, low, up, cat=cat)
+
+
+def iter_constraints(prob: Any) -> list[Any]:
+    """Return the problem constraints list across PuLP 4.x and legacy PuLP dicts."""
+    constrs = prob.constraints() if callable(prob.constraints) else prob.constraints
+    if isinstance(constrs, dict):
+        return list(constrs.values())
+    return list(constrs)
+
+
+def extract_solve_status(prob: Any, solve_ret: Any) -> str:
+    """Extract the human-readable status string from PuLP solve results."""
+    if hasattr(solve_ret, "status"):
+        st = solve_ret.status
+        name = str(getattr(solve_ret, "status_str", getattr(st, "name", str(st))))
+        return "Optimal" if name == "GapLimit" else name
+    code = int(getattr(prob, "status", solve_ret))
+    lp_status_map = getattr(pulp, "LpStatus", {})
+    return str(lp_status_map.get(code, "Unknown"))
+
+
+def fam_general(rng: random.Random, k: int) -> Any:
     """Mixed MILP with mixed signs and senses, negative integer bounds, free continuous vars."""
     n, m = rng.randint(4, 18), rng.randint(2, 10)
     prob = pulp.LpProblem(f"gen{k}", rng.choice([pulp.LpMinimize, pulp.LpMaximize]))
@@ -63,13 +139,16 @@ def fam_general(rng: random.Random, k: int) -> pulp.LpProblem:
     for j in range(n):
         kind = rng.random()
         if kind < 0.35:
-            v = pulp.LpVariable(f"x{j}", 0, 1, cat="Integer")
+            v = add_var(prob, f"x{j}", 0, 1, cat="Integer")
         elif kind < 0.7:
             lo = rng.choice([-5, -2, 0, 0, 1])
-            v = pulp.LpVariable(f"x{j}", lo, lo + rng.randint(1, 9), cat="Integer")
+            v = add_var(prob, f"x{j}", lo, lo + rng.randint(1, 9), cat="Integer")
         else:
-            v = pulp.LpVariable(
-                f"x{j}", rng.choice([None, -3.5, 0, 0]), rng.choice([None, 7.25, 12.0])
+            v = add_var(
+                prob,
+                f"x{j}",
+                rng.choice([None, -3.5, 0, 0]),
+                rng.choice([None, 7.25, 12.0]),
             )
         xs.append(v)
     prob += pulp.lpSum(rng.randint(-9, 9) * v for v in xs)
@@ -92,19 +171,24 @@ def fam_general(rng: random.Random, k: int) -> pulp.LpProblem:
         else:
             prob += e == rhs, f"c{i}"
     for j, v in enumerate(xs):
-        if v.lowBound is None or v.upBound is None:
+        if (
+            v.lowBound is None
+            or not math.isfinite(v.lowBound)
+            or v.upBound is None
+            or not math.isfinite(v.upBound)
+        ):
             prob += v <= 50, f"bnd_up_{j}"
             prob += v >= -50, f"bnd_lo_{j}"
     return prob
 
 
-def fam_bigm(rng: random.Random, k: int) -> pulp.LpProblem:
+def fam_bigm(rng: random.Random, k: int) -> Any:
     """Fixed-charge depot siting with large big-M and small demands."""
     nf, nc = rng.randint(3, 6), rng.randint(3, 8)
     big_m = rng.choice([1e4, 1e5, 1e6])
     prob = pulp.LpProblem(f"bigm{k}", pulp.LpMinimize)
-    y = [pulp.LpVariable(f"y{i}", cat="Binary") for i in range(nf)]
-    x = [[pulp.LpVariable(f"x{i}_{j}", 0) for j in range(nc)] for i in range(nf)]
+    y = [add_var(prob, f"y{i}", 0, 1, cat="Binary") for i in range(nf)]
+    x = [[add_var(prob, f"x{i}_{j}", 0) for j in range(nc)] for i in range(nf)]
     fixed = [rng.randint(5, 40) for _ in range(nf)]
     cost = [[rng.randint(1, 20) for _ in range(nc)] for _ in range(nf)]
     dem = [rng.choice([0.01, 0.05, 0.2, 1.0, 3.0]) for _ in range(nc)]
@@ -118,13 +202,11 @@ def fam_bigm(rng: random.Random, k: int) -> pulp.LpProblem:
     return prob
 
 
-def fam_eqknap(rng: random.Random, k: int) -> pulp.LpProblem:
+def fam_eqknap(rng: random.Random, k: int) -> Any:
     """Equation-constrained general-integer knapsack (often infeasible or tight)."""
     n = rng.randint(4, 9)
     prob = pulp.LpProblem(f"eqk{k}", pulp.LpMinimize)
-    x = [
-        pulp.LpVariable(f"x{j}", 0, rng.randint(2, 6), cat="Integer") for j in range(n)
-    ]
+    x = [add_var(prob, f"x{j}", 0, rng.randint(2, 6), cat="Integer") for j in range(n)]
     a = [rng.randint(3, 40) for _ in range(n)]
     prob += pulp.lpSum(rng.randint(1, 15) * v for v in x)
     prob += pulp.lpSum(a[j] * x[j] for j in range(n)) == rng.randint(30, 150), "eq"
@@ -134,12 +216,13 @@ def fam_eqknap(rng: random.Random, k: int) -> pulp.LpProblem:
     return prob
 
 
-def fam_scaled(rng: random.Random, k: int) -> pulp.LpProblem:
+def fam_scaled(rng: random.Random, k: int) -> Any:
     """Badly scaled MILP with row coefficients spanning 1e-3 to 1e4."""
     n, m = rng.randint(5, 12), rng.randint(3, 7)
     prob = pulp.LpProblem(f"scl{k}", pulp.LpMaximize)
     x = [
-        pulp.LpVariable(
+        add_var(
+            prob,
             f"x{j}",
             0,
             rng.choice([1, 10, 100]),
@@ -165,14 +248,12 @@ def solve_cbc(
     doc: dict[str, Any], options: list[str] | None = None
 ) -> tuple[str, float | None]:
     _, prob = pulp.LpProblem.fromDict(doc)
-    prob.solve(make_cbc(options))
-    status = pulp.LpStatus[prob.status]
-    obj = pulp.value(prob.objective) if prob.status == pulp.LpStatusOptimal else None
-    return status, (
-        float(obj)
-        if obj is not None
-        else (0.0 if prob.status == pulp.LpStatusOptimal else None)
-    )
+    solve_ret = prob.solve(make_cbc(options))
+    status = extract_solve_status(prob, solve_ret)
+    if status != "Optimal":
+        return status, None
+    raw_obj = pulp.value(prob.objective)
+    return status, float(raw_obj) if raw_obj is not None else 0.0
 
 
 def feasible_in_pulp(doc: dict[str, Any], x: dict[str, float]) -> tuple[bool, float]:
@@ -181,13 +262,24 @@ def feasible_in_pulp(doc: dict[str, Any], x: dict[str, float]) -> tuple[bool, fl
     for name, var in prob.variablesDict().items():
         val = x.get(name, 0.0)
         var.varValue = val
-        if var.lowBound is not None and val < var.lowBound - FEAS_TOL:
+        if (
+            var.lowBound is not None
+            and math.isfinite(var.lowBound)
+            and val < var.lowBound - FEAS_TOL
+        ):
             return False, math.nan
-        if var.upBound is not None and val > var.upBound + FEAS_TOL:
+        if (
+            var.upBound is not None
+            and math.isfinite(var.upBound)
+            and val > var.upBound + FEAS_TOL
+        ):
             return False, math.nan
-        if var.cat == pulp.LpInteger and abs(val - round(val)) > FEAS_TOL:
+        if (
+            var.cat in (pulp.LpInteger, pulp.LpBinary)
+            and abs(val - round(val)) > FEAS_TOL
+        ):
             return False, math.nan
-    for con in prob.constraints.values():
+    for con in iter_constraints(prob):
         slack = con.value()
         if (con.sense == pulp.LpConstraintLE and slack > FEAS_TOL) or (
             con.sense == pulp.LpConstraintGE and slack < -FEAS_TOL
@@ -232,7 +324,7 @@ def classify(ref: dict[str, Any], got: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--instances", type=int, default=400)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(

@@ -83,9 +83,10 @@ func Dot(vars []Var, coeffs []float64) Expr {
 	return Expr{Terms: terms}
 }
 
-// AddTerm appends a term to the expression and returns the updated Expr.
+// AddTerm appends a term to the expression without mutating shared backing storage.
 func (e Expr) AddTerm(v Var, coeff float64) Expr {
-	e.Terms = append(e.Terms, Term{Var: v, Coeff: coeff})
+	n := len(e.Terms)
+	e.Terms = append(e.Terms[:n:n], Term{Var: v, Coeff: coeff})
 	return e
 }
 

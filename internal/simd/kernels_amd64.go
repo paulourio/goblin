@@ -307,23 +307,22 @@ func AllAbsLE64With(x []float64, limit float64, disableSIMD bool) bool {
 	}
 	xp := unsafe.Pointer(&x[0])
 	vlim := archsimd.BroadcastFloat64x4(limit)
+	allOK := archsimd.BroadcastFloat64x4(0).LessEqual(vlim)
 	i := 0
 	for ; i+8 <= n; i += 8 {
 		v0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, i*8))).Abs()
 		v1 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, (i+4)*8))).Abs()
-		if v0.LessEqual(vlim).And(v1.LessEqual(vlim)).ToBits() != 0xf {
-			archsimd.ClearAVXUpperBits()
-			return false
-		}
+		allOK = allOK.And(v0.LessEqual(vlim)).And(v1.LessEqual(vlim))
 	}
 	for ; i+4 <= n; i += 4 {
 		v0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, i*8))).Abs()
-		if v0.LessEqual(vlim).ToBits() != 0xf {
-			archsimd.ClearAVXUpperBits()
-			return false
-		}
+		allOK = allOK.And(v0.LessEqual(vlim))
 	}
+	ok := allOK.ToBits() == 0xf
 	archsimd.ClearAVXUpperBits()
+	if !ok {
+		return false
+	}
 	for ; i < n; i++ {
 		if !(math.Abs(*(*float64)(unsafe.Add(xp, i*8))) <= limit) {
 			return false

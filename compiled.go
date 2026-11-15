@@ -106,6 +106,9 @@ func (m *Model) CompileChecked() (*CompiledProblem, error) {
 // Duplicate variable terms within the objective or within a single constraint
 // are summed and zero coefficients are dropped.
 func (m *Model) Compile() *CompiledProblem {
+	if m == nil {
+		return nil
+	}
 	n := len(m.vars)
 	mc := len(m.constraints)
 
@@ -140,18 +143,22 @@ func (m *Model) Compile() *CompiledProblem {
 	}
 
 	for j, v := range m.vars {
+		cat := v.cat
+		if cat == Integer && v.lb >= 0 && v.ub <= 1 && v.lb <= v.ub {
+			cat = Binary
+		}
 		p.VarNames[j] = v.name
 		p.VarLB[j] = v.lb
 		p.VarUB[j] = v.ub
-		p.VarCat[j] = v.cat
+		p.VarCat[j] = cat
 		p.ColLBClp[j] = clampCBCBound(v.lb)
 		p.ColUBClp[j] = clampCBCBound(v.ub)
-		if v.cat != Continuous {
+		if cat != Continuous {
 			p.IsMIP = true
 			p.IntegerMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			p.IntCols = append(p.IntCols, j)
 			p.IntCols32 = append(p.IntCols32, int32(j))
-			if v.cat == Binary {
+			if cat == Binary {
 				p.BinaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			}
 		}

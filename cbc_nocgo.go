@@ -23,7 +23,8 @@ func solveCBC(_ context.Context, p *CompiledProblem, _ Options, start, _ time.Ti
 
 // CBCLPSolver is a no-op stub when built with CGO_ENABLED=0.
 type CBCLPSolver struct {
-	Prob *CompiledProblem
+	Prob   *CompiledProblem
+	numCut int
 }
 
 // NewCBCLPSolver returns a stub solver.
@@ -34,14 +35,14 @@ func NewCBCLPSolver(p *CompiledProblem) *CBCLPSolver {
 // Close is a no-op stub.
 func (s *CBCLPSolver) Close() {}
 
-// TotalRows returns the number of structural rows.
-func (s *CBCLPSolver) TotalRows() int { return s.Prob.NumConstraints }
+// TotalRows returns the number of structural rows and added cuts.
+func (s *CBCLPSolver) TotalRows() int { return s.Prob.NumConstraints + s.numCut }
 
 // SetStructuralBounds is a no-op stub when built with CGO_ENABLED=0.
 func (s *CBCLPSolver) SetStructuralBounds(_, _ []float64) {}
 
-// AddCut is a no-op stub.
-func (s *CBCLPSolver) AddCut(_ []int, _ []float64, _ float64) {}
+// AddCut records the cut count on the no-cgo stub.
+func (s *CBCLPSolver) AddCut(_ []int, _ []float64, _ float64) { s.numCut++ }
 
 // Solve returns StatusUndefined when built without cgo.
 func (s *CBCLPSolver) Solve() LPResult {

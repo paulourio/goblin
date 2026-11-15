@@ -35,7 +35,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 	needsScale := false
 
 	if !transposed && !negate {
-		if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD) {
+		if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD || len(cost) < 256) {
 			return m, n, cost, false, 1, nil
 		}
 		for _, c := range cost {

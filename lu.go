@@ -29,6 +29,7 @@ type LUFactorization struct {
 	m          int
 	numColSing int
 	nucStart   int
+	valid      bool
 
 	uDiag      []float64
 	uInvDiag   []float64
@@ -99,6 +100,7 @@ func (f *LUFactorization) Reset(m int) {
 	f.m = m
 	f.numColSing = 0
 	f.nucStart = 0
+	f.valid = false
 	if cap(f.perm) < m {
 		f.uDiag = make([]float64, m)
 		f.uInvDiag = make([]float64, m)
@@ -166,38 +168,49 @@ func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64))
 func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []int, vals []float64) ([]int, []float64)) error {
 	f.Reset(m)
 	if m == 0 {
+		f.valid = true
 		return nil
 	}
 
+	bColPtr := f.bColPtr[:m+1]
+	bRowPtr := f.bRowPtr[:m+1]
+	rowDeg := f.rowDeg[:m]
+	colDeg := f.colDeg[:m]
+	rowDone := f.rowDone[:m]
+	colDone := f.colDone[:m]
+	workInt := f.workInt[:m]
+
 	f.bRowIdx = f.bRowIdx[:0]
 	f.bVal = f.bVal[:0]
-	f.bColPtr[0] = 0
+	bColPtr[0] = 0
 	for col := range m {
 		f.bRowIdx, f.bVal = appendCol(col, f.bRowIdx, f.bVal)
-		f.bColPtr[col+1] = len(f.bRowIdx)
+		bColPtr[col+1] = len(f.bRowIdx)
 	}
 
-	clear(f.rowDeg)
-	clear(f.colDeg)
-	clear(f.rowDone)
-	clear(f.colDone)
+	clear(rowDeg)
+	clear(colDeg)
+	clear(rowDone)
+	clear(colDone)
+	bRowIdx := f.bRowIdx
+	bVal := f.bVal
 	for col := range m {
 		deg := 0
-		for p := f.bColPtr[col]; p < f.bColPtr[col+1]; p++ {
-			if math.Abs(f.bVal[p]) > luDropTol {
-				f.rowDeg[f.bRowIdx[p]]++
+		for p := bColPtr[col]; p < bColPtr[col+1]; p++ {
+			if math.Abs(bVal[p]) > luDropTol {
+				rowDeg[bRowIdx[p]]++
 				deg++
 			}
 		}
-		f.colDeg[col] = deg
+		colDeg[col] = deg
 	}
 
-	f.bRowPtr[0] = 0
+	bRowPtr[0] = 0
 	for r := range m {
-		f.bRowPtr[r+1] = f.bRowPtr[r] + f.rowDeg[r]
-		f.workInt[r] = f.bRowPtr[r]
+		bRowPtr[r+1] = bRowPtr[r] + rowDeg[r]
+		workInt[r] = bRowPtr[r]
 	}
-	nnz := f.bRowPtr[m]
+	nnz := bRowPtr[m]
 	if cap(f.bColIdx) < nnz {
 		f.bColIdx = make([]int, nnz)
 		f.bRowVal = make([]float64, nnz)
@@ -205,15 +218,17 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		f.bColIdx = f.bColIdx[:nnz]
 		f.bRowVal = f.bRowVal[:nnz]
 	}
+	bColIdx := f.bColIdx
+	bRowVal := f.bRowVal
 	for col := range m {
-		for p := f.bColPtr[col]; p < f.bColPtr[col+1]; p++ {
-			v := f.bVal[p]
+		for p := bColPtr[col]; p < bColPtr[col+1]; p++ {
+			v := bVal[p]
 			if math.Abs(v) > luDropTol {
-				r := f.bRowIdx[p]
-				pos := f.workInt[r]
-				f.bColIdx[pos] = col
-				f.bRowVal[pos] = v
-				f.workInt[r] = pos + 1
+				r := bRowIdx[p]
+				pos := workInt[r]
+				bColIdx[pos] = col
+				bRowVal[pos] = v
+				workInt[r] = pos + 1
 			}
 		}
 	}
@@ -339,6 +354,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 
 	// Build unified L (CSC + CSR) and U (CSR + CSC) in pivot coordinates [0..m-1].
 	f.assembleFactors(m, numColSing, nucStart, nNuc)
+	f.valid = true
 	return nil
 }
 
@@ -696,52 +712,68 @@ func updateEntry(idxs []int, vals []float64, target int, newVal float64) {
 
 func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 	// 1. Assemble L in CSC (columns 0..m-1)
+	lColPtr := f.lColPtr[:m+1]
+	lRowPtr := f.lRowPtr[:m+1]
+	uRowPtr := f.uRowPtr[:m+1]
+	uColPtr := f.uColPtr[:m+1]
+	bColPtr := f.bColPtr[:m+1]
+	bRowPtr := f.bRowPtr[:m+1]
+	rowDeg := f.rowDeg[:m]
+	colDeg := f.colDeg[:m]
+	workInt := f.workInt[:m]
+	colPerm := f.colPerm[:m]
+	perm := f.perm[:m]
+	uInvDiag := f.uInvDiag[:m]
+
 	f.lRowIdx = f.lRowIdx[:0]
 	f.lColVal = f.lColVal[:0]
-	clear(f.rowDeg)
+	clear(rowDeg)
 
 	for k := range numColSing {
-		f.lColPtr[k] = 0
+		lColPtr[k] = 0
 	}
+	bVal := f.bVal
+	bRowIdx := f.bRowIdx
+	invPerm := f.invPerm
 	for k := numColSing; k < nucStart; k++ {
-		f.lColPtr[k] = len(f.lRowIdx)
-		c := f.colPerm[k]
-		invD := f.uInvDiag[k]
-		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
-			v := f.bVal[p]
+		lColPtr[k] = len(f.lRowIdx)
+		c := colPerm[k]
+		invD := uInvDiag[k]
+		for p := bColPtr[c]; p < bColPtr[c+1]; p++ {
+			v := bVal[p]
 			if math.Abs(v) <= luDropTol {
 				continue
 			}
-			i := f.invPerm[f.bRowIdx[p]]
+			i := invPerm[bRowIdx[p]]
 			if i > k {
 				mult := v * invD
 				f.lRowIdx = append(f.lRowIdx, i)
 				f.lColVal = append(f.lColVal, mult)
-				f.rowDeg[i]++
+				rowDeg[i]++
 			}
 		}
 	}
 	for nk := range nNuc {
 		k := nucStart + nk
-		f.lColPtr[k] = len(f.lRowIdx)
+		lColPtr[k] = len(f.lRowIdx)
 		pivNC := f.nucPivCol[nk]
 		rows := f.nucCRows[pivNC]
 		vals := f.nucCVals[pivNC]
 		for p, nr := range rows {
-			i := f.invPerm[f.nucRows[nr]]
+			i := invPerm[f.nucRows[nr]]
 			f.lRowIdx = append(f.lRowIdx, i)
 			f.lColVal = append(f.lColVal, vals[p])
-			f.rowDeg[i]++
+			rowDeg[i]++
 		}
 	}
-	f.lColPtr[m] = len(f.lRowIdx)
+	lColPtr[m] = len(f.lRowIdx)
 
 	// Transpose L CSC -> L CSR
 	lNNZ := len(f.lRowIdx)
-	f.lRowPtr[0] = 0
+	lRowPtr[0] = 0
 	for i := range m {
-		f.lRowPtr[i+1] = f.lRowPtr[i] + f.rowDeg[i]
-		f.workInt[i] = f.lRowPtr[i]
+		lRowPtr[i+1] = lRowPtr[i] + rowDeg[i]
+		workInt[i] = lRowPtr[i]
 	}
 	if cap(f.lColIdx) < lNNZ {
 		f.lColIdx = make([]int, lNNZ)
@@ -750,58 +782,65 @@ func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 		f.lColIdx = f.lColIdx[:lNNZ]
 		f.lRowVal = f.lRowVal[:lNNZ]
 	}
+	lRowIdx := f.lRowIdx
+	lColVal := f.lColVal
+	lColIdx := f.lColIdx
+	lRowVal := f.lRowVal
 	for k := numColSing; k < m; k++ {
-		for p := f.lColPtr[k]; p < f.lColPtr[k+1]; p++ {
-			i := f.lRowIdx[p]
-			pos := f.workInt[i]
-			f.lColIdx[pos] = k
-			f.lRowVal[pos] = f.lColVal[p]
-			f.workInt[i] = pos + 1
+		for p := lColPtr[k]; p < lColPtr[k+1]; p++ {
+			i := lRowIdx[p]
+			pos := workInt[i]
+			lColIdx[pos] = k
+			lRowVal[pos] = lColVal[p]
+			workInt[i] = pos + 1
 		}
 	}
 
 	// 2. Assemble U in CSR (rows 0..m-1)
 	f.uColIdx = f.uColIdx[:0]
 	f.uRowVal = f.uRowVal[:0]
-	clear(f.colDeg)
+	clear(colDeg)
 
+	bColIdx := f.bColIdx
+	bRowVal := f.bRowVal
+	invColPerm := f.invColPerm
 	for i := range numColSing {
-		f.uRowPtr[i] = len(f.uColIdx)
-		r := f.perm[i]
-		for p := f.bRowPtr[r]; p < f.bRowPtr[r+1]; p++ {
-			j := f.invColPerm[f.bColIdx[p]]
+		uRowPtr[i] = len(f.uColIdx)
+		r := perm[i]
+		for p := bRowPtr[r]; p < bRowPtr[r+1]; p++ {
+			j := invColPerm[bColIdx[p]]
 			if j > i {
-				v := f.bRowVal[p]
+				v := bRowVal[p]
 				f.uColIdx = append(f.uColIdx, j)
 				f.uRowVal = append(f.uRowVal, v)
-				f.colDeg[j]++
+				colDeg[j]++
 			}
 		}
 	}
 	for i := numColSing; i < nucStart; i++ {
-		f.uRowPtr[i] = len(f.uColIdx)
+		uRowPtr[i] = len(f.uColIdx)
 	}
 	for nk := range nNuc {
 		i := nucStart + nk
-		f.uRowPtr[i] = len(f.uColIdx)
+		uRowPtr[i] = len(f.uColIdx)
 		pivNR := f.nucPivRow[nk]
 		cols := f.nucRCols[pivNR]
 		vals := f.nucRVals[pivNR]
 		for p, nc := range cols {
-			j := f.invColPerm[f.nucCols[nc]]
+			j := invColPerm[f.nucCols[nc]]
 			f.uColIdx = append(f.uColIdx, j)
 			f.uRowVal = append(f.uRowVal, vals[p])
-			f.colDeg[j]++
+			colDeg[j]++
 		}
 	}
-	f.uRowPtr[m] = len(f.uColIdx)
+	uRowPtr[m] = len(f.uColIdx)
 
 	// Transpose U CSR -> U CSC
 	uNNZ := len(f.uColIdx)
-	f.uColPtr[0] = 0
+	uColPtr[0] = 0
 	for j := range m {
-		f.uColPtr[j+1] = f.uColPtr[j] + f.colDeg[j]
-		f.workInt[j] = f.uColPtr[j]
+		uColPtr[j+1] = uColPtr[j] + colDeg[j]
+		workInt[j] = uColPtr[j]
 	}
 	if cap(f.uRowIdx) < uNNZ {
 		f.uRowIdx = make([]int, uNNZ)
@@ -810,20 +849,24 @@ func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 		f.uRowIdx = f.uRowIdx[:uNNZ]
 		f.uColVal = f.uColVal[:uNNZ]
 	}
+	uColIdx := f.uColIdx
+	uRowVal := f.uRowVal
+	uRowIdx := f.uRowIdx
+	uColVal := f.uColVal
 	for i := range m {
-		for p := f.uRowPtr[i]; p < f.uRowPtr[i+1]; p++ {
-			j := f.uColIdx[p]
-			pos := f.workInt[j]
-			f.uRowIdx[pos] = i
-			f.uColVal[pos] = f.uRowVal[p]
-			f.workInt[j] = pos + 1
+		for p := uRowPtr[i]; p < uRowPtr[i+1]; p++ {
+			j := uColIdx[p]
+			pos := workInt[j]
+			uRowIdx[pos] = i
+			uColVal[pos] = uRowVal[p]
+			workInt[j] = pos + 1
 		}
 	}
 }
 
 func (f *LUFactorization) FTRAN(rhs []float64) {
 	m := f.m
-	if m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lColPtr) <= m || len(f.uColPtr) <= m {
+	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lColPtr) <= m || len(f.uColPtr) <= m {
 		return
 	}
 	rhs = rhs[:m]
@@ -968,7 +1011,7 @@ func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
 
 func (f *LUFactorization) BTRAN(rhs []float64) {
 	m := f.m
-	if m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lRowPtr) <= m || len(f.uRowPtr) <= m {
+	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lRowPtr) <= m || len(f.uRowPtr) <= m {
 		return
 	}
 	rhs = rhs[:m]
