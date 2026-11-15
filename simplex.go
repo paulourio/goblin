@@ -356,6 +356,7 @@ type lpSnapshot struct {
 	basis    []int
 	status   []varBasisStatus
 	lb, ub   []float64
+	xb       []float64
 	dse      []float64
 }
 
@@ -369,6 +370,7 @@ func (s *LPSolver) snapshot() lpSnapshot {
 		status:   slices.Clone(ws.Status[:n+m]),
 		lb:       slices.Clone(ws.LB[:n]),
 		ub:       slices.Clone(ws.UB[:n]),
+		xb:       slices.Clone(ws.XB[:m]),
 		dse:      slices.Clone(ws.DSE[:m]),
 	}
 }
@@ -394,10 +396,13 @@ func (s *LPSolver) restore(snap lpSnapshot) {
 		ws.BasicRow[slack] = -1
 	}
 	copy(ws.Status[:n+m], snap.status)
+	copy(ws.XB[:m], snap.xb)
 	for i := range m {
-		ws.Basis[i] = snap.basis[i]
-		ws.BasicRow[snap.basis[i]] = i
+		bVar := snap.basis[i]
+		ws.Basis[i] = bVar
+		ws.BasicRow[bVar] = i
 		ws.DSE[i] = snap.dse[i]
+		ws.X[bVar] = snap.xb[i]
 	}
 	for k := range n + m {
 		if ws.Status[k] != statusBasic {
@@ -406,6 +411,93 @@ func (s *LPSolver) restore(snap lpSnapshot) {
 	}
 	s.luValid = false
 	s.dualValid = false
+}
+
+// PurgeSlackCuts drops dynamic cut rows whose slack variable is basic with primal value
+// above slackTol, compacting ExtraRows and basis arrays in place while preserving primal
+// feasibility, dual optimality, and steepest-edge weights.
+func (s *LPSolver) PurgeSlackCuts(slackTol float64) int {
+	if len(s.ExtraRows) == 0 {
+		return 0
+	}
+	p := s.Prob
+	n := p.NumVars
+	baseM := p.NumConstraints
+	oldExtra := len(s.ExtraRows)
+	oldM := baseM + oldExtra
+	ws := s.WS
+
+	dropExtra := make([]bool, oldExtra)
+	dropped := 0
+	for e := range oldExtra {
+		slackVar := n + baseM + e
+		if ws.Status[slackVar] == statusBasic {
+			bSlot := ws.BasicRow[slackVar]
+			if bSlot >= 0 && bSlot < oldM && ws.Basis[bSlot] == slackVar && ws.XB[bSlot] > slackTol {
+				dropExtra[e] = true
+				dropped++
+			}
+		}
+	}
+	if dropped == 0 {
+		return 0
+	}
+
+	rowMap := make([]int, oldM)
+	for i := range baseM {
+		rowMap[i] = i
+	}
+	newExtra := 0
+	for e := range oldExtra {
+		if dropExtra[e] {
+			rowMap[baseM+e] = -1
+			continue
+		}
+		if newExtra != e {
+			s.ExtraRows[newExtra] = s.ExtraRows[e]
+		}
+		rowMap[baseM+e] = baseM + newExtra
+		newExtra++
+	}
+	clear(s.ExtraRows[newExtra:])
+	s.ExtraRows = s.ExtraRows[:newExtra]
+	newM := baseM + newExtra
+
+	newStatus := make([]varBasisStatus, n+newM)
+	copy(newStatus[:n+baseM], ws.Status[:n+baseM])
+	for e := range oldExtra {
+		if mappedRow := rowMap[baseM+e]; mappedRow >= 0 {
+			newStatus[n+mappedRow] = ws.Status[n+baseM+e]
+		}
+	}
+
+	newBasis := make([]int, 0, newM)
+	newXB := make([]float64, 0, newM)
+	newDSE := make([]float64, 0, newM)
+	for slot := range oldM {
+		bVar := ws.Basis[slot]
+		if bVar >= n {
+			mappedRow := rowMap[bVar-n]
+			if mappedRow < 0 {
+				continue
+			}
+			bVar = n + mappedRow
+		}
+		newBasis = append(newBasis, bVar)
+		newXB = append(newXB, ws.XB[slot])
+		newDSE = append(newDSE, ws.DSE[slot])
+	}
+
+	s.restore(lpSnapshot{
+		numExtra: newExtra,
+		basis:    newBasis,
+		status:   newStatus,
+		lb:       slices.Clone(ws.LB[:n]),
+		ub:       slices.Clone(ws.UB[:n]),
+		xb:       newXB,
+		dse:      newDSE,
+	})
+	return dropped
 }
 
 // slackBounds returns the bounds of the slack of row i (a_i x + s_i = rhs_i).
@@ -447,6 +539,41 @@ func (s *LPSolver) fillColumn(colVar int, dst []float64) {
 			}
 		}
 	}
+}
+
+func (s *LPSolver) fillColumnSparse(colVar int, dst []float64, idx []int) []int {
+	p := s.Prob
+	n := p.NumVars
+	idx = idx[:0]
+	if colVar >= n {
+		row := colVar - n
+		dst[row] = 1.0
+		return append(idx, row)
+	}
+	for k := p.ColPtr[colVar]; k < p.ColPtr[colVar+1]; k++ {
+		r := p.RowIdx[k]
+		dst[r] = p.ColVal[k]
+		idx = append(idx, r)
+	}
+	baseM := p.NumConstraints
+	for r, dr := range s.ExtraRows {
+		var v float64
+		if dr.Dense != nil {
+			v = dr.Dense[colVar]
+		} else {
+			for k, c := range dr.ColIdx {
+				if c == colVar {
+					v = dr.Val[k]
+					break
+				}
+			}
+		}
+		if v != 0 {
+			dst[baseM+r] = v
+			idx = append(idx, baseM+r)
+		}
+	}
+	return idx
 }
 
 func (s *LPSolver) addScaledColumn(colVar int, scale float64, dst []float64) {
@@ -876,7 +1003,9 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 		clear(rho)
 	}
 	rho[r] = 1.0
-	ws.RhoIdx = ws.LU.BTRANSparse(ws.Rho, ws.RhoIdx)
+	var unitHint [1]int
+	unitHint[0] = r
+	ws.RhoIdx = ws.LU.BTRANSparseHint(ws.Rho, unitHint[:], ws.RhoIdx)
 	ws.RhoSparse = true
 
 	if ws.TabRowSparse {
@@ -1014,25 +1143,32 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 							chunks = append(chunks, ch)
 						}
 					}
-				} else if cnt >= 34 && cols[cnt-3]-c0 == cnt-3 {
-					l := cnt - 2
-					s.axpy64(tabStruct[c0:][:l], vals[:l], yi)
-					for ch := c0 >> 6; ch <= (c0+l-1)>>6; ch++ {
+				} else if cols[31]-c0 == 31 {
+					lo, hi := 32, cnt-1
+					for lo < hi {
+						mid := int(uint(lo+hi+1) >> 1)
+						if cols[mid-1]-c0 == mid-1 {
+							lo = mid
+						} else {
+							hi = mid - 1
+						}
+					}
+					s.axpy64(tabStruct[c0:][:lo], vals[:lo], yi)
+					for ch := c0 >> 6; ch <= (c0+lo-1)>>6; ch++ {
 						if uint(ch) < uint(numChunks) && !chunkMark[ch] {
 							chunkMark[ch] = true
 							chunks = append(chunks, ch)
 						}
 					}
-					c1, c2 := cols[l], cols[l+1]
-					tabStruct[c1] += yi * vals[l]
-					tabStruct[c2] += yi * vals[l+1]
-					if !chunkMark[c1>>6] {
-						chunkMark[c1>>6] = true
-						chunks = append(chunks, c1>>6)
-					}
-					if !chunkMark[c2>>6] {
-						chunkMark[c2>>6] = true
-						chunks = append(chunks, c2>>6)
+					for k := lo; k < cnt; k++ {
+						col := cols[k]
+						if uint(col) < uint(n) {
+							tabStruct[col] += yi * vals[k]
+							if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
+								chunkMark[ch] = true
+								chunks = append(chunks, ch)
+							}
+						}
 					}
 				} else {
 					for k, col := range cols {
@@ -1635,8 +1771,8 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		} else {
 			clear(ws.FCol)
 		}
-		s.fillColumn(enterVar, ws.FCol)
-		ws.FColIdx = ws.LU.FTRANSparse(ws.FCol, ws.FColIdx)
+		ws.FColIdx = s.fillColumnSparse(enterVar, ws.FCol, ws.FColIdx)
+		ws.FColIdx = ws.LU.FTRANSparseHint(ws.FCol, ws.FColIdx, ws.FColIdx)
 		ws.FColSparse = true
 
 		pivElem := ws.FCol[leaveRow]
@@ -1650,7 +1786,16 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		}
 
 		if len(ws.FlipCols) > 0 {
-			clear(ws.Tau)
+			if ws.TauSparse {
+				for _, i := range ws.TauIdx {
+					if uint(i) < uint(m) {
+						ws.Tau[i] = 0
+					}
+				}
+				ws.TauIdx = ws.TauIdx[:0]
+			} else {
+				clear(ws.Tau)
+			}
 			for _, fk := range ws.FlipCols {
 				lbf, ubf := lb[fk], ub[fk]
 				var deltaX float64
@@ -1668,8 +1813,11 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 			ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
 			for _, i := range ws.TauIdx {
 				xb[i] -= ws.Tau[i]
+				ws.Tau[i] = 0
 				ws.X[basis[i]] = xb[i]
 			}
+			ws.TauIdx = ws.TauIdx[:0]
+			ws.TauSparse = true
 			bVar := basis[leaveRow]
 			if leaveDir > 0 {
 				primalInfeas = max(0.0, lb[bVar]-xb[leaveRow])
@@ -1691,16 +1839,27 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		fCol := ws.FCol[:m]
 		if len(ws.FColIdx) > 1 {
 			tau := ws.Tau[:m]
-			clear(tau)
+			if ws.TauSparse {
+				for _, i := range ws.TauIdx {
+					if uint(i) < uint(m) {
+						tau[i] = 0
+					}
+				}
+				ws.TauIdx = ws.TauIdx[:0]
+			} else {
+				clear(tau)
+			}
 			if ws.RhoSparse {
 				rho := ws.Rho[:m]
 				for _, i := range ws.RhoIdx {
 					tau[i] = rho[i]
 				}
+				ws.TauIdx = ws.LU.FTRANSparseHint(ws.Tau, ws.RhoIdx, ws.TauIdx)
 			} else {
 				copy(tau, ws.Rho[:m])
+				ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
 			}
-			ws.LU.FTRAN(ws.Tau)
+			ws.TauSparse = true
 			for _, i := range ws.FColIdx {
 				if i != leaveRow && uint(i) < uint(m) {
 					fi := fCol[i]

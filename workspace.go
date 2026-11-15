@@ -52,6 +52,7 @@ type Workspace struct {
 	FColSparse      bool
 	Tau             []float64
 	TauIdx          []int
+	TauSparse       bool
 	TabRow          []float64
 	TabRowIdx       []int
 	TabRowMark      []bool
@@ -122,6 +123,7 @@ func (ws *Workspace) EnsureSize(n, m int) {
 	ws.FColSparse = false
 	ws.Tau = resizeFloat64(ws.Tau, m)
 	ws.TauIdx = ws.TauIdx[:0]
+	ws.TauSparse = false
 	ws.TabRow = resizeFloat64(ws.TabRow, tot)
 	if cap(ws.TabRowMark) < tot {
 		ws.TabRowMark = make([]bool, tot)

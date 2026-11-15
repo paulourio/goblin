@@ -10,7 +10,7 @@ The `goblin` solver separates algebraic model building, sparse matrix assembly, 
 flowchart LR
     A["format.FromPuLPJSON / Model API"] --> B["Model.Compile()"]
     B --> C["CompiledProblem (CSR + CSC)"]
-    C --> D["Presolve (GCD + Savelsbergh)"]
+    C --> D["Presolve (GCD + Savelsbergh + Orbit Symmetry)"]
     D --> E["LPSolver (Dual / Primal Simplex + LU)"]
     E --> F["solveBranchAndCut (Cuts + Heuristics + B&B)"]
     F --> G["Result (Primal + Dual + Telemetry)"]
@@ -19,7 +19,7 @@ flowchart LR
 | Layer | Source Files | Core Responsibility |
 | :--- | :--- | :--- |
 | **1. Modeling & Compilation** | [`model.go`](../model.go), [`expr.go`](../expr.go), [`compiled.go`](../compiled.go) | Collects variables, linear expressions, and constraints, validates variable ownership and finite coefficients, deduplicates terms, and compiles immutable `CSR` and `CSC` sparse matrices (`CompiledProblem`). |
-| **2. Linear Algebra & LP Engine** | [`lu.go`](../lu.go), [`simplex.go`](../simplex.go), [`workspace.go`](../workspace.go), [`internal/simd/`](../internal/simd/) | Executes singleton-preordered sparse Markowitz `LU` factorization with PFI eta updates, Revised Dual Simplex with `FTRANSparse`/`BTRANSparse` and bound flipping, and Two-Phase Primal Simplex over pooled `Workspace` buffers. |
+| **2. Linear Algebra & LP Engine** | [`lu.go`](../lu.go), [`simplex.go`](../simplex.go), [`workspace.go`](../workspace.go), [`internal/simd/`](../internal/simd/) | Executes singleton-preordered sparse Markowitz `LU` factorization with PFI eta updates, Revised Dual Simplex with `FTRANSparseHint`/`BTRANSparseHint` and bound flipping, and Two-Phase Primal Simplex over pooled `Workspace` buffers. |
 | **3. MILP Branch-and-Cut & CBC Bridge** | [`presolve.go`](../presolve.go), [`cuts.go`](../cuts.go), [`heuristics.go`](../heuristics.go), [`bab.go`](../bab.go), [`solve.go`](../solve.go), [`cbc_cgo.go`](../cbc_cgo.go) | Performs MIP presolve, multi-family cutting-plane generation, primal heuristics, and pseudocost/strong-branching search in pure Go, or dispatches the compiled `CSC` matrix to COIN-OR CBC/CLP when `WithCBC()` is selected. |
 | **4. Combinatorial Assignment (`goblin/assign`)** | [`assign/assign.go`](../assign/assign.go), [`assign/solver.go`](../assign/solver.go), [`assign/workspace.go`](../assign/workspace.go), [`assign_alias.go`](../assign_alias.go) | Solves square and rectangular Linear Sum Assignment Problems (`LSAP`) in $O(\min(m, n)^2 \max(m, n))$ time via Jonker-Volgenant and Bijsterbosch-Volgenant dual reduction and 3-way partitioned Dijkstra shortest augmenting paths over pooled workspaces. |
 | **5. Serialization & Benchmarking** | [`format/pulp_json.go`](../format/pulp_json.go), [`format/mps.go`](../format/mps.go), [`bench/corpus.go`](../bench/corpus.go), [`bench/assign_corpus.go`](../bench/assign_corpus.go), [`bench/docgen.go`](../bench/docgen.go), [`cmd/goblin-optcheck/main.go`](../cmd/goblin-optcheck/main.go) | Parses and emits `PuLP` JSON and MPS formats, builds the 31-family MILP corpus (293 trials) and 22-family LSAP corpus (200 trials), synchronizes markdown documentation from JSON telemetry, and audits hot-path compiler and disassembly diagnostics. |

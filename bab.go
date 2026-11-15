@@ -275,7 +275,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 				bestPrimal = sol
 			}
 		}
-		if (!opts.EnableCuts || opts.MaxCutPasses <= 0 || isGapClosed(rootLPMin, bestObjMin, 0.20, opts.AbsGapTol)) && !timeExpired() && !isGapClosed(rootLPMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
+		if !timeExpired() && !isGapClosed(rootLPMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
 			if sol, objMin, ok := tryRootSubMIP(p, lpSolver, rootRes.Primal, p.VarLB, p.VarUB, bestObjMin, deadline); ok && objMin < bestObjMin {
 				bestObjMin = objMin
 				bestPrimal = sol
@@ -305,6 +305,9 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	if opts.EnableCuts && opts.MaxCutPasses > 0 {
 		stagnantRounds := 0
 		maxCutsPerRound := min(maxRootCutsCap, max(minRootCutsFloor, p.NumConstraints/rootCutsRowDiv))
+		anchorSnap := lpSolver.snapshot()
+		anchorLPRes := curLPRes
+		anchorCuts := 0
 		for range opts.MaxCutPasses {
 			if timeExpired() {
 				break
@@ -351,8 +354,18 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 						bestObjMin = objMin
 						bestPrimal = cand
 					}
+					anchorSnap = lpSolver.snapshot()
+					anchorLPRes = curLPRes
+					anchorCuts = cutsAdded
 					break
 				}
+			}
+
+			zeroGainTol := max(1e-6, 1e-7*math.Abs(prevObj))
+			if curLPRes.ObjectiveMin-prevObj > zeroGainTol {
+				anchorSnap = lpSolver.snapshot()
+				anchorLPRes = curLPRes
+				anchorCuts = cutsAdded
 			}
 
 			improvement := (curLPRes.ObjectiveMin - prevObj) / max(1.0, math.Abs(prevObj))
@@ -365,13 +378,22 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 				stagnantRounds = 0
 			}
 		}
+		if curLPRes.ObjectiveMin-anchorLPRes.ObjectiveMin <= max(1e-6, 1e-7*math.Abs(anchorLPRes.ObjectiveMin)) && cutsAdded > anchorCuts {
+			lpSolver.restore(anchorSnap)
+			curLPRes = anchorLPRes
+			cutsAdded = anchorCuts
+		}
+		if len(lpSolver.ExtraRows) > 0 {
+			cutsAdded -= lpSolver.PurgeSlackCuts(0.05)
+		}
 	}
 
 	rootCutMin := curLPRes.ObjectiveMin
 	rootCutUser := p.ObjectiveFromMin(rootCutMin)
 
 	postCutSubMIPFound := false
-	if opts.EnableHeuristics && cutsAdded > 0 && !timeExpired() && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
+	cutsImproved := cutsAdded > 0 && rootCutMin-rootLPMin > max(1e-6, 1e-7*math.Abs(rootLPMin))
+	if opts.EnableHeuristics && cutsImproved && !timeExpired() && !isGapClosed(rootCutMin, bestObjMin, opts.RelGapTol, opts.AbsGapTol) {
 		if sol, objMin, ok := tryRootSubMIP(p, lpSolver, curLPRes.Primal, p.VarLB, p.VarUB, bestObjMin, deadline); ok && objMin < bestObjMin {
 			bestObjMin = objMin
 			bestPrimal = sol

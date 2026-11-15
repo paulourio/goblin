@@ -638,3 +638,270 @@ func TestLPUnboundedIntegerInfeasibleVsUnboundedMIP(t *testing.T) {
 		}
 	}
 }
+
+// Verifies layout-independent S_G orbit symmetry breaking in Presolve across designated
+// bijection subgroups, general partitioning orbitopes, monotone-cost empty-block ordering,
+// and asymmetric negative controls.
+func TestOrbitSymmetryBreaking(t *testing.T) {
+	t.Run("designated_bijection_interleaved_layout", func(t *testing.T) {
+		const numGroups = 3
+		const numItems = 7
+		const numPeriods = 4
+		weights := [numPeriods][numItems]float64{
+			{310, 470, 520, 680, 190, 410, 620},
+			{440, 290, 610, 350, 530, 220, 580},
+			{260, 510, 390, 640, 480, 330, 490},
+			{590, 360, 450, 280, 370, 610, 310},
+		}
+		m := gb.NewModel("sym_bijection_interleaved", gb.Minimize)
+		var x [numGroups][numItems]gb.Var
+		// Interleave item-major binaries with auxiliary continuous variables so variable
+		// indices do not follow contiguous group-major blocks.
+		var z [numGroups][numPeriods]gb.Var
+		var mean [numGroups]gb.Var
+		for i := range numItems {
+			for g := range numGroups {
+				x[g][i] = m.AddBinaryVar(fmt.Sprintf("item_%d_grp_%d", i, g))
+			}
+			if i < numGroups {
+				mean[i] = m.AddContVar(fmt.Sprintf("mean_%d", i), 0, math.Inf(1))
+				for pIdx := range numPeriods {
+					z[i][pIdx] = m.AddContVar(fmt.Sprintf("dev_%d_%d", i, pIdx), 0, math.Inf(1))
+				}
+			}
+		}
+		obj := gb.NewExpr()
+		for g := range numGroups {
+			for pIdx := range numPeriods {
+				obj = obj.AddTerm(z[g][pIdx], 1.0)
+				pos := gb.NewExpr(gb.T(z[g][pIdx], 1.0), gb.T(mean[g], 1.0))
+				neg := gb.NewExpr(gb.T(z[g][pIdx], 1.0), gb.T(mean[g], -1.0))
+				for i := range numItems {
+					pos = pos.AddTerm(x[g][i], -weights[pIdx][i])
+					neg = neg.AddTerm(x[g][i], weights[pIdx][i])
+				}
+				m.AddConstraint(fmt.Sprintf("l1_pos_%d_%d", g, pIdx), gb.Ge(pos, 0))
+				m.AddConstraint(fmt.Sprintf("l1_neg_%d_%d", g, pIdx), gb.Ge(neg, 0))
+			}
+		}
+		m.SetObjective(obj)
+		for i := range numItems {
+			part := gb.NewExpr()
+			for g := range numGroups {
+				part = part.AddTerm(x[g][i], 1.0)
+			}
+			m.AddConstraint(fmt.Sprintf("part_%d", i), gb.Eq(part, 1.0))
+		}
+		for g := range numGroups {
+			desig := gb.NewExpr()
+			for i := numItems - numGroups; i < numItems; i++ {
+				desig = desig.AddTerm(x[g][i], 1.0)
+			}
+			m.AddConstraint(fmt.Sprintf("desig_%d", g), gb.Eq(desig, 1.0))
+		}
+
+		p := m.Compile()
+		preRes := gb.Presolve(p, 5)
+		if preRes.Infeasible {
+			t.Fatalf("Presolve reported infeasible on feasible symmetric model")
+		}
+		if preRes.Reduced.NumConstraints >= p.NumConstraints {
+			t.Fatalf("Presolve constraints=%d, want < %d after eliminating fixed designated equations",
+				preRes.Reduced.NumConstraints, p.NumConstraints)
+		}
+
+		resNoPre := mustSolveCompiled(t, p, gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false))
+		if resNoPre.Status != gb.StatusOptimal {
+			t.Fatalf("no-presolve baseline status=%v, want Optimal", resNoPre.Status)
+		}
+		wantObj := resNoPre.Objective
+		for name, opts := range optionVariants() {
+			assertOptimal(t, "bijection/"+name, p, mustSolveCompiled(t, p, opts...), wantObj)
+		}
+		resBare := mustSolveCompiled(t, p, gb.WithCuts(false), gb.WithHeuristics(false))
+		if resBare.Nodes >= resNoPre.Nodes {
+			t.Fatalf("presolve symmetry breaking nodes=%d, want < %d (no-presolve)", resBare.Nodes, resNoPre.Nodes)
+		}
+	})
+
+	t.Run("partition_orbitope_and_edge_statuses", func(t *testing.T) {
+		weights := []float64{19, 17, 13, 11, 7, 5, 3, 2}
+		m := gb.NewModel("sym_makespan_3", gb.Minimize)
+		makespan := m.AddContVar("makespan", 0, math.Inf(1))
+		m.SetObjective(gb.NewExpr(gb.T(makespan, 1.0)))
+		var x [3][]gb.Var
+		for g := range 3 {
+			x[g] = make([]gb.Var, len(weights))
+			load := gb.NewExpr(gb.T(makespan, 1.0))
+			for i, w := range weights {
+				x[g][i] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", g, i))
+				load = load.AddTerm(x[g][i], -w)
+			}
+			m.AddConstraint(fmt.Sprintf("load_%d", g), gb.Ge(load, 0))
+		}
+		for i := range weights {
+			m.AddConstraint(fmt.Sprintf("assign_%d", i),
+				gb.Eq(gb.NewExpr(gb.T(x[0][i], 1), gb.T(x[1][i], 1), gb.T(x[2][i], 1)), 1.0))
+		}
+		p := m.Compile()
+		for name, opts := range optionVariants() {
+			assertOptimal(t, "orbitope/"+name, p, mustSolveCompiled(t, p, opts...), 26.0)
+		}
+		resNoPre := mustSolveCompiled(t, p, gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false))
+		resBare := mustSolveCompiled(t, p, gb.WithCuts(false), gb.WithHeuristics(false))
+		if resBare.Nodes >= resNoPre.Nodes {
+			t.Fatalf("orbitope symmetry breaking nodes=%d, want < %d", resBare.Nodes, resNoPre.Nodes)
+		}
+
+		// Symmetric infeasible partitioning model: 3 groups with capacity 1 each cannot hold 4 items.
+		mInf := gb.NewModel("sym_infeasible", gb.Minimize)
+		var xInf [3][4]gb.Var
+		for g := range 3 {
+			capExpr := gb.NewExpr()
+			for i := range 4 {
+				xInf[g][i] = mInf.AddBinaryVar(fmt.Sprintf("xi_%d_%d", g, i))
+				capExpr = capExpr.AddTerm(xInf[g][i], 1.0)
+			}
+			mInf.AddConstraint(fmt.Sprintf("cap_%d", g), gb.Le(capExpr, 1.0))
+		}
+		for i := range 4 {
+			mInf.AddConstraint(fmt.Sprintf("part_%d", i),
+				gb.Eq(gb.NewExpr(gb.T(xInf[0][i], 1), gb.T(xInf[1][i], 1), gb.T(xInf[2][i], 1)), 1.0))
+		}
+		pInf := mInf.Compile()
+		for name, opts := range optionVariants() {
+			if res := mustSolveCompiled(t, pInf, opts...); res.Status != gb.StatusInfeasible {
+				t.Fatalf("sym_infeasible/%s: status=%v, want Infeasible", name, res.Status)
+			}
+		}
+
+		// Symmetric unbounded partitioning model: free continuous bonus coupled symmetrically.
+		mUnb := gb.NewModel("sym_unbounded", gb.Minimize)
+		u := mUnb.AddContVar("u", math.Inf(-1), 0)
+		mUnb.SetObjective(gb.NewExpr(gb.T(u, 1.0)))
+		var xUnb [2][2]gb.Var
+		for g := range 2 {
+			for i := range 2 {
+				xUnb[g][i] = mUnb.AddBinaryVar(fmt.Sprintf("xu_%d_%d", g, i))
+			}
+			mUnb.AddConstraint(fmt.Sprintf("g_%d", g),
+				gb.Eq(gb.NewExpr(gb.T(xUnb[g][0], 1), gb.T(xUnb[g][1], 1)), 1.0))
+		}
+		for i := range 2 {
+			mUnb.AddConstraint(fmt.Sprintf("p_%d", i),
+				gb.Eq(gb.NewExpr(gb.T(xUnb[0][i], 1), gb.T(xUnb[1][i], 1)), 1.0))
+		}
+		pUnb := mUnb.Compile()
+		for name, opts := range optionVariants() {
+			if res := mustSolveCompiled(t, pUnb, opts...); res.Status != gb.StatusUnbounded {
+				t.Fatalf("sym_unbounded/%s: status=%v, want Unbounded", name, res.Status)
+			}
+		}
+	})
+
+	t.Run("monotone_empty_block_and_asymmetric_control", func(t *testing.T) {
+		sizes := []float64{6, 6, 5, 3}
+		openCosts := []float64{1.00, 1.02, 1.07, 1.25, 1.40}
+		m := gb.NewModel("perturbed_binpack", gb.Minimize)
+		var y [5]gb.Var
+		var x [5][]gb.Var
+		obj := gb.NewExpr()
+		for b := range 5 {
+			y[b] = m.AddBinaryVar(fmt.Sprintf("y_%d", b))
+			obj = obj.AddTerm(y[b], openCosts[b])
+			x[b] = make([]gb.Var, len(sizes))
+			capExpr := gb.NewExpr(gb.T(y[b], -10.0))
+			for i, sz := range sizes {
+				x[b][i] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", b, i))
+				capExpr = capExpr.AddTerm(x[b][i], sz)
+			}
+			m.AddConstraint(fmt.Sprintf("cap_%d", b), gb.Le(capExpr, 0))
+		}
+		m.SetObjective(obj)
+		for i := range sizes {
+			m.AddConstraint(fmt.Sprintf("assign_%d", i),
+				gb.Eq(gb.NewExpr(
+					gb.T(x[0][i], 1), gb.T(x[1][i], 1), gb.T(x[2][i], 1),
+					gb.T(x[3][i], 1), gb.T(x[4][i], 1),
+				), 1.0))
+		}
+		p := m.Compile()
+		for name, opts := range optionVariants() {
+			assertOptimal(t, "perturbed_binpack/"+name, p, mustSolveCompiled(t, p, opts...), 3.09)
+		}
+
+		// Negative control: bin 0 has capacity 8 and cost 1.0, while bin 1 has capacity 10 and
+		// cost 1.1. A single item of size 9 requires bin 1 to open while bin 0 stays closed, so
+		// presolve must reject y_0 >= y_1 because the constraint capacities are asymmetric.
+		mAsym := gb.NewModel("asym_binpack_control", gb.Minimize)
+		y0 := mAsym.AddBinaryVar("y0")
+		y1 := mAsym.AddBinaryVar("y1")
+		x0 := mAsym.AddBinaryVar("x0")
+		x1 := mAsym.AddBinaryVar("x1")
+		mAsym.SetObjective(gb.NewExpr(gb.T(y0, 1.0), gb.T(y1, 1.1)))
+		mAsym.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x0, 9.0), gb.T(y0, -8.0)), 0))
+		mAsym.AddConstraint("c1", gb.Le(gb.NewExpr(gb.T(x1, 9.0), gb.T(y1, -10.0)), 0))
+		mAsym.AddConstraint("assign", gb.Eq(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 1.0)), 1.0))
+		pAsym := mAsym.Compile()
+		for name, opts := range optionVariants() {
+			assertOptimal(t, "asym_control/"+name, pAsym, mustSolveCompiled(t, pAsym, opts...), 1.1)
+		}
+	})
+}
+
+// Verifies single-row c-MIR cut separation on one-sided bounded variables and slack-cut
+// compaction in LPSolver.PurgeSlackCuts followed by warm-started bound updates.
+func TestOneSidedCMIRCutsAndPurgeSlackCuts(t *testing.T) {
+	m := gb.NewModel("onesided_cmir", gb.Minimize)
+	z := m.AddIntVar("z", 0, math.Inf(1))
+	s := m.AddContVar("s", 0, math.Inf(1))
+	w := m.AddContVar("w", math.Inf(-1), 2.0)
+	m.SetObjective(gb.NewExpr(gb.T(z, 10.0), gb.T(s, 10.0), gb.T(w, -1.0)))
+	m.AddConstraint("lower_mix", gb.Ge(gb.NewExpr(gb.T(z, 1.0), gb.T(s, 0.25)), 2.4))
+	m.AddConstraint("upper_mix", gb.Le(gb.NewExpr(gb.T(z, -1.0), gb.T(w, 0.5)), -1.3))
+	p := m.Compile()
+
+	for name, opts := range optionVariants() {
+		assertOptimal(t, "onesided_cmir/"+name, p, mustSolveCompiled(t, p, opts...), 28.0)
+	}
+	rootOnly := mustSolveCompiled(t, p, gb.WithPresolve(false), gb.WithHeuristics(false), gb.WithMaxNodes(1))
+	if rootOnly.RootCutBound <= rootOnly.RootLPBound+1.0 {
+		t.Fatalf("expected one-sided c-MIR to tighten RootCutBound > RootLPBound+1.0, got LP=%.4f Cut=%.4f",
+			rootOnly.RootLPBound, rootOnly.RootCutBound)
+	}
+
+	lpModel := gb.NewModel("purge_slack_cuts", gb.Minimize)
+	x0 := lpModel.AddContVar("x0", 0, 10)
+	x1 := lpModel.AddContVar("x1", 0, 10)
+	lpModel.SetObjective(gb.NewExpr(gb.T(x0, -3.0), gb.T(x1, -2.0)))
+	lpModel.AddConstraint("cap", gb.Le(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 1.0)), 6.0))
+	lpProb := lpModel.Compile()
+
+	ws := gb.AcquireWorkspace(lpProb.NumVars, lpProb.NumConstraints)
+	defer gb.ReleaseWorkspace(ws)
+	lp := gb.NewLPSolver(lpProb, ws)
+	if res0 := lp.Solve(); res0.Status != gb.StatusOptimal || math.Abs(res0.Objective - -18.0) > 1e-8 {
+		t.Fatalf("initial LP status=%v obj=%.6f, want Optimal -18.0", res0.Status, res0.Objective)
+	}
+
+	// Add one binding cut (x0 <= 4.0) and two strictly slack cuts (x0 + 2*x1 <= 20, x1 <= 9).
+	lp.AddCut([]int{0}, []float64{1.0}, 4.0)
+	lp.AddCut([]int{0, 1}, []float64{1.0, 2.0}, 20.0)
+	lp.AddCut([]int{1}, []float64{1.0}, 9.0)
+	resCut := lp.Solve()
+	if resCut.Status != gb.StatusOptimal || math.Abs(resCut.Objective - -16.0) > 1e-8 {
+		t.Fatalf("cut LP status=%v obj=%.6f, want Optimal -16.0", resCut.Status, resCut.Objective)
+	}
+	if got := lp.PurgeSlackCuts(0.05); got != 2 || len(lp.ExtraRows) != 1 {
+		t.Fatalf("PurgeSlackCuts removed %d rows (remaining=%d), want 2 removed and 1 remaining",
+			got, len(lp.ExtraRows))
+	}
+
+	// Tighten x1 <= 1.5 and warm-start; optimal is x0 = 4.0 (from kept cut), x1 = 1.5 -> obj = -15.0.
+	lp.SetStructuralBounds([]float64{0, 0}, []float64{10, 1.5})
+	resWarm := lp.Solve()
+	if resWarm.Status != gb.StatusOptimal || math.Abs(resWarm.Objective - -15.0) > 1e-8 {
+		t.Fatalf("warm LP after PurgeSlackCuts: status=%v obj=%.6f, want Optimal -15.0",
+			resWarm.Status, resWarm.Objective)
+	}
+}

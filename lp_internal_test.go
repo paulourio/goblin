@@ -193,55 +193,85 @@ func TestSparseMarkowitzLUAndHyperSparseSolves(t *testing.T) {
 		t.Fatalf("expected full Markowitz nucleus (nucStart=0), got nucStart=%d", lu.nucStart)
 	}
 
-	// Verify FTRANSparse and BTRANSparse match dense FTRAN and BTRAN on sparse RHS vectors,
-	// both before and after PushEtaSparse updates.
+	// Verify FTRANSparse, FTRANSparseHint, BTRANSparse, and BTRANSparseHint match dense
+	// FTRAN and BTRAN on sparse RHS vectors before and after PushEtaSparse updates.
 	for step := range 4 {
 		bDense := make([]float64, m)
 		bSparse := make([]float64, m)
-		bOrig := make([]float64, m)
+		bHint := make([]float64, m)
+		var bInIdx []int
+		seenIn := make([]bool, m)
 		for range 3 {
 			idx := r.IntN(m)
 			val := (r.Float64() - 0.5) * 5.0
 			bDense[idx] = val
 			bSparse[idx] = val
-			bOrig[idx] = val
+			bHint[idx] = val
+			if !seenIn[idx] {
+				seenIn[idx] = true
+				bInIdx = append(bInIdx, idx)
+			}
 		}
 		lu.FTRAN(bDense)
 		fIdx := lu.FTRANSparse(bSparse, nil)
+		fHintIdx := lu.FTRANSparseHint(bHint, bInIdx, nil)
 		for i := range m {
 			if math.Abs(bDense[i]-bSparse[i]) > 1e-12 {
 				t.Fatalf("step %d: FTRANSparse[%d]=%.15g != FTRAN=%.15g", step, i, bSparse[i], bDense[i])
+			}
+			if math.Abs(bDense[i]-bHint[i]) > 1e-12 {
+				t.Fatalf("step %d: FTRANSparseHint[%d]=%.15g != FTRAN=%.15g", step, i, bHint[i], bDense[i])
 			}
 		}
 		inFIdx := make([]bool, m)
 		for _, idx := range fIdx {
 			inFIdx[idx] = true
 		}
+		inFHint := make([]bool, m)
+		for _, idx := range fHintIdx {
+			inFHint[idx] = true
+		}
 		for i, v := range bSparse {
 			if math.Abs(v) > 1e-13 && !inFIdx[i] {
 				t.Fatalf("step %d: nonzero FTRANSparse[%d]=%.3e missing from fIdx", step, i, v)
+			}
+			if math.Abs(bHint[i]) > 1e-13 && !inFHint[i] {
+				t.Fatalf("step %d: nonzero FTRANSparseHint[%d]=%.3e missing from fHintIdx", step, i, bHint[i])
 			}
 		}
 
 		cDense := make([]float64, m)
 		cSparse := make([]float64, m)
+		cHint := make([]float64, m)
 		pivRow := r.IntN(m)
 		cDense[pivRow] = 1.0
 		cSparse[pivRow] = 1.0
+		cHint[pivRow] = 1.0
 		lu.BTRAN(cDense)
 		rIdx := lu.BTRANSparse(cSparse, nil)
+		rHintIdx := lu.BTRANSparseHint(cHint, []int{pivRow}, nil)
 		for i := range m {
 			if math.Abs(cDense[i]-cSparse[i]) > 1e-12 {
 				t.Fatalf("step %d: BTRANSparse[%d]=%.15g != BTRAN=%.15g", step, i, cSparse[i], cDense[i])
+			}
+			if math.Abs(cDense[i]-cHint[i]) > 1e-12 {
+				t.Fatalf("step %d: BTRANSparseHint[%d]=%.15g != BTRAN=%.15g", step, i, cHint[i], cDense[i])
 			}
 		}
 		inRIdx := make([]bool, m)
 		for _, idx := range rIdx {
 			inRIdx[idx] = true
 		}
+		inRHint := make([]bool, m)
+		for _, idx := range rHintIdx {
+			inRHint[idx] = true
+		}
 		for i, v := range cSparse {
 			if math.Abs(v) > 1e-13 && !inRIdx[i] {
 				t.Fatalf("step %d: nonzero BTRANSparse[%d]=%.3e missing from rIdx", step, i, v)
+			}
+			if math.Abs(cHint[i]) > 1e-12 && !inRHint[i] {
+				t.Fatalf("step %d: nonzero BTRANSparseHint[%d]=%.3e missing from rHintIdx", step, i, cHint[i])
 			}
 		}
 
@@ -253,6 +283,29 @@ func TestSparseMarkowitzLUAndHyperSparseSolves(t *testing.T) {
 		if err := lu.PushEtaSparse(pivRow, fSparseCopy, fIdx); err != nil {
 			t.Fatalf("step %d: PushEtaSparse failed: %v", step, err)
 		}
-		_ = bOrig
+	}
+
+	// Verify empty-input and dense-fallback paths of FTRANSparseHint and BTRANSparseHint.
+	zeroVec := make([]float64, m)
+	if got := lu.FTRANSparseHint(zeroVec, nil, nil); len(got) != 0 {
+		t.Fatalf("empty FTRANSparseHint returned %d indices, want 0", len(got))
+	}
+	if got := lu.BTRANSparseHint(zeroVec, nil, nil); len(got) != 0 {
+		t.Fatalf("empty BTRANSparseHint returned %d indices, want 0", len(got))
+	}
+	denseRef := make([]float64, m)
+	denseHint := make([]float64, m)
+	denseIn := make([]int, 0, m/2)
+	for i := range m / 2 {
+		denseRef[i] = float64(i + 1)
+		denseHint[i] = float64(i + 1)
+		denseIn = append(denseIn, i)
+	}
+	lu.FTRAN(denseRef)
+	lu.FTRANSparseHint(denseHint, denseIn, nil)
+	for i := range m {
+		if math.Abs(denseRef[i]-denseHint[i]) > 1e-11 {
+			t.Fatalf("dense-fallback FTRANSparseHint[%d]=%.15g != FTRAN=%.15g", i, denseHint[i], denseRef[i])
+		}
 	}
 }

@@ -716,6 +716,16 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	return cuts
 }
 
+func mirUseLower(x, l, u float64) bool {
+	if math.IsInf(u, 1) {
+		return true
+	}
+	if math.IsInf(l, -1) {
+		return false
+	}
+	return x-l <= u-x
+}
+
 func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	n := p.NumVars
 	m := p.NumConstraints
@@ -742,7 +752,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		for k := s; k < e; k++ {
 			col := p.ColIdx[k]
 			act += sign * p.RowVal[k] * lpPrimal[col]
-			if math.IsInf(p.VarLB[col], -1) || math.IsInf(p.VarUB[col], 1) {
+			if math.IsInf(p.VarLB[col], -1) && math.IsInf(p.VarUB[col], 1) {
 				validBounds = false
 				break
 			}
@@ -769,13 +779,13 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			}
 			triedDivs++
 
-			// Shift variables to closer bound
+			// Shift variables to closer finite bound
 			beta := rhs
 			for k := s; k < e; k++ {
 				col := p.ColIdx[k]
 				a := sign * p.RowVal[k]
 				l, u := p.VarLB[col], p.VarUB[col]
-				if lpPrimal[col]-l <= u-lpPrimal[col] {
+				if mirUseLower(lpPrimal[col], l, u) {
 					beta -= a * l
 				} else {
 					beta -= a * u
@@ -795,7 +805,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				col := p.ColIdx[k]
 				a := sign * p.RowVal[k]
 				l, u := p.VarLB[col], p.VarUB[col]
-				atLower := lpPrimal[col]-l <= u-lpPrimal[col]
+				atLower := mirUseLower(lpPrimal[col], l, u)
 
 				if p.VarCat[col] == Continuous {
 					if a > 0 {

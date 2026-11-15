@@ -66,6 +66,7 @@ type LUFactorization struct {
 	colDeg  []int
 	rowDone []bool
 	colDone []bool
+	nzMark  []bool
 	workInt []int
 	work    []float64
 
@@ -118,6 +119,7 @@ func (f *LUFactorization) Reset(m int) {
 		f.colDeg = make([]int, m)
 		f.rowDone = make([]bool, m)
 		f.colDone = make([]bool, m)
+		f.nzMark = make([]bool, m)
 		f.workInt = make([]int, m)
 		f.work = make([]float64, m)
 	} else {
@@ -137,6 +139,8 @@ func (f *LUFactorization) Reset(m int) {
 		f.colDeg = f.colDeg[:m]
 		f.rowDone = f.rowDone[:m]
 		f.colDone = f.colDone[:m]
+		f.nzMark = f.nzMark[:m]
+		clear(f.nzMark)
 		f.workInt = f.workInt[:m]
 		f.work = f.work[:m]
 		clear(f.work)
@@ -926,7 +930,8 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 		}
 
 		// Solve upper-triangular U * x = y.
-		for j := lastNZ; j >= 0; j-- {
+		minNZ := firstNZ
+		for j := lastNZ; j >= minNZ; j-- {
 			if uint(j) >= uint(m) {
 				continue
 			}
@@ -948,6 +953,9 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 				for p, r := range rows {
 					if uint(r) < uint(m) {
 						w[r] -= vals[p] * wj
+						if r < minNZ {
+							minNZ = r
+						}
 					}
 				}
 			}
@@ -955,9 +963,10 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 
 		colPerm := f.colPerm[:lastNZ+1]
 		wOut := w[:lastNZ+1]
-		for k, c := range colPerm {
+		for k := minNZ; k <= lastNZ; k++ {
 			if wk := wOut[k]; wk != 0 {
 				wOut[k] = 0
+				c := colPerm[k]
 				if uint(c) < uint(m) {
 					rhs[c] = wk
 				}
@@ -994,19 +1003,181 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 
 // FTRANSparse solves B * x = rhs in place and appends the indices i with |x[i]| > luSolveDropTol to nzIdx.
 func (f *LUFactorization) FTRANSparse(rhs []float64, nzIdx []int) []int {
-	f.FTRAN(rhs)
+	return f.FTRANSparseHint(rhs, nil, nzIdx)
+}
+
+// FTRANSparseHint solves B * x = rhs in place using optional candidate input nonzero
+// indices inIdx, returning output indices i with |x[i]| > luSolveDropTol in nzIdx.
+func (f *LUFactorization) FTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []int {
+	m := f.m
+	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.invPerm) < m || len(f.colPerm) < m || len(f.nzMark) < m || len(f.uInvDiag) < m || len(f.lColPtr) <= m || len(f.uColPtr) <= m {
+		return nzIdx[:0]
+	}
+	rhs = rhs[:m]
+	w := f.work[:m]
+	firstNZ := m
+	lastNZ := -1
+	if inIdx != nil && len(inIdx) < (m>>2) {
+		invPerm := f.invPerm[:m]
+		for _, p := range inIdx {
+			if uint(p) >= uint(m) {
+				continue
+			}
+			v := rhs[p]
+			if v != 0 {
+				rhs[p] = 0
+				i := invPerm[p]
+				w[i] = v
+				if i < firstNZ {
+					firstNZ = i
+				}
+				if i > lastNZ {
+					lastNZ = i
+				}
+			}
+		}
+	} else {
+		perm := f.perm[:m]
+		for i, p := range perm {
+			if uint(p) >= uint(m) {
+				continue
+			}
+			v := rhs[p]
+			if v != 0 {
+				rhs[p] = 0
+				w[i] = v
+				if lastNZ < 0 {
+					firstNZ = i
+				}
+				lastNZ = i
+			}
+		}
+	}
+
 	nzIdx = nzIdx[:0]
-	for i, v := range rhs {
-		if v == 0 {
+	nzMark := f.nzMark[:m]
+	if lastNZ >= 0 {
+		lColPtr := f.lColPtr[:m+1]
+		lRowIdx := f.lRowIdx
+		lColVal := f.lColVal
+		uInvDiag := f.uInvDiag[:m]
+		uColPtr := f.uColPtr[:m+1]
+		uRowIdx := f.uRowIdx
+		uColVal := f.uColVal
+
+		startK := max(f.numColSing, firstNZ)
+		for k := startK; k <= lastNZ && uint(k) < uint(m); k++ {
+			wk := w[k]
+			if wk == 0 {
+				continue
+			}
+			if wk <= luDropTol && wk >= -luDropTol {
+				w[k] = 0
+				continue
+			}
+			start, end := lColPtr[k], lColPtr[k+1]
+			rows := lRowIdx[start:end]
+			vals := lColVal[start:end]
+			if len(rows) > 0 {
+				vals = vals[:len(rows)]
+				for p, r := range rows {
+					if uint(r) < uint(m) {
+						w[r] -= vals[p] * wk
+						if r > lastNZ {
+							lastNZ = r
+						}
+					}
+				}
+			}
+		}
+
+		minNZ := firstNZ
+		for j := lastNZ; j >= minNZ; j-- {
+			if uint(j) >= uint(m) {
+				continue
+			}
+			wj := w[j]
+			if wj == 0 {
+				continue
+			}
+			if wj <= luDropTol && wj >= -luDropTol {
+				w[j] = 0
+				continue
+			}
+			wj *= uInvDiag[j]
+			w[j] = wj
+			start, end := uColPtr[j], uColPtr[j+1]
+			rows := uRowIdx[start:end]
+			vals := uColVal[start:end]
+			if len(rows) > 0 {
+				vals = vals[:len(rows)]
+				for p, r := range rows {
+					if uint(r) < uint(m) {
+						w[r] -= vals[p] * wj
+						if r < minNZ {
+							minNZ = r
+						}
+					}
+				}
+			}
+		}
+
+		colPerm := f.colPerm[:lastNZ+1]
+		wOut := w[:lastNZ+1]
+		for k := minNZ; k <= lastNZ; k++ {
+			if wk := wOut[k]; wk != 0 {
+				wOut[k] = 0
+				c := colPerm[k]
+				if uint(c) < uint(m) {
+					rhs[c] = wk
+					nzMark[c] = true
+					nzIdx = append(nzIdx, c)
+				}
+			}
+		}
+	}
+
+	etas := f.etas
+	for e := range etas {
+		eta := &etas[e]
+		pr := eta.pivotRow
+		if uint(pr) >= uint(m) {
 			continue
 		}
+		xp := rhs[pr]
+		if xp == 0 {
+			continue
+		}
+		if xp <= luDropTol && xp >= -luDropTol {
+			rhs[pr] = 0
+			continue
+		}
+		xp *= eta.pivotInv
+		rhs[pr] = xp
+		idxs := eta.idx
+		vals := eta.val[:len(idxs)]
+		for k, idx := range idxs {
+			if uint(idx) < uint(m) {
+				rhs[idx] -= vals[k] * xp
+				if !nzMark[idx] {
+					nzMark[idx] = true
+					nzIdx = append(nzIdx, idx)
+				}
+			}
+		}
+	}
+
+	out := nzIdx[:0]
+	for _, i := range nzIdx {
+		nzMark[i] = false
+		v := rhs[i]
 		if v > luSolveDropTol || v < -luSolveDropTol {
-			nzIdx = append(nzIdx, i)
+			out = append(out, i)
 		} else {
 			rhs[i] = 0
 		}
 	}
-	return nzIdx
+	return out
 }
 
 func (f *LUFactorization) BTRAN(rhs []float64) {
@@ -1092,8 +1263,9 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 	}
 
 	// Solve unit upper-triangular L^T * y = z
-	numColSing := f.numColSing
-	for i := lastNZ; i >= numColSing; i-- {
+	minNZ := firstNZ
+	stopI := max(f.numColSing, minNZ)
+	for i := lastNZ; i >= stopI; i-- {
 		if uint(i) >= uint(m) {
 			continue
 		}
@@ -1113,6 +1285,10 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 			for p, c := range cols {
 				if uint(c) < uint(m) {
 					w[c] -= vals[p] * wi
+					if c < minNZ {
+						minNZ = c
+						stopI = max(f.numColSing, minNZ)
+					}
 				}
 			}
 		}
@@ -1120,9 +1296,10 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 
 	perm := f.perm[:lastNZ+1]
 	wOut := w[:lastNZ+1]
-	for i, p := range perm {
+	for i := minNZ; i <= lastNZ; i++ {
 		if wi := wOut[i]; wi != 0 {
 			wOut[i] = 0
+			p := perm[i]
 			if uint(p) < uint(m) {
 				rhs[p] = wi
 			}
@@ -1132,16 +1309,182 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 
 // BTRANSparse solves B^T * y = rhs in place and appends the indices i with |y[i]| > luDropTol to nzIdx.
 func (f *LUFactorization) BTRANSparse(rhs []float64, nzIdx []int) []int {
-	f.BTRAN(rhs)
-	nzIdx = nzIdx[:0]
-	for i, v := range rhs {
-		if v == 0 {
+	return f.BTRANSparseHint(rhs, nil, nzIdx)
+}
+
+// BTRANSparseHint solves B^T * y = rhs in place using optional candidate input nonzero
+// indices inIdx, returning output indices i with |y[i]| > luDropTol in nzIdx.
+func (f *LUFactorization) BTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []int {
+	m := f.m
+	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.invColPerm) < m || len(f.nzMark) < m || len(f.uInvDiag) < m || len(f.lRowPtr) <= m || len(f.uRowPtr) <= m {
+		return nzIdx[:0]
+	}
+	rhs = rhs[:m]
+	w := f.work[:m]
+	etas := f.etas
+	firstNZ := m
+	lastNZ := -1
+
+	if inIdx != nil && len(inIdx) < (m>>2) {
+		nzMark := f.nzMark[:m]
+		workIdx := nzIdx[:0]
+		for _, p := range inIdx {
+			if uint(p) < uint(m) && !nzMark[p] {
+				nzMark[p] = true
+				workIdx = append(workIdx, p)
+			}
+		}
+		for e := len(etas) - 1; e >= 0; e-- {
+			eta := &etas[e]
+			pr := eta.pivotRow
+			if uint(pr) >= uint(m) {
+				continue
+			}
+			sum := rhs[pr]
+			idxs := eta.idx
+			vals := eta.val[:len(idxs)]
+			for k, idx := range idxs {
+				if uint(idx) < uint(m) {
+					sum -= vals[k] * rhs[idx]
+				}
+			}
+			rhs[pr] = sum * eta.pivotInv
+			if sum != 0 && !nzMark[pr] {
+				nzMark[pr] = true
+				workIdx = append(workIdx, pr)
+			}
+		}
+		invColPerm := f.invColPerm[:m]
+		for _, c := range workIdx {
+			nzMark[c] = false
+			v := rhs[c]
+			if v != 0 {
+				rhs[c] = 0
+				k := invColPerm[c]
+				w[k] = v
+				if k < firstNZ {
+					firstNZ = k
+				}
+				if k > lastNZ {
+					lastNZ = k
+				}
+			}
+		}
+		nzIdx = workIdx[:0]
+	} else {
+		for e := len(etas) - 1; e >= 0; e-- {
+			eta := &etas[e]
+			pr := eta.pivotRow
+			if uint(pr) >= uint(m) {
+				continue
+			}
+			sum := rhs[pr]
+			idxs := eta.idx
+			vals := eta.val[:len(idxs)]
+			for k, idx := range idxs {
+				if uint(idx) < uint(m) {
+					sum -= vals[k] * rhs[idx]
+				}
+			}
+			rhs[pr] = sum * eta.pivotInv
+		}
+		colPerm := f.colPerm[:m]
+		for k, c := range colPerm {
+			if uint(c) >= uint(m) {
+				continue
+			}
+			v := rhs[c]
+			if v != 0 {
+				rhs[c] = 0
+				w[k] = v
+				if lastNZ < 0 {
+					firstNZ = k
+				}
+				lastNZ = k
+			}
+		}
+		nzIdx = nzIdx[:0]
+	}
+	if lastNZ < 0 {
+		return nzIdx
+	}
+
+	uInvDiag := f.uInvDiag[:m]
+	uRowPtr := f.uRowPtr[:m+1]
+	uColIdx := f.uColIdx
+	uRowVal := f.uRowVal
+	lRowPtr := f.lRowPtr[:m+1]
+	lColIdx := f.lColIdx
+	lRowVal := f.lRowVal
+
+	for i := firstNZ; i <= lastNZ && uint(i) < uint(m); i++ {
+		wi := w[i]
+		if wi == 0 {
 			continue
 		}
-		if v > luDropTol || v < -luDropTol {
-			nzIdx = append(nzIdx, i)
-		} else {
-			rhs[i] = 0
+		if wi <= luDropTol && wi >= -luDropTol {
+			w[i] = 0
+			continue
+		}
+		wi *= uInvDiag[i]
+		w[i] = wi
+		start, end := uRowPtr[i], uRowPtr[i+1]
+		cols := uColIdx[start:end]
+		vals := uRowVal[start:end]
+		if len(cols) > 0 {
+			vals = vals[:len(cols)]
+			for p, c := range cols {
+				if uint(c) < uint(m) {
+					w[c] -= vals[p] * wi
+					if c > lastNZ {
+						lastNZ = c
+					}
+				}
+			}
+		}
+	}
+
+	minNZ := firstNZ
+	stopI := max(f.numColSing, minNZ)
+	for i := lastNZ; i >= stopI; i-- {
+		if uint(i) >= uint(m) {
+			continue
+		}
+		wi := w[i]
+		if wi == 0 {
+			continue
+		}
+		if wi <= luDropTol && wi >= -luDropTol {
+			w[i] = 0
+			continue
+		}
+		start, end := lRowPtr[i], lRowPtr[i+1]
+		cols := lColIdx[start:end]
+		vals := lRowVal[start:end]
+		if len(cols) > 0 {
+			vals = vals[:len(cols)]
+			for p, c := range cols {
+				if uint(c) < uint(m) {
+					w[c] -= vals[p] * wi
+					if c < minNZ {
+						minNZ = c
+						stopI = max(f.numColSing, minNZ)
+					}
+				}
+			}
+		}
+	}
+
+	perm := f.perm[:lastNZ+1]
+	wOut := w[:lastNZ+1]
+	for i := minNZ; i <= lastNZ; i++ {
+		if wi := wOut[i]; wi != 0 {
+			wOut[i] = 0
+			p := perm[i]
+			if uint(p) < uint(m) && (wi > luDropTol || wi < -luDropTol) {
+				rhs[p] = wi
+				nzIdx = append(nzIdx, p)
+			}
 		}
 	}
 	return nzIdx

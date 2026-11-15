@@ -304,8 +304,9 @@ func tryPropagatedRounding(
 		}
 	}
 	fracCands := cands[firstFrac:]
+	lpFallbackSolver := auxSolver
 	if hasCont && len(fracCands) > 32 {
-		return nil, 0, false
+		lpFallbackSolver = nil
 	}
 
 	hlb := make([]float64, n)
@@ -400,7 +401,7 @@ func tryPropagatedRounding(
 				}
 			}
 		} else if auxSolver != nil {
-			if sSol, sObj, sOk := solveFixedIntContinuousLP(p, hlb, hub, auxSolver); sOk && sObj < bestObj {
+			if sSol, sObj, sOk := solveFixedIntContinuousLP(p, hlb, hub, lpFallbackSolver); sOk && sObj < bestObj {
 				bestObj = sObj
 				bestSol = sSol
 			}
@@ -905,6 +906,10 @@ func solveFixedIntContinuousLP(
 		if res.Status == StatusInfeasible {
 			return nil, 0, false
 		}
+	}
+
+	if auxSolver == nil && n > 256 {
+		return nil, 0, false
 	}
 
 	subModel := NewModel("__cont_lp__", Minimize)
