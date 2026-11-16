@@ -648,382 +648,429 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 
 	switch blockName {
 	case "TIER_SUMMARY_TABLE":
-		type groupSpec struct {
-			label  string
-			filter func(c CorpusCase) bool
-		}
-		groups := []groupSpec{
-			{"Tier 1: Canonical (`N <= 26`)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
-			{"Tier 2: Target p90 (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
-			{"Tier 3: Large Tail (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
-			{"Tier 3 non-MAD MILPs", func(c CorpusCase) bool {
-				_, _, _, isMAD := madDimensions(c.ID)
-				return c.Tier == "tier3_large" && !isMAD
-			}},
-			{"Planted-gap MAD family (zero integrality gap by construction)", func(c CorpusCase) bool { return isPlantedMAD(c.ID) }},
-			{"Random-weight MAD (negative controls)", func(c CorpusCase) bool { return strings.Contains(c.ID, "_mad_rand_") }},
-			{"**All families except planted-gap MAD**", func(c CorpusCase) bool { return !isPlantedMAD(c.ID) }},
-			{"All corpus families", func(_ CorpusCase) bool { return true }},
-		}
-
-		b.WriteString("| Workload Subset | Families | `Py / goblin (Go)` GeoMean | `Py net / goblin (Go)` | `goblin (Go) / CBC` | `goblin (Go)` (ms) | `goblin (CBC)` (ms) | Py Total (ms) | Py Net (ms) | `Py / goblin (Go)` Median [Min-Max] |\n")
-		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-		for _, grp := range groups {
-			var pyVals, pyNetVals, gbVals, goVals, speedups []float64
-			for _, c := range cases {
-				if !grp.filter(c) {
-					continue
-				}
-				py := tb.Python[c.ID]
-				goT := tb.Scalar[c.ID].TTotalMS
-				pyVals = append(pyVals, py.TTotalMedianMS)
-				pyNetVals = append(pyNetVals, max(py.TTotalMedianMS-py.CBCSpawnFloorMS, minNetSolveMS))
-				if gb, ok := tb.Goblin[c.ID]; ok && gb.TTotalMS > 0 {
-					gbVals = append(gbVals, gb.TTotalMS)
-				}
-				goVals = append(goVals, goT)
-				if goT > 0 {
-					speedups = append(speedups, py.TTotalMedianMS/goT)
-				}
-			}
-			pyGM, pyNetGM, goGM := geoMean(pyVals), geoMean(pyNetVals), geoMean(goVals)
-			medSp, minSp, maxSp := medianMinMax(speedups)
-			gbStr, gbRatio := "N/A", "N/A"
-			if len(gbVals) == len(goVals) && len(gbVals) > 0 {
-				gbGM := geoMean(gbVals)
-				gbStr = fmt.Sprintf("%.2f", gbGM)
-				gbRatio = fmt.Sprintf("%.2fx", goGM/gbGM)
-			}
-			fmt.Fprintf(&b, "| %s | %d | **%.1fx** | %.1fx | %s | %.2f | %s | %.2f | %.2f | %.1fx [%.1fx-%.1fx] |\n",
-				grp.label, len(goVals), pyGM/goGM, pyNetGM/goGM, gbRatio, goGM, gbStr, pyGM, pyNetGM, medSp, minSp, maxSp)
-		}
-
+		renderTierSummaryTable(&b, cases, tb)
 	case "SIMD_EFFECT_TABLE":
-		b.WriteString("| Problem ID | `n + m` | AVX2 `Dot64`/`Axpy64` reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
-		b.WriteString("| :--- | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
-		for _, c := range cases {
-			sc := tb.Scalar[c.ID]
-			sm := tb.SIMD[c.ID]
-			size := sm.NumVars + sm.NumConstraints
-			gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-			reach, verdict := simdVerdict(size, lo, hi, n)
-			fmt.Fprintf(&b, "| `%s` | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %.3f | %.3f | %d |\n",
-				c.ID, size, reach, verdict, gm, lo, hi, sc.TSolveMS, sm.TSolveMS, n)
-		}
-
+		renderSIMDEffectTable(&b, cases, tb)
 	case "SIMD_SUMMARY":
-		var controls, controlsFlagged, reachable, faster, slower int
-		for _, c := range cases {
-			sm := tb.SIMD[c.ID]
-			size := sm.NumVars + sm.NumConstraints
-			_, lo, hi, n := pairedRatio(tb.Scalar[c.ID].TSolveTrialsMS, sm.TSolveTrialsMS)
-			if n < minPairedSamples {
-				continue
-			}
-			excludesOne := lo > 1 || hi < 1
-			if size < simdReachSize {
-				controls++
-				if excludesOne {
-					controlsFlagged++
-				}
-				continue
-			}
-			reachable++
-			switch {
-			case lo > 1:
-				faster++
-			case hi < 1:
-				slower++
-			}
-		}
-		fmt.Fprintf(&b, "- **Negative controls** (`n + m < %d`, no AVX2 kernel can run): %d of %d have a 95%% interval excluding 1. These differences come from the two binaries (compiler output and code layout differ under `GOEXPERIMENT=simd`) and from run-to-run effects, not from SIMD kernels. Intervals of similar size on the AVX2-capable instances are therefore not evidence of a SIMD effect.\n",
-			simdReachSize, controlsFlagged, controls)
-		fmt.Fprintf(&b, "- **Instances where AVX2 can run**: %d faster, %d slower, %d with no detectable effect, out of %d.\n",
-			faster, slower, reachable-faster-slower, reachable)
-
+		renderSIMDSummary(&b, cases, tb)
 	case "MAD_PIPELINE_TABLE":
-		b.WriteString("| Problem ID | $G \\times I$ | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Optimal Obj | Parity |\n")
-		b.WriteString("| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
-		for _, c := range cases {
-			g, i, _, ok := madDimensions(c.ID)
-			if !ok {
-				continue
-			}
-			py := tb.Python[c.ID]
-			sc := tb.Scalar[c.ID]
-			pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
-			goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | %d | %d | **%.1fx** | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %.1f | %s |\n",
-				c.ID,
-				g, i, sc.NumVars, sc.NumConstraints,
-				py.TTotalMedianMS/sc.TTotalMS,
-				sc.TTotalMS, py.TTotalMedianMS,
-				sc.TSolveMS, py.TSolveMedianMS, pyNetSolveMS(py),
-				goPrep, pyPrep,
-				sc.CP7Full.Objective,
-				parityCell(tb, c.ID))
-		}
-
+		renderMADPipelineTable(&b, cases, tb)
 	case "MAD_CBC_GAP_TABLE":
-		b.WriteString("| Problem ID | $G \\times I$ ($N \\times M$) | Total (`Go / CBC`) | Go Total (ms) | CBC Total (ms) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) | Py Net Solve (ms) |\n")
-		b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-		for _, c := range cases {
-			g, i, _, ok := madDimensions(c.ID)
-			if !ok {
-				continue
-			}
-			py := tb.Python[c.ID]
-			sc := tb.Scalar[c.ID]
-			gb := tb.Goblin[c.ID]
-			lpRatio := sc.RootLPTimeMS / max(gb.RootLPTimeMS, geoMeanMinFloor)
-			totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ ($%d \\times %d$) | **%.2fx** | %.2f | %.2f | %.2fx | %.2f (%d / %d) | %.2f (%d / %d) | %.3f (%d) | %.3f (%d) | %.2f |\n",
-				c.ID,
-				g, i, sc.NumVars, sc.NumConstraints,
-				totRatio,
-				sc.TTotalMS, gb.TTotalMS,
-				lpRatio,
-				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
-				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
-				sc.RootLPTimeMS, sc.RootLPIters,
-				gb.RootLPTimeMS, gb.RootLPIters,
-				pyNetSolveMS(py))
-		}
-
+		renderMADCBCGapTable(&b, cases, tb)
 	case "NON_MAD_CBC_GAP_TABLE":
-		b.WriteString("| Problem ID | $N \\times M$ | Total Median (`Go / CBC`) | Go Total Mean $\\pm$ SD (ms) | CBC Total Mean $\\pm$ SD (ms) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP5 +Presolve (ms / nodes) |\n")
-		b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-		gapIDs := []string{"t3_mkp_200", "t2_mkp_50", "t2_binpack_44", "t3_cflp_300", "t3_sched_1000"}
-		for _, id := range gapIDs {
-			sc, ok := tb.Scalar[id]
-			if !ok {
-				continue
-			}
-			gb := tb.Goblin[id]
-			totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | **%.2fx** | $%.2f \\pm %.2f$ | $%.2f \\pm %.2f$ | %.2f (%d / %d) | %.2f (%d / %d) | %s | %s |\n",
-				id,
-				sc.NumVars, sc.NumConstraints,
-				totRatio,
-				sc.TTotalMeanMS, sc.TTotalSDMS,
-				gb.TTotalMeanMS, gb.TTotalSDMS,
-				sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
-				gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
-				formatCP67(sc.CP6Cuts, false),
-				formatCP45(sc.CP5Presolve))
-		}
-
+		renderNonMADCBCGapTable(&b, tb)
 	case "MAD_STATS_TABLE":
-		b.WriteString("| Problem ID | $G \\times I$ | `goblin (Go)` Scalar Total (Mean $\\pm$ SD [95% CI], ms) | Python `PuLP + CBC` Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\\pm$ SD [95% CI], ms) |\n")
-		b.WriteString("| :--- | :---: | ---: | ---: | ---: |\n")
-		for _, c := range cases {
-			g, i, _, ok := madDimensions(c.ID)
-			if !ok {
-				continue
-			}
-			py := tb.Python[c.ID]
-			sc := tb.Scalar[c.ID]
-			sm := tb.SIMD[c.ID]
-			nTrials := py.Trials
-			if nTrials <= 0 {
-				nTrials = len(sm.TrialObjectives)
-			}
-			tc := tCrit975(nTrials - 1)
-			sqrtN := math.Sqrt(float64(max(1, nTrials)))
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | $%.2f \\pm %.2f$ ($\\pm %.2f$) | $%.2f \\pm %.2f$ ($\\pm %.2f$) | $%.2f \\pm %.2f$ ($\\pm %.2f$) |\n",
-				c.ID,
-				g, i,
-				sc.TTotalMeanMS, sc.TTotalSDMS, tc*sc.TTotalSDMS/sqrtN,
-				py.TTotalMeanMS, py.TTotalSDMS, tc*py.TTotalSDMS/sqrtN,
-				sm.TTotalMeanMS, sm.TTotalSDMS, tc*sm.TTotalSDMS/sqrtN)
-		}
-
-	case "MAD_CHECKPOINT_TABLE", "FULL_CHECKPOINT_TABLE":
-		b.WriteString("| Problem ID | CP7 Full (ms / nodes / cuts) | CP6 +Cuts (ms / nodes / cuts) | CP5 +Presolve (ms / nodes) | CP4 Base (ms / nodes) | Root LP (ms) | Optimal Obj | Root LP Obj |\n")
-		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-		for _, c := range cases {
-			if _, _, _, ok := madDimensions(c.ID); !ok && blockName == "MAD_CHECKPOINT_TABLE" {
-				continue
-			}
-			sc := tb.Scalar[c.ID]
-			fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s | %.3f | %.2f | %.2f |\n",
-				c.ID,
-				formatCP67(sc.CP7Full, true),
-				formatCP67(sc.CP6Cuts, false),
-				formatCP45(sc.CP5Presolve),
-				formatCP45(sc.CP4Baseline),
-				sc.RootLPTimeMS,
-				sc.CP7Full.Objective,
-				sc.RootLPObj)
-		}
-
+		renderMADStatsTable(&b, cases, tb)
+	case "MAD_CHECKPOINT_TABLE":
+		renderCheckpointTable(&b, cases, tb, true)
+	case "FULL_CHECKPOINT_TABLE":
+		renderCheckpointTable(&b, cases, tb, false)
 	case "FULL_PIPELINE_TABLE":
-		b.WriteString("| Problem ID | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Parity |\n")
-		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
-		for _, c := range cases {
-			py := tb.Python[c.ID]
-			sc := tb.Scalar[c.ID]
-			pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
-			goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
-			fmt.Fprintf(&b, "| `%s` | %d | %d | **%.1fx** | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %s |\n",
-				c.ID,
-				sc.NumVars, sc.NumConstraints,
-				py.TTotalMedianMS/sc.TTotalMS,
-				sc.TTotalMS, py.TTotalMedianMS,
-				sc.TSolveMS, py.TSolveMedianMS, pyNetSolveMS(py),
-				goPrep, pyPrep,
-				parityCell(tb, c.ID))
-		}
-
+		renderFullPipelineTable(&b, cases, tb)
 	case "PROVENANCE":
-		pv, err := telemetryProvenance(tb)
-		if err != nil {
+		if err := renderProvenance(&b, cases, tb); err != nil {
 			return "", err
 		}
-		var anyPy PythonBaselineEntry
-		var floors []float64
-		for _, c := range cases {
-			anyPy = tb.Python[c.ID]
-			floors = append(floors, tb.Python[c.ID].CBCSpawnFloorMS)
-		}
-		var anySciPy SciPyAssignEntry
-		for _, ac := range BuildAssignCorpus() {
-			anySciPy = tb.SciPyAssign[ac.ID]
-		}
-		floorMed, _, _ := medianMinMax(floors)
-		base := fmt.Sprintf("commit `%s`", pv.commit)
-		if pv.dirty {
-			base = fmt.Sprintf("working tree on top of commit `%s`", pv.commit)
-		}
-		fmt.Fprintf(&b, "- **goblin telemetry source**: fingerprint `%s` (%s), `%s`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources.\n",
-			pv.fingerprint, base, pv.goVersion)
-		fmt.Fprintf(&b, "- **CPU affinity**: goblin %s; Python + CBC %s; Python + SciPy %s.\n",
-			affinityList(pv.affinity),
-			affinityList(map[string]bool{anyPy.CPUAffinity: true}),
-			affinityList(map[string]bool{anySciPy.CPUAffinity: true}))
-		fmt.Fprintf(&b, "- **Python MILP reference**: PuLP `%s`, CBC `%s` (`%s`).\n", anyPy.PuLPVersion, anyPy.CBCVersion, filepath.Base(anyPy.CBCPath))
-		fmt.Fprintf(&b, "- **Python LSAP reference**: SciPy `%s` (`scipy.optimize.linear_sum_assignment`, C++ `rectangular_lsap`), NumPy `%s`.\n", anySciPy.SciPyVersion, anySciPy.NumPyVersion)
-		fmt.Fprintf(&b, "- **CBC subprocess spawn floor**: %.2f ms median (`prob.solve()` on a 1-variable MILP); the \"Net of Spawn\" columns subtract it.\n", floorMed)
-		fmt.Fprintf(&b, "- **goblin `WithCBC()` backend**: %s\n", cbcBackendDescription)
-
 	case "ASSIGN_TIER_SUMMARY_TABLE":
-		assignCases := BuildAssignCorpus()
-		type assignGroupSpec struct {
-			label  string
-			filter func(c AssignCorpusCase) bool
-		}
-		groups := []assignGroupSpec{
-			{"Tier 1: Micro/Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
-			{"Tier 2: Medium / Target p90 (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
-			{"Tier 3: Large Tail (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
-			{"Square families ($m = n$)", func(c AssignCorpusCase) bool { return c.Rows == c.Cols }},
-			{"Rectangular families ($m \\neq n$, wide and tall)", func(c AssignCorpusCase) bool { return c.Rows != c.Cols }},
-			{"Degenerate / structured (ties, rank-1, geometric, sparse)", func(c AssignCorpusCase) bool {
-				return c.Family == "integer_ties" || c.Family == "rank1" || c.Family == "geometric" || c.Family == "sparse"
-			}},
-			{"**All 22 LSAP corpus families**", func(_ AssignCorpusCase) bool { return true }},
-		}
-
-		b.WriteString("| Workload Subset | Families | `SciPy Solve / goblin` GeoMean | `SciPy Total / goblin` GeoMean | `goblin` Solve (ms) | SciPy Solve (ms) | `goblin` Total (ms) | SciPy Total (ms) | `SciPy Solve / goblin` Median [Min-Max] |\n")
-		b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-		for _, grp := range groups {
-			var spSolveVals, spTotVals, goSolveVals, goTotVals, solveSpeedups []float64
-			for _, ac := range assignCases {
-				if !grp.filter(ac) {
-					continue
-				}
-				sp := tb.SciPyAssign[ac.ID]
-				sc := tb.AssignScalar[ac.ID]
-				spSolveVals = append(spSolveVals, sp.TSolveMedianMS)
-				spTotVals = append(spTotVals, sp.TTotalMedianMS)
-				goSolveVals = append(goSolveVals, sc.TSolveMS)
-				goTotVals = append(goTotVals, sc.TTotalMS)
-				if sc.TSolveMS > 0 {
-					solveSpeedups = append(solveSpeedups, sp.TSolveMedianMS/sc.TSolveMS)
-				}
-			}
-			spSolveGM, spTotGM := geoMean(spSolveVals), geoMean(spTotVals)
-			goSolveGM, goTotGM := geoMean(goSolveVals), geoMean(goTotVals)
-			medSp, minSp, maxSp := medianMinMax(solveSpeedups)
-			fmt.Fprintf(&b, "| %s | %d | **%.2fx** | %.2fx | %s | %s | %s | %s | %.2fx [%.2fx-%.2fx] |\n",
-				grp.label, len(goSolveVals),
-				spSolveGM/goSolveGM, spTotGM/goTotGM,
-				formatAssignMS(goSolveGM), formatAssignMS(spSolveGM),
-				formatAssignMS(goTotGM), formatAssignMS(spTotGM),
-				medSp, minSp, maxSp)
-		}
-
+		renderAssignTierSummaryTable(&b, tb)
 	case "ASSIGN_PIPELINE_TABLE":
-		assignCases := BuildAssignCorpus()
-		b.WriteString("| Problem ID | Shape ($m \\times n$) | Family | `SciPy Solve / goblin` | GoSolve (ms) | SciPySolve (ms) | GoTotal (ms) | SciPyTotal (ms) | Go Solve Mean $\\pm$ SD (ms) | SciPy Solve Mean $\\pm$ SD (ms) | Optimal Obj | Parity |\n")
-		b.WriteString("| :--- | :---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
-		for _, ac := range assignCases {
-			sp := tb.SciPyAssign[ac.ID]
-			sc := tb.AssignScalar[ac.ID]
-			solveRatio := sp.TSolveMedianMS / max(sc.TSolveMS, geoMeanMinFloor)
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | `%s` | **%.2fx** | %s | %s | %s | %s | $%s \\pm %s$ | $%s \\pm %s$ | %.2f | %s |\n",
-				ac.ID, ac.Rows, ac.Cols, ac.Family,
-				solveRatio,
-				formatAssignMS(sc.TSolveMS), formatAssignMS(sp.TSolveMedianMS),
-				formatAssignMS(sc.TTotalMS), formatAssignMS(sp.TTotalMedianMS),
-				formatAssignMS(sc.TSolveMeanMS), formatAssignMS(sc.TSolveSDMS),
-				formatAssignMS(sp.TSolveMeanMS), formatAssignMS(sp.TSolveSDMS),
-				sc.Objective,
-				assignParityCell(tb, ac.ID))
-		}
-
+		renderAssignPipelineTable(&b, tb)
 	case "ASSIGN_SIMD_SUMMARY":
-		assignCases := BuildAssignCorpus()
-		var controls, controlsFlagged, reachable, faster, slower int
-		for _, ac := range assignCases {
-			sc := tb.AssignScalar[ac.ID]
-			sm := tb.AssignSIMD[ac.ID]
-			size := max(sm.Rows, sm.Cols)
-			_, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-			if n < minPairedSamples {
-				continue
-			}
-			excludesOne := lo > 1 || hi < 1
-			if size < simdReachSize {
-				controls++
-				if excludesOne {
-					controlsFlagged++
-				}
-				continue
-			}
-			reachable++
-			switch {
-			case lo > 1:
-				faster++
-			case hi < 1:
-				slower++
-			}
-		}
-		fmt.Fprintf(&b, "- **Negative controls** (`max(rows, cols) < %d`, no AVX2 row-reduction kernel runs): %d of %d have a 95%% interval excluding 1.\n",
-			simdReachSize, controlsFlagged, controls)
-		fmt.Fprintf(&b, "- **Instances where AVX2 row kernels run** (`max(rows, cols) >= %d`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
-			simdReachSize, faster, slower, reachable-faster-slower, reachable)
-
+		renderAssignSIMDSummary(&b, tb)
 	case "ASSIGN_SIMD_TABLE":
-		assignCases := BuildAssignCorpus()
-		b.WriteString("| Problem ID | Shape ($m \\times n$) | `max(m, n)` | AVX2 row kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
-		b.WriteString("| :--- | :---: | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
-		for _, ac := range assignCases {
-			sc := tb.AssignScalar[ac.ID]
-			sm := tb.AssignSIMD[ac.ID]
-			size := max(sm.Rows, sm.Cols)
-			gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-			reach, verdict := simdVerdict(size, lo, hi, n)
-			fmt.Fprintf(&b, "| `%s` | $%d \\times %d$ | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %s | %s | %d |\n",
-				ac.ID, ac.Rows, ac.Cols, size, reach, verdict, gm, lo, hi,
-				formatAssignMS(sc.TSolveMS), formatAssignMS(sm.TSolveMS), n)
-		}
-
+		renderAssignSIMDTable(&b, tb)
 	default:
 		return "", fmt.Errorf("unknown generated block %q", blockName)
 	}
 
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	type groupSpec struct {
+		label  string
+		filter func(c CorpusCase) bool
+	}
+	groups := []groupSpec{
+		{"Tier 1: Canonical (`N <= 26`)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
+		{"Tier 2: Target p90 (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
+		{"Tier 3: Large Tail (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
+		{"Tier 3 non-MAD MILPs", func(c CorpusCase) bool {
+			_, _, _, isMAD := madDimensions(c.ID)
+			return c.Tier == "tier3_large" && !isMAD
+		}},
+		{"Planted-gap MAD family (zero integrality gap by construction)", func(c CorpusCase) bool { return isPlantedMAD(c.ID) }},
+		{"Random-weight MAD (negative controls)", func(c CorpusCase) bool { return strings.Contains(c.ID, "_mad_rand_") }},
+		{"**All families except planted-gap MAD**", func(c CorpusCase) bool { return !isPlantedMAD(c.ID) }},
+		{"All corpus families", func(_ CorpusCase) bool { return true }},
+	}
+
+	b.WriteString("| Workload Subset | Families | `Py / goblin (Go)` GeoMean | `Py net / goblin (Go)` | `goblin (Go) / CBC` | `goblin (Go)` (ms) | `goblin (CBC)` (ms) | Py Total (ms) | Py Net (ms) | `Py / goblin (Go)` Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, grp := range groups {
+		var pyVals, pyNetVals, gbVals, goVals, speedups []float64
+		for _, c := range cases {
+			if !grp.filter(c) {
+				continue
+			}
+			py := tb.Python[c.ID]
+			goT := tb.Scalar[c.ID].TTotalMS
+			pyVals = append(pyVals, py.TTotalMedianMS)
+			pyNetVals = append(pyNetVals, max(py.TTotalMedianMS-py.CBCSpawnFloorMS, minNetSolveMS))
+			if gb, ok := tb.Goblin[c.ID]; ok && gb.TTotalMS > 0 {
+				gbVals = append(gbVals, gb.TTotalMS)
+			}
+			goVals = append(goVals, goT)
+			if goT > 0 {
+				speedups = append(speedups, py.TTotalMedianMS/goT)
+			}
+		}
+		pyGM, pyNetGM, goGM := geoMean(pyVals), geoMean(pyNetVals), geoMean(goVals)
+		medSp, minSp, maxSp := medianMinMax(speedups)
+		gbStr, gbRatio := "N/A", "N/A"
+		if len(gbVals) == len(goVals) && len(gbVals) > 0 {
+			gbGM := geoMean(gbVals)
+			gbStr = fmt.Sprintf("%.2f", gbGM)
+			gbRatio = fmt.Sprintf("%.2fx", goGM/gbGM)
+		}
+		fmt.Fprintf(b, "| %s | %d | **%.1fx** | %.1fx | %s | %.2f | %s | %.2f | %.2f | %.1fx [%.1fx-%.1fx] |\n",
+			grp.label, len(goVals), pyGM/goGM, pyNetGM/goGM, gbRatio, goGM, gbStr, pyGM, pyNetGM, medSp, minSp, maxSp)
+	}
+}
+
+func renderSIMDEffectTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	b.WriteString("| Problem ID | `n + m` | AVX2 `Dot64`/`Axpy64` reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
+	b.WriteString("| :--- | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
+	for _, c := range cases {
+		sc := tb.Scalar[c.ID]
+		sm := tb.SIMD[c.ID]
+		size := sm.NumVars + sm.NumConstraints
+		gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
+		reach, verdict := simdVerdict(size, lo, hi, n)
+		fmt.Fprintf(b, "| `%s` | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %.3f | %.3f | %d |\n",
+			c.ID, size, reach, verdict, gm, lo, hi, sc.TSolveMS, sm.TSolveMS, n)
+	}
+}
+
+func renderSIMDSummary(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	var controls, controlsFlagged, reachable, faster, slower int
+	for _, c := range cases {
+		sm := tb.SIMD[c.ID]
+		size := sm.NumVars + sm.NumConstraints
+		_, lo, hi, n := pairedRatio(tb.Scalar[c.ID].TSolveTrialsMS, sm.TSolveTrialsMS)
+		if n < minPairedSamples {
+			continue
+		}
+		excludesOne := lo > 1 || hi < 1
+		if size < simdReachSize {
+			controls++
+			if excludesOne {
+				controlsFlagged++
+			}
+			continue
+		}
+		reachable++
+		switch {
+		case lo > 1:
+			faster++
+		case hi < 1:
+			slower++
+		}
+	}
+	fmt.Fprintf(b, "- **Negative controls** (`n + m < %d`, no AVX2 kernel can run): %d of %d have a 95%% interval excluding 1. These differences come from the two binaries (compiler output and code layout differ under `GOEXPERIMENT=simd`) and from run-to-run effects, not from SIMD kernels. Intervals of similar size on the AVX2-capable instances are therefore not evidence of a SIMD effect.\n",
+		simdReachSize, controlsFlagged, controls)
+	fmt.Fprintf(b, "- **Instances where AVX2 can run**: %d faster, %d slower, %d with no detectable effect, out of %d.\n",
+		faster, slower, reachable-faster-slower, reachable)
+}
+
+func renderMADPipelineTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	b.WriteString("| Problem ID | $G \\times I$ | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Optimal Obj | Parity |\n")
+	b.WriteString("| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+	for _, c := range cases {
+		g, i, _, ok := madDimensions(c.ID)
+		if !ok {
+			continue
+		}
+		py := tb.Python[c.ID]
+		sc := tb.Scalar[c.ID]
+		pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
+		goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | %d | %d | **%.1fx** | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %.1f | %s |\n",
+			c.ID,
+			g, i, sc.NumVars, sc.NumConstraints,
+			py.TTotalMedianMS/sc.TTotalMS,
+			sc.TTotalMS, py.TTotalMedianMS,
+			sc.TSolveMS, py.TSolveMedianMS, pyNetSolveMS(py),
+			goPrep, pyPrep,
+			sc.CP7Full.Objective,
+			parityCell(tb, c.ID))
+	}
+}
+
+func renderMADCBCGapTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	b.WriteString("| Problem ID | $G \\times I$ ($N \\times M$) | Total (`Go / CBC`) | Go Total (ms) | CBC Total (ms) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) | Py Net Solve (ms) |\n")
+	b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, c := range cases {
+		g, i, _, ok := madDimensions(c.ID)
+		if !ok {
+			continue
+		}
+		py := tb.Python[c.ID]
+		sc := tb.Scalar[c.ID]
+		gb := tb.Goblin[c.ID]
+		lpRatio := sc.RootLPTimeMS / max(gb.RootLPTimeMS, geoMeanMinFloor)
+		totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ ($%d \\times %d$) | **%.2fx** | %.2f | %.2f | %.2fx | %.2f (%d / %d) | %.2f (%d / %d) | %.3f (%d) | %.3f (%d) | %.2f |\n",
+			c.ID,
+			g, i, sc.NumVars, sc.NumConstraints,
+			totRatio,
+			sc.TTotalMS, gb.TTotalMS,
+			lpRatio,
+			sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
+			gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
+			sc.RootLPTimeMS, sc.RootLPIters,
+			gb.RootLPTimeMS, gb.RootLPIters,
+			pyNetSolveMS(py))
+	}
+}
+
+func renderNonMADCBCGapTable(b *bytes.Buffer, tb *TelemetryBundle) {
+	b.WriteString("| Problem ID | $N \\times M$ | Total Median (`Go / CBC`) | Go Total Mean $\\pm$ SD (ms) | CBC Total Mean $\\pm$ SD (ms) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP5 +Presolve (ms / nodes) |\n")
+	b.WriteString("| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	gapIDs := []string{"t3_mkp_200", "t2_mkp_50", "t2_binpack_44", "t3_cflp_300", "t3_sched_1000"}
+	for _, id := range gapIDs {
+		sc, ok := tb.Scalar[id]
+		if !ok {
+			continue
+		}
+		gb := tb.Goblin[id]
+		totRatio := sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | **%.2fx** | $%.2f \\pm %.2f$ | $%.2f \\pm %.2f$ | %.2f (%d / %d) | %.2f (%d / %d) | %s | %s |\n",
+			id,
+			sc.NumVars, sc.NumConstraints,
+			totRatio,
+			sc.TTotalMeanMS, sc.TTotalSDMS,
+			gb.TTotalMeanMS, gb.TTotalSDMS,
+			sc.TSolveMS, sc.CP7Full.Nodes, sc.CP7Full.Iterations,
+			gb.TSolveMS, gb.CP7Full.Nodes, gb.CP7Full.Iterations,
+			formatCP67(sc.CP6Cuts, false),
+			formatCP45(sc.CP5Presolve))
+	}
+}
+
+func renderMADStatsTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	b.WriteString("| Problem ID | $G \\times I$ | `goblin (Go)` Scalar Total (Mean $\\pm$ SD [95% CI], ms) | Python `PuLP + CBC` Total (Mean $\\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\\pm$ SD [95% CI], ms) |\n")
+	b.WriteString("| :--- | :---: | ---: | ---: | ---: |\n")
+	for _, c := range cases {
+		g, i, _, ok := madDimensions(c.ID)
+		if !ok {
+			continue
+		}
+		py := tb.Python[c.ID]
+		sc := tb.Scalar[c.ID]
+		sm := tb.SIMD[c.ID]
+		nTrials := py.Trials
+		if nTrials <= 0 {
+			nTrials = len(sm.TrialObjectives)
+		}
+		tc := tCrit975(nTrials - 1)
+		sqrtN := math.Sqrt(float64(max(1, nTrials)))
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | $%.2f \\pm %.2f$ ($\\pm %.2f$) | $%.2f \\pm %.2f$ ($\\pm %.2f$) | $%.2f \\pm %.2f$ ($\\pm %.2f$) |\n",
+			c.ID,
+			g, i,
+			sc.TTotalMeanMS, sc.TTotalSDMS, tc*sc.TTotalSDMS/sqrtN,
+			py.TTotalMeanMS, py.TTotalSDMS, tc*py.TTotalSDMS/sqrtN,
+			sm.TTotalMeanMS, sm.TTotalSDMS, tc*sm.TTotalSDMS/sqrtN)
+	}
+}
+
+func renderCheckpointTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle, madOnly bool) {
+	b.WriteString("| Problem ID | CP7 Full (ms / nodes / cuts) | CP6 +Cuts (ms / nodes / cuts) | CP5 +Presolve (ms / nodes) | CP4 Base (ms / nodes) | Root LP (ms) | Optimal Obj | Root LP Obj |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, c := range cases {
+		if _, _, _, ok := madDimensions(c.ID); !ok && madOnly {
+			continue
+		}
+		sc := tb.Scalar[c.ID]
+		fmt.Fprintf(b, "| `%s` | %s | %s | %s | %s | %.3f | %.2f | %.2f |\n",
+			c.ID,
+			formatCP67(sc.CP7Full, true),
+			formatCP67(sc.CP6Cuts, false),
+			formatCP45(sc.CP5Presolve),
+			formatCP45(sc.CP4Baseline),
+			sc.RootLPTimeMS,
+			sc.CP7Full.Objective,
+			sc.RootLPObj)
+	}
+}
+
+func renderFullPipelineTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	b.WriteString("| Problem ID | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Parity |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+	for _, c := range cases {
+		py := tb.Python[c.ID]
+		sc := tb.Scalar[c.ID]
+		pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
+		goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
+		fmt.Fprintf(b, "| `%s` | %d | %d | **%.1fx** | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %s |\n",
+			c.ID,
+			sc.NumVars, sc.NumConstraints,
+			py.TTotalMedianMS/sc.TTotalMS,
+			sc.TTotalMS, py.TTotalMedianMS,
+			sc.TSolveMS, py.TSolveMedianMS, pyNetSolveMS(py),
+			goPrep, pyPrep,
+			parityCell(tb, c.ID))
+	}
+}
+
+func renderProvenance(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) error {
+	pv, err := telemetryProvenance(tb)
+	if err != nil {
+		return err
+	}
+	var anyPy PythonBaselineEntry
+	var floors []float64
+	for _, c := range cases {
+		anyPy = tb.Python[c.ID]
+		floors = append(floors, tb.Python[c.ID].CBCSpawnFloorMS)
+	}
+	var anySciPy SciPyAssignEntry
+	for _, ac := range BuildAssignCorpus() {
+		anySciPy = tb.SciPyAssign[ac.ID]
+	}
+	floorMed, _, _ := medianMinMax(floors)
+	base := fmt.Sprintf("commit `%s`", pv.commit)
+	if pv.dirty {
+		base = fmt.Sprintf("working tree on top of commit `%s`", pv.commit)
+	}
+	fmt.Fprintf(b, "- **goblin telemetry source**: fingerprint `%s` (%s), `%s`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources.\n",
+		pv.fingerprint, base, pv.goVersion)
+	fmt.Fprintf(b, "- **CPU affinity**: goblin %s; Python + CBC %s; Python + SciPy %s.\n",
+		affinityList(pv.affinity),
+		affinityList(map[string]bool{anyPy.CPUAffinity: true}),
+		affinityList(map[string]bool{anySciPy.CPUAffinity: true}))
+	fmt.Fprintf(b, "- **Python MILP reference**: PuLP `%s`, CBC `%s` (`%s`).\n", anyPy.PuLPVersion, anyPy.CBCVersion, filepath.Base(anyPy.CBCPath))
+	fmt.Fprintf(b, "- **Python LSAP reference**: SciPy `%s` (`scipy.optimize.linear_sum_assignment`, C++ `rectangular_lsap`), NumPy `%s`.\n", anySciPy.SciPyVersion, anySciPy.NumPyVersion)
+	fmt.Fprintf(b, "- **CBC subprocess spawn floor**: %.2f ms median (`prob.solve()` on a 1-variable MILP); the \"Net of Spawn\" columns subtract it.\n", floorMed)
+	fmt.Fprintf(b, "- **goblin `WithCBC()` backend**: %s\n", cbcBackendDescription)
+	return nil
+}
+
+func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
+	assignCases := BuildAssignCorpus()
+	type assignGroupSpec struct {
+		label  string
+		filter func(c AssignCorpusCase) bool
+	}
+	groups := []assignGroupSpec{
+		{"Tier 1: Micro/Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
+		{"Tier 2: Medium / Target p90 (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
+		{"Tier 3: Large Tail (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
+		{"Square families ($m = n$)", func(c AssignCorpusCase) bool { return c.Rows == c.Cols }},
+		{"Rectangular families ($m \\neq n$, wide and tall)", func(c AssignCorpusCase) bool { return c.Rows != c.Cols }},
+		{"Degenerate / structured (ties, rank-1, geometric, sparse)", func(c AssignCorpusCase) bool {
+			return c.Family == "integer_ties" || c.Family == "rank1" || c.Family == "geometric" || c.Family == "sparse"
+		}},
+		{"**All 22 LSAP corpus families**", func(_ AssignCorpusCase) bool { return true }},
+	}
+
+	b.WriteString("| Workload Subset | Families | `SciPy Solve / goblin` GeoMean | `SciPy Total / goblin` GeoMean | `goblin` Solve (ms) | SciPy Solve (ms) | `goblin` Total (ms) | SciPy Total (ms) | `SciPy Solve / goblin` Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, grp := range groups {
+		var spSolveVals, spTotVals, goSolveVals, goTotVals, solveSpeedups []float64
+		for _, ac := range assignCases {
+			if !grp.filter(ac) {
+				continue
+			}
+			sp := tb.SciPyAssign[ac.ID]
+			sc := tb.AssignScalar[ac.ID]
+			spSolveVals = append(spSolveVals, sp.TSolveMedianMS)
+			spTotVals = append(spTotVals, sp.TTotalMedianMS)
+			goSolveVals = append(goSolveVals, sc.TSolveMS)
+			goTotVals = append(goTotVals, sc.TTotalMS)
+			if sc.TSolveMS > 0 {
+				solveSpeedups = append(solveSpeedups, sp.TSolveMedianMS/sc.TSolveMS)
+			}
+		}
+		spSolveGM, spTotGM := geoMean(spSolveVals), geoMean(spTotVals)
+		goSolveGM, goTotGM := geoMean(goSolveVals), geoMean(goTotVals)
+		medSp, minSp, maxSp := medianMinMax(solveSpeedups)
+		fmt.Fprintf(b, "| %s | %d | **%.2fx** | %.2fx | %s | %s | %s | %s | %.2fx [%.2fx-%.2fx] |\n",
+			grp.label, len(goSolveVals),
+			spSolveGM/goSolveGM, spTotGM/goTotGM,
+			formatAssignMS(goSolveGM), formatAssignMS(spSolveGM),
+			formatAssignMS(goTotGM), formatAssignMS(spTotGM),
+			medSp, minSp, maxSp)
+	}
+}
+
+func renderAssignPipelineTable(b *bytes.Buffer, tb *TelemetryBundle) {
+	assignCases := BuildAssignCorpus()
+	b.WriteString("| Problem ID | Shape ($m \\times n$) | Family | `SciPy Solve / goblin` | GoSolve (ms) | SciPySolve (ms) | GoTotal (ms) | SciPyTotal (ms) | Go Solve Mean $\\pm$ SD (ms) | SciPy Solve Mean $\\pm$ SD (ms) | Optimal Obj | Parity |\n")
+	b.WriteString("| :--- | :---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+	for _, ac := range assignCases {
+		sp := tb.SciPyAssign[ac.ID]
+		sc := tb.AssignScalar[ac.ID]
+		solveRatio := sp.TSolveMedianMS / max(sc.TSolveMS, geoMeanMinFloor)
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | `%s` | **%.2fx** | %s | %s | %s | %s | $%s \\pm %s$ | $%s \\pm %s$ | %.2f | %s |\n",
+			ac.ID, ac.Rows, ac.Cols, ac.Family,
+			solveRatio,
+			formatAssignMS(sc.TSolveMS), formatAssignMS(sp.TSolveMedianMS),
+			formatAssignMS(sc.TTotalMS), formatAssignMS(sp.TTotalMedianMS),
+			formatAssignMS(sc.TSolveMeanMS), formatAssignMS(sc.TSolveSDMS),
+			formatAssignMS(sp.TSolveMeanMS), formatAssignMS(sp.TSolveSDMS),
+			sc.Objective,
+			assignParityCell(tb, ac.ID))
+	}
+}
+
+func renderAssignSIMDSummary(b *bytes.Buffer, tb *TelemetryBundle) {
+	assignCases := BuildAssignCorpus()
+	var controls, controlsFlagged, reachable, faster, slower int
+	for _, ac := range assignCases {
+		sc := tb.AssignScalar[ac.ID]
+		sm := tb.AssignSIMD[ac.ID]
+		size := max(sm.Rows, sm.Cols)
+		_, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
+		if n < minPairedSamples {
+			continue
+		}
+		excludesOne := lo > 1 || hi < 1
+		if size < simdReachSize {
+			controls++
+			if excludesOne {
+				controlsFlagged++
+			}
+			continue
+		}
+		reachable++
+		switch {
+		case lo > 1:
+			faster++
+		case hi < 1:
+			slower++
+		}
+	}
+	fmt.Fprintf(b, "- **Negative controls** (`max(rows, cols) < %d`, no AVX2 row-reduction kernel runs): %d of %d have a 95%% interval excluding 1.\n",
+		simdReachSize, controlsFlagged, controls)
+	fmt.Fprintf(b, "- **Instances where AVX2 row kernels run** (`max(rows, cols) >= %d`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
+		simdReachSize, faster, slower, reachable-faster-slower, reachable)
+}
+
+func renderAssignSIMDTable(b *bytes.Buffer, tb *TelemetryBundle) {
+	assignCases := BuildAssignCorpus()
+	b.WriteString("| Problem ID | Shape ($m \\times n$) | `max(m, n)` | AVX2 row kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
+	b.WriteString("| :--- | :---: | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
+	for _, ac := range assignCases {
+		sc := tb.AssignScalar[ac.ID]
+		sm := tb.AssignSIMD[ac.ID]
+		size := max(sm.Rows, sm.Cols)
+		gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
+		reach, verdict := simdVerdict(size, lo, hi, n)
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %s | %s | %d |\n",
+			ac.ID, ac.Rows, ac.Cols, size, reach, verdict, gm, lo, hi,
+			formatAssignMS(sc.TSolveMS), formatAssignMS(sm.TSolveMS), n)
+	}
 }
 
 // SyncMarkdownContent replaces all <!-- BEGIN GENERATED:NAME --> ... <!-- END GENERATED:NAME -->

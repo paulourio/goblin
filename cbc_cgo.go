@@ -23,6 +23,8 @@ import (
 const (
 	cbcDefaultCutPasses = 30
 	cbcUnboundedBound   = 1e48
+	cbcFeasTol          = 1e-7
+	cbcBoundSnapTol     = 1e-6
 )
 
 var (
@@ -59,7 +61,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	m := p.NumConstraints
 
 	for j := range n {
-		if p.VarLB[j] > p.VarUB[j]+1e-7 {
+		if p.VarLB[j] > p.VarUB[j]+cbcFeasTol {
 			return Result{
 				modelID:   p.modelID,
 				Backend:   BackendCBC,
@@ -71,7 +73,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 
 	if n == 0 {
 		for i := range m {
-			if 0 < p.RowLB[i]-1e-7 || 0 > p.RowUB[i]+1e-7 {
+			if 0 < p.RowLB[i]-cbcFeasTol || 0 > p.RowUB[i]+cbcFeasTol {
 				return Result{
 					modelID:   p.modelID,
 					Backend:   BackendCBC,
@@ -454,18 +456,18 @@ func (s *CBCLPSolver) Solve() LPResult {
 	m := s.TotalRows()
 
 	for j := range n {
-		if s.curLB[j] > s.curUB[j]+1e-7 {
+		if s.curLB[j] > s.curUB[j]+cbcFeasTol {
 			return LPResult{Status: StatusInfeasible}
 		}
 	}
 	if n == 0 {
 		for i := range p.NumConstraints {
-			if 0 < p.RowLB[i]-1e-7 || 0 > p.RowUB[i]+1e-7 {
+			if 0 < p.RowLB[i]-cbcFeasTol || 0 > p.RowUB[i]+cbcFeasTol {
 				return LPResult{Status: StatusInfeasible}
 			}
 		}
 		for _, rhs := range s.cutRHS {
-			if 0 > rhs+1e-7 {
+			if 0 > rhs+cbcFeasTol {
 				return LPResult{Status: StatusInfeasible}
 			}
 		}
@@ -515,9 +517,9 @@ func (s *CBCLPSolver) Solve() LPResult {
 
 	objMin := 0.0
 	for j := range n {
-		if !math.IsInf(s.curLB[j], -1) && primal[j] < s.curLB[j] && s.curLB[j]-primal[j] <= 1e-6 {
+		if !math.IsInf(s.curLB[j], -1) && primal[j] < s.curLB[j] && s.curLB[j]-primal[j] <= cbcBoundSnapTol {
 			primal[j] = s.curLB[j]
-		} else if !math.IsInf(s.curUB[j], 1) && primal[j] > s.curUB[j] && primal[j]-s.curUB[j] <= 1e-6 {
+		} else if !math.IsInf(s.curUB[j], 1) && primal[j] > s.curUB[j] && primal[j]-s.curUB[j] <= cbcBoundSnapTol {
 			primal[j] = s.curUB[j]
 		}
 		objMin += p.ObjMin[j] * primal[j]

@@ -117,6 +117,7 @@ linters:
         - name: error-return
         - name: error-strings
         - name: errorf
+        - name: exported
         - name: increment-decrement
         - name: indent-error-flow
         - name: range
@@ -132,7 +133,6 @@ linters:
   exclusions:
     generated: lax
     presets:
-      - comments
       - std-error-handling
     rules:
       # Hot numerical kernels must remain 100% free of context.Context overhead;

@@ -348,6 +348,46 @@ func findEnclosingSpan(spans []funcSpan, file string, line int) *funcSpan {
 	return nil
 }
 
+func recordCannotInlineDiag(
+	sp *funcSpan,
+	d *staticFuncDiag,
+	file string,
+	lineNum int,
+	fnName, reason string,
+	seenNear map[string]bool,
+	nearInline []nearInlineCandidate,
+) []nearInlineCandidate {
+	if sp == nil || sp.StartLine != lineNum {
+		return nearInline
+	}
+	d.CanInline = false
+	d.InlineReason = reason
+	bm := reCostBudget.FindStringSubmatch(reason)
+	if bm == nil {
+		return nearInline
+	}
+	cost, _ := strconv.Atoi(bm[1])
+	budget, _ := strconv.Atoi(bm[2])
+	d.InlineCost = cost
+	if cost > nearInlineCostLimit || budget != inlineBudgetDefault {
+		return nearInline
+	}
+	key := fmt.Sprintf("%s:%d:%s", file, lineNum, fnName)
+	if seenNear[key] {
+		return nearInline
+	}
+	seenNear[key] = true
+	return append(nearInline, nearInlineCandidate{
+		File:      file,
+		Line:      lineNum,
+		FuncName:  fnName,
+		Cost:      cost,
+		Budget:    budget,
+		OverBy:    cost - budget,
+		RawReason: reason,
+	})
+}
+
 func collectStaticDiagnostics(
 	ctx context.Context,
 	useSIMD bool,
@@ -392,11 +432,15 @@ func collectStaticDiagnostics(
 			continue
 		}
 		msg := m[5]
+		sp := findEnclosingSpan(spans, file, lineNum)
+		var d *staticFuncDiag
+		if sp != nil {
+			d = diagMap[sp.File+":"+sp.FullName]
+		}
 
 		if cm := reCanInline.FindStringSubmatch(msg); cm != nil {
-			cost, _ := strconv.Atoi(cm[2])
-			if sp := findEnclosingSpan(spans, file, lineNum); sp != nil {
-				d := diagMap[sp.File+":"+sp.FullName]
+			if d != nil {
+				cost, _ := strconv.Atoi(cm[2])
 				d.CanInline = true
 				d.InlineCost = cost
 			}
@@ -404,50 +448,20 @@ func collectStaticDiagnostics(
 		}
 
 		if cm := reCannotInline.FindStringSubmatch(msg); cm != nil {
-			fnName := cm[1]
-			reason := cm[2]
-			if sp := findEnclosingSpan(spans, file, lineNum); sp != nil {
-				d := diagMap[sp.File+":"+sp.FullName]
-				if sp.StartLine == lineNum {
-					d.CanInline = false
-					d.InlineReason = reason
-					if bm := reCostBudget.FindStringSubmatch(reason); bm != nil {
-						cost, _ := strconv.Atoi(bm[1])
-						budget, _ := strconv.Atoi(bm[2])
-						d.InlineCost = cost
-						if cost <= nearInlineCostLimit && budget == inlineBudgetDefault {
-							key := fmt.Sprintf("%s:%d:%s", file, lineNum, fnName)
-							if !seenNear[key] {
-								seenNear[key] = true
-								nearInline = append(nearInline, nearInlineCandidate{
-									File:      file,
-									Line:      lineNum,
-									FuncName:  fnName,
-									Cost:      cost,
-									Budget:    budget,
-									OverBy:    cost - budget,
-									RawReason: reason,
-								})
-							}
-						}
-					}
-				}
-			}
+			nearInline = recordCannotInlineDiag(sp, d, file, lineNum, cm[1], cm[2], seenNear, nearInline)
 			continue
 		}
 
 		if strings.Contains(msg, "Found IsInBounds") || strings.Contains(msg, "Found IsSliceInBounds") {
 			bceKey := fmt.Sprintf("%s:%d:%s", file, lineNum, m[4])
-			if seenBCE[bceKey] {
-				continue
-			}
-			seenBCE[bceKey] = true
-			totalBCE++
-			if sp := findEnclosingSpan(spans, file, lineNum); sp != nil {
-				d := diagMap[sp.File+":"+sp.FullName]
-				d.BCECount++
-				if !slices.Contains(d.BCELines, lineNum) {
-					d.BCELines = append(d.BCELines, lineNum)
+			if !seenBCE[bceKey] {
+				seenBCE[bceKey] = true
+				totalBCE++
+				if d != nil {
+					d.BCECount++
+					if !slices.Contains(d.BCELines, lineNum) {
+						d.BCELines = append(d.BCELines, lineNum)
+					}
 				}
 			}
 			continue
@@ -455,15 +469,13 @@ func collectStaticDiagnostics(
 
 		if (strings.Contains(msg, "escapes to heap") || strings.Contains(msg, "moved to heap")) && !strings.Contains(msg, " in ") {
 			escKey := fmt.Sprintf("%s:%d:%s", file, lineNum, msg)
-			if seenEsc[escKey] {
-				continue
-			}
-			seenEsc[escKey] = true
-			totalEsc++
-			if sp := findEnclosingSpan(spans, file, lineNum); sp != nil {
-				d := diagMap[sp.File+":"+sp.FullName]
-				d.EscapeCount++
-				d.EscapeDetails = append(d.EscapeDetails, fmt.Sprintf("L%d: %s", lineNum, msg))
+			if !seenEsc[escKey] {
+				seenEsc[escKey] = true
+				totalEsc++
+				if d != nil {
+					d.EscapeCount++
+					d.EscapeDetails = append(d.EscapeDetails, fmt.Sprintf("L%d: %s", lineNum, msg))
+				}
 			}
 		}
 	}

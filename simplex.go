@@ -24,6 +24,13 @@ const (
 	maxDSEWeight       = 1e12
 	minDSEColEntry     = 1e-14
 	phase1RelaxTol     = 1e-5
+	verifyFeasTol      = 1e-5
+	minBFRTFlipPivot   = 1e-5
+	primalRatioTieTol  = 1e-12
+	primalSnapTol      = 1e-6
+	maxDenseCutVars    = 2048
+	maxBFRTFlips       = 64
+	scalePivotVarMin   = 100
 )
 
 // LPResult holds the result of a continuous LP solve.
@@ -122,10 +129,12 @@ func NewLPSolver(p *CompiledProblem, ws *Workspace) *LPSolver {
 	return s
 }
 
+// TotalRows returns the total number of rows (structural constraints plus active dynamic cuts).
 func (s *LPSolver) TotalRows() int {
 	return s.Prob.NumConstraints + len(s.ExtraRows)
 }
 
+// InitCrashBasis resets the solver to an all-slack basis with nonbasic structural variables placed at cost-favorable bounds.
 func (s *LPSolver) InitCrashBasis() {
 	p := s.Prob
 	n := p.NumVars
@@ -170,6 +179,7 @@ func (s *LPSolver) InitCrashBasis() {
 	s.dualValid = false
 }
 
+// CopyRootBasisFrom copies the root basis, bounds, duals, reduced costs, and steepest-edge weights from src when neither solver holds extra cut rows.
 func (s *LPSolver) CopyRootBasisFrom(src *LPSolver) {
 	if len(src.ExtraRows) > 0 || len(s.ExtraRows) > 0 {
 		return
@@ -225,6 +235,7 @@ func nonBasicValue(st varBasisStatus, lb, ub float64) float64 {
 	}
 }
 
+// SetStructuralBounds updates the working bounds of structural columns in place while preserving the current basis for warm-started re-solves.
 func (s *LPSolver) SetStructuralBounds(lb, ub []float64) {
 	ws := s.WS
 	n := s.Prob.NumVars
@@ -276,7 +287,7 @@ func (s *LPSolver) newCutRow(colIdx []int, val []float64, rhs float64) dynamicRo
 		Val:    slices.Clone(val),
 		RHS:    rhs,
 	}
-	if n > 0 && n <= 2048 {
+	if n > 0 && n <= maxDenseCutVars {
 		dr.Dense = make([]float64, max(n, p.RowStride))
 		for k, col := range colIdx {
 			dr.Dense[col] = val[k]
@@ -644,6 +655,7 @@ func (s *LPSolver) rowRHS(i int) float64 {
 	return s.ExtraRows[i-s.Prob.NumConstraints].RHS
 }
 
+// Solve optimizes the current continuous LP relaxation via revised dual simplex with a two-phase primal simplex fallback.
 func (s *LPSolver) Solve() LPResult {
 	p := s.Prob
 	if p == nil || p.InvalidErr != nil {
@@ -910,7 +922,7 @@ func (s *LPSolver) isDualFeasible() bool {
 	djSlice := ws.Dj[:len(status)]
 	for k, st := range status {
 		dj := djSlice[k]
-		if (st == statusAtLower && dj < -1e-5) || (st == statusAtUpper && dj > 1e-5) || (st == statusSuperBasic && (dj > 1e-5 || dj < -1e-5)) {
+		if (st == statusAtLower && dj < -verifyFeasTol) || (st == statusAtUpper && dj > verifyFeasTol) || (st == statusSuperBasic && (dj > verifyFeasTol || dj < -verifyFeasTol)) {
 			return false
 		}
 	}
@@ -978,6 +990,7 @@ func (s *LPSolver) computePrimalValues() {
 	}
 }
 
+// ComputeTableauRow evaluates row r of B^{-1} [A I] into WS.Rho and WS.TabRow, tracking either sparse nonbasic support or 64-column chunks.
 func (s *LPSolver) ComputeTableauRow(r int) {
 	p := s.Prob
 	ws := s.WS
@@ -1332,6 +1345,28 @@ func sortBFRTCands(a []bfrtCand) {
 	}
 }
 
+// evalDualRatioCand classifies tableau entry tab on a leaving row; ok reports whether column k blocks dual movement.
+func evalDualRatioCand(tab, leaveDir float64, st varBasisStatus, djk float64) (absA, d float64, superBasic, ok bool) {
+	alphaBar := -leaveDir * tab
+	switch st {
+	case statusAtLower:
+		if alphaBar > pivotTol {
+			return alphaBar, djk, false, true
+		}
+	case statusAtUpper:
+		if -alphaBar > pivotTol {
+			return -alphaBar, -djk, false, true
+		}
+	case statusSuperBasic:
+		if alphaBar < 0 {
+			alphaBar = -alphaBar
+		}
+		return alphaBar, 0, true, true
+	}
+	return 0, 0, false, false
+}
+
+// selectDualBFRT executes the Bound-Flipping Ratio Test over boxed nonbasic columns outside equality rows.
 func (s *LPSolver) selectDualBFRT(primalInfeas, leaveDir float64) int {
 	ws := s.WS
 	cands := ws.BFRTCands
@@ -1365,61 +1400,32 @@ func (s *LPSolver) selectDualBFRT(primalInfeas, leaveDir float64) int {
 	cands = cands[:0]
 	if !ws.TabRowSparse {
 		for _, ch := range ws.TabRowChunks {
-			start := ch << 6
-			end := min(start+64, n)
+			start := ch << tabRowChunkBits
+			end := min(start+tabRowChunkSize, n)
 			for k := start; k < end; k++ {
-				tab := tabRow[k]
-				if tab <= pivotTol && tab >= -pivotTol {
-					continue
-				}
-				alphaBar := -leaveDir * tab
-				var absA, d float64
-				switch status[k] {
-				case statusAtLower:
-					absA = alphaBar
-					d = dj[k]
-				case statusAtUpper:
-					absA = -alphaBar
-					d = -dj[k]
-				case statusSuperBasic:
-					cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
-					continue
-				default:
-					continue
-				}
-				if absA > pivotTol {
-					d = max(0.0, d)
-					cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
+				if tab := tabRow[k]; tab > pivotTol || tab < -pivotTol {
+					if absA, d, super, ok := evalDualRatioCand(tab, leaveDir, status[k], dj[k]); ok {
+						ratio := 0.0
+						if !super && d > 0 {
+							ratio = d / absA
+						}
+						cands = append(cands, bfrtCand{col: k, ratio: ratio, absA: absA})
+					}
 				}
 			}
 		}
 	}
 	for _, k := range ws.TabRowIdx {
-		if uint(k) >= uint(tot) {
-			continue
-		}
-		tab := tabRow[k]
-		if tab <= pivotTol && tab >= -pivotTol {
-			continue
-		}
-		alphaBar := -leaveDir * tab
-		var absA, d float64
-		switch status[k] {
-		case statusAtLower:
-			absA = alphaBar
-			d = dj[k]
-		case statusAtUpper:
-			absA = -alphaBar
-			d = -dj[k]
-		case statusSuperBasic:
-			cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
-			continue
-		default:
-			continue
-		}
-		if absA > pivotTol {
-			d = max(0.0, d)
-			cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
+		if uint(k) < uint(tot) {
+			if tab := tabRow[k]; tab > pivotTol || tab < -pivotTol {
+				if absA, d, super, ok := evalDualRatioCand(tab, leaveDir, status[k], dj[k]); ok {
+					ratio := 0.0
+					if !super && d > 0 {
+						ratio = d / absA
+					}
+					cands = append(cands, bfrtCand{col: k, ratio: ratio, absA: absA})
+				}
+			}
 		}
 	}
 	ws.BFRTCands = cands
@@ -1435,7 +1441,7 @@ func (s *LPSolver) selectDualBFRT(primalInfeas, leaveDir float64) int {
 		absA := cands[i].absA
 		maxFlip := math.Inf(1)
 		inEq := uint(k) < uint(len(colHasEq)) && colHasEq[k]
-		if !inEq && absA >= 1e-5 && uint(k) < uint(tot) && status[k] != statusSuperBasic {
+		if !inEq && absA >= minBFRTFlipPivot && uint(k) < uint(tot) && status[k] != statusSuperBasic {
 			lbk, ubk := lbSlice[k], ubSlice[k]
 			if !math.IsInf(lbk, -1) && !math.IsInf(ubk, 1) {
 				maxFlip = absA * (ubk - lbk)
@@ -1448,7 +1454,7 @@ func (s *LPSolver) selectDualBFRT(primalInfeas, leaveDir float64) int {
 
 	remInfeas := primalInfeas
 	stopIdx := 0
-	for stopIdx < len(cands)-1 && len(ws.FlipCols) < 64 {
+	for stopIdx < len(cands)-1 && len(ws.FlipCols) < maxBFRTFlips {
 		c := cands[stopIdx]
 		if math.IsInf(c.maxFlip, 1) || c.maxFlip <= 0 || c.absA < minStaysFeasPivot || remInfeas-c.maxFlip <= primalTol {
 			break
@@ -1546,6 +1552,115 @@ func (s *LPSolver) colBasisLoad(k int, dynamic bool) int {
 	return load
 }
 
+// applyDualBoundFlips flips all columns selected by selectDualBFRT to their opposite bounds and updates basic primals via a batched sparse FTRAN.
+func (s *LPSolver) applyDualBoundFlips(leaveRow int, leaveDir float64) float64 {
+	ws := s.WS
+	m := s.TotalRows()
+	tot := ws.TotVar
+	lb := ws.LB[:tot]
+	ub := ws.UB[:tot]
+	status := ws.Status[:tot]
+	xb := ws.XB[:m]
+	basis := ws.Basis[:m]
+
+	if ws.TauSparse {
+		for _, i := range ws.TauIdx {
+			if uint(i) < uint(m) {
+				ws.Tau[i] = 0
+			}
+		}
+		ws.TauIdx = ws.TauIdx[:0]
+	} else {
+		clear(ws.Tau)
+	}
+	for _, fk := range ws.FlipCols {
+		lbf, ubf := lb[fk], ub[fk]
+		var deltaX float64
+		if status[fk] == statusAtLower {
+			status[fk] = statusAtUpper
+			ws.X[fk] = ubf
+			deltaX = ubf - lbf
+		} else {
+			status[fk] = statusAtLower
+			ws.X[fk] = lbf
+			deltaX = lbf - ubf
+		}
+		s.addScaledColumn(fk, deltaX, ws.Tau)
+	}
+	ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
+	for _, i := range ws.TauIdx {
+		xb[i] -= ws.Tau[i]
+		ws.Tau[i] = 0
+		ws.X[basis[i]] = xb[i]
+	}
+	ws.TauIdx = ws.TauIdx[:0]
+	ws.TauSparse = true
+	bVar := basis[leaveRow]
+	if leaveDir > 0 {
+		return max(0.0, lb[bVar]-xb[leaveRow])
+	}
+	return max(0.0, xb[leaveRow]-ub[bVar])
+}
+
+// updateDualSteepestEdge updates row steepest-edge weights via the Forrest-Goldfarb recurrence over FColIdx.
+func (s *LPSolver) updateDualSteepestEdge(leaveRow int, pivElem float64) {
+	ws := s.WS
+	m := s.TotalRows()
+	dse := ws.DSE[:m]
+	invPiv := 1.0 / pivElem
+	invPiv2 := invPiv * invPiv
+	leaveWeight := dse[leaveRow]
+	newLeaveWeight := leaveWeight * invPiv2
+	if !(newLeaveWeight >= minDSEWeight && newLeaveWeight <= maxDSEWeight) {
+		newLeaveWeight = min(max(newLeaveWeight, minDSEWeight), maxDSEWeight)
+		if math.IsNaN(newLeaveWeight) {
+			newLeaveWeight = 1.0
+		}
+	}
+	fCol := ws.FCol[:m]
+	if len(ws.FColIdx) > 1 {
+		tau := ws.Tau[:m]
+		if ws.TauSparse {
+			for _, i := range ws.TauIdx {
+				if uint(i) < uint(m) {
+					tau[i] = 0
+				}
+			}
+			ws.TauIdx = ws.TauIdx[:0]
+		} else {
+			clear(tau)
+		}
+		if ws.RhoSparse {
+			rho := ws.Rho[:m]
+			for _, i := range ws.RhoIdx {
+				tau[i] = rho[i]
+			}
+			ws.TauIdx = ws.LU.FTRANSparseHint(tau, ws.RhoIdx, ws.TauIdx)
+		} else {
+			copy(tau, ws.Rho[:m])
+			ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
+		}
+		ws.TauSparse = true
+		for _, i := range ws.FColIdx {
+			if i != leaveRow && uint(i) < uint(m) {
+				fi := fCol[i]
+				if fi > minDSEColEntry || fi < -minDSEColEntry {
+					ratio := fi * invPiv
+					w := dse[i] - 2.0*ratio*tau[i] + ratio*ratio*leaveWeight
+					if !(w >= minDSEWeight && w <= maxDSEWeight) {
+						w = min(max(w, minDSEWeight), maxDSEWeight)
+						if math.IsNaN(w) {
+							w = 1.0
+						}
+					}
+					dse[i] = w
+				}
+			}
+		}
+	}
+	dse[leaveRow] = newLeaveWeight
+}
+
 func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 	p := s.Prob
 	ws := s.WS
@@ -1625,6 +1740,7 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 
 		s.ComputeTableauRow(leaveRow)
 
+		// Pass 1 of Harris ratio test: collect dual-blocking candidates and tightest step bound thetaMax.
 		thetaMax := math.Inf(1)
 		cands := ws.BFRTCands[:0]
 		tabRow := ws.TabRow[:tot]
@@ -1632,72 +1748,45 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		dj := ws.Dj[:tot]
 		if !ws.TabRowSparse {
 			for _, ch := range ws.TabRowChunks {
-				start := ch << 6
-				end := min(start+64, n)
+				start := ch << tabRowChunkBits
+				end := min(start+tabRowChunkSize, n)
 				for k := start; k < end; k++ {
-					tab := tabRow[k]
-					if tab <= pivotTol && tab >= -pivotTol {
-						continue
-					}
-					alphaBar := -leaveDir * tab
-					var absA, d float64
-					switch status[k] {
-					case statusAtLower:
-						absA = alphaBar
-						d = dj[k]
-					case statusAtUpper:
-						absA = -alphaBar
-						d = -dj[k]
-					case statusSuperBasic:
-						thetaMax = 0
-						cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
-						continue
-					default:
-						continue
-					}
-					if absA > pivotTol {
-						d = max(0.0, d)
-						if d <= (thetaMax+2*minScaledPrimalTol)*absA {
-							if ratio := (d + harrisTol) / absA; ratio < thetaMax {
-								thetaMax = ratio
+					if tab := tabRow[k]; tab > pivotTol || tab < -pivotTol {
+						if absA, d, super, ok := evalDualRatioCand(tab, leaveDir, status[k], dj[k]); ok {
+							if super {
+								thetaMax = 0
+								cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							} else {
+								d = max(0.0, d)
+								if d <= (thetaMax+2*minScaledPrimalTol)*absA {
+									if ratio := (d + harrisTol) / absA; ratio < thetaMax {
+										thetaMax = ratio
+									}
+									cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
+								}
 							}
-							cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
 						}
 					}
 				}
 			}
 		}
 		for _, k := range ws.TabRowIdx {
-			if uint(k) >= uint(tot) {
-				continue
-			}
-			tab := tabRow[k]
-			if tab <= pivotTol && tab >= -pivotTol {
-				continue
-			}
-			alphaBar := -leaveDir * tab
-			var absA, d float64
-			switch status[k] {
-			case statusAtLower:
-				absA = alphaBar
-				d = dj[k]
-			case statusAtUpper:
-				absA = -alphaBar
-				d = -dj[k]
-			case statusSuperBasic:
-				thetaMax = 0
-				cands = append(cands, bfrtCand{col: k, ratio: 0, absA: math.Abs(alphaBar)})
-				continue
-			default:
-				continue
-			}
-			if absA > pivotTol {
-				d = max(0.0, d)
-				if d <= (thetaMax+2*minScaledPrimalTol)*absA {
-					if ratio := (d + harrisTol) / absA; ratio < thetaMax {
-						thetaMax = ratio
+			if uint(k) < uint(tot) {
+				if tab := tabRow[k]; tab > pivotTol || tab < -pivotTol {
+					if absA, d, super, ok := evalDualRatioCand(tab, leaveDir, status[k], dj[k]); ok {
+						if super {
+							thetaMax = 0
+							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+						} else {
+							d = max(0.0, d)
+							if d <= (thetaMax+2*minScaledPrimalTol)*absA {
+								if ratio := (d + harrisTol) / absA; ratio < thetaMax {
+									thetaMax = ratio
+								}
+								cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
+							}
+						}
 					}
-					cands = append(cands, bfrtCand{col: k, ratio: d / absA, absA: absA})
 				}
 			}
 		}
@@ -1714,13 +1803,14 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 			return StatusInfeasible, iter
 		}
 
+		// Pass 2 of Harris ratio test: pick the largest-pivot candidate within thetaMax, preferring stays-feasible columns.
 		enterVar := -1
 		bestPivAbs := 0.0
 		bestLoad := 0
 		bestStaysFeas := false
 		dynLoad := thetaMax > harrisTol && iter < 3*m
 		thetaLim := thetaMax + minScaledPrimalTol
-		scalePiv := n > 100
+		scalePiv := n > scalePivotVarMin
 		for _, c := range cands {
 			if c.ratio <= thetaLim {
 				k := c.col
@@ -1786,98 +1876,11 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64) (Status, int) {
 		}
 
 		if len(ws.FlipCols) > 0 {
-			if ws.TauSparse {
-				for _, i := range ws.TauIdx {
-					if uint(i) < uint(m) {
-						ws.Tau[i] = 0
-					}
-				}
-				ws.TauIdx = ws.TauIdx[:0]
-			} else {
-				clear(ws.Tau)
-			}
-			for _, fk := range ws.FlipCols {
-				lbf, ubf := lb[fk], ub[fk]
-				var deltaX float64
-				if status[fk] == statusAtLower {
-					status[fk] = statusAtUpper
-					ws.X[fk] = ubf
-					deltaX = ubf - lbf
-				} else {
-					status[fk] = statusAtLower
-					ws.X[fk] = lbf
-					deltaX = lbf - ubf
-				}
-				s.addScaledColumn(fk, deltaX, ws.Tau)
-			}
-			ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
-			for _, i := range ws.TauIdx {
-				xb[i] -= ws.Tau[i]
-				ws.Tau[i] = 0
-				ws.X[basis[i]] = xb[i]
-			}
-			ws.TauIdx = ws.TauIdx[:0]
-			ws.TauSparse = true
-			bVar := basis[leaveRow]
-			if leaveDir > 0 {
-				primalInfeas = max(0.0, lb[bVar]-xb[leaveRow])
-			} else {
-				primalInfeas = max(0.0, xb[leaveRow]-ub[bVar])
-			}
+			primalInfeas = s.applyDualBoundFlips(leaveRow, leaveDir)
 		}
 
-		invPiv := 1.0 / pivElem
-		invPiv2 := invPiv * invPiv
-		leaveWeight := dse[leaveRow]
-		newLeaveWeight := leaveWeight * invPiv2
-		if !(newLeaveWeight >= minDSEWeight && newLeaveWeight <= maxDSEWeight) {
-			newLeaveWeight = min(max(newLeaveWeight, minDSEWeight), maxDSEWeight)
-			if math.IsNaN(newLeaveWeight) {
-				newLeaveWeight = 1.0
-			}
-		}
+		s.updateDualSteepestEdge(leaveRow, pivElem)
 		fCol := ws.FCol[:m]
-		if len(ws.FColIdx) > 1 {
-			tau := ws.Tau[:m]
-			if ws.TauSparse {
-				for _, i := range ws.TauIdx {
-					if uint(i) < uint(m) {
-						tau[i] = 0
-					}
-				}
-				ws.TauIdx = ws.TauIdx[:0]
-			} else {
-				clear(tau)
-			}
-			if ws.RhoSparse {
-				rho := ws.Rho[:m]
-				for _, i := range ws.RhoIdx {
-					tau[i] = rho[i]
-				}
-				ws.TauIdx = ws.LU.FTRANSparseHint(ws.Tau, ws.RhoIdx, ws.TauIdx)
-			} else {
-				copy(tau, ws.Rho[:m])
-				ws.TauIdx = ws.LU.FTRANSparse(ws.Tau, ws.TauIdx)
-			}
-			ws.TauSparse = true
-			for _, i := range ws.FColIdx {
-				if i != leaveRow && uint(i) < uint(m) {
-					fi := fCol[i]
-					if fi > minDSEColEntry || fi < -minDSEColEntry {
-						ratio := fi * invPiv
-						w := dse[i] - 2.0*ratio*tau[i] + ratio*ratio*leaveWeight
-						if !(w >= minDSEWeight && w <= maxDSEWeight) {
-							w = min(max(w, minDSEWeight), maxDSEWeight)
-							if math.IsNaN(w) {
-								w = 1.0
-							}
-						}
-						dse[i] = w
-					}
-				}
-			}
-		}
-		dse[leaveRow] = newLeaveWeight
 
 		leaveVar := basis[leaveRow]
 		var newLeaveVal float64
@@ -2067,7 +2070,7 @@ func (s *LPSolver) solveTwoPhasePrimalWithLimit(maxIter int) (Status, int) {
 			for i := range m {
 				bVar := ws.Basis[i]
 				val := ws.XB[i]
-				if val < ws.LB[bVar]-1e-5 || val > ws.UB[bVar]+1e-5 {
+				if val < ws.LB[bVar]-verifyFeasTol || val > ws.UB[bVar]+verifyFeasTol {
 					return StatusNumericalError, totalIter
 				}
 			}
@@ -2153,7 +2156,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 			if val < lb-tol {
 				if d < -pivotTol && !math.IsInf(ub, 1) {
 					theta := (ub - val) / (-d)
-					if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
+					if theta < bestTheta-primalRatioTieTol || (math.Abs(theta-bestTheta) <= primalRatioTieTol && math.Abs(d) > bestPivot) {
 						bestTheta = theta
 						leaveRow = i
 						leaveToUpper = true
@@ -2161,7 +2164,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 					}
 				} else if d < -pivotTol {
 					theta := (lb - val) / (-d)
-					if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
+					if theta < bestTheta-primalRatioTieTol || (math.Abs(theta-bestTheta) <= primalRatioTieTol && math.Abs(d) > bestPivot) {
 						bestTheta = theta
 						leaveRow = i
 						leaveToUpper = false
@@ -2172,7 +2175,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 			} else if val > ub+tol {
 				if d > pivotTol && !math.IsInf(lb, -1) {
 					theta := (val - lb) / d
-					if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
+					if theta < bestTheta-primalRatioTieTol || (math.Abs(theta-bestTheta) <= primalRatioTieTol && math.Abs(d) > bestPivot) {
 						bestTheta = theta
 						leaveRow = i
 						leaveToUpper = false
@@ -2180,7 +2183,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 					}
 				} else if d > pivotTol {
 					theta := (val - ub) / d
-					if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
+					if theta < bestTheta-primalRatioTieTol || (math.Abs(theta-bestTheta) <= primalRatioTieTol && math.Abs(d) > bestPivot) {
 						bestTheta = theta
 						leaveRow = i
 						leaveToUpper = true
@@ -2193,7 +2196,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 
 		if d > pivotTol && !math.IsInf(lb, -1) {
 			theta := max(0.0, val-lb) / d
-			if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
+			if theta < bestTheta-primalRatioTieTol || (math.Abs(theta-bestTheta) <= primalRatioTieTol && math.Abs(d) > bestPivot) {
 				bestTheta = theta
 				leaveRow = i
 				leaveToUpper = false
@@ -2201,7 +2204,7 @@ func (s *LPSolver) primalSimplexStep(phase1 bool) Status {
 			}
 		} else if d < -pivotTol && !math.IsInf(ub, 1) {
 			theta := max(0.0, ub-val) / (-d)
-			if theta < bestTheta-1e-12 || (math.Abs(theta-bestTheta) <= 1e-12 && math.Abs(d) > bestPivot) {
+			if theta < bestTheta-primalRatioTieTol || (math.Abs(theta-bestTheta) <= primalRatioTieTol && math.Abs(d) > bestPivot) {
 				bestTheta = theta
 				leaveRow = i
 				leaveToUpper = true
@@ -2295,9 +2298,9 @@ func (s *LPSolver) buildResult(status Status, iters int) LPResult {
 	}
 	for j := range n {
 		val := ws.X[j]
-		if val < ws.LB[j] && ws.LB[j]-val <= 1e-6 {
+		if val < ws.LB[j] && ws.LB[j]-val <= primalSnapTol {
 			val = ws.LB[j]
-		} else if val > ws.UB[j] && val-ws.UB[j] <= 1e-6 {
+		} else if val > ws.UB[j] && val-ws.UB[j] <= primalSnapTol {
 			val = ws.UB[j]
 		}
 		primal[j] = val

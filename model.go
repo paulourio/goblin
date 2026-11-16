@@ -14,11 +14,13 @@ var nextModelID atomic.Uint32
 // Sense defines the optimization direction (Minimize or Maximize).
 type Sense int8
 
+// Optimization directions supported by Model.
 const (
 	Minimize Sense = 1
 	Maximize Sense = -1
 )
 
+// String returns "Minimize" or "Maximize".
 func (s Sense) String() string {
 	if s == Maximize {
 		return "Maximize"
@@ -29,12 +31,14 @@ func (s Sense) String() string {
 // VarCategory defines the domain type of a decision variable.
 type VarCategory uint8
 
+// Variable domain categories supported by Model.
 const (
 	Continuous VarCategory = iota
 	Integer
 	Binary
 )
 
+// String returns the variable category name ("Continuous", "Integer", or "Binary").
 func (c VarCategory) String() string {
 	switch c {
 	case Integer:
@@ -49,12 +53,14 @@ func (c VarCategory) String() string {
 // ConstraintSense defines the relational operator of a linear constraint.
 type ConstraintSense int8
 
+// Relational operators supported for linear constraints.
 const (
 	LessEqual    ConstraintSense = -1
 	Equal        ConstraintSense = 0
 	GreaterEqual ConstraintSense = 1
 )
 
+// String returns the relational symbol ("<=", "=", or ">=").
 func (s ConstraintSense) String() string {
 	switch s {
 	case LessEqual:
@@ -73,6 +79,7 @@ func (s ConstraintSense) valid() bool {
 // Status represents the termination status of a solve call, matching PuLP's LpSolveStatus codes.
 type Status int8
 
+// Termination status codes returned in Result.Status and LPResult.Status.
 const (
 	StatusNotSolved      Status = 0
 	StatusOptimal        Status = 1
@@ -86,6 +93,7 @@ const (
 	StatusNumericalError Status = -12
 )
 
+// String returns the canonical status label (such as "Optimal" or "Infeasible").
 func (s Status) String() string {
 	switch s {
 	case StatusOptimal:
@@ -207,12 +215,7 @@ func (m *Model) NumVars() int { return len(m.vars) }
 // NumConstraints returns the number of constraints in the model.
 func (m *Model) NumConstraints() int { return len(m.constraints) }
 
-// AddVar adds a decision variable with explicit lower bound, upper bound, and category.
-// Use math.Inf(-1) for no lower bound and math.Inf(1) for no upper bound.
-func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
-	if math.IsNaN(lb) || math.IsNaN(ub) || math.IsInf(lb, 1) || math.IsInf(ub, -1) {
-		m.recordErr(fmt.Errorf("variable %q has invalid bounds [%v, %v]", name, lb, ub))
-	}
+func roundBoundsForCategory(lb, ub float64, cat VarCategory) (float64, float64) {
 	switch cat {
 	case Binary:
 		if lb < 0 || math.IsInf(lb, -1) {
@@ -235,6 +238,16 @@ func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
 			ub = math.Floor(ub + intBoundRoundTol)
 		}
 	}
+	return lb, ub
+}
+
+// AddVar adds a decision variable with explicit lower bound, upper bound, and category.
+// Use math.Inf(-1) for no lower bound and math.Inf(1) for no upper bound.
+func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
+	if math.IsNaN(lb) || math.IsNaN(ub) || math.IsInf(lb, 1) || math.IsInf(ub, -1) {
+		m.recordErr(fmt.Errorf("variable %q has invalid bounds [%v, %v]", name, lb, ub))
+	}
+	lb, ub = roundBoundsForCategory(lb, ub, cat)
 	idx := len(m.vars)
 	id := makeVar(m.id, idx)
 	if name == "" {
@@ -308,29 +321,7 @@ func (m *Model) SetVarBounds(v Var, lb, ub float64) {
 	if math.IsNaN(lb) || math.IsNaN(ub) || math.IsInf(lb, 1) || math.IsInf(ub, -1) {
 		m.recordErr(fmt.Errorf("variable %q has invalid bounds [%v, %v]", m.vars[idx].name, lb, ub))
 	}
-	cat := m.vars[idx].cat
-	switch cat {
-	case Binary:
-		if lb < 0 || math.IsInf(lb, -1) {
-			lb = 0
-		}
-		if ub > 1 || math.IsInf(ub, 1) {
-			ub = 1
-		}
-		if !math.IsNaN(lb) {
-			lb = math.Ceil(lb - intBoundRoundTol)
-		}
-		if !math.IsNaN(ub) {
-			ub = math.Floor(ub + intBoundRoundTol)
-		}
-	case Integer:
-		if !math.IsInf(lb, 0) && !math.IsNaN(lb) {
-			lb = math.Ceil(lb - intBoundRoundTol)
-		}
-		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
-			ub = math.Floor(ub + intBoundRoundTol)
-		}
-	}
+	lb, ub = roundBoundsForCategory(lb, ub, m.vars[idx].cat)
 	m.vars[idx].lb = lb
 	m.vars[idx].ub = ub
 }

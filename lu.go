@@ -13,6 +13,8 @@ const (
 	etaIdxRowMult  = 24
 	luDropTol      = 1e-13
 	luSolveDropTol = 1e-13
+	luSingDegTol   = 1e-16
+	maxMeritInit   = 1<<30 - 1
 )
 
 type etaVector struct {
@@ -97,6 +99,7 @@ func newLUFactorization(m int) *LUFactorization {
 	return f
 }
 
+// Reset resizes internal permutation, factor, and scratch slices for an m-by-m basis and clears all PFI eta updates.
 func (f *LUFactorization) Reset(m int) {
 	f.m = m
 	f.numColSing = 0
@@ -150,10 +153,12 @@ func (f *LUFactorization) Reset(m int) {
 	f.etaIdx = f.etaIdx[:0]
 }
 
+// NeedsRefactor reports whether the accumulated PFI eta file has reached its update or nonzero-entry cap.
 func (f *LUFactorization) NeedsRefactor() bool {
 	return len(f.etas) >= maxEtaUpdates || len(f.etaIdx) >= max(minEtaIdxCap, etaIdxRowMult*f.m)
 }
 
+// Factorize computes the sparse LU factorization of an m-by-m basis populated via dense column callback fillCol.
 func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64)) error {
 	colBuf := make([]float64, m)
 	return f.FactorizeSparse(m, func(col int, rows []int, vals []float64) ([]int, []float64) {
@@ -169,6 +174,8 @@ func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64))
 	})
 }
 
+// FactorizeSparse computes P * B * Q = L * U over sparse basis columns supplied by appendCol,
+// peeling column and row singletons before eliminating the active Markowitz nucleus.
 func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []int, vals []float64) ([]int, []float64)) error {
 	f.Reset(m)
 	if m == 0 {
@@ -330,7 +337,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		k++
 		for p := f.bColPtr[pivCol]; p < f.bColPtr[pivCol+1]; p++ {
 			r2 := f.bRowIdx[p]
-			if !f.rowDone[r2] && math.Abs(f.bVal[p]) > 1e-16 {
+			if !f.rowDone[r2] && math.Abs(f.bVal[p]) > luSingDegTol {
 				f.rowDeg[r2]--
 				if f.rowDeg[r2] == 1 {
 					q = append(q, r2)
@@ -511,7 +518,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 
 		// 3. Markowitz threshold search across remaining active columns.
 		if pivNR == -1 {
-			bestMerit := int(1<<30 - 1)
+			bestMerit := maxMeritInit
 			bestAbs := 0.0
 			checkedCols := 0
 
@@ -868,6 +875,7 @@ func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 	}
 }
 
+// FTRAN solves the forward basis system B * x = rhs in place, applying L, U, and the PFI eta file in order.
 func (f *LUFactorization) FTRAN(rhs []float64) {
 	m := f.m
 	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lColPtr) <= m || len(f.uColPtr) <= m {
@@ -1180,6 +1188,7 @@ func (f *LUFactorization) FTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []i
 	return out
 }
 
+// BTRAN solves the transposed basis system B^T * y = rhs in place, applying the PFI eta file in reverse before U^T and L^T.
 func (f *LUFactorization) BTRAN(rhs []float64) {
 	m := f.m
 	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lRowPtr) <= m || len(f.uRowPtr) <= m {
@@ -1490,6 +1499,7 @@ func (f *LUFactorization) BTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []i
 	return nzIdx
 }
 
+// PushEta appends a PFI eta update vector for pivotRow from dense transformed pivot column fCol.
 func (f *LUFactorization) PushEta(pivotRow int, fCol []float64) error {
 	piv := fCol[pivotRow]
 	if math.Abs(piv) < luPivotTol {
@@ -1512,6 +1522,7 @@ func (f *LUFactorization) PushEta(pivotRow int, fCol []float64) error {
 	return nil
 }
 
+// PushEtaSparse appends a PFI eta update vector for pivotRow over the sparse support indices in fColIdx.
 func (f *LUFactorization) PushEtaSparse(pivotRow int, fCol []float64, fColIdx []int) error {
 	piv := fCol[pivotRow]
 	if math.Abs(piv) < luPivotTol {

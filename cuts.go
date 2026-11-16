@@ -13,16 +13,23 @@ const (
 	minCutEfficacy   = 1e-3
 	maxCutDynamism   = 1e5
 	rhsSafetyMargin  = 1e-7
+	coverDPTol       = 1e-7
 	maxOrthoCosine   = 0.92
 	halfFracTarget   = 0.5
 	maxGMIFraqRows   = 25
 	gmiZeroTol       = 1e-13
 	cutCoeffZeroTol  = 1e-12
+	cutDropTol       = 1e-11
 	unitCoeffTol     = 1e-9
 	cutCompareTol    = 1e-6
 	minCoverItemVal  = 1e-4
 	minPairNNZ       = 2
 	maxFlowLookahead = 6
+	maxFlowChainLen  = 64
+	maxMIRDivisors   = 4
+	minMIRFrac       = 0.02
+	mirMaxRelSlack   = 0.05
+	defaultMaxCuts   = 15
 )
 
 type cutPlane struct {
@@ -32,9 +39,11 @@ type cutPlane struct {
 	Efficacy float64
 }
 
+// generateCutRound separates GMI, lifted knapsack cover, flow/VUB, and single-row MIR cuts,
+// returning up to maxCuts pairwise-orthogonal cuts ordered by descending efficacy.
 func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int) []cutPlane {
 	if maxCuts <= 0 {
-		maxCuts = 15
+		maxCuts = defaultMaxCuts
 	}
 	if solver.timeExpired() {
 		return nil
@@ -89,6 +98,7 @@ func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int) []cutPl
 	return selected
 }
 
+// separateGMICuts derives Gomory mixed-integer cuts from up to maxGMIFraqRows fractional basic integer rows.
 func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 	p := solver.Prob
 	ws := solver.WS
@@ -251,6 +261,7 @@ func addScaledRow(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale floa
 	}
 }
 
+// separateKnapsackCoverCuts relaxes inequality rows to 0-1 knapsacks and sequentially lifts minimal covers via dynamic programming.
 func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	n := p.NumVars
 	m := p.NumConstraints
@@ -387,12 +398,12 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 				remCap := rhs - it.weight
 				zMax := 0
 				for v := coverSize - 1; v >= 1; v-- {
-					if minWeight[v] <= remCap+1e-7 {
+					if minWeight[v] <= remCap+coverDPTol {
 						zMax = v
 						break
 					}
 				}
-				if remCap < -1e-7 {
+				if remCap < -coverDPTol {
 					alpha = coverSize - 1
 				} else {
 					alpha = (coverSize - 1) - zMax
@@ -418,7 +429,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 				finalRHS -= fAlpha
 			}
 		}
-		if lhsStar <= cutCap+1e-3 {
+		if lhsStar <= cutCap+minCutEfficacy {
 			continue
 		}
 
@@ -430,6 +441,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 	return cuts
 }
 
+// separateFlowAndVUBCuts separates disaggregated variable-upper-bound inequalities and Barany-Van Roy-Wolsey (l, S) lot-sizing cuts.
 func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	n := p.NumVars
 	m := p.NumConstraints
@@ -445,7 +457,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 
 	// 1. Detect VUB constraints (p - M*y <= 0) and Disaggregated Implied VUB constraints (sum_k a_k x_k - C*y <= 0)
 	for i := range m {
-		if p.RowSense[i] != LessEqual || math.Abs(p.RowRHS[i]) > 1e-9 {
+		if p.RowSense[i] != LessEqual || math.Abs(p.RowRHS[i]) > unitCoeffTol {
 			continue
 		}
 		s, e := p.RowPtr[i], p.RowPtr[i+1]
@@ -606,7 +618,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		cur := root
 		for {
 			chain = append(chain, cur)
-			if len(chain) >= 64 || invOutCount[cur.invOut] != 1 || invInCount[cur.invOut] != 1 {
+			if len(chain) >= maxFlowChainLen || invOutCount[cur.invOut] != 1 || invInCount[cur.invOut] != 1 {
 				break
 			}
 			next, ok := nodeByInvIn[cur.invOut]
@@ -660,7 +672,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					}
 					yTerm := remDem * lpPrimal[nd.binCol]
 					pTerm := lpPrimal[nd.prodCol]
-					if yTerm < pTerm-1e-6 {
+					if yTerm < pTerm-cutCompareTol {
 						seenBins[numSeen] = nd.binCol
 						numSeen++
 						lhsStar += yTerm
@@ -671,7 +683,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					remDem -= nd.demand
 				}
 
-				if !anyInS || lhsStar >= cumDem-1e-3 {
+				if !anyInS || lhsStar >= cumDem-minCutEfficacy {
 					continue
 				}
 
@@ -696,7 +708,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					}
 					yTerm := remDem * lpPrimal[nd.binCol]
 					pTerm := lpPrimal[nd.prodCol]
-					if yTerm < pTerm-1e-6 {
+					if yTerm < pTerm-cutCompareTol {
 						seenBins[numSeen] = nd.binCol
 						numSeen++
 						denseCut[nd.binCol] -= remDem
@@ -726,6 +738,7 @@ func mirUseLower(x, l, u float64) bool {
 	return x-l <= u-x
 }
 
+// separateRowMIRCuts separates single-row Marchand-Wolsey complemented Mixed-Integer Rounding cuts over bounded and one-sided rows.
 func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	n := p.NumVars
 	m := p.NumConstraints
@@ -757,13 +770,13 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				break
 			}
 		}
-		if !validBounds || rhs-act > 1.0+0.05*math.Abs(rhs) {
+		if !validBounds || rhs-act > 1.0+mirMaxRelSlack*math.Abs(rhs) {
 			continue
 		}
 
 		// Try Marchand-Wolsey c-MIR scaling with divisor delta = |a_k| for fractional integer variables
 		triedDivs := 0
-		for kDiv := s; kDiv < e && triedDivs < 4; kDiv++ {
+		for kDiv := s; kDiv < e && triedDivs < maxMIRDivisors; kDiv++ {
 			divCol := p.ColIdx[kDiv]
 			if p.VarCat[divCol] == Continuous {
 				continue
@@ -795,7 +808,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			betaHat := beta / delta
 			b0 := math.Floor(betaHat)
 			f0 := betaHat - b0
-			if f0 < 0.02 || f0 > 0.98 {
+			if f0 < minMIRFrac || f0 > 1.0-minMIRFrac {
 				continue
 			}
 
@@ -862,7 +875,6 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 // largest possible value of each dropped term -a_j*x_j over the global bounds of x_j is added
 // to the right-hand side, and the cut is rejected if that bound is infinite.
 func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []float64) (cutPlane, bool) {
-	const cutDropTol = 1e-11
 	norm2 := 0.0
 	maxAbs := 0.0
 	minAbs := math.Inf(1)

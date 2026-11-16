@@ -19,31 +19,44 @@ type bfrtCand struct {
 	maxFlip float64
 }
 
+const (
+	defaultLUInitCap = 64
+	tabRowChunkBits  = 6
+	tabRowChunkSize  = 1 << tabRowChunkBits
+	tabRowChunkMask  = tabRowChunkSize - 1
+)
+
 // Workspace holds all preallocated numerical buffers for an LP solve or
 // warm-started Branch-and-Cut node re-optimization, eliminating GC allocations.
+// Callers borrow instances via AcquireWorkspace and return them with ReleaseWorkspace.
 type Workspace struct {
 	LU *LUFactorization
 
+	// Active dimensions (TotVar = N + M).
 	N      int
 	M      int
 	TotVar int
 
+	// Working bounds and costs.
 	LB       []float64
 	UB       []float64
 	Cost     []float64
 	WorkCost []float64
 
+	// Basis indices: Basis[r] stores slot r's variable, while BasicRow[k] maps variable k back to its basis row or -1 when nonbasic.
 	Basis       []int
 	BasicRow    []int
 	RowBasicDeg []int
 	Status      []varBasisStatus
 
+	// Primal, dual, reduced-cost, and steepest-edge vectors.
 	X   []float64
 	XB  []float64
 	Y   []float64
 	Dj  []float64
 	DSE []float64
 
+	// Sparse linear-system scratch buffers: whenever a *Sparse flag is true, every nonzero entry of the paired slice is recorded inside its *Idx support list so subsequent clears touch only active positions.
 	Rho             []float64
 	RhoIdx          []int
 	RhoSparse       bool
@@ -60,11 +73,10 @@ type Workspace struct {
 	TabRowChunks    []int
 	TabRowChunkMark []bool
 
+	// Ratio-test scratch buffers.
 	FlipCols  []int
 	BFRTCands []bfrtCand
 }
-
-const defaultLUInitCap = 64
 
 var workspacePool = sync.Pool{
 	New: func() any {
@@ -133,7 +145,7 @@ func (ws *Workspace) EnsureSize(n, m int) {
 	}
 	ws.TabRowIdx = ws.TabRowIdx[:0]
 	ws.TabRowSparse = false
-	numChunks := (n + 63) >> 6
+	numChunks := (n + tabRowChunkMask) >> tabRowChunkBits
 	if cap(ws.TabRowChunkMark) < numChunks {
 		ws.TabRowChunkMark = make([]bool, numChunks)
 		ws.TabRowChunks = make([]int, 0, numChunks)

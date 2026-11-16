@@ -22,6 +22,7 @@ func (s Sense) valid() bool {
 	return s == Minimize || s == Maximize
 }
 
+// String returns "Minimize", "Maximize", or "Invalid".
 func (s Sense) String() string {
 	switch s {
 	case Minimize:

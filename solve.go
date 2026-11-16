@@ -19,6 +19,7 @@ const (
 	BackendCBC
 )
 
+// String returns the short backend name ("Go" or "CBC").
 func (b Backend) String() string {
 	switch b {
 	case BackendCBC:
@@ -61,6 +62,7 @@ type Options struct {
 
 	hasCutoff bool
 	cutoffMin float64
+	isSubMIP  bool
 }
 
 const (

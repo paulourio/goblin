@@ -488,7 +488,252 @@ func main() {
 		return
 	}
 
-	backend, err := parseBackend(*backendFlag)
+	runMILPBenchSuite(milpSuiteConfig{
+		corpusDir:   *corpusDir,
+		pyRefPath:   *pyRefPath,
+		outPath:     *outPath,
+		backendName: *backendFlag,
+		noSIMD:      *noSIMD,
+		trials:      *trials,
+		workers:     *workers,
+	})
+}
+
+type milpSuiteConfig struct {
+	corpusDir   string
+	pyRefPath   string
+	outPath     string
+	backendName string
+	noSIMD      bool
+	trials      int
+	workers     int
+}
+
+type milpJobResult struct {
+	idx          int
+	res          bench.ProblemBenchResult
+	canonicalRes gb.Result
+}
+
+func measureRootLPRelaxation(
+	canonicalCompiled *gb.CompiledProblem,
+	compiledTrials []*gb.CompiledProblem,
+	warmup, nTrials int,
+	backend gb.Backend,
+	noSIMD bool,
+) ([]time.Duration, gb.LPResult) {
+	lpTimes := make([]time.Duration, 0, nTrials)
+	var canonicalRootLP gb.LPResult
+	for i := range warmup + nTrials {
+		cp := canonicalCompiled
+		if i >= warmup {
+			cp = compiledTrials[i-warmup]
+		}
+		var dt time.Duration
+		var lpRes gb.LPResult
+		if backend == gb.BackendCBC {
+			t0 := time.Now()
+			lpSolver := gb.NewCBCLPSolver(cp)
+			lpRes = lpSolver.Solve()
+			dt = time.Since(t0)
+			lpSolver.Close()
+		} else {
+			ws := gb.AcquireWorkspace(cp.NumVars, cp.NumConstraints)
+			t0 := time.Now()
+			lpSolver := gb.NewLPSolver(cp, ws)
+			lpSolver.DisableSIMD = noSIMD
+			lpRes = lpSolver.Solve()
+			dt = time.Since(t0)
+			gb.ReleaseWorkspace(ws)
+		}
+		if i >= warmup {
+			if i == warmup {
+				canonicalRootLP = lpRes
+			}
+			lpTimes = append(lpTimes, dt)
+		}
+	}
+	return lpTimes, canonicalRootLP
+}
+
+func benchSingleCorpusCase(
+	c bench.CorpusCase,
+	cfg milpSuiteConfig,
+	backend gb.Backend,
+	simdActive bool,
+	baseOpts []gb.Option,
+	mpsBuf *bytes.Buffer,
+	gitCommit string,
+	gitDirty bool,
+	fingerprint string,
+) (bench.ProblemBenchResult, gb.Result) {
+	nTrials := cfg.trials
+	if c.Tier == "tier3_large" {
+		nTrials = min(nTrials, tier3MaxTrials)
+	}
+	warmup := 2
+	if c.Tier == "tier3_large" {
+		warmup = 1
+	}
+
+	trialPayloads, err := loadTrialPayloads(cfg.corpusDir, c.ID, nTrials)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "missing %s: %v\n", c.ID, err)
+		os.Exit(1)
+	}
+
+	tParse := make([]time.Duration, 0, nTrials)
+	tBuild := make([]time.Duration, 0, nTrials)
+	tCompile := make([]time.Duration, 0, nTrials)
+	tMPS := make([]time.Duration, 0, nTrials)
+	tSolve := make([]time.Duration, 0, nTrials)
+	tTotal := make([]time.Duration, 0, nTrials)
+	trialObjs := make([]float64, 0, nTrials)
+	compiledTrials := make([]*gb.CompiledProblem, 0, nTrials)
+
+	var canonicalRes gb.Result
+	var canonicalCompiled *gb.CompiledProblem
+
+	for i := range warmup + nTrials {
+		rawBytes := trialPayloads[0]
+		if i >= warmup {
+			rawBytes = trialPayloads[i-warmup]
+		}
+
+		t0 := time.Now()
+		doc, err := format.ParsePuLPJSON(rawBytes)
+		if err != nil {
+			panic(err)
+		}
+		t1 := time.Now()
+		model, err := format.BuildModelFromPuLPJSON(doc)
+		if err != nil {
+			panic(err)
+		}
+		t2 := time.Now()
+		compiled := model.Compile()
+		t3 := time.Now()
+		res, err := gb.SolveCompiled(context.Background(), compiled, baseOpts...)
+		if err != nil {
+			panic(err)
+		}
+		t4 := time.Now()
+
+		mpsBuf.Reset()
+		if err := format.WriteMPS(compiled, mpsBuf); err != nil {
+			panic(err)
+		}
+		t5 := time.Now()
+
+		if i >= warmup {
+			trialIdx := i - warmup
+			if trialIdx == 0 {
+				canonicalCompiled = compiled
+				canonicalRes = res
+			}
+			compiledTrials = append(compiledTrials, compiled)
+			trialObjs = append(trialObjs, res.Objective)
+			tParse = append(tParse, t1.Sub(t0))
+			tBuild = append(tBuild, t2.Sub(t1))
+			tCompile = append(tCompile, t3.Sub(t2))
+			tSolve = append(tSolve, t4.Sub(t3))
+			tTotal = append(tTotal, t4.Sub(t0))
+			tMPS = append(tMPS, t5.Sub(t4))
+		}
+	}
+
+	lpTimes, canonicalRootLP := measureRootLPRelaxation(canonicalCompiled, compiledTrials, warmup, nTrials, backend, cfg.noSIMD)
+
+	cpTrials := 3
+	if c.Tier == "tier3_large" {
+		cpTrials = 1
+	}
+	cpTimeout := cpTimeoutMS * time.Millisecond
+
+	cp4 := runCheckpoint(compiledTrials, cpTrials,
+		gb.WithBackend(backend),
+		gb.WithSIMD(!cfg.noSIMD),
+		gb.WithPresolve(false),
+		gb.WithCuts(false),
+		gb.WithHeuristics(false),
+		gb.WithMaxNodes(cpMaxNodes),
+		gb.WithRelGapTol(cpGapTol),
+		gb.WithAbsGapTol(cpGapTol),
+		gb.WithTimeLimit(cpTimeout),
+	)
+
+	cp5 := runCheckpoint(compiledTrials, cpTrials,
+		gb.WithBackend(backend),
+		gb.WithSIMD(!cfg.noSIMD),
+		gb.WithPresolve(true),
+		gb.WithCuts(false),
+		gb.WithHeuristics(false),
+		gb.WithMaxNodes(cpMaxNodes),
+		gb.WithRelGapTol(cpGapTol),
+		gb.WithAbsGapTol(cpGapTol),
+		gb.WithTimeLimit(cpTimeout),
+	)
+
+	cp6 := runCheckpoint(compiledTrials, cpTrials,
+		gb.WithBackend(backend),
+		gb.WithSIMD(!cfg.noSIMD),
+		gb.WithPresolve(true),
+		gb.WithCuts(true),
+		gb.WithHeuristics(false),
+		gb.WithMaxNodes(cpMaxNodes),
+		gb.WithMaxCutPasses(cpMaxCutPasses),
+		gb.WithRelGapTol(cpGapTol),
+		gb.WithAbsGapTol(cpGapTol),
+		gb.WithTimeLimit(cpTimeout),
+	)
+
+	cp7 := bench.CheckpointMetrics{
+		Status:     canonicalRes.Status.String(),
+		Objective:  canonicalRes.Objective,
+		BestBound:  canonicalRes.BestBound,
+		Nodes:      canonicalRes.Nodes,
+		Iterations: canonicalRes.Iterations,
+		CutsAdded:  canonicalRes.CutsAdded,
+		TimeMS:     medianDurationMS(tSolve),
+	}
+
+	goMeanMS, goSDMS := meanSDDurationMS(tTotal)
+	return bench.ProblemBenchResult{
+		ID:                c.ID,
+		Tier:              c.Tier,
+		NumVars:           canonicalCompiled.NumVars,
+		NumConstraints:    canonicalCompiled.NumConstraints,
+		IsMIP:             canonicalCompiled.IsMIP,
+		Backend:           backend.String(),
+		SIMDEnabled:       simdActive,
+		TrialObjectives:   trialObjs,
+		TParseMS:          medianDurationMS(tParse),
+		TBuildMS:          medianDurationMS(tBuild),
+		TCompileMS:        medianDurationMS(tCompile),
+		TMPSWriteMS:       medianDurationMS(tMPS),
+		TSolveMS:          medianDurationMS(tSolve),
+		TTotalMS:          medianDurationMS(tTotal),
+		TTotalMeanMS:      goMeanMS,
+		TTotalSDMS:        goSDMS,
+		TSolveTrialsMS:    durationsMS(tSolve),
+		TTotalTrialsMS:    durationsMS(tTotal),
+		GitCommit:         gitCommit,
+		GitDirty:          gitDirty,
+		GoVersion:         runtime.Version(),
+		SourceFingerprint: fingerprint,
+		CPUAffinity:       cpuAffinity(),
+		RootLPTimeMS:      medianDurationMS(lpTimes),
+		RootLPIters:       canonicalRootLP.Iterations,
+		RootLPObj:         canonicalRootLP.Objective,
+		CP4Baseline:       cp4,
+		CP5Presolve:       cp5,
+		CP6Cuts:           cp6,
+		CP7Full:           cp7,
+	}, canonicalRes
+}
+
+func runMILPBenchSuite(cfg milpSuiteConfig) {
+	backend, err := parseBackend(cfg.backendName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(exitCodeBadFlag)
@@ -504,12 +749,12 @@ func main() {
 	} else {
 		baseOpts = append(baseOpts, gb.WithPureGo())
 	}
-	if *noSIMD {
+	if cfg.noSIMD {
 		baseOpts = append(baseOpts, gb.WithoutSIMD())
 	}
 
 	var pyRef map[string]bench.PythonBaselineEntry
-	if rawRef, err := os.ReadFile(*pyRefPath); err == nil {
+	if rawRef, err := os.ReadFile(cfg.pyRefPath); err == nil {
 		_ = json.Unmarshal(rawRef, &pyRef)
 	}
 
@@ -521,12 +766,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
 		os.Exit(1)
 	}
-	if gitDirty && *outPath != "" {
+	if gitDirty && cfg.outPath != "" {
 		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
 	}
 
-	simdActive := backend == gb.BackendGo && simd.UsingHardwareSIMDWith(*noSIMD)
-	nWorkers := max(1, *workers)
+	simdActive := backend == gb.BackendGo && simd.UsingHardwareSIMDWith(cfg.noSIMD)
+	nWorkers := max(1, cfg.workers)
 	fmt.Printf("=== GOBLIN WARM-STATE MULTI-TRIAL BENCHMARK SUITE (Backend=%s, SIMD=%v, Workers=%d) ===\n\n",
 		backend, simdActive, nWorkers)
 	fmt.Printf("%-18s | %5s %4s | %8s %8s | %8s %8s | %9s %9s | %7s | %7s\n",
@@ -537,230 +782,27 @@ func main() {
 		"Speedup", "Parity")
 	fmt.Println(strings.Repeat("-", tableRuleWidth))
 
-	type jobResult struct {
-		idx          int
-		res          bench.ProblemBenchResult
-		canonicalRes gb.Result
-	}
-
 	jobCh := make(chan int, len(cases))
 	for idx := range cases {
 		jobCh <- idx
 	}
 	close(jobCh)
 
-	jobResults := make([]jobResult, len(cases))
+	jobResults := make([]milpJobResult, len(cases))
 	var wg sync.WaitGroup
 	for range min(nWorkers, len(cases)) {
 		wg.Go(func() {
 			var mpsBuf bytes.Buffer
-			warmWorker(*corpusDir, &mpsBuf, baseOpts...)
+			warmWorker(cfg.corpusDir, &mpsBuf, baseOpts...)
 
 			for idx := range jobCh {
-				c := cases[idx]
-				nTrials := *trials
-				if c.Tier == "tier3_large" {
-					nTrials = min(nTrials, tier3MaxTrials)
-				}
-				warmup := 2
-				if c.Tier == "tier3_large" {
-					warmup = 1
-				}
-
-				trialPayloads, err := loadTrialPayloads(*corpusDir, c.ID, nTrials)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "missing %s: %v\n", c.ID, err)
-					os.Exit(1)
-				}
-
-				tParse := make([]time.Duration, 0, nTrials)
-				tBuild := make([]time.Duration, 0, nTrials)
-				tCompile := make([]time.Duration, 0, nTrials)
-				tMPS := make([]time.Duration, 0, nTrials)
-				tSolve := make([]time.Duration, 0, nTrials)
-				tTotal := make([]time.Duration, 0, nTrials)
-				trialObjs := make([]float64, 0, nTrials)
-				compiledTrials := make([]*gb.CompiledProblem, 0, nTrials)
-
-				var canonicalRes gb.Result
-				var canonicalCompiled *gb.CompiledProblem
-
-				for i := range warmup + nTrials {
-					rawBytes := trialPayloads[0]
-					if i >= warmup {
-						rawBytes = trialPayloads[i-warmup]
-					}
-
-					t0 := time.Now()
-					doc, err := format.ParsePuLPJSON(rawBytes)
-					if err != nil {
-						panic(err)
-					}
-					t1 := time.Now()
-					model, err := format.BuildModelFromPuLPJSON(doc)
-					if err != nil {
-						panic(err)
-					}
-					t2 := time.Now()
-					compiled := model.Compile()
-					t3 := time.Now()
-					res, err := gb.SolveCompiled(context.Background(), compiled, baseOpts...)
-					if err != nil {
-						panic(err)
-					}
-					t4 := time.Now()
-
-					mpsBuf.Reset()
-					if err := format.WriteMPS(compiled, &mpsBuf); err != nil {
-						panic(err)
-					}
-					t5 := time.Now()
-
-					if i >= warmup {
-						trialIdx := i - warmup
-						if trialIdx == 0 {
-							canonicalCompiled = compiled
-							canonicalRes = res
-						}
-						compiledTrials = append(compiledTrials, compiled)
-						trialObjs = append(trialObjs, res.Objective)
-						tParse = append(tParse, t1.Sub(t0))
-						tBuild = append(tBuild, t2.Sub(t1))
-						tCompile = append(tCompile, t3.Sub(t2))
-						tSolve = append(tSolve, t4.Sub(t3))
-						tTotal = append(tTotal, t4.Sub(t0))
-						tMPS = append(tMPS, t5.Sub(t4))
-					}
-				}
-
-				// Measure Root LP Relaxation (Checkpoint 2/3) across warm randomized trials
-				lpTimes := make([]time.Duration, 0, nTrials)
-				var canonicalRootLP gb.LPResult
-				for i := range warmup + nTrials {
-					cp := canonicalCompiled
-					if i >= warmup {
-						cp = compiledTrials[i-warmup]
-					}
-					var dt time.Duration
-					var lpRes gb.LPResult
-					if backend == gb.BackendCBC {
-						t0 := time.Now()
-						lpSolver := gb.NewCBCLPSolver(cp)
-						lpRes = lpSolver.Solve()
-						dt = time.Since(t0)
-						lpSolver.Close()
-					} else {
-						ws := gb.AcquireWorkspace(cp.NumVars, cp.NumConstraints)
-						t0 := time.Now()
-						lpSolver := gb.NewLPSolver(cp, ws)
-						lpSolver.DisableSIMD = *noSIMD
-						lpRes = lpSolver.Solve()
-						dt = time.Since(t0)
-						gb.ReleaseWorkspace(ws)
-					}
-					if i >= warmup {
-						if i == warmup {
-							canonicalRootLP = lpRes
-						}
-						lpTimes = append(lpTimes, dt)
-					}
-				}
-
-				cpTrials := 3
-				if c.Tier == "tier3_large" {
-					cpTrials = 1
-				}
-				cpTimeout := cpTimeoutMS * time.Millisecond
-
-				cp4 := runCheckpoint(compiledTrials, cpTrials,
-					gb.WithBackend(backend),
-					gb.WithSIMD(!*noSIMD),
-					gb.WithPresolve(false),
-					gb.WithCuts(false),
-					gb.WithHeuristics(false),
-					gb.WithMaxNodes(cpMaxNodes),
-					gb.WithRelGapTol(cpGapTol),
-					gb.WithAbsGapTol(cpGapTol),
-					gb.WithTimeLimit(cpTimeout),
+				res, canonicalRes := benchSingleCorpusCase(
+					cases[idx], cfg, backend, simdActive, baseOpts, &mpsBuf, gitCommit, gitDirty, fingerprint,
 				)
-
-				cp5 := runCheckpoint(compiledTrials, cpTrials,
-					gb.WithBackend(backend),
-					gb.WithSIMD(!*noSIMD),
-					gb.WithPresolve(true),
-					gb.WithCuts(false),
-					gb.WithHeuristics(false),
-					gb.WithMaxNodes(cpMaxNodes),
-					gb.WithRelGapTol(cpGapTol),
-					gb.WithAbsGapTol(cpGapTol),
-					gb.WithTimeLimit(cpTimeout),
-				)
-
-				cp6 := runCheckpoint(compiledTrials, cpTrials,
-					gb.WithBackend(backend),
-					gb.WithSIMD(!*noSIMD),
-					gb.WithPresolve(true),
-					gb.WithCuts(true),
-					gb.WithHeuristics(false),
-					gb.WithMaxNodes(cpMaxNodes),
-					gb.WithMaxCutPasses(cpMaxCutPasses),
-					gb.WithRelGapTol(cpGapTol),
-					gb.WithAbsGapTol(cpGapTol),
-					gb.WithTimeLimit(cpTimeout),
-				)
-
-				cp7 := bench.CheckpointMetrics{
-					Status:     canonicalRes.Status.String(),
-					Objective:  canonicalRes.Objective,
-					BestBound:  canonicalRes.BestBound,
-					Nodes:      canonicalRes.Nodes,
-					Iterations: canonicalRes.Iterations,
-					CutsAdded:  canonicalRes.CutsAdded,
-					TimeMS:     medianDurationMS(tSolve),
-				}
-
-				goParseMS := medianDurationMS(tParse)
-				goBuildMS := medianDurationMS(tBuild)
-				goCompileMS := medianDurationMS(tCompile)
-				goSolveMS := medianDurationMS(tSolve)
-				goTotalMS := medianDurationMS(tTotal)
-				goMeanMS, goSDMS := meanSDDurationMS(tTotal)
-
-				jobResults[idx] = jobResult{
+				jobResults[idx] = milpJobResult{
 					idx:          idx,
+					res:          res,
 					canonicalRes: canonicalRes,
-					res: bench.ProblemBenchResult{
-						ID:                c.ID,
-						Tier:              c.Tier,
-						NumVars:           canonicalCompiled.NumVars,
-						NumConstraints:    canonicalCompiled.NumConstraints,
-						IsMIP:             canonicalCompiled.IsMIP,
-						Backend:           backend.String(),
-						SIMDEnabled:       simdActive,
-						TrialObjectives:   trialObjs,
-						TParseMS:          goParseMS,
-						TBuildMS:          goBuildMS,
-						TCompileMS:        goCompileMS,
-						TMPSWriteMS:       medianDurationMS(tMPS),
-						TSolveMS:          goSolveMS,
-						TTotalMS:          goTotalMS,
-						TTotalMeanMS:      goMeanMS,
-						TTotalSDMS:        goSDMS,
-						TSolveTrialsMS:    durationsMS(tSolve),
-						TTotalTrialsMS:    durationsMS(tTotal),
-						GitCommit:         gitCommit,
-						GitDirty:          gitDirty,
-						GoVersion:         runtime.Version(),
-						SourceFingerprint: fingerprint,
-						CPUAffinity:       cpuAffinity(),
-						RootLPTimeMS:      medianDurationMS(lpTimes),
-						RootLPIters:       canonicalRootLP.Iterations,
-						RootLPObj:         canonicalRootLP.Objective,
-						CP4Baseline:       cp4,
-						CP5Presolve:       cp5,
-						CP6Cuts:           cp6,
-						CP7Full:           cp7,
-					},
 				}
 			}
 		})
@@ -770,62 +812,66 @@ func main() {
 	for idx, c := range cases {
 		jr := jobResults[idx]
 		r := jr.res
-		canonicalRes := jr.canonicalRes
-		goPrepMS := r.TParseMS + r.TBuildMS + r.TCompileMS
-		goSolveMS := r.TSolveMS
-		goTotalMS := r.TTotalMS
-
-		pyPrepMS, pySolveMS, pyTotalMS := 0.0, 0.0, 0.0
-		speedupStr := "N/A"
-		parityStr := "OK"
-
-		if ref, ok := pyRef[c.ID]; ok {
-			pyPrepMS = ref.TParseMedianMS + ref.TBuildMedianMS + ref.TFormatMedianMS
-			pySolveMS = ref.TSolveMedianMS
-			pyTotalMS = ref.TTotalMedianMS
-			if goTotalMS > 0 {
-				speedupStr = fmt.Sprintf("%.1fx", pyTotalMS/goTotalMS)
-			}
-			if canonicalRes.Status.String() != ref.Status {
-				parityStr = "STAT!"
-			} else if ref.Objective != nil {
-				diff := math.Abs(canonicalRes.Objective-*ref.Objective) / max(1.0, math.Abs(*ref.Objective))
-				if diff > parityObjectiveTol {
-					parityStr = fmt.Sprintf("%.1e", diff)
-				}
-				for k, wantPtr := range ref.TrialObjectives {
-					if wantPtr != nil && k < len(r.TrialObjectives) {
-						td := math.Abs(r.TrialObjectives[k]-*wantPtr) / max(1.0, math.Abs(*wantPtr))
-						if td > parityObjectiveTol {
-							parityStr = fmt.Sprintf("T%d:%.1e", k, td)
-							break
-						}
-					}
-				}
-			}
-		}
-
-		fmt.Printf("%-18s | %5d %4d | %6.3fms %6.3fms | %6.2fms %6.2fms | %7.2fms %7.2fms | %7s | %7s\n",
-			c.ID, r.NumVars, r.NumConstraints,
-			pyPrepMS, goPrepMS,
-			pySolveMS, goSolveMS,
-			pyTotalMS, goTotalMS,
-			speedupStr, parityStr)
-
+		printMILPBenchRow(c.ID, r, jr.canonicalRes, pyRef)
 		results[c.ID] = r
 	}
 
-	if *outPath != "" {
-		if err := os.MkdirAll(filepath.Dir(*outPath), outDirPerm); err != nil {
+	if cfg.outPath != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.outPath), outDirPerm); err != nil {
 			panic(err)
 		}
 		rawOut, err := json.MarshalIndent(results, "", "  ")
 		if err != nil {
 			panic(err)
 		}
-		if err := os.WriteFile(*outPath, rawOut, reportFilePerm); err != nil {
+		if err := os.WriteFile(cfg.outPath, rawOut, reportFilePerm); err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nSaved benchmark telemetry to %s\n", *outPath)
+		fmt.Printf("\nSaved benchmark telemetry to %s\n", cfg.outPath)
 	}
+}
+
+func printMILPBenchRow(
+	id string,
+	r bench.ProblemBenchResult,
+	canonicalRes gb.Result,
+	pyRef map[string]bench.PythonBaselineEntry,
+) {
+	goPrepMS := r.TParseMS + r.TBuildMS + r.TCompileMS
+	pyPrepMS, pySolveMS, pyTotalMS := 0.0, 0.0, 0.0
+	speedupStr := "N/A"
+	parityStr := "OK"
+
+	if ref, ok := pyRef[id]; ok {
+		pyPrepMS = ref.TParseMedianMS + ref.TBuildMedianMS + ref.TFormatMedianMS
+		pySolveMS = ref.TSolveMedianMS
+		pyTotalMS = ref.TTotalMedianMS
+		if r.TTotalMS > 0 {
+			speedupStr = fmt.Sprintf("%.1fx", pyTotalMS/r.TTotalMS)
+		}
+		if canonicalRes.Status.String() != ref.Status {
+			parityStr = "STAT!"
+		} else if ref.Objective != nil {
+			diff := math.Abs(canonicalRes.Objective-*ref.Objective) / max(1.0, math.Abs(*ref.Objective))
+			if diff > parityObjectiveTol {
+				parityStr = fmt.Sprintf("%.1e", diff)
+			}
+			for k, wantPtr := range ref.TrialObjectives {
+				if wantPtr != nil && k < len(r.TrialObjectives) {
+					td := math.Abs(r.TrialObjectives[k]-*wantPtr) / max(1.0, math.Abs(*wantPtr))
+					if td > parityObjectiveTol {
+						parityStr = fmt.Sprintf("T%d:%.1e", k, td)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Printf("%-18s | %5d %4d | %6.3fms %6.3fms | %6.2fms %6.2fms | %7.2fms %7.2fms | %7s | %7s\n",
+		id, r.NumVars, r.NumConstraints,
+		pyPrepMS, goPrepMS,
+		pySolveMS, r.TSolveMS,
+		pyTotalMS, r.TTotalMS,
+		speedupStr, parityStr)
 }

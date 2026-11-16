@@ -9,19 +9,34 @@ import (
 )
 
 const (
-	intFeasTol            = 1e-6
-	heurCoeffZeroTol      = 1e-12
-	heurIntBoundTol       = 1e-7
-	minPropSteps          = 32
-	propStepsPerRow       = 3
-	rowQueueCapMult       = 2
-	maxDiveStepsCap       = 18
-	maxEqSupportRowNNZ    = 32
-	nodePropPasses        = 2
-	subMIPPresolvePasses  = 4
-	subMIPTimeLimitMillis = 1500
+	intFeasTol               = 1e-6
+	heurCoeffZeroTol         = 1e-12
+	heurIntBoundTol          = 1e-7
+	heurDedupTol             = 1e-9
+	heurSnapNearFrac         = 0.15
+	minPropSteps             = 32
+	propStepsPerRow          = 3
+	rowQueueCapMult          = 2
+	maxDiveStepsCap          = 18
+	maxEqSupportRowNNZ       = 32
+	heurSubLPSkipFracCap     = 32
+	heurCompactLPMaxVars     = 128
+	heurNoAuxSkipVars        = 256
+	heurSubMIPBaseFracCap    = 120
+	heurSubMIPFreeFracCap    = 240
+	heurSubMIPSmallModelVars = 200
+	heurSubMIPMaxNodes       = 800
+	heurSubMIPFallbackNodes  = 120
+	heurSubMIPCutPasses      = 3
+	nodePropPasses           = 2
+	subMIPPresolvePasses     = 4
+	subMIPTimeLimitMillis    = 1500
+	ownerUnassigned          = -2
+	ownerPureEpigraph        = -1
 )
 
+// propagateRow tightens variable bounds on row i from residual row activities and reports
+// whether the row remains feasible and whether any bound shrunk by more than heurIntBoundTol.
 func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col int)) (feasible, changed bool) {
 	s, e := p.RowPtr[i], p.RowPtr[i+1]
 	rhs := p.RowRHS[i]
@@ -66,10 +81,10 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 		}
 	}
 
-	if hasUB && minInf == 0 && minAct > rhs+1e-6 {
+	if hasUB && minInf == 0 && minAct > rhs+intFeasTol {
 		return false, false
 	}
-	if hasLB && maxInf == 0 && maxAct < rhs-1e-6 {
+	if hasLB && maxInf == 0 && maxAct < rhs-intFeasTol {
 		return false, false
 	}
 
@@ -216,6 +231,8 @@ func propagateFromCol(p *CompiledProblem, lb, ub []float64, startCol int, queue 
 	return true
 }
 
+// findContLinkedIntCols marks general integer columns whose nonzeros appear only in mixed rows
+// coupling continuous variables with a single integer variable (such as roundness-penalty multiples).
 func findContLinkedIntCols(p *CompiledProblem) []bool {
 	if len(p.IntCols) == 0 || len(p.IntCols) == p.NumVars {
 		return nil
@@ -261,6 +278,8 @@ func findContLinkedIntCols(p *CompiledProblem) []bool {
 	return isContLinked
 }
 
+// tryPropagatedRounding rounds fractional integer columns in ascending fractionality order
+// with queue-driven bound propagation, testing nearest and objective-directed rounding strategies.
 func tryPropagatedRounding(
 	p *CompiledProblem,
 	lpPrimal []float64,
@@ -305,7 +324,7 @@ func tryPropagatedRounding(
 	}
 	fracCands := cands[firstFrac:]
 	lpFallbackSolver := auxSolver
-	if hasCont && len(fracCands) > 32 {
+	if hasCont && len(fracCands) > heurSubLPSkipFracCap {
 		lpFallbackSolver = nil
 	}
 
@@ -342,7 +361,7 @@ func tryPropagatedRounding(
 			}
 			v := min(max(lpPrimal[col], hlb[col]), hub[col])
 			var target float64
-			if strategy == 0 || math.Abs(v-math.Round(v)) <= 0.15 {
+			if strategy == 0 || math.Abs(v-math.Round(v)) <= heurSnapNearFrac {
 				target = math.Round(v)
 			} else {
 				if p.ObjMin[col] > heurCoeffZeroTol {
@@ -390,7 +409,7 @@ func tryPropagatedRounding(
 				candX[j] = hlb[j]
 			}
 			bV, rV, iV := p.MaxViolation(candX, true)
-			if bV <= 1e-6 && rV <= 1e-6 && iV <= 1e-6 {
+			if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 				obj := 0.0
 				for j := range n {
 					obj += p.ObjMin[j] * candX[j]
@@ -473,26 +492,22 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	}
 
 	// Map each non-epigraph free variable into an independent component around contCol.
+	// Sentinel values in epiOwner and intOwner: ownerUnassigned (-2) before first row visit,
+	// ownerPureEpigraph (-1) for epigraph columns with no partner variables, or contCol >= 0.
 	epiOwner := make([]int, n)
 	intOwner := make([]int, n)
 	contIntPartner := make([]int, n)
 	for j := range n {
-		epiOwner[j] = -2
-		intOwner[j] = -2
+		epiOwner[j] = ownerUnassigned
+		intOwner[j] = ownerUnassigned
 		contIntPartner[j] = -1
 	}
 
-	type compData struct {
-		contCol int
-		intCol  int
-		epiCols []int
-		rows    []epigraphRowTerm
-	}
 	compIdxByCont := make([]int, n)
 	for j := range n {
 		compIdxByCont[j] = -1
 	}
-	var comps []compData
+	var comps []epigraphComponent
 	var pureEpiMaxLB []float64
 
 	getComp := func(contCol int) int {
@@ -500,7 +515,7 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		if idx == -1 {
 			idx = len(comps)
 			compIdxByCont[contCol] = idx
-			comps = append(comps, compData{contCol: contCol, intCol: -1})
+			comps = append(comps, epigraphComponent{contCol: contCol, intCol: -1})
 		}
 		return idx
 	}
@@ -535,11 +550,11 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		if freeCount == 0 {
 			switch sense {
 			case LessEqual:
-				if fixedAct > p.RowRHS[i]+1e-6 {
+				if fixedAct > p.RowRHS[i]+intFeasTol {
 					return nil, 0, false
 				}
 			case GreaterEqual:
-				if fixedAct < p.RowRHS[i]-1e-6 {
+				if fixedAct < p.RowRHS[i]-intFeasTol {
 					return nil, 0, false
 				}
 			case Equal:
@@ -569,10 +584,10 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		beta := -aInt / aEpi
 
 		if contCol == -1 && intCol == -1 {
-			if epiOwner[epiCol] != -2 && epiOwner[epiCol] != -1 {
+			if epiOwner[epiCol] != ownerUnassigned && epiOwner[epiCol] != ownerPureEpigraph {
 				return nil, 0, false
 			}
-			epiOwner[epiCol] = -1
+			epiOwner[epiCol] = ownerPureEpigraph
 			if pureEpiMaxLB == nil {
 				pureEpiMaxLB = slices.Clone(hlb)
 			}
@@ -584,14 +599,14 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		if contCol == -1 {
 			return nil, 0, false
 		}
-		if epiOwner[epiCol] == -2 {
+		if epiOwner[epiCol] == ownerUnassigned {
 			epiOwner[epiCol] = contCol
 		} else if epiOwner[epiCol] != contCol {
 			return nil, 0, false
 		}
 		cIdx := getComp(contCol)
 		if intCol != -1 {
-			if intOwner[intCol] == -2 {
+			if intOwner[intCol] == ownerUnassigned {
 				intOwner[intCol] = contCol
 			} else if intOwner[intCol] != contCol {
 				return nil, 0, false
@@ -617,7 +632,7 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	cand := slices.Clone(hlb)
 	for j := range n {
 		if hlb[j] < hub[j] {
-			if pureEpiMaxLB != nil && epiOwner[j] == -1 {
+			if pureEpiMaxLB != nil && epiOwner[j] == ownerPureEpigraph {
 				cand[j] = pureEpiMaxLB[j]
 			} else if p.ObjMin[j] < 0 {
 				if math.IsInf(hub[j], 1) {
@@ -635,140 +650,11 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	}
 
 	for idx := range comps {
-		comp := &comps[idx]
-		mCol := comp.contCol
-		nCol := comp.intCol
-		mLB, mUB := hlb[mCol], hub[mCol]
-
-		var mCands []float64
-		addMCand := func(v float64) {
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				return
-			}
-			v = min(max(v, mLB), mUB)
-			for _, ex := range mCands {
-				if math.Abs(ex-v) <= 1e-9 {
-					return
-				}
-			}
-			mCands = append(mCands, v)
-		}
-		addMCand(mLB)
-		addMCand(mUB)
-		addMCand(0.0)
-
-		rows := comp.rows
-		for r1 := range rows {
-			if math.Abs(rows[r1].beta) <= 1e-12 && math.Abs(rows[r1].alpha) > 1e-12 {
-				addMCand((hlb[rows[r1].epiCol] - rows[r1].c) / rows[r1].alpha)
-			}
-			for r2 := r1 + 1; r2 < len(rows); r2++ {
-				if rows[r1].epiCol == rows[r2].epiCol &&
-					math.Abs(rows[r1].beta) <= 1e-12 && math.Abs(rows[r2].beta) <= 1e-12 {
-					da := rows[r1].alpha - rows[r2].alpha
-					if math.Abs(da) > 1e-12 {
-						addMCand((rows[r2].c - rows[r1].c) / da)
-					}
-				}
-			}
-		}
-
-		var nCands []float64
-		if nCol != -1 {
-			nLB, nUB := hlb[nCol], hub[nCol]
-			addNCand := func(v float64) {
-				if math.IsNaN(v) || math.IsInf(v, 0) {
-					return
-				}
-				v = min(max(math.Round(v), nLB), nUB)
-				if slices.Contains(nCands, v) {
-					return
-				}
-				nCands = append(nCands, v)
-			}
-			addNCand(nLB)
-			addNCand(nUB)
-			baseMCands := slices.Clone(mCands)
-			for _, mv := range baseMCands {
-				for _, r := range rows {
-					if math.Abs(r.beta) > 1e-12 {
-						nt := (hlb[r.epiCol] - r.c - r.alpha*mv) / r.beta
-						addNCand(math.Floor(nt))
-						addNCand(math.Ceil(nt))
-					}
-				}
-			}
-			for _, nv := range nCands {
-				for r1 := range rows {
-					if math.Abs(rows[r1].beta) > 1e-12 && math.Abs(rows[r1].alpha) > 1e-12 {
-						addMCand((hlb[rows[r1].epiCol] - rows[r1].c - rows[r1].beta*nv) / rows[r1].alpha)
-					}
-					for r2 := r1 + 1; r2 < len(rows); r2++ {
-						if rows[r1].epiCol == rows[r2].epiCol &&
-							(math.Abs(rows[r1].beta) > 1e-12 || math.Abs(rows[r2].beta) > 1e-12) {
-							da := rows[r1].alpha - rows[r2].alpha
-							if math.Abs(da) > 1e-12 {
-								c1 := rows[r1].c + rows[r1].beta*nv
-								c2 := rows[r2].c + rows[r2].beta*nv
-								addMCand((c2 - c1) / da)
-							}
-						}
-					}
-				}
-			}
-		} else {
-			nCands = []float64{0.0}
-		}
-
-		bestCompObj := math.Inf(1)
-		bestM := mCands[0]
-		bestN := nCands[0]
-		epiMax := make([]float64, len(comp.epiCols))
-		bestEpiVals := make([]float64, len(comp.epiCols))
-
-		for _, mv := range mCands {
-			for _, nv := range nCands {
-				for ei, ec := range comp.epiCols {
-					epiMax[ei] = hlb[ec]
-				}
-				for _, r := range rows {
-					val := r.c + r.alpha*mv + r.beta*nv
-					for ei, ec := range comp.epiCols {
-						if ec == r.epiCol {
-							if val > epiMax[ei] {
-								epiMax[ei] = val
-							}
-							break
-						}
-					}
-				}
-				obj := p.ObjMin[mCol] * mv
-				if nCol != -1 {
-					obj += p.ObjMin[nCol] * nv
-				}
-				for ei, ec := range comp.epiCols {
-					obj += p.ObjMin[ec] * epiMax[ei]
-				}
-				if obj < bestCompObj {
-					bestCompObj = obj
-					bestM = mv
-					bestN = nv
-					copy(bestEpiVals, epiMax)
-				}
-			}
-		}
-
-		cand[mCol] = bestM
-		if nCol != -1 {
-			cand[nCol] = bestN
-		}
-		for ei, ec := range comp.epiCols {
-			cand[ec] = bestEpiVals[ei]
-		}
+		solveEpigraphComponent(p, &comps[idx], hlb, hub, cand)
 	}
 
 	bV, rV, iV := p.MaxViolation(cand, true)
-	if bV <= 1e-6 && rV <= 1e-6 && iV <= 1e-6 {
+	if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 		obj := 0.0
 		for j := range n {
 			obj += p.ObjMin[j] * cand[j]
@@ -778,12 +664,247 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	return nil, 0, false
 }
 
+type epigraphComponent struct {
+	contCol int
+	intCol  int
+	epiCols []int
+	rows    []epigraphRowTerm
+}
+
+// solveEpigraphComponent enumerates piecewise-linear breakpoints (m, n) of one independent epigraph component and writes the optimal assignment into cand.
+func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hub, cand []float64) {
+	mCol := comp.contCol
+	nCol := comp.intCol
+	mLB, mUB := hlb[mCol], hub[mCol]
+
+	var mCands []float64
+	addMCand := func(v float64) {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return
+		}
+		v = min(max(v, mLB), mUB)
+		for _, ex := range mCands {
+			if math.Abs(ex-v) <= heurDedupTol {
+				return
+			}
+		}
+		mCands = append(mCands, v)
+	}
+	addMCand(mLB)
+	addMCand(mUB)
+	addMCand(0.0)
+
+	rows := comp.rows
+	for r1 := range rows {
+		if math.Abs(rows[r1].beta) <= heurCoeffZeroTol && math.Abs(rows[r1].alpha) > heurCoeffZeroTol {
+			addMCand((hlb[rows[r1].epiCol] - rows[r1].c) / rows[r1].alpha)
+		}
+		for r2 := r1 + 1; r2 < len(rows); r2++ {
+			if rows[r1].epiCol == rows[r2].epiCol &&
+				math.Abs(rows[r1].beta) <= heurCoeffZeroTol && math.Abs(rows[r2].beta) <= heurCoeffZeroTol {
+				da := rows[r1].alpha - rows[r2].alpha
+				if math.Abs(da) > heurCoeffZeroTol {
+					addMCand((rows[r2].c - rows[r1].c) / da)
+				}
+			}
+		}
+	}
+
+	var nCands []float64
+	if nCol != -1 {
+		nLB, nUB := hlb[nCol], hub[nCol]
+		addNCand := func(v float64) {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return
+			}
+			v = min(max(math.Round(v), nLB), nUB)
+			if slices.Contains(nCands, v) {
+				return
+			}
+			nCands = append(nCands, v)
+		}
+		addNCand(nLB)
+		addNCand(nUB)
+		baseMCands := slices.Clone(mCands)
+		for _, mv := range baseMCands {
+			for _, r := range rows {
+				if math.Abs(r.beta) > heurCoeffZeroTol {
+					nt := (hlb[r.epiCol] - r.c - r.alpha*mv) / r.beta
+					addNCand(math.Floor(nt))
+					addNCand(math.Ceil(nt))
+				}
+			}
+		}
+		for _, nv := range nCands {
+			for r1 := range rows {
+				if math.Abs(rows[r1].beta) > heurCoeffZeroTol && math.Abs(rows[r1].alpha) > heurCoeffZeroTol {
+					addMCand((hlb[rows[r1].epiCol] - rows[r1].c - rows[r1].beta*nv) / rows[r1].alpha)
+				}
+				for r2 := r1 + 1; r2 < len(rows); r2++ {
+					if rows[r1].epiCol == rows[r2].epiCol &&
+						(math.Abs(rows[r1].beta) > heurCoeffZeroTol || math.Abs(rows[r2].beta) > heurCoeffZeroTol) {
+						da := rows[r1].alpha - rows[r2].alpha
+						if math.Abs(da) > heurCoeffZeroTol {
+							c1 := rows[r1].c + rows[r1].beta*nv
+							c2 := rows[r2].c + rows[r2].beta*nv
+							addMCand((c2 - c1) / da)
+						}
+					}
+				}
+			}
+		}
+	} else {
+		nCands = []float64{0.0}
+	}
+
+	bestCompObj := math.Inf(1)
+	bestM := mCands[0]
+	bestN := nCands[0]
+	epiMax := make([]float64, len(comp.epiCols))
+	bestEpiVals := make([]float64, len(comp.epiCols))
+
+	for _, mv := range mCands {
+		for _, nv := range nCands {
+			for ei, ec := range comp.epiCols {
+				epiMax[ei] = hlb[ec]
+			}
+			for _, r := range rows {
+				val := r.c + r.alpha*mv + r.beta*nv
+				for ei, ec := range comp.epiCols {
+					if ec == r.epiCol {
+						if val > epiMax[ei] {
+							epiMax[ei] = val
+						}
+						break
+					}
+				}
+			}
+			obj := p.ObjMin[mCol] * mv
+			if nCol != -1 {
+				obj += p.ObjMin[nCol] * nv
+			}
+			for ei, ec := range comp.epiCols {
+				obj += p.ObjMin[ec] * epiMax[ei]
+			}
+			if obj < bestCompObj {
+				bestCompObj = obj
+				bestM = mv
+				bestN = nv
+				copy(bestEpiVals, epiMax)
+			}
+		}
+	}
+
+	cand[mCol] = bestM
+	if nCol != -1 {
+		cand[nCol] = bestN
+	}
+	for ei, ec := range comp.epiCols {
+		cand[ec] = bestEpiVals[ei]
+	}
+}
+
+// trySingleRowContinuousCompletion solves separable single-row bounded continuous knapsacks in closed form when every free column appears in at most one row.
+func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([]float64, float64, bool) {
+	n := p.NumVars
+	cand := slices.Clone(hlb)
+	allSingleRow := true
+	for j := range n {
+		if hlb[j] < hub[j] {
+			if p.ObjMin[j] < 0 {
+				cand[j] = hub[j]
+			}
+			if p.ColPtr[j+1]-p.ColPtr[j] > 1 {
+				allSingleRow = false
+			}
+		}
+	}
+	if allSingleRow {
+		type rowMove struct {
+			col         int
+			absA        float64
+			dxSign      float64
+			maxRoom     float64
+			unitPenalty float64
+		}
+		var moves []rowMove
+		for i := range p.NumConstraints {
+			s, e := p.RowPtr[i], p.RowPtr[i+1]
+			act := 0.0
+			for k := s; k < e; k++ {
+				act += p.RowVal[k] * cand[p.ColIdx[k]]
+			}
+			rhs := p.RowRHS[i]
+			sense := p.RowSense[i]
+			if (sense == LessEqual && act <= rhs+heurIntBoundTol) ||
+				(sense == GreaterEqual && act >= rhs-heurIntBoundTol) ||
+				(sense == Equal && math.Abs(act-rhs) <= heurIntBoundTol) {
+				continue
+			}
+			delta := rhs - act // needed change in row activity
+			moves = moves[:0]
+			for k := s; k < e; k++ {
+				col := p.ColIdx[k]
+				if hlb[col] >= hub[col] {
+					continue
+				}
+				a := p.RowVal[k]
+				var room, dxSign float64
+				if (delta > 0 && a > 0) || (delta < 0 && a < 0) {
+					room = hub[col] - cand[col]
+					dxSign = 1.0
+				} else {
+					room = cand[col] - hlb[col]
+					dxSign = -1.0
+				}
+				if room > heurCoeffZeroTol {
+					absA := math.Abs(a)
+					pen := max(0.0, p.ObjMin[col]*dxSign) / absA
+					moves = append(moves, rowMove{
+						col:         col,
+						absA:        absA,
+						dxSign:      dxSign,
+						maxRoom:     room,
+						unitPenalty: pen,
+					})
+				}
+			}
+			slices.SortFunc(moves, func(a, b rowMove) int {
+				return cmp.Compare(a.unitPenalty, b.unitPenalty)
+			})
+			rem := math.Abs(delta)
+			for _, mv := range moves {
+				if rem <= heurDedupTol {
+					break
+				}
+				take := min(mv.maxRoom, rem/mv.absA)
+				cand[mv.col] += mv.dxSign * take
+				rem -= take * mv.absA
+			}
+			if rem > intFeasTol {
+				return nil, 0, false
+			}
+		}
+	}
+	bV, rV, iV := p.MaxViolation(cand, true)
+	if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
+		obj := 0.0
+		for j := range n {
+			obj += p.ObjMin[j] * cand[j]
+		}
+		return cand, obj, true
+	}
+	return nil, 0, false
+}
+
+// solveFixedIntContinuousLP optimizes the continuous (and continuous-linked integer) variables
+// after fixing primary integer decisions, trying closed-form epigraph and single-row solvers before LP fallback.
 func solveFixedIntContinuousLP(
 	p *CompiledProblem,
 	hlb, hub []float64,
 	auxSolver *LPSolver,
 ) (sol []float64, objMin float64, ok bool) {
-	if !propagateBounds(p, hlb, hub, 2) {
+	if !propagateBounds(p, hlb, hub, nodePropPasses) {
 		return nil, 0, false
 	}
 	if eSol, eObj, eOk := solveEpigraphContinuousLP(p, hlb, hub); eOk {
@@ -799,107 +920,16 @@ func solveFixedIntContinuousLP(
 		}
 	}
 	if !hasUnfixedInt {
-		// Fast check: try setting each free continuous variable to its objective-favorable
-		// propagated bound. If all rows are satisfied, this point is LP-optimal.
-		cand := slices.Clone(hlb)
-		allSingleRow := true
-		for j := range n {
-			if hlb[j] < hub[j] {
-				if p.ObjMin[j] < 0 {
-					cand[j] = hub[j]
-				}
-				if p.ColPtr[j+1]-p.ColPtr[j] > 1 {
-					allSingleRow = false
-				}
-			}
-		}
-		if allSingleRow {
-			type rowMove struct {
-				col         int
-				absA        float64
-				dxSign      float64
-				maxRoom     float64
-				unitPenalty float64
-			}
-			var moves []rowMove
-			feasible := true
-			for i := range p.NumConstraints {
-				s, e := p.RowPtr[i], p.RowPtr[i+1]
-				act := 0.0
-				for k := s; k < e; k++ {
-					act += p.RowVal[k] * cand[p.ColIdx[k]]
-				}
-				rhs := p.RowRHS[i]
-				sense := p.RowSense[i]
-				if (sense == LessEqual && act <= rhs+1e-7) ||
-					(sense == GreaterEqual && act >= rhs-1e-7) ||
-					(sense == Equal && math.Abs(act-rhs) <= 1e-7) {
-					continue
-				}
-				delta := rhs - act // needed change in row activity
-				moves = moves[:0]
-				for k := s; k < e; k++ {
-					col := p.ColIdx[k]
-					if hlb[col] >= hub[col] {
-						continue
-					}
-					a := p.RowVal[k]
-					var room, dxSign float64
-					if (delta > 0 && a > 0) || (delta < 0 && a < 0) {
-						room = hub[col] - cand[col]
-						dxSign = 1.0
-					} else {
-						room = cand[col] - hlb[col]
-						dxSign = -1.0
-					}
-					if room > 1e-12 {
-						absA := math.Abs(a)
-						pen := max(0.0, p.ObjMin[col]*dxSign) / absA
-						moves = append(moves, rowMove{
-							col:         col,
-							absA:        absA,
-							dxSign:      dxSign,
-							maxRoom:     room,
-							unitPenalty: pen,
-						})
-					}
-				}
-				slices.SortFunc(moves, func(a, b rowMove) int {
-					return cmp.Compare(a.unitPenalty, b.unitPenalty)
-				})
-				rem := math.Abs(delta)
-				for _, mv := range moves {
-					if rem <= 1e-9 {
-						break
-					}
-					take := min(mv.maxRoom, rem/mv.absA)
-					cand[mv.col] += mv.dxSign * take
-					rem -= take * mv.absA
-				}
-				if rem > 1e-6 {
-					feasible = false
-					break
-				}
-			}
-			if !feasible {
-				return nil, 0, false
-			}
-		}
-		bV, rV, iV := p.MaxViolation(cand, true)
-		if bV <= 1e-6 && rV <= 1e-6 && iV <= 1e-6 {
-			obj := 0.0
-			for j := range n {
-				obj += p.ObjMin[j] * cand[j]
-			}
-			return cand, obj, true
+		if cSol, cObj, cOk := trySingleRowContinuousCompletion(p, hlb, hub); cOk {
+			return cSol, cObj, true
 		}
 	}
-	if !hasUnfixedInt && auxSolver != nil && n <= 128 {
+	if !hasUnfixedInt && auxSolver != nil && n <= heurCompactLPMaxVars {
 		auxSolver.SetStructuralBounds(hlb, hub)
 		res := auxSolver.Solve()
 		if res.Status == StatusOptimal {
 			bV, rV, iV := p.MaxViolation(res.Primal, true)
-			if bV <= 1e-6 && rV <= 1e-6 && iV <= 1e-6 {
+			if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 				return slices.Clone(res.Primal), res.ObjectiveMin, true
 			}
 		}
@@ -908,7 +938,7 @@ func solveFixedIntContinuousLP(
 		}
 	}
 
-	if auxSolver == nil && n > 256 {
+	if auxSolver == nil && n > heurNoAuxSkipVars {
 		return nil, 0, false
 	}
 
@@ -956,11 +986,11 @@ func solveFixedIntContinuousLP(
 		if len(terms) == 0 {
 			switch sense {
 			case LessEqual:
-				if fixedAct > p.RowRHS[i]+1e-6 {
+				if fixedAct > p.RowRHS[i]+intFeasTol {
 					return nil, 0, false
 				}
 			case GreaterEqual:
-				if fixedAct < p.RowRHS[i]-1e-6 {
+				if fixedAct < p.RowRHS[i]-intFeasTol {
 					return nil, 0, false
 				}
 			case Equal:
@@ -1021,7 +1051,7 @@ func solveFixedIntContinuousLP(
 				lp.SetStructuralBounds(subLB, subUB)
 				resHi := lp.Solve()
 				okHi := resHi.Status == StatusOptimal && len(resHi.Primal) == subP.NumVars
-				if okHi && (!okLo || resHi.ObjectiveMin < resLo.ObjectiveMin-1e-9) {
+				if okHi && (!okLo || resHi.ObjectiveMin < resLo.ObjectiveMin-heurDedupTol) {
 					res = resHi
 					continue
 				}
@@ -1048,7 +1078,7 @@ func solveFixedIntContinuousLP(
 		cand[col] = math.Round(cand[col])
 	}
 	bV, rV, iV := p.MaxViolation(cand, true)
-	if bV <= 1e-6 && rV <= 1e-6 && iV <= 1e-6 {
+	if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 		obj := 0.0
 		for j := range n {
 			obj += p.ObjMin[j] * cand[j]
@@ -1058,6 +1088,8 @@ func solveFixedIntContinuousLP(
 	return nil, 0, false
 }
 
+// tryFractionalDiving performs up to maxDiveStepsCap rounds of fixing fractional equality-supported
+// integer variables, propagating bounds, and warm-starting the LP relaxation.
 func tryFractionalDiving(
 	p *CompiledProblem,
 	rootPrimal []float64,
@@ -1083,7 +1115,7 @@ func tryFractionalDiving(
 			continue
 		}
 		s, e := p.RowPtr[i], p.RowPtr[i+1]
-		if e-s < 2 || e-s > 32 {
+		if e-s < 2 || e-s > maxEqSupportRowNNZ {
 			continue
 		}
 		hasFrac := false
@@ -1210,7 +1242,7 @@ func tryFractionalDiving(
 				curX[col] = math.Round(curX[col])
 			}
 			bV, rV, iV := p.MaxViolation(curX, true)
-			if bV <= 1e-5 && rV <= 1e-5 && iV <= 1e-5 {
+			if bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol {
 				obj := 0.0
 				for j := range n {
 					obj += p.ObjMin[j] * curX[j]
@@ -1235,10 +1267,10 @@ func tryFractionalDiving(
 		if ok1 {
 			diveSolver.SetStructuralBounds(dlb, dub)
 			res1 = diveSolver.Solve()
-			ok1 = res1.Status == StatusOptimal && res1.ObjectiveMin < bestObjMin-1e-7
+			ok1 = res1.Status == StatusOptimal && res1.ObjectiveMin < bestObjMin-heurIntBoundTol
 		}
 
-		if ok1 && res1.ObjectiveMin <= curObjMin+1e-5 {
+		if ok1 && res1.ObjectiveMin <= curObjMin+incumbentTol {
 			curX = res1.Primal
 			curObjMin = res1.ObjectiveMin
 			continue
@@ -1264,10 +1296,10 @@ func tryFractionalDiving(
 		if ok2 {
 			diveSolver.SetStructuralBounds(dlb, dub)
 			res2 = diveSolver.Solve()
-			ok2 = res2.Status == StatusOptimal && res2.ObjectiveMin < bestObjMin-1e-7
+			ok2 = res2.Status == StatusOptimal && res2.ObjectiveMin < bestObjMin-heurIntBoundTol
 		}
 
-		if ok2 && (!ok1 || res2.ObjectiveMin <= res1.ObjectiveMin+1e-6) {
+		if ok2 && (!ok1 || res2.ObjectiveMin <= res1.ObjectiveMin+intFeasTol) {
 			curX = res2.Primal
 			curObjMin = res2.ObjectiveMin
 		} else if ok1 {
@@ -1297,8 +1329,9 @@ func tryRootSubMIP(
 	curLB, curUB []float64,
 	bestObjMin float64,
 	deadline time.Time,
+	isSubMIP bool,
 ) (sol []float64, objMin float64, ok bool) {
-	if p.Name == "__submip__" || len(p.IntCols) == 0 {
+	if isSubMIP || len(p.IntCols) == 0 {
 		return nil, 0, false
 	}
 	var done <-chan struct{}
@@ -1323,7 +1356,7 @@ func tryRootSubMIP(
 			baseFrac++
 		}
 	}
-	if baseFrac == 0 || baseFrac > 120 {
+	if baseFrac == 0 || baseFrac > heurSubMIPBaseFracCap {
 		return nil, 0, false
 	}
 
@@ -1353,7 +1386,7 @@ func tryRootSubMIP(
 				basicInRow++
 			}
 		}
-		if rowHasFrac || (n <= 200 && basicInRow >= 2) {
+		if rowHasFrac || (n <= heurSubMIPSmallModelVars && basicInRow >= 2) {
 			for k := s; k < e; k++ {
 				col := p.ColIdx[k]
 				if p.VarCat[col] != Continuous {
@@ -1385,7 +1418,7 @@ func tryRootSubMIP(
 		}
 	}
 
-	if nFrac == 0 || nFrac > 240 || nFrac >= len(p.IntCols) {
+	if nFrac == 0 || nFrac > heurSubMIPFreeFracCap || nFrac >= len(p.IntCols) {
 		return nil, 0, false
 	}
 
@@ -1393,7 +1426,7 @@ func tryRootSubMIP(
 		return nil, 0, false
 	}
 
-	subModel := NewModel("__submip__", Minimize)
+	subModel := NewModel("submip", Minimize)
 	subVarMap := make([]Var, n)
 	isFree := make([]bool, n)
 	freeCols := make([]int, 0, nFrac+(n-len(p.IntCols)))
@@ -1438,11 +1471,11 @@ func tryRootSubMIP(
 		if len(terms) == 0 {
 			switch sense {
 			case LessEqual:
-				if fixedAct > p.RowRHS[i]+1e-6 {
+				if fixedAct > p.RowRHS[i]+intFeasTol {
 					return nil, 0, false
 				}
 			case GreaterEqual:
-				if fixedAct < p.RowRHS[i]-1e-6 {
+				if fixedAct < p.RowRHS[i]-intFeasTol {
 					return nil, 0, false
 				}
 			case Equal:
@@ -1467,9 +1500,10 @@ func tryRootSubMIP(
 	}
 
 	subOpts := DefaultOptions()
-	subOpts.MaxNodes = 800
+	subOpts.isSubMIP = true
+	subOpts.MaxNodes = heurSubMIPMaxNodes
 	if !hasEqRows && isContLinked == nil {
-		subOpts.MaxNodes = 120
+		subOpts.MaxNodes = heurSubMIPFallbackNodes
 	}
 	subOpts.TimeLimit = subMIPTimeLimitMillis * time.Millisecond
 	if !deadline.IsZero() {
@@ -1481,7 +1515,7 @@ func tryRootSubMIP(
 	}
 	subOpts.EnablePresolve = true
 	subOpts.EnableCuts = true
-	subOpts.MaxCutPasses = 3
+	subOpts.MaxCutPasses = heurSubMIPCutPasses
 	subOpts.EnableHeuristics = true
 	if lpSolver != nil {
 		subOpts.DisableSIMD = lpSolver.DisableSIMD
@@ -1505,14 +1539,14 @@ func tryRootSubMIP(
 	}
 
 	bV, rV, iV := p.MaxViolation(cand, true)
-	if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
+	if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
 		fixLB := slices.Clone(curLB)
 		fixUB := slices.Clone(curUB)
 		for _, col := range p.IntCols {
 			fixLB[col] = cand[col]
 			fixUB[col] = cand[col]
 		}
-		if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, nil); okLP && lpObj < bestObjMin-1e-7 {
+		if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, nil); okLP && lpObj < bestObjMin-heurIntBoundTol {
 			return lpSol, lpObj, true
 		}
 		return nil, 0, false
@@ -1522,7 +1556,7 @@ func tryRootSubMIP(
 	for j := range n {
 		obj += p.ObjMin[j] * cand[j]
 	}
-	if obj >= bestObjMin-1e-7 {
+	if obj >= bestObjMin-heurIntBoundTol {
 		return nil, 0, false
 	}
 	return cand, obj, true
