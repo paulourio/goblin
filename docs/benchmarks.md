@@ -15,7 +15,7 @@ go run ./cmd/goblin-bench -check-docs
 - **Experimental build**: `GOEXPERIMENT=simd`, compared to the default build only in section 5.
 
 <!-- BEGIN GENERATED:PROVENANCE -->
-- **goblin telemetry source**: fingerprint `80d7e0984eddd6e7` (working tree on top of commit `a1011bc8fdb9c25f0d0d595087e3b66ed1b32021`), `go1.27.3-X:nodwarf5`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources.
+- **goblin telemetry source**: fingerprint `80d7e0984eddd6e7` (commit `fdb28f7dce6853048635c046f8c71f99ae8dc590`), `go1.27.3-X:nodwarf5`; the documentation gate rejects telemetry whose fingerprint differs from the checked-in sources.
 - **CPU affinity**: goblin `2`; Python + CBC `2`; Python + SciPy `2`.
 - **Python MILP reference**: PuLP `4.2.0`, CBC `2.10.3` (`cbc`).
 - **Python LSAP reference**: SciPy `1.18.1` (`scipy.optimize.linear_sum_assignment`, C++ `rectangular_lsap`), NumPy `2.5.4`.
@@ -37,14 +37,14 @@ go run ./cmd/goblin-bench -check-docs
 <!-- BEGIN GENERATED:TIER_SUMMARY_TABLE -->
 | Workload Subset | Families | `Py / goblin (Go)` GeoMean | `Py net / goblin (Go)` | `goblin (Go) / CBC` | `goblin (Go)` (ms) | `goblin (CBC)` (ms) | Py Total (ms) | Py Net (ms) | `Py / goblin (Go)` Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Canonical (`N <= 26`) | 10 | **40.6x** | 1.3x | 0.07x | 0.06 | 0.87 | 2.50 | 0.08 | 55.2x [11.9x-87.5x] |
-| Tier 2: Target p90 (`30 <= N <= 84`) | 13 | **6.6x** | 5.0x | 0.17x | 1.68 | 10.14 | 11.03 | 8.43 | 6.5x [1.5x-12.5x] |
-| Tier 3: Large Tail (`145 <= N <= 4036`) | 8 | **2.9x** | 2.8x | 0.29x | 20.52 | 71.38 | 59.90 | 56.86 | 4.0x [0.7x-8.2x] |
-| Tier 3 non-MAD MILPs | 4 | **2.2x** | 2.1x | 0.45x | 42.98 | 96.17 | 92.48 | 90.63 | 2.7x [0.7x-8.2x] |
-| Planted-gap MAD family (zero integrality gap by construction) | 8 | **5.8x** | 4.4x | 0.14x | 2.17 | 15.03 | 12.66 | 9.57 | 4.5x [3.6x-11.9x] |
-| Random-weight MAD (negative controls) | 3 | **7.8x** | 7.5x | 0.18x | 7.57 | 42.97 | 58.88 | 56.80 | 6.4x [4.5x-16.5x] |
-| **All families except planted-gap MAD** | 23 | **11.4x** | 2.4x | 0.15x | 0.87 | 5.98 | 9.93 | 2.07 | 9.5x [0.7x-87.5x] |
-| All corpus families | 31 | **9.6x** | 2.8x | 0.15x | 1.10 | 7.59 | 10.57 | 3.08 | 8.2x [0.7x-87.5x] |
+| Tier 1: Canonical (`N <= 26`) | 10 | **64.5x** | 2.1x | 0.06x | 0.04 | 0.62 | 2.50 | 0.08 | 71.4x [26.9x-252.9x] |
+| Tier 2: Target p90 (`30 <= N <= 84`) | 13 | **6.9x** | 5.3x | 0.19x | 1.61 | 8.58 | 11.03 | 8.43 | 7.2x [2.3x-19.9x] |
+| Tier 3: Large Tail (`145 <= N <= 4036`) | 8 | **3.4x** | 3.2x | 0.27x | 17.57 | 64.17 | 59.90 | 56.86 | 4.2x [0.8x-12.2x] |
+| Tier 3 non-MAD MILPs | 4 | **2.7x** | 2.7x | 0.39x | 34.16 | 87.29 | 92.48 | 90.63 | 3.8x [0.8x-12.2x] |
+| Planted-gap MAD family (zero integrality gap by construction) | 8 | **6.4x** | 4.9x | 0.17x | 1.97 | 11.62 | 12.66 | 9.57 | 5.0x [4.1x-27.3x] |
+| Random-weight MAD (negative controls) | 3 | **9.6x** | 9.2x | 0.17x | 6.15 | 35.56 | 58.88 | 56.80 | 7.2x [4.6x-26.9x] |
+| **All families except planted-gap MAD** | 23 | **14.6x** | 3.0x | 0.14x | 0.68 | 4.98 | 9.93 | 2.07 | 10.9x [0.8x-252.9x] |
+| All corpus families | 31 | **11.8x** | 3.4x | 0.14x | 0.90 | 6.19 | 10.57 | 3.08 | 8.0x [0.8x-252.9x] |
 <!-- END GENERATED:TIER_SUMMARY_TABLE -->
 
 How to read this table:
@@ -96,17 +96,17 @@ In the planted-gap generator ([`bench/corpus.go`](../bench/corpus.go)), regular 
 <!-- BEGIN GENERATED:MAD_PIPELINE_TABLE -->
 | Problem ID | $G \times I$ | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Optimal Obj | Parity |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | 26 | 34 | **11.9x** | 0.32 | 3.82 | 0.11 | 3.63 | 2.10 | 0.207 | 0.246 | 2400.0 | `OK` |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | 26 | 34 | **16.5x** | 1.50 | 24.75 | 1.21 | 24.53 | 22.99 | 0.225 | 0.281 | 4601.0 | `OK` |
-| `t2_mad_g2_i8` | $2 \times 8$ | 34 | 38 | **10.0x** | 0.34 | 3.43 | 0.14 | 3.18 | 1.65 | 0.168 | 0.329 | 2400.0 | `OK` |
-| `t2_mad_g3_i9` | $3 \times 9$ | 54 | 54 | **9.8x** | 0.43 | 4.21 | 0.16 | 3.83 | 2.30 | 0.233 | 0.486 | 4800.0 | `OK` |
-| `t2_mad_g4_i12` | $4 \times 12$ | 84 | 72 | **4.7x** | 1.13 | 5.28 | 0.48 | 4.71 | 3.17 | 0.653 | 0.740 | 8000.0 | `OK` |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | 34 | 38 | **6.4x** | 6.78 | 43.22 | 6.50 | 42.91 | 41.38 | 0.276 | 0.382 | 5975.0 | `OK` |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | 54 | 54 | **4.5x** | 42.57 | 190.87 | 42.21 | 190.46 | 188.93 | 0.418 | 0.542 | 7720.0 | `OK` |
-| `t3_mad_g5_i20` | $5 \times 20$ | 145 | 95 | **4.4x** | 2.24 | 9.85 | 0.86 | 8.88 | 7.35 | 1.108 | 1.308 | 12000.0 | `OK` |
-| `t3_mad_g6_i30` | $6 \times 30$ | 234 | 120 | **3.8x** | 3.37 | 12.68 | 1.50 | 10.99 | 9.45 | 1.867 | 2.243 | 16800.0 | `OK` |
-| `t3_mad_g10_i100` | $10 \times 100$ | 1090 | 250 | **3.6x** | 13.00 | 46.51 | 7.06 | 37.92 | 36.39 | 6.773 | 10.812 | 88000.0 | `OK` |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | 4036 | 1060 | **4.2x** | 93.67 | 389.97 | 61.25 | 345.93 | 344.40 | 30.001 | 44.695 | 208000.0 | `OK` |
+| `t1_mad_g2_i4` | $2 \times 4$ | 26 | 34 | **27.3x** | 0.14 | 3.82 | 0.04 | 3.63 | 2.10 | 0.091 | 0.246 | 2400.0 | `OK` |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | 26 | 34 | **26.9x** | 0.92 | 24.75 | 0.82 | 24.53 | 22.99 | 0.107 | 0.281 | 4601.0 | `OK` |
+| `t2_mad_g2_i8` | $2 \times 8$ | 34 | 38 | **8.0x** | 0.43 | 3.43 | 0.18 | 3.18 | 1.65 | 0.223 | 0.329 | 2400.0 | `OK` |
+| `t2_mad_g3_i9` | $3 \times 9$ | 54 | 54 | **7.3x** | 0.57 | 4.21 | 0.21 | 3.83 | 2.30 | 0.363 | 0.486 | 4800.0 | `OK` |
+| `t2_mad_g4_i12` | $4 \times 12$ | 84 | 72 | **5.3x** | 0.99 | 5.28 | 0.41 | 4.71 | 3.17 | 0.580 | 0.740 | 8000.0 | `OK` |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | 34 | 38 | **7.2x** | 6.03 | 43.22 | 5.76 | 42.91 | 41.38 | 0.248 | 0.382 | 5975.0 | `OK` |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | 54 | 54 | **4.6x** | 41.93 | 190.87 | 41.48 | 190.46 | 188.93 | 0.421 | 0.542 | 7720.0 | `OK` |
+| `t3_mad_g5_i20` | $5 \times 20$ | 145 | 95 | **4.7x** | 2.10 | 9.85 | 0.85 | 8.88 | 7.35 | 1.235 | 1.308 | 12000.0 | `OK` |
+| `t3_mad_g6_i30` | $6 \times 30$ | 234 | 120 | **4.1x** | 3.11 | 12.68 | 1.58 | 10.99 | 9.45 | 1.715 | 2.243 | 16800.0 | `OK` |
+| `t3_mad_g10_i100` | $10 \times 100$ | 1090 | 250 | **4.3x** | 10.91 | 46.51 | 5.90 | 37.92 | 36.39 | 4.691 | 10.812 | 88000.0 | `OK` |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | 4036 | 1060 | **4.2x** | 93.56 | 389.97 | 65.96 | 345.93 | 344.40 | 27.090 | 44.695 | 208000.0 | `OK` |
 <!-- END GENERATED:MAD_PIPELINE_TABLE -->
 
 ### MAD Multi-Trial Latency Dispersion (`Mean ± SD [95% CI]`)
@@ -114,17 +114,17 @@ In the planted-gap generator ([`bench/corpus.go`](../bench/corpus.go)), regular 
 <!-- BEGIN GENERATED:MAD_STATS_TABLE -->
 | Problem ID | $G \times I$ | `goblin (Go)` Scalar Total (Mean $\pm$ SD [95% CI], ms) | Python `PuLP + CBC` Total (Mean $\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\pm$ SD [95% CI], ms) |
 | :--- | :---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | $0.35 \pm 0.07$ ($\pm 0.05$) | $3.75 \pm 0.22$ ($\pm 0.15$) | $0.31 \pm 0.05$ ($\pm 0.03$) |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | $1.87 \pm 1.38$ ($\pm 0.93$) | $22.50 \pm 8.42$ ($\pm 5.66$) | $1.63 \pm 1.30$ ($\pm 0.87$) |
-| `t2_mad_g2_i8` | $2 \times 8$ | $0.32 \pm 0.06$ ($\pm 0.04$) | $3.59 \pm 0.32$ ($\pm 0.22$) | $0.23 \pm 0.04$ ($\pm 0.03$) |
-| `t2_mad_g3_i9` | $3 \times 9$ | $0.42 \pm 0.09$ ($\pm 0.06$) | $4.20 \pm 0.05$ ($\pm 0.03$) | $0.31 \pm 0.01$ ($\pm 0.01$) |
-| `t2_mad_g4_i12` | $4 \times 12$ | $1.17 \pm 0.16$ ($\pm 0.11$) | $5.30 \pm 0.09$ ($\pm 0.06$) | $0.91 \pm 0.29$ ($\pm 0.19$) |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | $6.67 \pm 3.72$ ($\pm 2.50$) | $31.51 \pm 18.28$ ($\pm 12.28$) | $5.96 \pm 3.47$ ($\pm 2.33$) |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | $60.85 \pm 57.15$ ($\pm 38.39$) | $166.14 \pm 82.17$ ($\pm 55.20$) | $58.86 \pm 51.08$ ($\pm 34.31$) |
-| `t3_mad_g5_i20` | $5 \times 20$ | $2.03 \pm 0.60$ ($\pm 0.75$) | $9.31 \pm 1.08$ ($\pm 1.34$) | $1.57 \pm 0.42$ ($\pm 0.52$) |
-| `t3_mad_g6_i30` | $6 \times 30$ | $3.81 \pm 1.08$ ($\pm 1.35$) | $13.63 \pm 2.27$ ($\pm 2.82$) | $4.10 \pm 1.04$ ($\pm 1.29$) |
-| `t3_mad_g10_i100` | $10 \times 100$ | $14.09 \pm 1.77$ ($\pm 2.19$) | $47.36 \pm 3.41$ ($\pm 4.24$) | $18.54 \pm 1.15$ ($\pm 1.43$) |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | $103.14 \pm 31.30$ ($\pm 38.86$) | $463.02 \pm 195.32$ ($\pm 242.49$) | $109.53 \pm 25.73$ ($\pm 31.94$) |
+| `t1_mad_g2_i4` | $2 \times 4$ | $0.14 \pm 0.01$ ($\pm 0.01$) | $3.75 \pm 0.22$ ($\pm 0.15$) | $0.21 \pm 0.04$ ($\pm 0.03$) |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | $1.12 \pm 0.82$ ($\pm 0.55$) | $22.50 \pm 8.42$ ($\pm 5.66$) | $1.59 \pm 1.25$ ($\pm 0.84$) |
+| `t2_mad_g2_i8` | $2 \times 8$ | $0.45 \pm 0.10$ ($\pm 0.07$) | $3.59 \pm 0.32$ ($\pm 0.22$) | $0.31 \pm 0.11$ ($\pm 0.07$) |
+| `t2_mad_g3_i9` | $3 \times 9$ | $0.56 \pm 0.10$ ($\pm 0.07$) | $4.20 \pm 0.05$ ($\pm 0.03$) | $0.34 \pm 0.06$ ($\pm 0.04$) |
+| `t2_mad_g4_i12` | $4 \times 12$ | $1.07 \pm 0.17$ ($\pm 0.11$) | $5.30 \pm 0.09$ ($\pm 0.06$) | $1.00 \pm 0.34$ ($\pm 0.23$) |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | $5.47 \pm 3.01$ ($\pm 2.02$) | $31.51 \pm 18.28$ ($\pm 12.28$) | $5.63 \pm 2.85$ ($\pm 1.92$) |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | $49.42 \pm 42.60$ ($\pm 28.61$) | $166.14 \pm 82.17$ ($\pm 55.20$) | $49.38 \pm 46.02$ ($\pm 30.92$) |
+| `t3_mad_g5_i20` | $5 \times 20$ | $2.12 \pm 0.18$ ($\pm 0.22$) | $9.31 \pm 1.08$ ($\pm 1.34$) | $1.95 \pm 0.38$ ($\pm 0.47$) |
+| `t3_mad_g6_i30` | $6 \times 30$ | $3.52 \pm 1.43$ ($\pm 1.77$) | $13.63 \pm 2.27$ ($\pm 2.82$) | $2.49 \pm 0.81$ ($\pm 1.01$) |
+| `t3_mad_g10_i100` | $10 \times 100$ | $10.85 \pm 0.86$ ($\pm 1.06$) | $47.36 \pm 3.41$ ($\pm 4.24$) | $15.55 \pm 1.93$ ($\pm 2.39$) |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | $98.07 \pm 26.05$ ($\pm 32.34$) | $463.02 \pm 195.32$ ($\pm 242.49$) | $74.98 \pm 23.98$ ($\pm 29.77$) |
 <!-- END GENERATED:MAD_STATS_TABLE -->
 
 ### MAD Solver-Core Checkpoint Progression
@@ -134,17 +134,17 @@ Checkpoints `CP4 Base` (branch-and-bound without presolve, cuts, or heuristics),
 <!-- BEGIN GENERATED:MAD_CHECKPOINT_TABLE -->
 | Problem ID | CP7 Full (ms / nodes / cuts) | CP6 +Cuts (ms / nodes / cuts) | CP5 +Presolve (ms / nodes) | CP4 Base (ms / nodes) | Root LP (ms) | Optimal Obj | Root LP Obj |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | **0.11** (1 / 0) | 0.07 (1 / 0) | 0.09 (1) | 0.56 (3) | 0.119 | 2400.00 | 2400.00 |
-| `t1_mad_rand_g2_i4` | **1.21** (5 / 0) | 0.84 (12 / 0) | 0.84 (12) | 0.99 (84) | 0.095 | 4601.00 | 4257.00 |
-| `t2_mad_g2_i8` | **0.14** (1 / 0) | 0.52 (9 / 0) | 0.44 (9) | 0.22 (2) | 0.095 | 2400.00 | 2400.00 |
-| `t2_mad_g3_i9` | **0.16** (1 / 0) | 0.23 (1 / 0) | 0.22 (1) | 2.05 (136) | 0.297 | 4800.00 | 4800.00 |
-| `t2_mad_g4_i12` | **0.48** (1 / 0) | 2.22 (15 / 0) | 2.38 (15) | 7.57 (47) | 0.399 | 8000.00 | 8000.00 |
-| `t2_mad_rand_g2_i8` | **6.50** (43 / 0) | 4.44 (41 / 0) | 3.39 (41) | 5.48 (126) | 0.192 | 5975.00 | 5894.00 |
-| `t2_mad_rand_g3_i9` | **42.21** (137 / 0) | 41.85 (201 / 0) | 20.57 (201) | 250.07 (1426, `TimeLimit`) | 0.395 | 7720.00 | 6060.00 |
-| `t3_mad_g5_i20` | **0.86** (1 / 0) | 3.16 (14 / 0) | 2.08 (14) | 1.55 (1) | 1.548 | 12000.00 | 12000.00 |
-| `t3_mad_g6_i30` | **1.50** (1 / 0) | 3.51 (12 / 0) | 5.41 (12) | 9.82 (27) | 2.399 | 16800.00 | 16800.00 |
-| `t3_mad_g10_i100` | **7.06** (1 / 0) | 55.48 (130 / 0) | 52.47 (130) | 250.31 (201, `TimeLimit`) | 16.753 | 88000.00 | 88000.00 |
-| `t3_mad_g4_i1000` | **61.25** (1 / 0) | 76.75 (2 / 0) | 58.17 (2) | 251.43 (40, `TimeLimit`) | 190.467 | 208000.00 | 208000.00 |
+| `t1_mad_g2_i4` | **0.04** (1 / 0) | 0.05 (1 / 0) | 0.05 (1) | 0.32 (3) | 0.064 | 2400.00 | 2400.00 |
+| `t1_mad_rand_g2_i4` | **0.82** (5 / 0) | 0.58 (12 / 0) | 0.48 (12) | 0.84 (84) | 0.072 | 4601.00 | 4257.00 |
+| `t2_mad_g2_i8` | **0.18** (1 / 0) | 0.65 (9 / 0) | 0.65 (9) | 0.35 (2) | 0.145 | 2400.00 | 2400.00 |
+| `t2_mad_g3_i9` | **0.21** (1 / 0) | 0.18 (1 / 0) | 0.20 (1) | 1.92 (136) | 0.341 | 4800.00 | 4800.00 |
+| `t2_mad_g4_i12` | **0.41** (1 / 0) | 1.95 (15 / 0) | 1.58 (15) | 6.64 (47) | 0.402 | 8000.00 | 8000.00 |
+| `t2_mad_rand_g2_i8` | **5.76** (43 / 0) | 3.09 (41 / 0) | 2.93 (41) | 4.74 (126) | 0.188 | 5975.00 | 5894.00 |
+| `t2_mad_rand_g3_i9` | **41.48** (137 / 0) | 32.70 (201 / 0) | 16.93 (201) | 250.03 (1860, `TimeLimit`) | 0.368 | 7720.00 | 6060.00 |
+| `t3_mad_g5_i20` | **0.85** (1 / 0) | 3.34 (14 / 0) | 3.09 (14) | 1.64 (1) | 1.501 | 12000.00 | 12000.00 |
+| `t3_mad_g6_i30` | **1.58** (1 / 0) | 5.52 (12 / 0) | 3.10 (12) | 8.60 (27) | 2.345 | 16800.00 | 16800.00 |
+| `t3_mad_g10_i100` | **5.90** (1 / 0) | 81.18 (130 / 0) | 52.33 (130) | 250.01 (208, `TimeLimit`) | 18.631 | 88000.00 | 88000.00 |
+| `t3_mad_g4_i1000` | **65.96** (1 / 0) | 65.32 (2 / 0) | 65.04 (2) | 250.68 (102, `TimeLimit`) | 144.585 | 208000.00 | 208000.00 |
 <!-- END GENERATED:MAD_CHECKPOINT_TABLE -->
 
 ---
@@ -159,37 +159,37 @@ The corpus spans 31 families in three tiers:
 <!-- BEGIN GENERATED:FULL_PIPELINE_TABLE -->
 | Problem ID | Vars | Rows | `Py / goblin (Go)` | GoTotal (ms) | PyTotal (ms) | GoSolve (ms) | PySolve (ms) | PySolve Net (ms) | GoPrep (ms) | PyPrep (ms) | Parity |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `t1_std_lp` | 3 | 3 | **65.8x** | 0.02 | 1.34 | 0.00 | 1.30 | 0.00 | 0.017 | 0.056 | `OK` |
-| `t1_std_lp_max` | 3 | 3 | **63.3x** | 0.02 | 1.34 | 0.00 | 1.26 | 0.00 | 0.017 | 0.056 | `OK` |
-| `t1_std_mip` | 3 | 3 | **87.5x** | 0.02 | 2.01 | 0.01 | 1.96 | 0.43 | 0.017 | 0.059 | `OK` |
-| `t1_mip_float_obj` | 3 | 3 | **66.0x** | 0.03 | 1.91 | 0.01 | 1.87 | 0.33 | 0.020 | 0.057 | `OK` |
-| `t1_whiskas` | 6 | 5 | **28.4x** | 0.05 | 1.39 | 0.01 | 1.33 | 0.00 | 0.043 | 0.082 | `OK` |
-| `t1_furniture` | 2 | 3 | **47.2x** | 0.05 | 2.23 | 0.02 | 2.18 | 0.65 | 0.018 | 0.057 | `OK` |
-| `t1_knapsack_12` | 12 | 3 | **23.0x** | 0.14 | 3.21 | 0.09 | 3.14 | 1.61 | 0.042 | 0.092 | `OK` |
-| `t1_infeasible_mip` | 2 | 1 | **83.1x** | 0.02 | 1.45 | 0.00 | 1.42 | 0.00 | 0.015 | 0.046 | `OK` |
-| `t1_mad_g2_i4` | 26 | 34 | **11.9x** | 0.32 | 3.82 | 0.11 | 3.63 | 2.10 | 0.207 | 0.246 | `OK` |
-| `t1_mad_rand_g2_i4` | 26 | 34 | **16.5x** | 1.50 | 24.75 | 1.21 | 24.53 | 22.99 | 0.225 | 0.281 | `OK` |
-| `t2_mkp_30` | 30 | 6 | **6.5x** | 4.28 | 27.67 | 4.12 | 27.50 | 25.97 | 0.158 | 0.208 | `OK` |
-| `t2_mkp_50` | 50 | 8 | **1.5x** | 7.79 | 11.47 | 7.53 | 11.23 | 9.69 | 0.251 | 0.324 | `OK` |
-| `t2_cflp_36` | 36 | 11 | **9.5x** | 0.37 | 3.56 | 0.25 | 3.39 | 1.86 | 0.105 | 0.191 | `OK` |
-| `t2_cflp_49` | 49 | 13 | **7.4x** | 0.56 | 4.15 | 0.43 | 3.96 | 2.42 | 0.125 | 0.259 | `OK` |
-| `t2_gap_45` | 45 | 13 | **6.1x** | 1.39 | 8.48 | 1.23 | 8.28 | 6.75 | 0.164 | 0.241 | `OK` |
-| `t2_lotsizing_48` | 48 | 32 | **5.7x** | 6.98 | 39.67 | 6.84 | 39.44 | 37.91 | 0.198 | 0.290 | `OK` |
-| `t2_binpack_44` | 44 | 14 | **12.5x** | 0.54 | 6.73 | 0.45 | 6.57 | 5.04 | 0.090 | 0.212 | `OK` |
-| `t2_setcover_50` | 50 | 20 | **11.2x** | 0.48 | 5.37 | 0.16 | 5.11 | 3.57 | 0.323 | 0.353 | `OK` |
-| `t2_mad_g2_i8` | 34 | 38 | **10.0x** | 0.34 | 3.43 | 0.14 | 3.18 | 1.65 | 0.168 | 0.329 | `OK` |
-| `t2_mad_g3_i9` | 54 | 54 | **9.8x** | 0.43 | 4.21 | 0.16 | 3.83 | 2.30 | 0.233 | 0.486 | `OK` |
-| `t2_mad_g4_i12` | 84 | 72 | **4.7x** | 1.13 | 5.28 | 0.48 | 4.71 | 3.17 | 0.653 | 0.740 | `OK` |
-| `t2_mad_rand_g2_i8` | 34 | 38 | **6.4x** | 6.78 | 43.22 | 6.50 | 42.91 | 41.38 | 0.276 | 0.382 | `OK` |
-| `t2_mad_rand_g3_i9` | 54 | 54 | **4.5x** | 42.57 | 190.87 | 42.21 | 190.46 | 188.93 | 0.418 | 0.542 | `OK` |
-| `t3_mkp_200` | 200 | 8 | **0.7x** | 57.28 | 41.23 | 56.68 | 40.62 | 39.09 | 0.666 | 0.782 | `OK` |
-| `t3_cflp_300` | 300 | 34 | **8.2x** | 25.71 | 211.02 | 24.74 | 210.13 | 208.60 | 1.012 | 1.147 | `OK` |
-| `t3_lotsizing_504` | 504 | 336 | **0.8x** | 160.41 | 128.49 | 158.30 | 126.64 | 125.11 | 1.714 | 2.268 | `OK` |
-| `t3_sched_1000` | 1000 | 100 | **4.5x** | 14.44 | 65.45 | 11.83 | 62.22 | 60.69 | 2.750 | 3.667 | `OK` |
-| `t3_mad_g5_i20` | 145 | 95 | **4.4x** | 2.24 | 9.85 | 0.86 | 8.88 | 7.35 | 1.108 | 1.308 | `OK` |
-| `t3_mad_g6_i30` | 234 | 120 | **3.8x** | 3.37 | 12.68 | 1.50 | 10.99 | 9.45 | 1.867 | 2.243 | `OK` |
-| `t3_mad_g10_i100` | 1090 | 250 | **3.6x** | 13.00 | 46.51 | 7.06 | 37.92 | 36.39 | 6.773 | 10.812 | `OK` |
-| `t3_mad_g4_i1000` | 4036 | 1060 | **4.2x** | 93.67 | 389.97 | 61.25 | 345.93 | 344.40 | 30.001 | 44.695 | `OK` |
+| `t1_std_lp` | 3 | 3 | **78.0x** | 0.02 | 1.34 | 0.00 | 1.30 | 0.00 | 0.014 | 0.056 | `OK` |
+| `t1_std_lp_max` | 3 | 3 | **73.7x** | 0.02 | 1.34 | 0.00 | 1.26 | 0.00 | 0.014 | 0.056 | `OK` |
+| `t1_std_mip` | 3 | 3 | **94.4x** | 0.02 | 2.01 | 0.01 | 1.96 | 0.43 | 0.014 | 0.059 | `OK` |
+| `t1_mip_float_obj` | 3 | 3 | **99.4x** | 0.02 | 1.91 | 0.01 | 1.87 | 0.33 | 0.013 | 0.057 | `OK` |
+| `t1_whiskas` | 6 | 5 | **46.9x** | 0.03 | 1.39 | 0.00 | 1.33 | 0.00 | 0.024 | 0.082 | `OK` |
+| `t1_furniture` | 2 | 3 | **69.1x** | 0.03 | 2.23 | 0.02 | 2.18 | 0.65 | 0.012 | 0.057 | `OK` |
+| `t1_knapsack_12` | 12 | 3 | **38.3x** | 0.08 | 3.21 | 0.06 | 3.14 | 1.61 | 0.025 | 0.092 | `OK` |
+| `t1_infeasible_mip` | 2 | 1 | **252.9x** | 0.01 | 1.45 | 0.00 | 1.42 | 0.00 | 0.005 | 0.046 | `OK` |
+| `t1_mad_g2_i4` | 26 | 34 | **27.3x** | 0.14 | 3.82 | 0.04 | 3.63 | 2.10 | 0.091 | 0.246 | `OK` |
+| `t1_mad_rand_g2_i4` | 26 | 34 | **26.9x** | 0.92 | 24.75 | 0.82 | 24.53 | 22.99 | 0.107 | 0.281 | `OK` |
+| `t2_mkp_30` | 30 | 6 | **9.3x** | 2.99 | 27.67 | 2.92 | 27.50 | 25.97 | 0.071 | 0.208 | `OK` |
+| `t2_mkp_50` | 50 | 8 | **2.3x** | 5.07 | 11.47 | 4.96 | 11.23 | 9.69 | 0.139 | 0.324 | `OK` |
+| `t2_cflp_36` | 36 | 11 | **10.9x** | 0.33 | 3.56 | 0.21 | 3.39 | 1.86 | 0.107 | 0.191 | `OK` |
+| `t2_cflp_49` | 49 | 13 | **5.5x** | 0.75 | 4.15 | 0.57 | 3.96 | 2.42 | 0.198 | 0.259 | `OK` |
+| `t2_gap_45` | 45 | 13 | **6.1x** | 1.39 | 8.48 | 1.23 | 8.28 | 6.75 | 0.113 | 0.241 | `OK` |
+| `t2_lotsizing_48` | 48 | 32 | **5.3x** | 7.44 | 39.67 | 7.25 | 39.44 | 37.91 | 0.189 | 0.290 | `OK` |
+| `t2_binpack_44` | 44 | 14 | **9.2x** | 0.74 | 6.73 | 0.65 | 6.57 | 5.04 | 0.140 | 0.212 | `OK` |
+| `t2_setcover_50` | 50 | 20 | **19.9x** | 0.27 | 5.37 | 0.12 | 5.11 | 3.57 | 0.157 | 0.353 | `OK` |
+| `t2_mad_g2_i8` | 34 | 38 | **8.0x** | 0.43 | 3.43 | 0.18 | 3.18 | 1.65 | 0.223 | 0.329 | `OK` |
+| `t2_mad_g3_i9` | 54 | 54 | **7.3x** | 0.57 | 4.21 | 0.21 | 3.83 | 2.30 | 0.363 | 0.486 | `OK` |
+| `t2_mad_g4_i12` | 84 | 72 | **5.3x** | 0.99 | 5.28 | 0.41 | 4.71 | 3.17 | 0.580 | 0.740 | `OK` |
+| `t2_mad_rand_g2_i8` | 34 | 38 | **7.2x** | 6.03 | 43.22 | 5.76 | 42.91 | 41.38 | 0.248 | 0.382 | `OK` |
+| `t2_mad_rand_g3_i9` | 54 | 54 | **4.6x** | 41.93 | 190.87 | 41.48 | 190.46 | 188.93 | 0.421 | 0.542 | `OK` |
+| `t3_mkp_200` | 200 | 8 | **0.8x** | 52.40 | 41.23 | 51.79 | 40.62 | 39.09 | 0.638 | 0.782 | `OK` |
+| `t3_cflp_300` | 300 | 34 | **12.2x** | 17.24 | 211.02 | 16.37 | 210.13 | 208.60 | 0.562 | 1.147 | `OK` |
+| `t3_lotsizing_504` | 504 | 336 | **0.8x** | 157.46 | 128.49 | 156.23 | 126.64 | 125.11 | 1.589 | 2.268 | `OK` |
+| `t3_sched_1000` | 1000 | 100 | **6.8x** | 9.57 | 65.45 | 7.73 | 62.22 | 60.69 | 1.864 | 3.667 | `OK` |
+| `t3_mad_g5_i20` | 145 | 95 | **4.7x** | 2.10 | 9.85 | 0.85 | 8.88 | 7.35 | 1.235 | 1.308 | `OK` |
+| `t3_mad_g6_i30` | 234 | 120 | **4.1x** | 3.11 | 12.68 | 1.58 | 10.99 | 9.45 | 1.715 | 2.243 | `OK` |
+| `t3_mad_g10_i100` | 1090 | 250 | **4.3x** | 10.91 | 46.51 | 5.90 | 37.92 | 36.39 | 4.691 | 10.812 | `OK` |
+| `t3_mad_g4_i1000` | 4036 | 1060 | **4.2x** | 93.56 | 389.97 | 65.96 | 345.93 | 344.40 | 27.090 | 44.695 | `OK` |
 <!-- END GENERATED:FULL_PIPELINE_TABLE -->
 
 ---
@@ -201,44 +201,44 @@ In [`internal/simd/kernels_amd64.go`](../internal/simd/kernels_amd64.go), AVX2 k
 At the full-solver level, each ratio below is the geometric mean of per-trial `scalar / SIMD` solve times over the same instances, with a 95% $t$-interval on the log ratios; "no detectable effect" means the interval contains 1. "Reachable" is a necessary condition: the AVX2 `Dot64`/`Axpy64`/`Scale64` paths require a slice of length 32 or more (`n + m >= 32`). Below that size no AVX2 kernel can run, so those 8 families serve as negative controls where intervals excluding 1 reflect binary code-layout or run-to-run variance rather than SIMD execution. Lowering `minAVX2Len` from 256 to 32 enables AVX2 across dense tableau row accumulation (`ComputeTableauRow`) and dual reduced-cost updates (`solveDual`) for medium models with $n \le 256$ (`DenseThreshold`), while `ComputeTableauRow` dispatches `Axpy64` on contiguous CSR column blocks in large models ($n > 256$, such as `t3_mad_g4_i1000`).
 
 <!-- BEGIN GENERATED:SIMD_SUMMARY -->
-- **Negative controls** (`n + m < 32`, no AVX2 kernel can run): 4 of 8 have a 95% interval excluding 1. These differences come from the two binaries (compiler output and code layout differ under `GOEXPERIMENT=simd`) and from run-to-run effects, not from SIMD kernels. Intervals of similar size on the AVX2-capable instances are therefore not evidence of a SIMD effect.
-- **Instances where AVX2 can run**: 6 faster, 4 slower, 13 with no detectable effect, out of 23.
+- **Negative controls** (`n + m < 32`, no AVX2 kernel can run): 5 of 8 have a 95% interval excluding 1. These differences come from the two binaries (compiler output and code layout differ under `GOEXPERIMENT=simd`) and from run-to-run effects, not from SIMD kernels. Intervals of similar size on the AVX2-capable instances are therefore not evidence of a SIMD effect.
+- **Instances where AVX2 can run**: 5 faster, 7 slower, 11 with no detectable effect, out of 23.
 <!-- END GENERATED:SIMD_SUMMARY -->
 
 <!-- BEGIN GENERATED:SIMD_EFFECT_TABLE -->
 | Problem ID | `n + m` | AVX2 `Dot64`/`Axpy64` reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |
 | :--- | ---: | :---: | :--- | ---: | ---: | ---: | ---: |
-| `t1_std_lp` | 6 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.73x [0.60x-0.90x] | 0.003 | 0.004 | 11 |
-| `t1_std_lp_max` | 6 | no (control) | identical source | 0.92x [0.77x-1.10x] | 0.003 | 0.003 | 11 |
-| `t1_std_mip` | 6 | no (control) | identical source | 0.83x [0.60x-1.15x] | 0.006 | 0.006 | 11 |
-| `t1_mip_float_obj` | 6 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.55x [1.31x-1.82x] | 0.008 | 0.006 | 11 |
-| `t1_whiskas` | 11 | no (control) | identical source | 1.10x [0.99x-1.22x] | 0.006 | 0.006 | 11 |
-| `t1_furniture` | 5 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.13x [1.07x-1.20x] | 0.023 | 0.018 | 11 |
-| `t1_knapsack_12` | 15 | no (control) | identical source | 0.91x [0.80x-1.03x] | 0.094 | 0.097 | 11 |
-| `t1_infeasible_mip` | 3 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.52x [1.40x-1.65x] | 0.001 | 0.000 | 11 |
-| `t1_mad_g2_i4` | 60 | possible | no detectable effect | 1.10x [0.94x-1.29x] | 0.111 | 0.097 | 11 |
-| `t1_mad_rand_g2_i4` | 60 | possible | no detectable effect | 1.08x [0.90x-1.31x] | 1.208 | 1.009 | 11 |
-| `t2_mkp_30` | 36 | possible | no detectable effect | 0.99x [0.88x-1.12x] | 4.121 | 4.523 | 11 |
-| `t2_mkp_50` | 58 | possible | no detectable effect | 1.00x [0.88x-1.13x] | 7.532 | 8.198 | 11 |
-| `t2_cflp_36` | 47 | possible | SIMD slower | 0.83x [0.73x-0.95x] | 0.252 | 0.270 | 11 |
-| `t2_cflp_49` | 62 | possible | SIMD slower | 0.88x [0.79x-0.99x] | 0.430 | 0.594 | 11 |
-| `t2_gap_45` | 58 | possible | SIMD faster | 1.16x [1.02x-1.32x] | 1.234 | 1.138 | 11 |
-| `t2_lotsizing_48` | 80 | possible | no detectable effect | 0.92x [0.81x-1.04x] | 6.843 | 7.037 | 11 |
-| `t2_binpack_44` | 58 | possible | SIMD slower | 0.71x [0.64x-0.78x] | 0.452 | 0.731 | 11 |
-| `t2_setcover_50` | 70 | possible | SIMD faster | 1.60x [1.42x-1.79x] | 0.157 | 0.109 | 11 |
-| `t2_mad_g2_i8` | 72 | possible | SIMD faster | 1.51x [1.20x-1.90x] | 0.143 | 0.093 | 11 |
-| `t2_mad_g3_i9` | 108 | possible | SIMD faster | 1.33x [1.11x-1.59x] | 0.160 | 0.117 | 11 |
-| `t2_mad_g4_i12` | 156 | possible | SIMD faster | 1.32x [1.11x-1.57x] | 0.478 | 0.384 | 11 |
-| `t2_mad_rand_g2_i8` | 72 | possible | SIMD faster | 1.18x [1.02x-1.35x] | 6.502 | 6.295 | 11 |
-| `t2_mad_rand_g3_i9` | 108 | possible | no detectable effect | 0.95x [0.85x-1.07x] | 42.208 | 53.020 | 11 |
-| `t3_mkp_200` | 208 | possible | no detectable effect | 1.06x [0.91x-1.22x] | 56.678 | 49.802 | 5 |
-| `t3_cflp_300` | 334 | possible | no detectable effect | 1.04x [0.99x-1.10x] | 24.739 | 24.351 | 5 |
-| `t3_lotsizing_504` | 840 | possible | no detectable effect | 1.05x [0.98x-1.12x] | 158.299 | 148.219 | 5 |
-| `t3_sched_1000` | 1100 | possible | no detectable effect | 0.87x [0.72x-1.06x] | 11.827 | 13.097 | 5 |
-| `t3_mad_g5_i20` | 240 | possible | no detectable effect | 1.22x [0.67x-2.22x] | 0.857 | 0.709 | 5 |
-| `t3_mad_g6_i30` | 354 | possible | no detectable effect | 0.94x [0.82x-1.08x] | 1.503 | 1.564 | 5 |
-| `t3_mad_g10_i100` | 1340 | possible | SIMD slower | 0.76x [0.61x-0.93x] | 7.056 | 9.358 | 5 |
-| `t3_mad_g4_i1000` | 5096 | possible | no detectable effect | 0.91x [0.77x-1.08x] | 61.248 | 66.617 | 5 |
+| `t1_std_lp` | 6 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.33x [1.12x-1.57x] | 0.002 | 0.002 | 11 |
+| `t1_std_lp_max` | 6 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.37x [1.08x-1.73x] | 0.003 | 0.002 | 11 |
+| `t1_std_mip` | 6 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.54x [1.21x-1.98x] | 0.007 | 0.004 | 11 |
+| `t1_mip_float_obj` | 6 | no (control) | identical source | 1.35x [0.98x-1.87x] | 0.006 | 0.005 | 11 |
+| `t1_whiskas` | 11 | no (control) | identical source | 0.88x [0.66x-1.16x] | 0.004 | 0.005 | 11 |
+| `t1_furniture` | 5 | no (control) | identical source | 1.18x [0.98x-1.41x] | 0.019 | 0.018 | 11 |
+| `t1_knapsack_12` | 15 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.75x [0.65x-0.86x] | 0.060 | 0.075 | 11 |
+| `t1_infeasible_mip` | 3 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.90x [0.82x-0.99x] | 0.000 | 0.000 | 11 |
+| `t1_mad_g2_i4` | 60 | possible | SIMD slower | 0.59x [0.47x-0.75x] | 0.043 | 0.067 | 11 |
+| `t1_mad_rand_g2_i4` | 60 | possible | SIMD slower | 0.74x [0.64x-0.86x] | 0.815 | 0.959 | 11 |
+| `t2_mkp_30` | 36 | possible | SIMD slower | 0.70x [0.63x-0.79x] | 2.923 | 3.957 | 11 |
+| `t2_mkp_50` | 58 | possible | SIMD slower | 0.72x [0.63x-0.82x] | 4.956 | 7.732 | 11 |
+| `t2_cflp_36` | 47 | possible | SIMD faster | 1.30x [1.25x-1.35x] | 0.214 | 0.164 | 11 |
+| `t2_cflp_49` | 62 | possible | SIMD faster | 1.40x [1.24x-1.59x] | 0.570 | 0.375 | 11 |
+| `t2_gap_45` | 58 | possible | SIMD faster | 1.12x [1.06x-1.20x] | 1.225 | 1.110 | 11 |
+| `t2_lotsizing_48` | 80 | possible | no detectable effect | 1.06x [0.93x-1.21x] | 7.252 | 5.959 | 11 |
+| `t2_binpack_44` | 58 | possible | no detectable effect | 0.95x [0.80x-1.13x] | 0.646 | 0.621 | 11 |
+| `t2_setcover_50` | 70 | possible | SIMD slower | 0.76x [0.59x-0.99x] | 0.117 | 0.180 | 11 |
+| `t2_mad_g2_i8` | 72 | possible | SIMD faster | 1.58x [1.16x-2.15x] | 0.184 | 0.110 | 11 |
+| `t2_mad_g3_i9` | 108 | possible | SIMD faster | 1.55x [1.26x-1.91x] | 0.208 | 0.115 | 11 |
+| `t2_mad_g4_i12` | 156 | possible | no detectable effect | 1.15x [0.96x-1.38x] | 0.411 | 0.405 | 11 |
+| `t2_mad_rand_g2_i8` | 72 | possible | no detectable effect | 0.95x [0.81x-1.10x] | 5.762 | 6.222 | 11 |
+| `t2_mad_rand_g3_i9` | 108 | possible | no detectable effect | 1.06x [0.90x-1.26x] | 41.480 | 40.477 | 11 |
+| `t3_mkp_200` | 208 | possible | no detectable effect | 0.94x [0.73x-1.22x] | 51.793 | 50.759 | 5 |
+| `t3_cflp_300` | 334 | possible | SIMD slower | 0.77x [0.61x-0.98x] | 16.367 | 21.327 | 5 |
+| `t3_lotsizing_504` | 840 | possible | no detectable effect | 0.98x [0.80x-1.20x] | 156.232 | 147.230 | 5 |
+| `t3_sched_1000` | 1100 | possible | no detectable effect | 0.78x [0.60x-1.02x] | 7.726 | 9.700 | 5 |
+| `t3_mad_g5_i20` | 240 | possible | no detectable effect | 1.12x [0.81x-1.54x] | 0.852 | 0.817 | 5 |
+| `t3_mad_g6_i30` | 354 | possible | no detectable effect | 1.34x [0.99x-1.82x] | 1.581 | 0.998 | 5 |
+| `t3_mad_g10_i100` | 1340 | possible | SIMD slower | 0.77x [0.62x-0.96x] | 5.900 | 7.182 | 5 |
+| `t3_mad_g4_i1000` | 5096 | possible | no detectable effect | 1.25x [0.88x-1.77x] | 65.962 | 51.683 | 5 |
 <!-- END GENERATED:SIMD_EFFECT_TABLE -->
 
 ---
@@ -249,36 +249,36 @@ At the full-solver level, each ratio below is the geometric mean of per-trial `s
 | Problem ID | CP7 Full (ms / nodes / cuts) | CP6 +Cuts (ms / nodes / cuts) | CP5 +Presolve (ms / nodes) | CP4 Base (ms / nodes) | Root LP (ms) | Optimal Obj | Root LP Obj |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `t1_std_lp` | **0.00** (1 / 0) | 0.00 (1 / 0) | 0.00 (1) | 0.00 (1) | 0.002 | 54.00 | 54.00 |
-| `t1_std_lp_max` | **0.00** (1 / 0) | 0.00 (1 / 0) | 0.00 (1) | 0.00 (1) | 0.002 | 80.00 | 80.00 |
-| `t1_std_mip` | **0.01** (1 / 0) | 0.01 (1 / 0) | 0.01 (1) | 0.01 (3) | 0.003 | 64.00 | 58.00 |
-| `t1_mip_float_obj` | **0.01** (1 / 0) | 0.01 (1 / 0) | 0.01 (1) | 0.01 (3) | 0.003 | 64.95 | 58.90 |
-| `t1_whiskas` | **0.01** (1 / 0) | 0.01 (1 / 0) | 0.01 (1) | 0.01 (1) | 0.004 | 0.52 | 0.52 |
-| `t1_furniture` | **0.02** (1 / 0) | 0.01 (1 / 0) | 0.02 (1) | 0.02 (1) | 0.003 | 1075.00 | 1075.00 |
-| `t1_knapsack_12` | **0.09** (1 / 8) | 0.14 (2 / 8) | 0.19 (24) | 0.27 (31) | 0.008 | 513.24 | 578.65 |
-| `t1_infeasible_mip` | **0.00** (0 / 0) | 0.00 (0 / 0) | 0.00 (0) | 0.01 (5) | 0.002 | 0.00 | 1.50 |
-| `t1_mad_g2_i4` | **0.11** (1 / 0) | 0.07 (1 / 0) | 0.09 (1) | 0.56 (3) | 0.119 | 2400.00 | 2400.00 |
-| `t1_mad_rand_g2_i4` | **1.21** (5 / 0) | 0.84 (12 / 0) | 0.84 (12) | 0.99 (84) | 0.095 | 4601.00 | 4257.00 |
-| `t2_mkp_30` | **4.12** (29 / 8) | 3.32 (60 / 8) | 1.15 (77) | 1.01 (77) | 0.023 | 1917.24 | 1966.92 |
-| `t2_mkp_50` | **7.53** (1 / 4) | 5.64 (2 / 4) | 8.62 (132) | 5.86 (119) | 0.051 | 2620.01 | 2648.37 |
-| `t2_cflp_36` | **0.25** (1 / 2) | 1.63 (3 / 2) | 0.16 (7) | 0.17 (7) | 0.033 | 801.17 | 781.97 |
-| `t2_cflp_49` | **0.43** (1 / 20) | 1.88 (4 / 20) | 0.34 (9) | 0.34 (9) | 0.030 | 909.02 | 827.30 |
-| `t2_gap_45` | **1.23** (1 / 8) | 0.37 (1 / 8) | 2.53 (61) | 2.58 (61) | 0.025 | 195.18 | 178.04 |
-| `t2_lotsizing_48` | **6.84** (3 / 35) | 7.02 (33 / 35) | 3.02 (198) | 3.43 (174) | 0.086 | 2245.81 | 2052.34 |
-| `t2_binpack_44` | **0.45** (1 / 5) | 1.53 (13 / 5) | 24.20 (1838) | 31.58 (2450) | 0.040 | 30.32 | 29.30 |
-| `t2_setcover_50` | **0.16** (1 / 6) | 0.35 (2 / 6) | 0.88 (9) | 0.88 (9) | 0.046 | 58.10 | 56.84 |
-| `t2_mad_g2_i8` | **0.14** (1 / 0) | 0.52 (9 / 0) | 0.44 (9) | 0.22 (2) | 0.095 | 2400.00 | 2400.00 |
-| `t2_mad_g3_i9` | **0.16** (1 / 0) | 0.23 (1 / 0) | 0.22 (1) | 2.05 (136) | 0.297 | 4800.00 | 4800.00 |
-| `t2_mad_g4_i12` | **0.48** (1 / 0) | 2.22 (15 / 0) | 2.38 (15) | 7.57 (47) | 0.399 | 8000.00 | 8000.00 |
-| `t2_mad_rand_g2_i8` | **6.50** (43 / 0) | 4.44 (41 / 0) | 3.39 (41) | 5.48 (126) | 0.192 | 5975.00 | 5894.00 |
-| `t2_mad_rand_g3_i9` | **42.21** (137 / 0) | 41.85 (201 / 0) | 20.57 (201) | 250.07 (1426, `TimeLimit`) | 0.395 | 7720.00 | 6060.00 |
-| `t3_mkp_200` | **56.68** (594 / 14) | 68.28 (701 / 14) | 161.53 (5000, `NodeLimit`) | 117.07 (5000, `NodeLimit`) | 0.178 | 12906.80 | 12955.46 |
-| `t3_cflp_300` | **24.74** (48 / 31) | 28.17 (63 / 31) | 10.96 (134) | 12.55 (134) | 0.238 | 2187.30 | 2081.53 |
-| `t3_lotsizing_504` | **158.30** (27 / 203) | 198.38 (416 / 203) | 250.02 (3083, `TimeLimit`) | 250.11 (3673, `TimeLimit`) | 1.167 | 13120.44 | 10518.99 |
-| `t3_sched_1000` | **11.83** (35 / 47) | 13.81 (96 / 47) | 250.04 (3400, `TimeLimit`) | 250.04 (4246, `TimeLimit`) | 0.206 | 46818.28 | 46971.09 |
-| `t3_mad_g5_i20` | **0.86** (1 / 0) | 3.16 (14 / 0) | 2.08 (14) | 1.55 (1) | 1.548 | 12000.00 | 12000.00 |
-| `t3_mad_g6_i30` | **1.50** (1 / 0) | 3.51 (12 / 0) | 5.41 (12) | 9.82 (27) | 2.399 | 16800.00 | 16800.00 |
-| `t3_mad_g10_i100` | **7.06** (1 / 0) | 55.48 (130 / 0) | 52.47 (130) | 250.31 (201, `TimeLimit`) | 16.753 | 88000.00 | 88000.00 |
-| `t3_mad_g4_i1000` | **61.25** (1 / 0) | 76.75 (2 / 0) | 58.17 (2) | 251.43 (40, `TimeLimit`) | 190.467 | 208000.00 | 208000.00 |
+| `t1_std_lp_max` | **0.00** (1 / 0) | 0.00 (1 / 0) | 0.00 (1) | 0.00 (1) | 0.001 | 80.00 | 80.00 |
+| `t1_std_mip` | **0.01** (1 / 0) | 0.01 (1 / 0) | 0.01 (1) | 0.01 (3) | 0.002 | 64.00 | 58.00 |
+| `t1_mip_float_obj` | **0.01** (1 / 0) | 0.01 (1 / 0) | 0.01 (1) | 0.01 (3) | 0.001 | 64.95 | 58.90 |
+| `t1_whiskas` | **0.00** (1 / 0) | 0.00 (1 / 0) | 0.00 (1) | 0.00 (1) | 0.003 | 0.52 | 0.52 |
+| `t1_furniture` | **0.02** (1 / 0) | 0.02 (1 / 0) | 0.02 (1) | 0.01 (1) | 0.002 | 1075.00 | 1075.00 |
+| `t1_knapsack_12` | **0.06** (1 / 8) | 0.06 (2 / 8) | 0.09 (24) | 0.12 (31) | 0.004 | 513.24 | 578.65 |
+| `t1_infeasible_mip` | **0.00** (0 / 0) | 0.00 (0 / 0) | 0.00 (0) | 0.00 (5) | 0.001 | 0.00 | 1.50 |
+| `t1_mad_g2_i4` | **0.04** (1 / 0) | 0.05 (1 / 0) | 0.05 (1) | 0.32 (3) | 0.064 | 2400.00 | 2400.00 |
+| `t1_mad_rand_g2_i4` | **0.82** (5 / 0) | 0.58 (12 / 0) | 0.48 (12) | 0.84 (84) | 0.072 | 4601.00 | 4257.00 |
+| `t2_mkp_30` | **2.92** (29 / 8) | 2.11 (60 / 8) | 0.99 (77) | 0.87 (77) | 0.020 | 1917.24 | 1966.92 |
+| `t2_mkp_50` | **4.96** (1 / 4) | 6.49 (2 / 4) | 6.89 (132) | 3.62 (119) | 0.034 | 2620.01 | 2648.37 |
+| `t2_cflp_36` | **0.21** (1 / 2) | 1.59 (3 / 2) | 0.21 (7) | 0.20 (7) | 0.030 | 801.17 | 781.97 |
+| `t2_cflp_49` | **0.57** (1 / 20) | 1.99 (4 / 20) | 0.43 (9) | 0.53 (9) | 0.049 | 909.02 | 827.30 |
+| `t2_gap_45` | **1.23** (1 / 8) | 0.41 (1 / 8) | 1.75 (61) | 2.63 (61) | 0.037 | 195.18 | 178.04 |
+| `t2_lotsizing_48` | **7.25** (3 / 35) | 8.23 (33 / 35) | 2.84 (198) | 2.75 (174) | 0.051 | 2245.81 | 2052.34 |
+| `t2_binpack_44` | **0.65** (1 / 5) | 1.39 (13 / 5) | 23.33 (1838) | 27.73 (2450) | 0.025 | 30.32 | 29.30 |
+| `t2_setcover_50` | **0.12** (1 / 6) | 0.23 (2 / 6) | 1.15 (9) | 1.12 (9) | 0.029 | 58.10 | 56.84 |
+| `t2_mad_g2_i8` | **0.18** (1 / 0) | 0.65 (9 / 0) | 0.65 (9) | 0.35 (2) | 0.145 | 2400.00 | 2400.00 |
+| `t2_mad_g3_i9` | **0.21** (1 / 0) | 0.18 (1 / 0) | 0.20 (1) | 1.92 (136) | 0.341 | 4800.00 | 4800.00 |
+| `t2_mad_g4_i12` | **0.41** (1 / 0) | 1.95 (15 / 0) | 1.58 (15) | 6.64 (47) | 0.402 | 8000.00 | 8000.00 |
+| `t2_mad_rand_g2_i8` | **5.76** (43 / 0) | 3.09 (41 / 0) | 2.93 (41) | 4.74 (126) | 0.188 | 5975.00 | 5894.00 |
+| `t2_mad_rand_g3_i9` | **41.48** (137 / 0) | 32.70 (201 / 0) | 16.93 (201) | 250.03 (1860, `TimeLimit`) | 0.368 | 7720.00 | 6060.00 |
+| `t3_mkp_200` | **51.79** (594 / 14) | 48.87 (701 / 14) | 110.13 (5000, `NodeLimit`) | 101.43 (5000, `NodeLimit`) | 0.122 | 12906.80 | 12955.46 |
+| `t3_cflp_300` | **16.37** (48 / 31) | 22.81 (63 / 31) | 10.60 (134) | 9.41 (134) | 0.213 | 2187.30 | 2081.53 |
+| `t3_lotsizing_504` | **156.23** (27 / 203) | 186.73 (416 / 203) | 250.03 (3736, `TimeLimit`) | 250.03 (4985, `TimeLimit`) | 1.573 | 13120.44 | 10518.99 |
+| `t3_sched_1000` | **7.73** (35 / 47) | 20.74 (96 / 47) | 250.05 (3243, `TimeLimit`) | 220.05 (5000, `NodeLimit`) | 0.139 | 46818.28 | 46971.09 |
+| `t3_mad_g5_i20` | **0.85** (1 / 0) | 3.34 (14 / 0) | 3.09 (14) | 1.64 (1) | 1.501 | 12000.00 | 12000.00 |
+| `t3_mad_g6_i30` | **1.58** (1 / 0) | 5.52 (12 / 0) | 3.10 (12) | 8.60 (27) | 2.345 | 16800.00 | 16800.00 |
+| `t3_mad_g10_i100` | **5.90** (1 / 0) | 81.18 (130 / 0) | 52.33 (130) | 250.01 (208, `TimeLimit`) | 18.631 | 88000.00 | 88000.00 |
+| `t3_mad_g4_i1000` | **65.96** (1 / 0) | 65.32 (2 / 0) | 65.04 (2) | 250.68 (102, `TimeLimit`) | 144.585 | 208000.00 | 208000.00 |
 <!-- END GENERATED:FULL_CHECKPOINT_TABLE -->
 
 ---
@@ -294,13 +294,13 @@ The 22-family Linear Sum Assignment corpus ([`bench/assign_corpus.go`](../bench/
 <!-- BEGIN GENERATED:ASSIGN_TIER_SUMMARY_TABLE -->
 | Workload Subset | Families | `SciPy Solve / goblin` GeoMean | `SciPy Total / goblin` GeoMean | `goblin` Solve (ms) | SciPy Solve (ms) | `goblin` Total (ms) | SciPy Total (ms) | `SciPy Solve / goblin` Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Micro/Small (`N <= 32`) | 6 | **1.84x** | 4.52x | 0.0026 | 0.0047 | 0.0034 | 0.0156 | 1.59x [1.38x-3.11x] |
-| Tier 2: Medium / Target p90 (`64 <= N <= 256`) | 9 | **1.77x** | 1.63x | 0.104 | 0.183 | 0.159 | 0.260 | 1.61x [1.02x-6.92x] |
-| Tier 3: Large Tail (`500 <= N <= 2000`) | 7 | **1.37x** | 1.43x | 4.055 | 5.553 | 6.256 | 8.946 | 1.27x [0.89x-2.09x] |
-| Square families ($m = n$) | 16 | **1.84x** | 2.29x | 0.164 | 0.302 | 0.220 | 0.504 | 1.82x [0.89x-6.92x] |
-| Rectangular families ($m \neq n$, wide and tall) | 6 | **1.23x** | 1.57x | 0.0542 | 0.0667 | 0.105 | 0.165 | 1.23x [1.00x-1.53x] |
-| Degenerate / structured (ties, rank-1, geometric, sparse) | 7 | **1.59x** | 1.87x | 0.124 | 0.198 | 0.170 | 0.318 | 1.38x [0.89x-6.92x] |
-| **All 22 LSAP corpus families** | 22 | **1.65x** | 2.07x | 0.121 | 0.200 | 0.180 | 0.372 | 1.57x [0.89x-6.92x] |
+| Tier 1: Micro/Small (`N <= 32`) | 6 | **1.37x** | 3.33x | 0.0035 | 0.0047 | 0.0047 | 0.0156 | 1.15x [1.09x-2.76x] |
+| Tier 2: Medium / Target p90 (`64 <= N <= 256`) | 9 | **1.86x** | 1.74x | 0.0987 | 0.183 | 0.149 | 0.260 | 1.67x [0.96x-8.51x] |
+| Tier 3: Large Tail (`500 <= N <= 2000`) | 7 | **1.67x** | 1.76x | 3.334 | 5.553 | 5.089 | 8.946 | 1.86x [0.98x-3.18x] |
+| Square families ($m = n$) | 16 | **1.75x** | 2.17x | 0.173 | 0.302 | 0.233 | 0.504 | 1.58x [0.96x-8.51x] |
+| Rectangular families ($m \neq n$, wide and tall) | 6 | **1.42x** | 1.88x | 0.0471 | 0.0667 | 0.0877 | 0.165 | 1.46x [1.09x-1.86x] |
+| Degenerate / structured (ties, rank-1, geometric, sparse) | 7 | **1.43x** | 1.70x | 0.138 | 0.198 | 0.187 | 0.318 | 1.12x [0.96x-8.51x] |
+| **All 22 LSAP corpus families** | 22 | **1.65x** | 2.08x | 0.121 | 0.200 | 0.178 | 0.372 | 1.54x [0.96x-8.51x] |
 <!-- END GENERATED:ASSIGN_TIER_SUMMARY_TABLE -->
 
 ### 7.2 Full 22-Family LSAP Pipeline Comparison
@@ -308,28 +308,28 @@ The 22-family Linear Sum Assignment corpus ([`bench/assign_corpus.go`](../bench/
 <!-- BEGIN GENERATED:ASSIGN_PIPELINE_TABLE -->
 | Problem ID | Shape ($m \times n$) | Family | `SciPy Solve / goblin` | GoSolve (ms) | SciPySolve (ms) | GoTotal (ms) | SciPyTotal (ms) | Go Solve Mean $\pm$ SD (ms) | SciPy Solve Mean $\pm$ SD (ms) | Optimal Obj | Parity |
 | :--- | :---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `a1_canon_4x4` | $4 \times 4$ | `canonical` | **3.11x** | 0.0006 | 0.0019 | 0.0007 | 0.0122 | $0.0006 \pm 0.0002$ | $0.0020 \pm 0.0003$ | 275.00 | `OK` |
-| `a1_unif_10x10` | $10 \times 10$ | `uniform` | **2.44x** | 0.0013 | 0.0032 | 0.0017 | 0.0106 | $0.0015 \pm 0.0005$ | $0.0032 \pm 0.0004$ | 18107.93 | `OK` |
-| `a1_ties_20x20` | $20 \times 20$ | `integer_ties` | **1.64x** | 0.0043 | 0.0070 | 0.0053 | 0.0157 | $0.0043 \pm 0.0011$ | $0.0071 \pm 0.0016$ | 4.00 | `OK` |
-| `a1_wide_16x32` | $16 \times 32$ | `wide` | **1.49x** | 0.0031 | 0.0047 | 0.0042 | 0.0143 | $0.0029 \pm 0.0007$ | $0.0047 \pm 0.0008$ | 5044.66 | `OK` |
-| `a1_tall_32x16` | $32 \times 16$ | `tall` | **1.53x** | 0.0032 | 0.0050 | 0.0044 | 0.0152 | $0.0033 \pm 0.0008$ | $0.0051 \pm 0.0008$ | 2840.65 | `OK` |
-| `a1_sparse_24x24` | $24 \times 24$ | `sparse` | **1.38x** | 0.0082 | 0.0113 | 0.0138 | 0.0321 | $0.0087 \pm 0.0029$ | $0.0112 \pm 0.0018$ | 2261.00 | `OK` |
-| `a2_unif_64x64` | $64 \times 64$ | `uniform` | **1.86x** | 0.0362 | 0.0673 | 0.0445 | 0.0915 | $0.0352 \pm 0.0066$ | $0.0664 \pm 0.0100$ | 16825.55 | `OK` |
-| `a2_unif_100x100` | $100 \times 100$ | `uniform` | **2.24x** | 0.0747 | 0.167 | 0.0943 | 0.218 | $0.0761 \pm 0.0139$ | $0.168 \pm 0.0258$ | 15794.03 | `OK` |
-| `a2_ties_100x100` | $100 \times 100$ | `integer_ties` | **1.51x** | 0.0596 | 0.0902 | 0.0883 | 0.135 | $0.0581 \pm 0.0069$ | $0.0929 \pm 0.0137$ | 1.00 | `OK` |
-| `a2_geom_100x100` | $100 \times 100$ | `geometric` | **1.13x** | 0.187 | 0.210 | 0.205 | 0.249 | $0.214 \pm 0.0645$ | $0.227 \pm 0.0413$ | 610058.93 | `OK` |
-| `a2_rank1_100x100` | $100 \times 100$ | `rank1` | **6.92x** | 0.0934 | 0.647 | 0.134 | 0.722 | $0.0912 \pm 0.0120$ | $0.654 \pm 0.0259$ | 20173201.47 | `OK` |
-| `a2_wide_80x200` | $80 \times 200$ | `wide` | **1.19x** | 0.0558 | 0.0664 | 0.146 | 0.135 | $0.0554 \pm 0.0055$ | $0.0685 \pm 0.0072$ | 3410.92 | `OK` |
-| `a2_tall_200x80` | $200 \times 80$ | `tall` | **1.02x** | 0.0757 | 0.0769 | 0.166 | 0.148 | $0.0765 \pm 0.0051$ | $0.0791 \pm 0.0090$ | 4329.48 | `OK` |
-| `a2_max_128x128` | $128 \times 128$ | `maximize` | **1.61x** | 0.170 | 0.273 | 0.260 | 0.355 | $0.177 \pm 0.0335$ | $0.279 \pm 0.0320$ | 1233885.41 | `OK` |
-| `a2_unif_256x256` | $256 \times 256$ | `uniform` | **1.78x** | 0.680 | 1.208 | 1.024 | 1.565 | $0.671 \pm 0.0991$ | $1.216 \pm 0.127$ | 14858.73 | `OK` |
-| `a3_unif_500x500` | $500 \times 500$ | `uniform` | **1.91x** | 2.647 | 5.065 | 3.588 | 6.730 | $2.420 \pm 0.613$ | $5.136 \pm 0.361$ | 16720.22 | `OK` |
-| `a3_ties_500x500` | $500 \times 500$ | `integer_ties` | **1.07x** | 1.378 | 1.481 | 2.308 | 2.800 | $1.374 \pm 0.247$ | $1.474 \pm 0.0683$ | 0.00 | `OK` |
-| `a3_geom_500x500` | $500 \times 500$ | `geometric` | **0.89x** | 9.184 | 8.160 | 9.885 | 9.560 | $10.058 \pm 3.526$ | $8.896 \pm 2.588$ | 1396753.69 | `OK` |
-| `a3_wide_250x1000` | $250 \times 1000$ | `wide` | **1.27x** | 0.619 | 0.787 | 1.601 | 2.142 | $0.629 \pm 0.0345$ | $0.800 \pm 0.0535$ | 2515.07 | `OK` |
-| `a3_tall_1000x250` | $1000 \times 250$ | `tall` | **1.00x** | 0.953 | 0.949 | 1.900 | 2.179 | $1.029 \pm 0.232$ | $0.948 \pm 0.0520$ | 2394.37 | `OK` |
-| `a3_unif_1000x1000` | $1000 \times 1000$ | `uniform` | **2.09x** | 12.997 | 27.110 | 16.486 | 33.193 | $13.073 \pm 2.413$ | $27.297 \pm 2.163$ | 16203.23 | `OK` |
-| `a3_unif_2000x2000` | $2000 \times 2000$ | `uniform` | **1.87x** | 70.197 | 131.378 | 91.393 | 164.230 | $71.853 \pm 5.861$ | $131.911 \pm 8.430$ | 16450.52 | `OK` |
+| `a1_canon_4x4` | $4 \times 4$ | `canonical` | **2.76x** | 0.0007 | 0.0019 | 0.0008 | 0.0122 | $0.0007 \pm 0.0001$ | $0.0020 \pm 0.0003$ | 275.00 | `OK` |
+| `a1_unif_10x10` | $10 \times 10$ | `uniform` | **1.48x** | 0.0022 | 0.0032 | 0.0026 | 0.0106 | $0.0021 \pm 0.0005$ | $0.0032 \pm 0.0004$ | 18107.93 | `OK` |
+| `a1_ties_20x20` | $20 \times 20$ | `integer_ties` | **1.17x** | 0.0060 | 0.0070 | 0.0074 | 0.0157 | $0.0059 \pm 0.0015$ | $0.0071 \pm 0.0016$ | 4.00 | `OK` |
+| `a1_wide_16x32` | $16 \times 32$ | `wide` | **1.11x** | 0.0042 | 0.0047 | 0.0058 | 0.0143 | $0.0040 \pm 0.0008$ | $0.0047 \pm 0.0008$ | 5044.66 | `OK` |
+| `a1_tall_32x16` | $32 \times 16$ | `tall` | **1.09x** | 0.0046 | 0.0050 | 0.0067 | 0.0152 | $0.0046 \pm 0.0009$ | $0.0051 \pm 0.0008$ | 2840.65 | `OK` |
+| `a1_sparse_24x24` | $24 \times 24$ | `sparse` | **1.12x** | 0.0101 | 0.0113 | 0.0169 | 0.0321 | $0.0106 \pm 0.0034$ | $0.0112 \pm 0.0018$ | 2261.00 | `OK` |
+| `a2_unif_64x64` | $64 \times 64$ | `uniform` | **1.37x** | 0.0493 | 0.0673 | 0.0637 | 0.0915 | $0.0468 \pm 0.0091$ | $0.0664 \pm 0.0100$ | 16825.55 | `OK` |
+| `a2_unif_100x100` | $100 \times 100$ | `uniform` | **1.67x** | 0.100 | 0.167 | 0.135 | 0.218 | $0.0983 \pm 0.0095$ | $0.168 \pm 0.0258$ | 15794.03 | `OK` |
+| `a2_ties_100x100` | $100 \times 100$ | `integer_ties` | **1.13x** | 0.0800 | 0.0902 | 0.118 | 0.135 | $0.0769 \pm 0.0059$ | $0.0929 \pm 0.0137$ | 1.00 | `OK` |
+| `a2_geom_100x100` | $100 \times 100$ | `geometric` | **0.96x** | 0.220 | 0.210 | 0.236 | 0.249 | $0.240 \pm 0.0673$ | $0.227 \pm 0.0413$ | 610058.93 | `OK` |
+| `a2_rank1_100x100` | $100 \times 100$ | `rank1` | **8.51x** | 0.0760 | 0.647 | 0.110 | 0.722 | $0.0781 \pm 0.0095$ | $0.654 \pm 0.0259$ | 20173201.47 | `OK` |
+| `a2_wide_80x200` | $80 \times 200$ | `wide` | **1.71x** | 0.0387 | 0.0664 | 0.0831 | 0.135 | $0.0403 \pm 0.0062$ | $0.0685 \pm 0.0072$ | 3410.92 | `OK` |
+| `a2_tall_200x80` | $200 \times 80$ | `tall` | **1.59x** | 0.0482 | 0.0769 | 0.100 | 0.148 | $0.0483 \pm 0.0078$ | $0.0791 \pm 0.0090$ | 4329.48 | `OK` |
+| `a2_max_128x128` | $128 \times 128$ | `maximize` | **2.37x** | 0.116 | 0.273 | 0.170 | 0.355 | $0.117 \pm 0.0118$ | $0.279 \pm 0.0320$ | 1233885.41 | `OK` |
+| `a2_unif_256x256` | $256 \times 256$ | `uniform` | **1.93x** | 0.625 | 1.208 | 0.978 | 1.565 | $0.641 \pm 0.116$ | $1.216 \pm 0.127$ | 14858.73 | `OK` |
+| `a3_unif_500x500` | $500 \times 500$ | `uniform` | **2.00x** | 2.528 | 5.065 | 3.530 | 6.730 | $2.408 \pm 0.269$ | $5.136 \pm 0.361$ | 16720.22 | `OK` |
+| `a3_ties_500x500` | $500 \times 500$ | `integer_ties` | **0.98x** | 1.509 | 1.481 | 2.416 | 2.800 | $1.476 \pm 0.106$ | $1.474 \pm 0.0683$ | 0.00 | `OK` |
+| `a3_geom_500x500` | $500 \times 500$ | `geometric` | **1.03x** | 7.927 | 8.160 | 8.836 | 9.560 | $8.350 \pm 2.628$ | $8.896 \pm 2.588$ | 1396753.69 | `OK` |
+| `a3_wide_250x1000` | $250 \times 1000$ | `wide` | **1.33x** | 0.594 | 0.787 | 1.399 | 2.142 | $0.563 \pm 0.0735$ | $0.800 \pm 0.0535$ | 2515.07 | `OK` |
+| `a3_tall_1000x250` | $1000 \times 250$ | `tall` | **1.86x** | 0.509 | 0.949 | 1.005 | 2.179 | $0.501 \pm 0.0239$ | $0.948 \pm 0.0520$ | 2394.37 | `OK` |
+| `a3_unif_1000x1000` | $1000 \times 1000$ | `uniform` | **3.18x** | 8.520 | 27.110 | 11.504 | 33.193 | $8.504 \pm 0.888$ | $27.297 \pm 2.163$ | 16203.23 | `OK` |
+| `a3_unif_2000x2000` | $2000 \times 2000$ | `uniform` | **2.24x** | 58.747 | 131.378 | 72.555 | 164.230 | $60.242 \pm 9.261$ | $131.911 \pm 8.430$ | 16450.52 | `OK` |
 <!-- END GENERATED:ASSIGN_PIPELINE_TABLE -->
 
 ### 7.3 LSAP Scalar vs. `GOEXPERIMENT=simd` (`AllAbsLE64`, `MinReducedSlice64`, `InitReducedRow64`, and `Min2ReducedRow64`)
@@ -338,34 +338,34 @@ In [`assign/solver.go`](../assign/solver.go), [`simd.AllAbsLE64With`](../interna
 
 <!-- BEGIN GENERATED:ASSIGN_SIMD_SUMMARY -->
 - **Negative controls** (`max(rows, cols) < 32`, no AVX2 row-reduction kernel runs): 3 of 4 have a 95% interval excluding 1.
-- **Instances where AVX2 row kernels run** (`max(rows, cols) >= 32`): 9 faster, 5 slower, 4 with no detectable effect, out of 18.
+- **Instances where AVX2 row kernels run** (`max(rows, cols) >= 32`): 7 faster, 6 slower, 5 with no detectable effect, out of 18.
 <!-- END GENERATED:ASSIGN_SIMD_SUMMARY -->
 
 <!-- BEGIN GENERATED:ASSIGN_SIMD_TABLE -->
 | Problem ID | Shape ($m \times n$) | `max(m, n)` | AVX2 row kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |
 | :--- | :---: | ---: | :---: | :--- | ---: | ---: | ---: | ---: |
-| `a1_canon_4x4` | $4 \times 4$ | 4 | no (control) | identical source | 1.01x [0.90x-1.13x] | 0.0006 | 0.0006 | 11 |
-| `a1_unif_10x10` | $10 \times 10$ | 10 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.82x [0.75x-0.90x] | 0.0013 | 0.0017 | 11 |
-| `a1_ties_20x20` | $20 \times 20$ | 20 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.72x [0.67x-0.78x] | 0.0043 | 0.0058 | 11 |
-| `a1_wide_16x32` | $16 \times 32$ | 32 | possible | SIMD slower | 0.69x [0.64x-0.74x] | 0.0031 | 0.0043 | 11 |
-| `a1_tall_32x16` | $32 \times 16$ | 32 | possible | SIMD slower | 0.64x [0.58x-0.70x] | 0.0032 | 0.0048 | 11 |
-| `a1_sparse_24x24` | $24 \times 24$ | 24 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.78x [0.71x-0.86x] | 0.0082 | 0.0103 | 11 |
-| `a2_unif_64x64` | $64 \times 64$ | 64 | possible | SIMD slower | 0.80x [0.77x-0.83x] | 0.0362 | 0.0462 | 11 |
-| `a2_unif_100x100` | $100 \times 100$ | 100 | possible | SIMD slower | 0.89x [0.81x-0.97x] | 0.0747 | 0.0865 | 11 |
-| `a2_ties_100x100` | $100 \times 100$ | 100 | possible | SIMD slower | 0.94x [0.90x-0.99x] | 0.0596 | 0.0652 | 11 |
-| `a2_geom_100x100` | $100 \times 100$ | 100 | possible | no detectable effect | 0.92x [0.79x-1.07x] | 0.187 | 0.206 | 11 |
-| `a2_rank1_100x100` | $100 \times 100$ | 100 | possible | SIMD faster | 1.15x [1.11x-1.20x] | 0.0934 | 0.0858 | 11 |
-| `a2_wide_80x200` | $80 \times 200$ | 200 | possible | SIMD faster | 1.37x [1.25x-1.50x] | 0.0558 | 0.0423 | 11 |
-| `a2_tall_200x80` | $200 \times 80$ | 200 | possible | SIMD faster | 1.09x [1.05x-1.13x] | 0.0757 | 0.0708 | 11 |
-| `a2_max_128x128` | $128 \times 128$ | 128 | possible | SIMD faster | 1.19x [1.08x-1.32x] | 0.170 | 0.146 | 11 |
-| `a2_unif_256x256` | $256 \times 256$ | 256 | possible | SIMD faster | 1.36x [1.28x-1.45x] | 0.680 | 0.488 | 11 |
-| `a3_unif_500x500` | $500 \times 500$ | 500 | possible | no detectable effect | 1.16x [0.89x-1.50x] | 2.647 | 1.932 | 5 |
-| `a3_ties_500x500` | $500 \times 500$ | 500 | possible | SIMD faster | 1.41x [1.15x-1.71x] | 1.378 | 0.945 | 5 |
-| `a3_geom_500x500` | $500 \times 500$ | 500 | possible | no detectable effect | 1.05x [0.90x-1.23x] | 9.184 | 8.195 | 5 |
-| `a3_wide_250x1000` | $250 \times 1000$ | 1000 | possible | SIMD faster | 2.06x [1.81x-2.35x] | 0.619 | 0.295 | 5 |
-| `a3_tall_1000x250` | $1000 \times 250$ | 1000 | possible | no detectable effect | 1.27x [0.99x-1.63x] | 0.953 | 0.798 | 5 |
-| `a3_unif_1000x1000` | $1000 \times 1000$ | 1000 | possible | SIMD faster | 1.66x [1.14x-2.41x] | 12.997 | 8.010 | 5 |
-| `a3_unif_2000x2000` | $2000 \times 2000$ | 2000 | possible | SIMD faster | 1.22x [1.16x-1.29x] | 70.197 | 58.095 | 5 |
+| `a1_canon_4x4` | $4 \times 4$ | 4 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.88x [0.83x-0.94x] | 0.0007 | 0.0007 | 11 |
+| `a1_unif_10x10` | $10 \times 10$ | 10 | no (control) | identical source; interval excludes 1 (build/run effect) | 1.06x [1.02x-1.10x] | 0.0022 | 0.0020 | 11 |
+| `a1_ties_20x20` | $20 \times 20$ | 20 | no (control) | identical source | 0.99x [0.94x-1.04x] | 0.0060 | 0.0060 | 11 |
+| `a1_wide_16x32` | $16 \times 32$ | 32 | possible | SIMD slower | 0.97x [0.95x-1.00x] | 0.0042 | 0.0043 | 11 |
+| `a1_tall_32x16` | $32 \times 16$ | 32 | possible | SIMD slower | 0.91x [0.89x-0.93x] | 0.0046 | 0.0049 | 11 |
+| `a1_sparse_24x24` | $24 \times 24$ | 24 | no (control) | identical source; interval excludes 1 (build/run effect) | 0.96x [0.93x-1.00x] | 0.0101 | 0.0107 | 11 |
+| `a2_unif_64x64` | $64 \times 64$ | 64 | possible | SIMD faster | 1.06x [1.02x-1.11x] | 0.0493 | 0.0469 | 11 |
+| `a2_unif_100x100` | $100 \times 100$ | 100 | possible | SIMD faster | 1.19x [1.16x-1.22x] | 0.100 | 0.0836 | 11 |
+| `a2_ties_100x100` | $100 \times 100$ | 100 | possible | SIMD faster | 1.31x [1.23x-1.39x] | 0.0800 | 0.0630 | 11 |
+| `a2_geom_100x100` | $100 \times 100$ | 100 | possible | no detectable effect | 1.03x [0.96x-1.09x] | 0.220 | 0.224 | 11 |
+| `a2_rank1_100x100` | $100 \times 100$ | 100 | possible | no detectable effect | 0.93x [0.84x-1.02x] | 0.0760 | 0.0910 | 11 |
+| `a2_wide_80x200` | $80 \times 200$ | 200 | possible | no detectable effect | 0.97x [0.85x-1.11x] | 0.0387 | 0.0444 | 11 |
+| `a2_tall_200x80` | $200 \times 80$ | 200 | possible | SIMD slower | 0.65x [0.60x-0.71x] | 0.0482 | 0.0736 | 11 |
+| `a2_max_128x128` | $128 \times 128$ | 128 | possible | SIMD slower | 0.77x [0.73x-0.80x] | 0.116 | 0.153 | 11 |
+| `a2_unif_256x256` | $256 \times 256$ | 256 | possible | SIMD faster | 1.28x [1.18x-1.39x] | 0.625 | 0.493 | 11 |
+| `a3_unif_500x500` | $500 \times 500$ | 500 | possible | no detectable effect | 1.19x [0.91x-1.55x] | 2.528 | 1.943 | 5 |
+| `a3_ties_500x500` | $500 \times 500$ | 500 | possible | SIMD faster | 1.45x [1.37x-1.53x] | 1.509 | 1.019 | 5 |
+| `a3_geom_500x500` | $500 \times 500$ | 500 | possible | no detectable effect | 0.86x [0.72x-1.03x] | 7.927 | 8.744 | 5 |
+| `a3_wide_250x1000` | $250 \times 1000$ | 1000 | possible | SIMD faster | 1.86x [1.62x-2.13x] | 0.594 | 0.294 | 5 |
+| `a3_tall_1000x250` | $1000 \times 250$ | 1000 | possible | SIMD slower | 0.65x [0.57x-0.72x] | 0.509 | 0.780 | 5 |
+| `a3_unif_1000x1000` | $1000 \times 1000$ | 1000 | possible | SIMD slower | 0.77x [0.71x-0.85x] | 8.520 | 11.371 | 5 |
+| `a3_unif_2000x2000` | $2000 \times 2000$ | 2000 | possible | SIMD faster | 1.17x [1.04x-1.31x] | 58.747 | 50.320 | 5 |
 <!-- END GENERATED:ASSIGN_SIMD_TABLE -->
 
 ---
