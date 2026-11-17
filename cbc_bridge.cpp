@@ -1,3 +1,5 @@
+//go:build cgo && cbc
+
 #include "cbc_bridge.h"
 
 #include <algorithm>

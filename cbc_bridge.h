@@ -1,3 +1,5 @@
+//go:build cgo && cbc
+
 #ifndef GOBLIN_CBC_BRIDGE_H
 #define GOBLIN_CBC_BRIDGE_H
 

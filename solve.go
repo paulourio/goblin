@@ -15,7 +15,7 @@ type Backend uint8
 const (
 	// BackendGo uses goblin's pure-Go Revised Dual/Primal Simplex and Branch-and-Cut solver (default).
 	BackendGo Backend = iota
-	// BackendCBC uses in-process C++ bindings (cgo) to the COIN-OR CBC and CLP libraries.
+	// BackendCBC uses optional in-process C++ bindings (-tags cbc with cgo enabled) to COIN-OR CBC and CLP.
 	BackendCBC
 )
 
@@ -111,7 +111,8 @@ func WithBackend(b Backend) Option {
 	return func(cfg *Options) { cfg.Backend = b }
 }
 
-// WithCBC selects the in-process C++ COIN-OR CBC/CLP backend (shorthand for WithBackend(BackendCBC)).
+// WithCBC selects the optional in-process C++ COIN-OR CBC/CLP backend (shorthand for WithBackend(BackendCBC)).
+// Requires building with -tags cbc and cgo enabled; otherwise Solve returns StatusUndefined.
 func WithCBC() Option {
 	return func(cfg *Options) { cfg.Backend = BackendCBC }
 }

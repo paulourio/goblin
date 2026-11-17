@@ -127,6 +127,10 @@ func run() int {
 		gb.WithHeuristics(!*noHeur),
 	}
 	if strings.EqualFold(*backendFlag, "cbc") {
+		if !gb.CBCAvailable() {
+			fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built without -tags cbc (or with CGO_ENABLED=0)")
+			return 1
+		}
 		opts = append(opts, gb.WithCBC())
 	} else {
 		opts = append(opts, gb.WithPureGo())

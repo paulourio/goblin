@@ -51,7 +51,7 @@ if [ -n "${unformatted}" ]; then
     fail "Unformatted Go files detected. Run 'gofmt -w .'."
 fi
 
-# 3. Go Linter Gate (Default, SIMD, CGO_ENABLED=0)
+# 3. Go Linter Gate (Default, SIMD, CGO_ENABLED=0, and opt-in CBC when available)
 log_step "3/6 Running golangci-lint across all build configurations..."
 if ! command -v golangci-lint >/dev/null 2>&1; then
     fail "golangci-lint is required but not installed in PATH."
@@ -59,6 +59,9 @@ fi
 golangci-lint run ./...
 GOEXPERIMENT=simd golangci-lint run ./...
 CGO_ENABLED=0 golangci-lint run ./...
+if [ -d "third_party/Cbc/dist/lib" ]; then
+    golangci-lint run --build-tags=cbc ./...
+fi
 
 # 4. Python Linter & Static Type Check Gate
 log_step "4/6 Running Python linters (ruff & mypy) on bench/..."
@@ -187,12 +190,15 @@ PYEOF
 
 go run ./cmd/goblin-bench -check-docs
 
-# 6. Go Test Suite Gate (Default, SIMD, noasm, CGO_ENABLED=0, Race)
+# 6. Go Test Suite Gate (Default, SIMD, noasm, CGO_ENABLED=0, Race, and opt-in CBC when available)
 log_step "6/6 Running Go test suites across all build configurations..."
 go test ./...
 GOEXPERIMENT=simd go test ./...
 go test -tags=noasm ./...
 CGO_ENABLED=0 go test ./...
 go test -race -short ./...
+if [ -d "third_party/Cbc/dist/lib" ]; then
+    go test -tags=cbc ./...
+fi
 
 printf '\nAll pre-commit quality gates passed.\n'

@@ -633,7 +633,7 @@ func simdVerdict(size int, lo, hi float64, n int) (reach, verdict string) {
 }
 
 // cbcBackendDescription states which CBC build and flag mapping produced goblin_cbc.json.
-const cbcBackendDescription = "COIN-OR CBC/CLP `master` (commit `c1c171ec`, vendored in `third_party/Cbc`), linked in-process through `cgo` (`gb.WithCBC()`). " +
+const cbcBackendDescription = "COIN-OR CBC/CLP `master` (commit `c1c171ec`, vendored in `third_party/Cbc`), linked in-process through `cgo` when built with `-tags cbc` (`gb.WithCBC()`). " +
 	"The C++ backend maps default settings onto CBC with two deliberate differences: `MaxCutPasses = 12` becomes " +
 	"`passC = 30` and `MaxNodes = 50000` becomes unlimited. It is therefore not a like-for-like setup and " +
 	"not the CBC 2.10.3 binary used by the Python baseline."
@@ -1148,7 +1148,7 @@ func BuildFinalReportMarkdown(tb *TelemetryBundle) (string, error) {
 - **CPU**: ` + "`13th Gen Intel(R) Core(TM) i9-13900K`" + ` (x86_64, 30 logical CPUs exposed by ` + "`lscpu`" + `, AVX2 + FMA).
 - **Default pure-Go backend**: ` + "`goblin`" + ` default (` + "`BackendGo`" + `, scalar kernels or ` + "`WithoutSIMD()`" + `). All headline ` + "`goblin (Go)`" + ` timings use this setup.
 - **Experimental SIMD build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels for slices of length 32 or more; see section 4.
-- **Optional C++ backend**: ` + "`gb.WithCBC()`" + ` (` + "`BackendCBC`" + `), driving in-process COIN-OR CBC/CLP through ` + "`cgo`" + ` under the same unified ` + "`goblin`" + ` API.
+- **Optional C++ backend**: ` + "`gb.WithCBC()`" + ` (` + "`BackendCBC`" + `, built with ` + "`-tags cbc`" + `), driving in-process COIN-OR CBC/CLP through ` + "`cgo`" + ` under the same unified ` + "`goblin`" + ` API.
 - **Python baseline**: Python 3.14 + ` + "`PuLP`" + ` + ` + "`COIN-OR CBC`" + ` subprocess (` + "`threads=1`" + `). Its solve time includes MPS writing, process spawn, and ` + "`.sol`" + ` parsing.
 - **Corpus**: 31 deterministic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state.
 

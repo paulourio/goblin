@@ -739,7 +739,7 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 		os.Exit(exitCodeBadFlag)
 	}
 	if backend == gb.BackendCBC && !gb.CBCAvailable() {
-		fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built with CGO_ENABLED=0")
+		fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built without -tags cbc (or with CGO_ENABLED=0)")
 		os.Exit(1)
 	}
 

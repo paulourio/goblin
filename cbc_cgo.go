@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build cgo && cbc
 
 package goblin
 
@@ -53,7 +53,7 @@ func boolToCInt(b bool) C.int {
 	return 0
 }
 
-// CBCAvailable reports whether the in-process C++ COIN-OR CBC/CLP backend is compiled in.
+// CBCAvailable reports whether the optional C++ COIN-OR CBC/CLP backend (-tags cbc with cgo enabled) is compiled in.
 func CBCAvailable() bool { return true }
 
 func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadline time.Time, done <-chan struct{}) Result {

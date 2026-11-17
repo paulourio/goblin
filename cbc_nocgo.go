@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build !cgo || !cbc
 
 package goblin
 
@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// CBCAvailable reports whether the in-process C++ COIN-OR CBC/CLP backend is compiled in.
-// Under CGO_ENABLED=0 this stub always returns false, and callers requesting BackendCBC
+// CBCAvailable reports whether the optional C++ COIN-OR CBC/CLP backend (-tags cbc with cgo enabled) is compiled in.
+// Without -tags cbc (or under CGO_ENABLED=0) this stub returns false, and callers requesting BackendCBC
 // receive StatusUndefined without invoking C++ symbols.
 func CBCAvailable() bool { return false }
 
@@ -21,7 +21,7 @@ func solveCBC(_ context.Context, p *CompiledProblem, _ Options, start, _ time.Ti
 	}
 }
 
-// CBCLPSolver is a no-op stub when built with CGO_ENABLED=0.
+// CBCLPSolver is a no-op stub when built without -tags cbc or with CGO_ENABLED=0.
 type CBCLPSolver struct {
 	Prob   *CompiledProblem
 	numCut int
@@ -38,7 +38,7 @@ func (s *CBCLPSolver) Close() {}
 // TotalRows returns the number of structural rows and added cuts.
 func (s *CBCLPSolver) TotalRows() int { return s.Prob.NumConstraints + s.numCut }
 
-// SetStructuralBounds is a no-op stub when built with CGO_ENABLED=0.
+// SetStructuralBounds is a no-op stub when built without -tags cbc or with CGO_ENABLED=0.
 func (s *CBCLPSolver) SetStructuralBounds(_, _ []float64) {}
 
 // AddCut records the cut count on the no-cgo stub.
