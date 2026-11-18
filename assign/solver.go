@@ -777,8 +777,7 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 					break
 				}
 
-				eps := 1e-13 * max(1.0, max(math.Abs(u1), math.Abs(u2)))
-				if u2-u1 <= eps && uint(j2) < uint(n) && row4col[j2] == -1 {
+				if u1 == u2 && uint(j2) < uint(n) && row4col[j2] == -1 {
 					u[i] = u1
 					col4row[i] = j2
 					row4col[j2] = i

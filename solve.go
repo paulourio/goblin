@@ -3,6 +3,7 @@ package goblin
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 )
 
@@ -44,16 +45,18 @@ type Options struct {
 	EnableCuts bool
 	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
 	EnableHeuristics bool
-	// MaxNodes limits the number of explored branch-and-bound nodes (0 = unlimited).
+	// MaxNodes limits the number of explored branch-and-bound nodes (default 50000; 0 = unlimited).
 	// Exceeding it returns StatusNodeLimit with a valid global bound.
 	MaxNodes int
 	// MaxCutPasses limits the number of root cut rounds (0 disables cutting).
 	MaxCutPasses int
-	// MaxIter limits the total simplex pivots reported in the result counter
-	// (0 = unlimited). Exceeding it returns StatusIterationLimit; for MILPs whose root LP
-	// was solved, BestBound remains a valid global bound.
+	// MaxIter limits the total main-tree simplex pivots reported in Result.Iterations
+	// (0 = unlimited). Auxiliary primal-heuristic LP probes use bounded local budgets.
+	// Exceeding MaxIter returns StatusIterationLimit; once the root LP is solved,
+	// BestBound remains a valid global bound.
 	MaxIter int
-	// RelGapTol is the relative MIP gap at which the search stops.
+	// RelGapTol is the relative MIP gap threshold measured on the linear objective
+	// (|upper - lower| / max(1, |upper|), excluding ObjConstant, matching BackendCBC).
 	RelGapTol float64
 	// AbsGapTol is the absolute MIP gap at which the search stops.
 	AbsGapTol float64
@@ -73,7 +76,8 @@ const (
 	defaultPresolveMaxPass = 6
 )
 
-// DefaultOptions returns the default solver settings (pure-Go backend, presolve, cuts, and heuristics enabled).
+// DefaultOptions returns the default solver settings (pure-Go backend, presolve, cuts,
+// and heuristics enabled, with MaxNodes = 50000; pass WithMaxNodes(0) for an unlimited tree).
 func DefaultOptions() Options {
 	return Options{
 		Backend:          BackendGo,
@@ -97,6 +101,12 @@ func ApplyOptions(opts ...Option) Options {
 		if fn != nil {
 			fn(&cfg)
 		}
+	}
+	if cfg.RelGapTol < 0 || math.IsNaN(cfg.RelGapTol) {
+		cfg.RelGapTol = 0
+	}
+	if cfg.AbsGapTol < 0 || math.IsNaN(cfg.AbsGapTol) {
+		cfg.AbsGapTol = 0
 	}
 	return cfg
 }
@@ -209,8 +219,11 @@ type Result struct {
 
 // Value returns the primal value of variable v in the incumbent vector.
 func (r *Result) Value(v Var) float64 {
+	if v == 0 && r.modelID != 0 {
+		return 0
+	}
 	idx := v.Index()
-	if (r.modelID == 0 || v.modelID() == 0 || v.modelID() == r.modelID) && idx >= 0 && idx < len(r.Values) {
+	if (r.modelID == 0 || v.modelID() == r.modelID) && idx >= 0 && idx < len(r.Values) {
 		return r.Values[idx]
 	}
 	return 0
@@ -307,6 +320,34 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
+	}
+	if workProb != p && len(res.Values) == p.NumVars {
+		bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP)
+		if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
+			fallbackOpt := opt
+			fallbackOpt.EnablePresolve = false
+			if fallbackOpt.MaxIter > 0 {
+				rem := fallbackOpt.MaxIter - res.Iterations
+				if rem <= 0 {
+					res.Values = nil
+					res.Objective = 0
+					res.Status = StatusIterationLimit
+					res.Backend = BackendGo
+					return res, nil
+				}
+				fallbackOpt.MaxIter = rem
+			}
+			fbRes := solveBranchAndCutWithDone(p, fallbackOpt, start, deadline, done)
+			if ctx != nil {
+				if err := ctx.Err(); err != nil {
+					return Result{}, err
+				}
+			}
+			fbRes.Iterations += res.Iterations
+			fbRes.Backend = BackendGo
+			return fbRes, nil
+		}
+		res.Objective = p.EvaluateObjective(res.Values)
 	}
 	res.Backend = BackendGo
 	return res, nil

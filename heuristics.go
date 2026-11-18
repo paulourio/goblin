@@ -81,10 +81,13 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 		}
 	}
 
-	if hasUB && minInf == 0 && minAct > rhs+intFeasTol {
+	rowScale := max(1.0, max(math.Abs(rhs), max(math.Abs(minAct), math.Abs(maxAct))))
+	rowFeasTol := max(intFeasTol, presolveRelScaleTol*rowScale)
+
+	if hasUB && minInf == 0 && minAct > rhs+rowFeasTol {
 		return false, false
 	}
-	if hasLB && maxInf == 0 && maxAct < rhs-intFeasTol {
+	if hasLB && maxInf == 0 && maxAct < rhs-rowFeasTol {
 		return false, false
 	}
 
@@ -100,7 +103,8 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 			if a > heurCoeffZeroTol {
 				newUB := l + slack/a
 				if p.VarCat[col] != Continuous {
-					newUB = math.Floor(newUB + heurIntBoundTol)
+					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
+					newUB = math.Floor(newUB + bTol)
 				}
 				if newUB < u-heurIntBoundTol {
 					if newUB < l-intFeasTol {
@@ -115,7 +119,8 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 			} else if a < -heurCoeffZeroTol {
 				newLB := u + slack/a
 				if p.VarCat[col] != Continuous {
-					newLB = math.Ceil(newLB - heurIntBoundTol)
+					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/(-a))
+					newLB = math.Ceil(newLB - bTol)
 				}
 				if newLB > l+heurIntBoundTol {
 					if newLB > u+intFeasTol {
@@ -143,7 +148,8 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 			if a > heurCoeffZeroTol {
 				newLB := u - surplus/a
 				if p.VarCat[col] != Continuous {
-					newLB = math.Ceil(newLB - heurIntBoundTol)
+					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
+					newLB = math.Ceil(newLB - bTol)
 				}
 				if newLB > l+heurIntBoundTol {
 					if newLB > u+intFeasTol {
@@ -158,7 +164,8 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 			} else if a < -heurCoeffZeroTol {
 				newUB := l + surplus/(-a)
 				if p.VarCat[col] != Continuous {
-					newUB = math.Floor(newUB + heurIntBoundTol)
+					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/(-a))
+					newUB = math.Floor(newUB + bTol)
 				}
 				if newUB < u-heurIntBoundTol {
 					if newUB < l-intFeasTol {
@@ -1234,7 +1241,7 @@ func tryFractionalDiving(
 					fixLB[col] = iv
 					fixUB[col] = iv
 				}
-				if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, nil); okLP && lpObj < bestObjMin {
+				if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, diveSolver); okLP && lpObj < bestObjMin {
 					return lpSol, lpObj, true
 				}
 			}
@@ -1546,7 +1553,7 @@ func tryRootSubMIP(
 			fixLB[col] = cand[col]
 			fixUB[col] = cand[col]
 		}
-		if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, nil); okLP && lpObj < bestObjMin-heurIntBoundTol {
+		if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, lpSolver); okLP && lpObj < bestObjMin-heurIntBoundTol {
 			return lpSol, lpObj, true
 		}
 		return nil, 0, false

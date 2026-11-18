@@ -20,10 +20,11 @@ type bfrtCand struct {
 }
 
 const (
-	defaultLUInitCap = 64
-	tabRowChunkBits  = 6
-	tabRowChunkSize  = 1 << tabRowChunkBits
-	tabRowChunkMask  = tabRowChunkSize - 1
+	defaultLUInitCap      = 64
+	tabRowChunkBits       = 6
+	tabRowChunkSize       = 1 << tabRowChunkBits
+	tabRowChunkMask       = tabRowChunkSize - 1
+	maxPooledWorkspaceCap = 1 << 18
 )
 
 // Workspace holds all preallocated numerical buffers for an LP solve or
@@ -93,9 +94,9 @@ func AcquireWorkspace(n, m int) *Workspace {
 	return ws
 }
 
-// ReleaseWorkspace returns a Workspace to the pool.
+// ReleaseWorkspace returns a Workspace to the pool unless its buffers exceed maxPooledWorkspaceCap.
 func ReleaseWorkspace(ws *Workspace) {
-	if ws != nil {
+	if ws != nil && cap(ws.X) <= maxPooledWorkspaceCap {
 		workspacePool.Put(ws)
 	}
 }

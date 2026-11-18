@@ -176,7 +176,7 @@ func TestFullCorpusMILPParityWithCBC(t *testing.T) {
 						c.ID, res.Objective, wantObj, relDiff, res.Nodes, res.CutsAdded)
 				}
 				bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP)
-				if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
+				if bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
 					t.Fatalf("[%s] primal solution violation: bound=%.2e, row=%.2e, int=%.2e",
 						c.ID, bV, rV, iV)
 				}
@@ -243,8 +243,8 @@ func TestAllTrialParity(t *testing.T) {
 			}
 			want := py.TrialObjectives[k]
 			if want == nil {
-				if res.Status == gb.StatusOptimal {
-					t.Errorf("%s[%d]: goblin Optimal %.8g, CBC reported no optimum (%s)", c.ID, k, res.Objective, py.Status)
+				if res.Status.String() != py.Status {
+					t.Errorf("%s[%d]: goblin status=%s, CBC status=%s", c.ID, k, res.Status, py.Status)
 				}
 				continue
 			}
@@ -260,7 +260,7 @@ func TestAllTrialParity(t *testing.T) {
 					t.Errorf("%s[%d]: goblin %.8g, goblin_cbc %.8g (rel %.1e)", c.ID, k, res.Objective, cbcRef.TrialObjectives[k], d)
 				}
 			}
-			if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP); bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
+			if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP); bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
 				t.Errorf("%s[%d]: infeasible solution: bound=%.1e row=%.1e int=%.1e", c.ID, k, bV, rV, iV)
 			}
 		}

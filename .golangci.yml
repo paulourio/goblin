@@ -81,7 +81,6 @@ linters:
     gosec:
       excludes:
         - G103 # Deliberate unsafe.Pointer arithmetic in internal/simd AVX2 kernels and cgo bridge
-        - G115 # Intentional 32-bit bit-packing in Var handles and CSC int32 index casts for CBC
         - G404 # Deterministic math/rand/v2 PCG streams used for tie-breaking and corpus generation
 
     nolintlint:
@@ -153,6 +152,12 @@ linters:
       - path: (_test\.go|(^|/)bench/)
         linters:
           - unparam
+
+      # Intentional 32-bit bit-packing in Var handles, SplitMix64 hashes, and bounds-checked int32 casts
+      - path: (^|/)(model|compiled|cbc_cgo|bab|presolve)\.go$
+        linters:
+          - gosec
+        text: "G115"
 
       # Keep zero-overhead index-based backward loop in sparse LU BTRAN
       - path: (^|/)lu\.go$

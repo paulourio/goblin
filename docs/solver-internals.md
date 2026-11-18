@@ -30,8 +30,8 @@ Once factored, all three stages are assembled into unified pre-permuted CSR and 
 
 Each row $i$ becomes $a_i^T x + s_i = b_i$ with slack bounds $s_i \in [0, \infty)$ for `LessEqual`, $(-\infty, 0]$ for `GreaterEqual`, and $[0, 0]$ for `Equal`. Cutting planes are stored as extra `LessEqual` rows.
 
-### Feasibility Tolerances
-A basic variable $x_k$ is primal infeasible when it leaves $[l_k, u_k]$ by more than its tolerance. Slack columns use $\epsilon_p = 10^{-7}$. A structural column uses $\epsilon_p / \max(1, \max_i |a_{ik}|)$, floored at $10^{-12}$, because a value error $e$ in $x_k$ shifts some row by up to $e \max_i |a_{ik}|$. With an absolute tolerance, a big-M indicator resting $5 \cdot 10^{-8}$ outside its bound would shift its row by $0.05$ once reported.
+### Conditional Power-of-Two Ruiz Scaling and Feasibility Tolerances
+When every non-empty row and column norm already lies inside $[10^{-4}, 10^{6}]$ and objective magnitudes lie inside $[10^{-5}, 10^{6}]$, `LPSolver` runs directly on the unscaled matrix. Outside that range, `buildScaledLP` runs four passes of power-of-two Ruiz geometric equilibration ($r_i = 2^{e_i}, c_j = 2^{f_j} \in [2^{-26}, 2^{26}]$, plus power-of-two objective scaling $\sigma_{\text{obj}}$) so mantissa bits suffer zero scaling roundoff. A basic variable $x_k$ is primal infeasible when it leaves $[l_k, u_k]$ by more than its scaled tolerance: slack columns use $\epsilon_p \min(1, r_i)$ with $\epsilon_p = 10^{-7}$, and structural columns use $\epsilon_p / (c_k \max(1, \max_i |a_{ik}|))$, floored at $10^{-15}$. With an unscaled tolerance, a big-M indicator resting $5 \cdot 10^{-8}$ outside its bound would shift its row by $0.05$ once reported.
 
 ### Dual-First Dispatch
 Nonbasic structurals start at the bound favoured by their cost, with the slack basis $B = I$. When the reduced costs are dual feasible within $\epsilon_d = 10^{-7}$, [`LPSolver.Solve`](../simplex.go) runs [`runDualSimplexLoop`](../simplex.go); otherwise, or if the dual loop ends without a verified optimum, it runs [`solveTwoPhasePrimalWithLimit`](../simplex.go).
@@ -60,7 +60,7 @@ Under the `simd` build experiment on `amd64`, [`kernels_amd64.go`](../internal/s
 ## 4. MIP Presolve (`presolve.go`)
 
 [`presolveWithDeadline`](../presolve.go) runs on MILPs before the root LP and checks the deadline between passes:
-1. **GCD reduction**: on rows whose variables and coefficients are all integral, divides by $g = \gcd_j |a_{ij}| > 1$ and rounds the right-hand side ($\lfloor b_i/g \rfloor$ for $\le$, $\lceil b_i/g \rceil$ for $\ge$; an equality with $b_i/g \notin \mathbb{Z}$ proves infeasibility). With $g = 1$ it still rounds integral rows' right-hand sides.
+1. **GCD reduction**: on rows whose variables are integral and whose domain-weighted coefficient rounding error $\sum_j |a_{ij} - \operatorname{round}(a_{ij})| \max(|l_j|, |u_j|)$ stays at most $10^{-9}$, divides by $g = \gcd_j |\operatorname{round}(a_{ij})| > 1$ and rounds the error-relaxed right-hand side ($\lfloor b_i/g \rfloor$ for $\le$, $\lceil b_i/g \rceil$ for $\ge$; an equality with $b_i/g \notin \mathbb{Z}$ proves infeasibility). With $g = 1$ it still rounds integral rows' right-hand sides. The outer `SolveCompiled` entry point also verifies every returned vector against the unreduced `CompiledProblem` before returning.
 2. **Activity bound tightening** (up to `maxPasses` rounds): tightens $l_j, u_j$ from the residual minimum or maximum activity of each row, rounding integer bounds. Activities are computed once per row and pass; stale values only loosen the derived bounds, so every tightening is valid.
 3. **Redundant row and fixed-zero pruning**: drops `LessEqual` rows with $\overline{\alpha}_i \le b_i$, `GreaterEqual` rows with $\underline{\alpha}_i \ge b_i$, and all-fixed `Equal` rows satisfying $b_i$ (within $10^{-9}$), and strips fixed-zero ($l_j = u_j = 0$) entries from surviving rows.
 4. **Coefficient strengthening**: in a $\le$ row with maximum activity $\overline{\alpha}_i > b_i$, a binary with $a_{ij} > 0$ and $\overline{\alpha}_i - a_{ij} < b_i$ gets $a_{ij}$ and $b_i$ both reduced by $\delta = b_i - (\overline{\alpha}_i - a_{ij})$; a binary with $a_{ij} < 0$ and $\overline{\alpha}_i + a_{ij} < b_i$ gets $a_{ij}$ increased by $b_i - (\overline{\alpha}_i + a_{ij})$.
@@ -94,15 +94,15 @@ At the root, [`generateCutRound`](../cuts.go) separates four families, keeps can
 ### Branching and Search
 - **Branching column choice** (`selectBranchVar`): pseudocost product scores $\max(f \bar\psi^-, 10^{-4}) \cdot \max((1-f) \bar\psi^+, 10^{-4})$. At depth 2 or less it strong-branches on up to 5 unreliable candidates with 25 dual pivots per child. Only optimal child solves update pseudocosts; an infeasible child scores high; a pivot-limited child falls back to its pseudocost estimate.
 - **Pseudocosts**: each node records its branching side and step length. Gains are stored per unit of step length; steps shorter than $10^{-3}$ are ignored.
-- **Node choice**: best bound with plunging into the preferred child, switching to the queue every 8 nodes.
+- **Node choice**: best bound with plunging into the preferred child, switching to the queue every 8 nodes. Child nodes link to their parent with one `boundDelta` in $O(1)$ time and compact ancestor chains into deduplicated column bounds every 128 steps.
 
 ### Incumbents and Near-Integral Nodes
-An LP point is integral when every integer variable is within $10^{-6}$ of an integer. It becomes an incumbent only if, after snapping those values, the point violates no bound, row, or integer requirement by more than $10^{-5}$. Otherwise the node branches on the non-fixed integer variable furthest from an integer, even below $10^{-6}$, so its subtree is still explored. A node that cannot be branched keeps its LP bound in the global bound and makes the final status `NumericalError` rather than `Optimal`.
+An LP point is integral when every integer variable is within $10^{-6}$ of an integer. After snapping integer variables (and re-solving continuous columns with integers fixed when continuous residuals exceed $10^{-9}$), the candidate becomes an incumbent only if it violates no bound, row, or integer requirement by more than $10^{-6}$. Otherwise the node branches on the non-fixed integer variable furthest from an integer, even below $10^{-6}$, so its subtree is still explored. A node that cannot be branched keeps its LP bound in the global bound and makes the final status `NumericalError` rather than `Optimal`.
 
 ### Limits and Bounds
-- `TimeLimit`, `MaxNodes`, and `MaxIter` (total simplex pivots in `Result.Iterations`) stop the search. A node that could not be evaluated because of a limit goes back to the queue, so its bound stays in the global bound.
+- `TimeLimit`, `MaxNodes`, and `MaxIter` (total main-tree simplex pivots in `Result.Iterations`) stop the search. A node that could not be evaluated because of a limit goes back to the queue, so its bound stays in the global bound.
 - A node LP that fails twice (warm start, then slack basis) keeps its parent bound in the global bound.
-- **The `BestBound` field**: the minimum over open nodes, unresolved nodes, and the incumbent; at an early root exit it is the root LP or root cut bound. Reporting `StatusOptimal` requires the gap between `BestBound` and the incumbent to close within `RelGapTol`/`AbsGapTol`.
+- **The `BestBound` field**: the minimum over open nodes, gap-pruned nodes, unresolved nodes, and the incumbent; at an early root exit it is bounded by the root LP or root cut bound. Reporting `StatusOptimal` requires the gap between `BestBound` and the incumbent to close within `RelGapTol`/`AbsGapTol`.
 
 ---
 
@@ -120,7 +120,6 @@ The subpackage [`goblin/assign`](../assign/solver.go) solves the $m \times n$ Li
 
 ## Known Limits of the Pure-Go Engine
 
-- **LP updates and primal fallback**: while the basis solver uses a three-stage singleton and sparse Markowitz LU with `FTRANSparseHint`/`BTRANSparseHint` and dual bound flipping (`selectDualBFRT`), basis updates between full factor rebuilds use a product-form (PFI) eta file rather than Forrest-Tomlin $U$-updates, and the Phase II primal fallback uses full Dantzig pricing.
-- **Scaling**: there is no row or column scaling; only the primal bound tolerance is normalized by column magnitude.
+- **LP updates and primal fallback**: while the basis solver uses a three-stage singleton and sparse Markowitz LU with `FTRANSparseHint`/`BTRANSparseHint`, conditional power-of-two Ruiz equilibration, and dual bound flipping (`selectDualBFRT`), basis updates between full factor rebuilds use a product-form (PFI) eta file rather than Forrest-Tomlin $U$-updates, and the Phase II primal fallback uses Dantzig pricing with a Bland anti-cycling fallback.
 - **Cuts at the root only**: cuts are separated at the root node using global bounds (with slack root cuts purged before branching), without in-tree cut generation or multi-row aggregation.
 - **Reference solver**: parity is checked against CBC 2.10.3, which itself returns wrong answers on some instances (see [`testdata/regression`](../testdata/regression)); `bench/difftest_cbc.py` verifies mismatches independently before blaming either solver.

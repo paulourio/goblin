@@ -38,6 +38,8 @@ type PuLPCoefficient struct {
 }
 
 // PuLPObjective holds the linear objective in PuLP's JSON schema.
+// Constant is a goblin extension preserving nonzero Model objective offsets;
+// Python PuLP's MPSObjective.fromDict ignores this field when loading JSON.
 type PuLPObjective struct {
 	Name         *string           `json:"name"`
 	Coefficients []PuLPCoefficient `json:"coefficients"`
@@ -65,13 +67,46 @@ type PuLPConstraint struct {
 	Constant     float64           `json:"constant"`
 }
 
-// ParsePuLPJSON decodes a PuLP JSON payload from bytes without building a gb.Model yet.
-func ParsePuLPJSON(data []byte) (*PuLPJSON, error) {
+type pulpLowBoundProbe struct {
+	Variables []struct {
+		LowBound json.RawMessage `json:"lowBound"`
+	} `json:"variables"`
+}
+
+func parsePuLPJSONStd(data []byte) (*PuLPJSON, error) {
 	var doc PuLPJSON
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse PuLP JSON: %w", err)
 	}
+	hasNil := false
+	for i := range doc.Variables {
+		if doc.Variables[i].LowBound == nil {
+			hasNil = true
+			break
+		}
+	}
+	if hasNil {
+		var probe pulpLowBoundProbe
+		if err := json.Unmarshal(data, &probe); err == nil && len(probe.Variables) == len(doc.Variables) {
+			for i := range doc.Variables {
+				if doc.Variables[i].LowBound == nil && len(probe.Variables[i].LowBound) == 0 {
+					zero := 0.0
+					doc.Variables[i].LowBound = &zero
+				}
+			}
+		}
+	}
 	return &doc, nil
+}
+
+// ParsePuLPJSON decodes a PuLP JSON payload from bytes without building a gb.Model yet.
+// Omitted variable lowBound keys default to 0 while explicit JSON null maps to nil (-Inf),
+// matching Python PuLP's MPSVariable.fromDict.
+func ParsePuLPJSON(data []byte) (*PuLPJSON, error) {
+	if doc, ok := parsePuLPJSONFast(data); ok {
+		return doc, nil
+	}
+	return parsePuLPJSONStd(data)
 }
 
 // BuildModelFromPuLPJSON constructs a *gb.Model from a decoded PuLPJSON structure.
@@ -82,11 +117,17 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 	if len(doc.SOS1) > 0 || len(doc.SOS2) > 0 {
 		return nil, fmt.Errorf("PuLP JSON contains unsupported SOS constraints (sos1=%d, sos2=%d)", len(doc.SOS1), len(doc.SOS2))
 	}
-	sense := gb.Minimize
-	if doc.Parameters.Sense == -1 {
+	var sense gb.Sense
+	switch doc.Parameters.Sense {
+	case 1:
+		sense = gb.Minimize
+	case -1:
 		sense = gb.Maximize
+	default:
+		return nil, fmt.Errorf("PuLP JSON has invalid objective sense %d", doc.Parameters.Sense)
 	}
 	m := gb.NewModel(doc.Parameters.Name, sense)
+	m.Reserve(len(doc.Variables), len(doc.Constraints))
 
 	varMap := make(map[string]gb.Var, len(doc.Variables))
 	for _, v := range doc.Variables {
@@ -106,6 +147,8 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 		}
 		var cat gb.VarCategory
 		switch v.Cat {
+		case "Continuous":
+			cat = gb.Continuous
 		case "Binary":
 			cat = gb.Binary
 		case "Integer":
@@ -115,7 +158,7 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 				cat = gb.Integer
 			}
 		default:
-			cat = gb.Continuous
+			return nil, fmt.Errorf("variable %q has invalid category %q", v.Name, v.Cat)
 		}
 		id := m.AddVar(v.Name, lb, ub, cat)
 		varMap[v.Name] = id
@@ -148,10 +191,12 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 		switch c.Sense {
 		case -1:
 			csense = gb.LessEqual
+		case 0:
+			csense = gb.Equal
 		case 1:
 			csense = gb.GreaterEqual
 		default:
-			csense = gb.Equal
+			return nil, fmt.Errorf("constraint %q has invalid sense %d", c.Name, c.Sense)
 		}
 		rhs := -c.Constant
 		m.AddConstraint(c.Name, gb.Constraint{
@@ -159,6 +204,9 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 			Sense: csense,
 			RHS:   rhs,
 		})
+	}
+	if err := m.Validate(); err != nil {
+		return nil, err
 	}
 
 	return m, nil
@@ -242,8 +290,9 @@ func toPuLPJSONDoc(p *gb.CompiledProblem) PuLPJSON {
 	return doc
 }
 
-// ToPuLPJSON serializes a CompiledProblem into PuLP's native JSON schema so both
-// Python PuLP (LpProblem.fromJson) and goblin can consume the exact same JSON file.
+// ToPuLPJSON serializes a CompiledProblem into PuLP's JSON schema.
+// Nonzero objective offsets are emitted under objective.constant (a goblin extension
+// ignored by Python PuLP's LpProblem.fromJson).
 func ToPuLPJSON(p *gb.CompiledProblem, w io.Writer) error {
 	if p == nil {
 		return gb.ErrNilProblem

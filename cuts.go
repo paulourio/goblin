@@ -117,7 +117,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 		if bVar >= n || p.VarCat[bVar] == Continuous {
 			continue
 		}
-		xVal := ws.XB[r]
+		xVal := solver.unscaledBasicVal(r)
 		f0 := xVal - math.Floor(xVal)
 		if f0 < minIntInfeas || f0 > 1.0-minIntInfeas {
 			continue
@@ -162,8 +162,16 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				validRow = false
 				break
 			}
-			alpha := ws.TabRow[k]
-			if math.Abs(alpha) <= gmiZeroTol {
+			alpha := solver.unscaledTabEntry(bVar, k)
+			oppFinite := false
+			if k < n {
+				if st == statusAtLower {
+					oppFinite = !math.IsInf(solver.unscaledBound(k, true), 1)
+				} else {
+					oppFinite = !math.IsInf(solver.unscaledBound(k, false), -1)
+				}
+			}
+			if alpha == 0 || (!oppFinite && math.Abs(alpha) <= gmiZeroTol) {
 				continue
 			}
 
@@ -175,10 +183,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			var gamma float64
 			isIntVar := k < n && p.VarCat[k] != Continuous
 			if isIntVar {
-				bnd := ws.LB[k]
-				if st == statusAtUpper {
-					bnd = ws.UB[k]
-				}
+				bnd := solver.unscaledBound(k, st == statusAtUpper)
 				if math.Abs(bnd-math.Round(bnd)) > cutCompareTol {
 					isIntVar = false
 				}
@@ -186,7 +191,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 
 			if isIntVar {
 				fk := alphaTilde - math.Floor(alphaTilde)
-				if fk <= gmiZeroTol || fk >= 1.0-gmiZeroTol {
+				if !oppFinite && (fk <= gmiZeroTol || fk >= 1.0-gmiZeroTol) {
 					continue
 				}
 				if fk <= f0 {
@@ -202,27 +207,27 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				}
 			}
 
-			if gamma <= gmiZeroTol {
+			if gamma <= 0 || (!oppFinite && gamma <= gmiZeroTol) {
 				continue
 			}
 
 			if k < n {
 				if st == statusAtLower {
 					structCoeffs[k] += gamma
-					rhs += gamma * ws.LB[k]
+					rhs += gamma * solver.unscaledBound(k, false)
 				} else {
 					structCoeffs[k] -= gamma
-					rhs -= gamma * ws.UB[k]
+					rhs -= gamma * solver.unscaledBound(k, true)
 				}
 			} else {
 				rowIdx := k - n
 				var rowRHS float64
 				if st == statusAtLower {
-					rowRHS = solver.rowRHS(rowIdx) - ws.LB[k]
+					rowRHS = solver.unscaledRowRHS(rowIdx) - solver.unscaledBound(k, false)
 					rhs -= gamma * rowRHS
 					addScaledRow(p, solver.ExtraRows, rowIdx, -gamma, structCoeffs)
 				} else {
-					rowRHS = ws.UB[k] - solver.rowRHS(rowIdx)
+					rowRHS = solver.unscaledBound(k, true) - solver.unscaledRowRHS(rowIdx)
 					rhs -= gamma * rowRHS
 					addScaledRow(p, solver.ExtraRows, rowIdx, +gamma, structCoeffs)
 				}
@@ -256,8 +261,12 @@ func addScaledRow(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale floa
 		return
 	}
 	dr := extra[rowIdx-p.NumConstraints]
+	vals := dr.Val
+	if dr.OrigVal != nil {
+		vals = dr.OrigVal
+	}
 	for k, col := range dr.ColIdx {
-		dst[col] += scale * dr.Val[k]
+		dst[col] += scale * vals[k]
 	}
 }
 

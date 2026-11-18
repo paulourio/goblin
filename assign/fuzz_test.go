@@ -98,12 +98,12 @@ func generateFuzzMatrix(rng *rand.Rand, family int) (rows, cols int, cost []floa
 			}
 		}
 	case 5:
-		// Scale rows across orders of magnitude spanning 1e-4 to 1e6.
-		exps := []float64{1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6}
+		// Scale rows across orders of magnitude spanning 1e-18 to 1e12.
+		exps := []float64{1e-18, 1e-14, 1e-8, 1e-4, 1.0, 1e4, 1e8, 1e12}
 		for r := range rows {
 			scale := exps[rng.IntN(len(exps))]
 			for c := range cols {
-				cost[r*cols+c] = math.Round((rng.Float64()-0.3)*scale*1e4) / 1e4
+				cost[r*cols+c] = float64(rng.IntN(200)-60) * scale
 			}
 		}
 	case 6:
@@ -162,7 +162,16 @@ func TestRandomFuzzAssignment(t *testing.T) {
 		verifyOptimalityCertificate(t, label+"/SIMD", rows, cols, cost, sense, resSIMD)
 		verifyOptimalityCertificate(t, label+"/Scalar", rows, cols, cost, sense, resScalar)
 
-		tol := 1e-9 * max(1.0, math.Abs(resScalar.Objective))
+		maxAbs := 0.0
+		for _, v := range cost {
+			if !math.IsInf(v, 0) && !math.IsNaN(v) {
+				maxAbs = max(maxAbs, math.Abs(v))
+			}
+		}
+		if maxAbs == 0 {
+			maxAbs = 1.0
+		}
+		tol := 1e-9 * max(maxAbs, math.Abs(resScalar.Objective)) * float64(max(rows, cols))
 		if math.Abs(resSIMD.Objective-resScalar.Objective) > tol {
 			t.Fatalf("[%s] SIMD obj %.12g != Scalar obj %.12g", label, resSIMD.Objective, resScalar.Objective)
 		}
@@ -467,7 +476,7 @@ func TestExactIntegerHungarianParity(t *testing.T) {
 			}
 		case 3:
 			// Add small integer tie-breakers to a 2^40 base offset.
-			base := int64(1) << 40
+			base := int64(1) << 48
 			for i := range n * n {
 				v := base + int64(rng.IntN(200))
 				icost[i] = v

@@ -11,6 +11,7 @@ package goblin
 import "C"
 
 import (
+	"cmp"
 	"context"
 	"math"
 	"runtime"
@@ -59,6 +60,15 @@ func CBCAvailable() bool { return true }
 func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
 	n := p.NumVars
 	m := p.NumConstraints
+	if n > math.MaxInt32 || m > math.MaxInt32 || len(p.ColVal) > math.MaxInt32 ||
+		(m > 0 && len(p.ColPtr32) != n+1) {
+		return Result{
+			modelID:   p.modelID,
+			Backend:   BackendCBC,
+			Status:    StatusNumericalError,
+			SolveTime: time.Since(start),
+		}
+	}
 
 	for j := range n {
 		if p.VarLB[j] > p.VarUB[j]+cbcFeasTol {
@@ -361,7 +371,8 @@ func solveUnconstrainedCBC(p *CompiledProblem, start time.Time) Result {
 
 // CBCLPSolver wraps a persistent C++ OsiClpSolverInterface instance that can be
 // solved from scratch and repeatedly warm-started with modified bounds or added
-// cutting planes.
+// cutting planes. A single CBCLPSolver instance is not safe for concurrent use
+// by multiple goroutines without external synchronization.
 type CBCLPSolver struct {
 	Prob   *CompiledProblem
 	handle *C.GoblinLPSolver
@@ -373,18 +384,25 @@ type CBCLPSolver struct {
 
 // NewCBCLPSolver creates a C++ OsiClpSolverInterface LP solver for p.
 func NewCBCLPSolver(p *CompiledProblem) *CBCLPSolver {
-	h := C.goblin_lp_new(
-		C.int(p.NumVars),
-		C.int(p.NumConstraints),
-		cInt32Ptr(p.ColPtr32),
-		cInt32Ptr(p.RowIdx32),
-		cFloat64Ptr(p.ColVal),
-		cFloat64Ptr(p.ColLBClp),
-		cFloat64Ptr(p.ColUBClp),
-		cFloat64Ptr(p.ObjMin),
-		cFloat64Ptr(p.RowLBClp),
-		cFloat64Ptr(p.RowUBClp),
-	)
+	if p == nil {
+		return &CBCLPSolver{}
+	}
+	var h *C.GoblinLPSolver
+	if p.NumVars <= math.MaxInt32 && p.NumConstraints <= math.MaxInt32 &&
+		len(p.ColVal) <= math.MaxInt32 && len(p.ColPtr32) == p.NumVars+1 {
+		h = C.goblin_lp_new(
+			C.int(p.NumVars),
+			C.int(p.NumConstraints),
+			cInt32Ptr(p.ColPtr32),
+			cInt32Ptr(p.RowIdx32),
+			cFloat64Ptr(p.ColVal),
+			cFloat64Ptr(p.ColLBClp),
+			cFloat64Ptr(p.ColUBClp),
+			cFloat64Ptr(p.ObjMin),
+			cFloat64Ptr(p.RowLBClp),
+			cFloat64Ptr(p.RowUBClp),
+		)
+	}
 	s := &CBCLPSolver{
 		Prob:   p,
 		handle: h,
@@ -397,20 +415,27 @@ func NewCBCLPSolver(p *CompiledProblem) *CBCLPSolver {
 
 // Close releases the underlying C++ OsiClpSolverInterface instance.
 func (s *CBCLPSolver) Close() {
-	if s.handle != nil {
+	if s != nil && s.handle != nil {
 		C.goblin_lp_free(s.handle)
 		s.handle = nil
+		runtime.KeepAlive(s)
 	}
 }
 
 // TotalRows returns the total number of rows (structural constraints + added cuts).
 func (s *CBCLPSolver) TotalRows() int {
+	if s == nil || s.Prob == nil {
+		return 0
+	}
 	return s.Prob.NumConstraints + s.numCut
 }
 
 // SetStructuralBounds updates the column bounds in place while preserving the
 // current simplex basis for warm-started dual or primal resolves.
 func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
+	if s == nil || s.Prob == nil {
+		return
+	}
 	n := s.Prob.NumVars
 	lbClp := make([]float64, n)
 	ubClp := make([]float64, n)
@@ -422,32 +447,64 @@ func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 	}
 	if s.handle != nil {
 		C.goblin_lp_set_bounds(s.handle, C.int(n), cFloat64Ptr(lbClp), cFloat64Ptr(ubClp))
+		runtime.KeepAlive(s)
 	}
 }
 
 // AddCut appends a linear inequality sum(val[k] * x[colIdx[k]]) <= rhs to the LP
 // while preserving the existing basis for warm-started dual simplex resolve.
+// Out-of-range indices are ignored and duplicate column indices are summed.
 func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
-	nnz := len(colIdx)
-	cols32 := make([]int32, nnz)
-	for k, c := range colIdx {
-		cols32[k] = int32(c)
+	if s == nil || s.Prob == nil || s.handle == nil {
+		return
 	}
-	if s.handle != nil {
-		C.goblin_lp_add_cut(
-			s.handle,
-			C.int(nnz),
-			cInt32Ptr(cols32),
-			cFloat64Ptr(val),
-			C.double(clampCBCBound(rhs)),
-		)
-		s.cutRHS = append(s.cutRHS, rhs)
-		s.numCut++
+	n := s.Prob.NumVars
+	kLim := min(len(colIdx), len(val))
+	type termPair struct {
+		col int
+		val float64
 	}
+	pairs := make([]termPair, 0, kLim)
+	for k := range kLim {
+		c := colIdx[k]
+		v := val[k]
+		if c < 0 || c >= n || v == 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			continue
+		}
+		pairs = append(pairs, termPair{col: c, val: v})
+	}
+	slices.SortFunc(pairs, func(a, b termPair) int { return cmp.Compare(a.col, b.col) })
+	cols32 := make([]int32, 0, len(pairs))
+	vals := make([]float64, 0, len(pairs))
+	for i := 0; i < len(pairs); {
+		c := pairs[i].col
+		sum := pairs[i].val
+		for i++; i < len(pairs) && pairs[i].col == c; i++ {
+			sum += pairs[i].val
+		}
+		if math.Abs(sum) <= compileZeroTol {
+			continue
+		}
+		cols32 = append(cols32, int32(c))
+		vals = append(vals, sum)
+	}
+	C.goblin_lp_add_cut(
+		s.handle,
+		C.int(len(cols32)),
+		cInt32Ptr(cols32),
+		cFloat64Ptr(vals),
+		C.double(clampCBCBound(rhs)),
+	)
+	s.cutRHS = append(s.cutRHS, rhs)
+	s.numCut++
+	runtime.KeepAlive(s)
 }
 
 // Solve solves or warm-start resolves the current LP relaxation via COIN-OR CLP.
 func (s *CBCLPSolver) Solve() LPResult {
+	if s == nil {
+		return LPResult{Status: StatusUndefined}
+	}
 	p := s.Prob
 	if p == nil || p.InvalidErr != nil {
 		return LPResult{Status: StatusUndefined}
@@ -480,6 +537,9 @@ func (s *CBCLPSolver) Solve() LPResult {
 			ReducedCosts: []float64{},
 		}
 	}
+	if s.handle == nil {
+		return LPResult{Status: StatusNumericalError}
+	}
 
 	primal := make([]float64, n)
 	duals := make([]float64, m)
@@ -493,6 +553,7 @@ func (s *CBCLPSolver) Solve() LPResult {
 		cFloat64Ptr(duals),
 		cFloat64Ptr(rc),
 	)
+	runtime.KeepAlive(s)
 
 	status := Status(cRes.status)
 	if status != StatusOptimal {

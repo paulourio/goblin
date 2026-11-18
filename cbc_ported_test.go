@@ -17,8 +17,7 @@ import (
 // and testKnapsackWithParams from Cbc/test/CInterfaceTest.c and Cbc/test/CInterfaceTest_new.c.
 func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 	t.Run("CInterfaceTest_Knapsack_SequentialModification", func(t *testing.T) {
-		// Maximize 5x0 + 3x1 + 2x2 + 7x3 + 4x4
-		// s.t.     2x0 + 8x1 + 4x2 + 2x3 + 5x4 <= 10, x_j in {0,1}
+		// Maximize 5x0 + 3x1 + 2x2 + 7x3 + 4x4 subject to 2x0 + 8x1 + 4x2 + 2x3 + 5x4 <= 10.
 		m := gb.NewModel("knapsack", gb.Maximize)
 		weights := []float64{2, 8, 4, 2, 5}
 		profits := []float64{5, 3, 2, 7, 4}
@@ -46,7 +45,7 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 			}
 		}
 
-		// Fix x0 <= 0 -> optimal objective 11.0, primal [0, 0, 0, 1, 1]
+		// Fix x0 <= 0 so the optimal objective becomes 11.0 at primal [0, 0, 0, 1, 1].
 		m.SetVarBounds(x[0], 0, 0)
 		res2 := mustSolve(t, m)
 		if res2.Status != gb.StatusOptimal || math.Abs(res2.Objective-11.0) > 1e-6 {
@@ -59,7 +58,7 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 			}
 		}
 
-		// Fix x1 >= 1 -> optimal objective 10.0, primal [0, 1, 0, 1, 0]
+		// Fix x1 >= 1 so the optimal objective becomes 10.0 at primal [0, 1, 0, 1, 0].
 		m.SetVarBounds(x[1], 1, 1)
 		res3 := mustSolve(t, m)
 		if res3.Status != gb.StatusOptimal || math.Abs(res3.Objective-10.0) > 1e-6 {
@@ -74,8 +73,7 @@ func TestCBCPorted_KnapsackAndModification(t *testing.T) {
 	})
 
 	t.Run("CInterfaceTest_new_KnapsackWithParams", func(t *testing.T) {
-		// Maximize 10x0 + 13x1 + 18x2 + 31x3 + 7x4 + 15x5
-		// s.t.     11x0 + 15x1 + 20x2 + 35x3 + 10x4 + 33x5 <= 47, x_j in {0,1}
+		// Maximize 10x0 + 13x1 + 18x2 + 31x3 + 7x4 + 15x5 subject to capacity 47.
 		m := gb.NewModel("knapsack_params", gb.Maximize)
 		weights := []float64{11, 15, 20, 35, 10, 33}
 		profits := []float64{10, 13, 18, 31, 7, 15}
@@ -216,7 +214,7 @@ func TestCBCPorted_InfeasibleAndUnboundedEdgeCases(t *testing.T) {
 // and testSOS1 / testDelete from CInterfaceTest_advanced.c.
 func TestCBCPorted_LPReoptimizationAndDelete(t *testing.T) {
 	t.Run("testLPReoptimization", func(t *testing.T) {
-		// Max 5x + 4y s.t. 6x + 4y <= 24, x + 2y <= 6, x, y >= 0
+		// Maximize 5x + 4y subject to 6x + 4y <= 24, x + 2y <= 6, x >= 0, y >= 0.
 		m := gb.NewModel("lp_reopt", gb.Maximize)
 		x := m.AddContVar("x", 0, math.Inf(1))
 		y := m.AddContVar("y", 0, math.Inf(1))
@@ -227,34 +225,34 @@ func TestCBCPorted_LPReoptimizationAndDelete(t *testing.T) {
 		p := m.Compile()
 		lp := gb.NewLPSolver(p, nil)
 
-		// 1. Initial solve: x=3, y=1.5 -> obj = 21.0
+		// Step 1 solves the initial LP to x=3, y=1.5 with objective 21.0.
 		r1 := lp.Solve()
 		if r1.Status != gb.StatusOptimal || math.Abs(r1.Objective-21.0) > 1e-5 {
 			t.Fatalf("step 1: status=%v obj=%.6f, want Optimal 21.0", r1.Status, r1.Objective)
 		}
 
-		// 2. Tighten x <= 2 -> x=2, y=2 -> obj = 18.0
+		// Step 2 tightens x <= 2 so x=2, y=2 with objective 18.0.
 		lp.SetStructuralBounds([]float64{0, 0}, []float64{2.0, math.Inf(1)})
 		r2 := lp.Solve()
 		if r2.Status != gb.StatusOptimal || math.Abs(r2.Objective-18.0) > 1e-5 {
 			t.Fatalf("step 2: status=%v obj=%.6f, want Optimal 18.0", r2.Status, r2.Objective)
 		}
 
-		// 3. Add constraint x + y <= 3 -> x=2, y=1 -> obj = 14.0
+		// Step 3 adds constraint x + y <= 3 so x=2, y=1 with objective 14.0.
 		lp.AddCut([]int{0, 1}, []float64{1.0, 1.0}, 3.0)
 		r3 := lp.Solve()
 		if r3.Status != gb.StatusOptimal || math.Abs(r3.Objective-14.0) > 1e-5 {
 			t.Fatalf("step 3: status=%v obj=%.6f, want Optimal 14.0", r3.Status, r3.Objective)
 		}
 
-		// 4. Relax x <= 100 -> x=3, y=0 -> obj = 15.0
+		// Step 4 relaxes x <= 100 so x=3, y=0 with objective 15.0.
 		lp.SetStructuralBounds([]float64{0, 0}, []float64{100.0, math.Inf(1)})
 		r4 := lp.Solve()
 		if r4.Status != gb.StatusOptimal || math.Abs(r4.Objective-15.0) > 1e-5 {
 			t.Fatalf("step 4: status=%v obj=%.6f, want Optimal 15.0", r4.Status, r4.Objective)
 		}
 
-		// 5. Force x >= 10 -> Infeasible
+		// Step 5 forces x >= 10, rendering the LP infeasible.
 		lp.SetStructuralBounds([]float64{10.0, 0}, []float64{100.0, math.Inf(1)})
 		r5 := lp.Solve()
 		if r5.Status != gb.StatusInfeasible {
@@ -263,7 +261,7 @@ func TestCBCPorted_LPReoptimizationAndDelete(t *testing.T) {
 	})
 
 	t.Run("testSOS1_CInterfaceTest_advanced", func(t *testing.T) {
-		// max 3*x0 + 2*x1 + 5*x2, x0+x1+x2 <= 10, SOS1(x0,x1,x2) => x2=10, obj=50
+		// Maximize 3*x0 + 2*x1 + 5*x2 under x0+x1+x2 <= 10 and SOS1(x0,x1,x2).
 		m := gb.NewModel("sos1_adv", gb.Maximize)
 		coeffs := []float64{3.0, 2.0, 5.0}
 		x := make([]gb.Var, 3)
@@ -359,9 +357,9 @@ func TestCBCPorted_TransportationConstruction(t *testing.T) {
 	}
 }
 
-// TestCBCPorted_CuttingStockColumnGenerationAndKantorovich ports:
-// 1. Cbc/test/CInterfaceTest_colgen.c (Gilmore-Gomory Column Generation with LP duals + Knapsack Pricing MIP)
-// 2. Cbc/test/CInterfaceTest_kantorovich.c (Compact Kantorovich MIP formulation with symmetry breaking)
+// TestCBCPorted_CuttingStockColumnGenerationAndKantorovich ports Gilmore-Gomory
+// column generation from CInterfaceTest_colgen.c and the Kantorovich MIP from
+// CInterfaceTest_kantorovich.c.
 func TestCBCPorted_CuttingStockColumnGenerationAndKantorovich(t *testing.T) {
 	const barLength = 250.0
 	widths := []float64{187, 119, 74, 90}
@@ -519,7 +517,7 @@ func TestCBCPorted_FacilityLocation(t *testing.T) {
 	}
 	m.SetObjective(gb.SumTerms(objTerms...))
 
-	// Customer demand satisfaction: sum_f x[f][c] == 1
+	// Customer demand satisfaction requires sum_f x[f][c] == 1.
 	for c := range numCustomers {
 		var terms []gb.Term
 		for f := range numFacilities {
@@ -528,7 +526,7 @@ func TestCBCPorted_FacilityLocation(t *testing.T) {
 		m.AddConstraint(fmt.Sprintf("dem_%d", c), gb.Eq(gb.SumTerms(terms...), 1.0))
 	}
 
-	// Facility capacity: sum_c demand[c]*x[f][c] - capacity[f]*y[f] <= 0
+	// Facility capacity enforces sum_c demand[c]*x[f][c] - capacity[f]*y[f] <= 0.
 	for f := range numFacilities {
 		var terms []gb.Term
 		for c := range numCustomers {
@@ -538,7 +536,7 @@ func TestCBCPorted_FacilityLocation(t *testing.T) {
 		m.AddConstraint(fmt.Sprintf("cap_%d", f), gb.Le(gb.SumTerms(terms...), 0.0))
 	}
 
-	// Tightening linking constraints: x[f][c] - y[f] <= 0
+	// Tightening linking constraints enforce x[f][c] - y[f] <= 0.
 	for f := range numFacilities {
 		for c := range numCustomers {
 			m.AddConstraint(fmt.Sprintf("link_%d_%d", f, c), gb.Le(gb.NewExpr(gb.T(x[f][c], 1.0), gb.T(y[f], -1.0)), 0.0))
@@ -587,7 +585,7 @@ func TestCBCPorted_JobShopScheduling(t *testing.T) {
 	}
 	m.SetObjective(gb.NewExpr(gb.T(cMax, 1.0)))
 
-	// Precedence within job: x[j][machines[j][i]] - x[j][machines[j][i-1]] >= times[j][machines[j][i-1]]
+	// Precedence within each job orders consecutive machine operations.
 	for j := range numJobs {
 		for i := 1; i < numMachines; i++ {
 			mCur := machines[j][i]
@@ -604,7 +602,7 @@ func TestCBCPorted_JobShopScheduling(t *testing.T) {
 		)
 	}
 
-	// No-overlap on machine i for job pairs j != k
+	// Disjunctive big-M rows prevent overlap on machine i for job pairs j != k.
 	for j := range numJobs {
 		for k := j + 1; k < numJobs; k++ {
 			for i := range numMachines {
@@ -708,12 +706,8 @@ func TestCBCPorted_NQueens(t *testing.T) {
 	}
 }
 
-// TestCBCPorted_TSPSuite ports:
-// - testLazy (4-city TSP) from Cbc/test/CInterfaceTest_advanced.c
-// - 5-city TSP + path prohibition reoptimization from Cbc/test/CInterfaceTest_mip_reopt.c and CInterfaceTest_tsp_cuts.c
-// - testTSP (7-city asymmetric TSP: LP relaxation 238.75, 2-node/3-node subtour cuts to 261.0, and full MIP 262.0) from Cbc/test/CInterfaceTest.c
-// - testTSPUlysses22 (22-city geographic TSP -> optimal 5423.0) from Cbc/test/CInterfaceTest.c
-// - TSPLIB distance matrix instances from Cbc/examples/tsp/ (burma14, ulysses16, gr17, gr21, ulysses22)
+// TestCBCPorted_TSPSuite ports the 4-city, 5-city, 7-city, Ulysses22, and TSPLIB
+// asymmetric and geographic TSP suites from Cbc/test and Cbc/examples/tsp.
 func TestCBCPorted_TSPSuite(t *testing.T) {
 	t.Run("4City_CInterfaceTest_advanced", func(t *testing.T) {
 		dist := [][]float64{
@@ -722,7 +716,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 			{14, 32, 0, 30},
 			{19, 24, 28, 0},
 		}
-		// Optimal tour 0 -> 1 -> 3 -> 2 -> 0 has cost 10 + 25 + 28 + 14 = 77.0
+		// Optimal tour 0 -> 1 -> 3 -> 2 -> 0 has cost 77.0.
 		obj, tour := solveAsymmetricTSPWithSubtourCuts(t, dist)
 		if math.Abs(obj-77.0) > 1e-4 {
 			t.Fatalf("expected optimal tour cost 77.0, got %.6f (tour=%v)", obj, tour)
@@ -742,8 +736,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 			t.Fatalf("expected 5-city TSP cost 84.0, got %.6f (tour=%v)", obj1, tour1)
 		}
 
-		// Now forbid a 2-edge subpath from the optimal tour (e.g. tour1[0]->tour1[1]->tour1[2])
-		// by penalizing/forbidding one of its edges and re-solving, matching CInterfaceTest_mip_reopt.c
+		// Forbid a 2-edge subpath from the optimal tour and re-solve, matching CInterfaceTest_mip_reopt.c.
 		n := 5
 		m := gb.NewModel("tsp5_reopt", gb.Minimize)
 		var x [5][5]gb.Var
@@ -770,7 +763,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 			m.AddConstraint(fmt.Sprintf("out_%d", i), gb.Eq(gb.SumTerms(outT...), 1))
 			m.AddConstraint(fmt.Sprintf("in_%d", i), gb.Eq(gb.SumTerms(inT...), 1))
 		}
-		// All subtours of size 2 and 3
+		// Add subtour elimination constraints of sizes 2 and 3.
 		for mask := 1; mask < (1 << n); mask++ {
 			var S []int
 			for i := range n {
@@ -790,7 +783,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 				m.AddConstraint(fmt.Sprintf("sec_%d", mask), gb.Le(gb.SumTerms(terms...), float64(len(S)-1)))
 			}
 		}
-		// Forbid the 2-arc sequence tour1[0]->tour1[1]->tour1[2]
+		// Forbid the 2-arc sequence from the initial optimal tour.
 		u, v, w := tour1[0], tour1[1], tour1[2]
 		m.AddConstraint("forbid_seq", gb.Le(gb.NewExpr(gb.T(x[u][v], 1), gb.T(x[v][w], 1)), 1.0))
 		res2 := mustSolve(t, m)
@@ -816,7 +809,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 			{oo, oo, 35, oo, 20, oo, 32},
 			{68, 35, oo, oo, 38, 37, oo},
 		}
-		// 1. Verify MTZ LP relaxation = 238.75 (Cbc/test/CInterfaceTest.c:703)
+		// Verify that the MTZ LP relaxation equals 238.75 as in CInterfaceTest.c.
 		const n = 7
 		mLP := gb.NewModel("tsp7_lp", gb.Minimize)
 		var xLP [n][n]gb.Var
@@ -862,7 +855,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 			t.Fatalf("expected 7-city MTZ LP relaxation 238.75, got %v %.6f", resLP.Status, resLP.Objective)
 		}
 
-		// 2. Verify full MIP optimal = 262.0
+		// Verify that the full MIP optimal value equals 262.0.
 		objMIP, _ := solveAsymmetricTSPWithSubtourCuts(t, d)
 		if math.Abs(objMIP-262.0) > 1e-4 {
 			t.Fatalf("expected 7-city TSP MIP optimal 262.0, got %.6f", objMIP)
@@ -878,7 +871,7 @@ func TestCBCPorted_TSPSuite(t *testing.T) {
 			{38.09, 24.36}, {36.09, 23.00}, {40.44, 13.57}, {40.33, 14.15},
 			{40.37, 14.23}, {37.57, 22.56},
 		}
-		// Match Cbc/test/CInterfaceTest.c:817-837 and 980-985 exactly
+		// Compute geographic distances using the exact CInterfaceTest.c degree-minute formula.
 		toRad := func(x float64) float64 {
 			const pi = 3.141592
 			deg := float64(int(x))
@@ -1023,7 +1016,7 @@ func solveAsymmetricTSPWithSubtourCuts(t *testing.T, dist [][]float64) (float64,
 		if len(cycles) == 1 && len(cycles[0]) == n {
 			return res.Objective, cycles[0]
 		}
-		for _, cyc := range cycles {
+		for cIdx, cyc := range cycles {
 			if len(cyc) < n {
 				var terms []gb.Term
 				for _, u := range cyc {
@@ -1034,7 +1027,7 @@ func solveAsymmetricTSPWithSubtourCuts(t *testing.T, dist [][]float64) (float64,
 					}
 				}
 				m.AddConstraint(
-					fmt.Sprintf("subtour_it%d_sz%d", iter, len(cyc)),
+					fmt.Sprintf("subtour_it%d_c%d_sz%d", iter, cIdx, len(cyc)),
 					gb.Le(gb.SumTerms(terms...), float64(len(cyc)-1)),
 				)
 			}
@@ -1066,20 +1059,20 @@ func TestCBCPorted_OsiExmip1AndModify(t *testing.T) {
 		}
 		m.SetObjective(gb.SumTerms(objTerms...))
 
-		// Row 0: 3*x0 + x1 - 2*x2 - x3 - x4 >= 2.5
+		// Row 0 enforces 3*x0 + x1 - 2*x2 - x3 - x4 >= 2.5.
 		m.AddConstraint("r0", gb.Ge(
 			gb.NewExpr(gb.T(v[0], 3), gb.T(v[1], 1), gb.T(v[2], -2), gb.T(v[3], -1), gb.T(v[4], -1)),
 			2.5,
 		))
-		// Row 1: 2*x1 + 1.1*x3 <= 2.1
+		// Row 1 enforces 2*x1 + 1.1*x3 <= 2.1.
 		m.AddConstraint("r1", gb.Le(gb.NewExpr(gb.T(v[1], 2), gb.T(v[3], 1.1)), 2.1))
-		// Row 2: x2 + x5 == 4.0
+		// Row 2 enforces x2 + x5 == 4.0.
 		m.AddConstraint("r2", gb.Eq(gb.NewExpr(gb.T(v[2], 1), gb.T(v[5], 1)), 4.0))
-		// Row 3: 1.8 <= 2.8*x3 - 1.2*x6 <= 5.0 (ranged row)
+		// Row 3 enforces ranged bounds 1.8 <= 2.8*x3 - 1.2*x6 <= 5.0.
 		r3Expr := gb.NewExpr(gb.T(v[3], 2.8), gb.T(v[6], -1.2))
 		m.AddConstraint("r3_lb", gb.Ge(r3Expr, 1.8))
 		m.AddConstraint("r3_ub", gb.Le(r3Expr, 5.0))
-		// Row 4: 3.0 <= 5.6*x0 + x4 + 1.9*x7 <= 15.0 (ranged row)
+		// Row 4 enforces ranged bounds 3.0 <= 5.6*x0 + x4 + 1.9*x7 <= 15.0.
 		r4Expr := gb.NewExpr(gb.T(v[0], 5.6), gb.T(v[4], 1.0), gb.T(v[7], 1.9))
 		m.AddConstraint("r4_lb", gb.Ge(r4Expr, 3.0))
 		m.AddConstraint("r4_ub", gb.Le(r4Expr, 15.0))
@@ -1399,17 +1392,14 @@ func TestCBCPorted_Sudoku(t *testing.T) {
 // presolve.go, solve.go, simplex.go, and bab.go during the CBC test port.
 func TestSolverEdgeCaseRegressions(t *testing.T) {
 	t.Run("NegativeBinaryCoeffTightening_PresolveParity", func(t *testing.T) {
-		// Row: 10*x0 - 8*y1 - 8*y2 <= 5, x0, y1, y2 in {0,1}
-		// maxAct = 10. For y1 (a = -8): maxAct + a = 2 < 5 => delta = 3, new coeff = -5.
-		// Previously, maxAct was erroneously reduced by delta=3 to 7, which then caused y2 (a = -8)
-		// to see maxAct + a = -1 < 5 => delta = 6, new coeff = -2, rhs = 5.
-		// Then at x0=1, y1=0, y2=1: 10(1) - 5(0) - 2(1) = 8 > 5 (infeasible in presolved model!),
-		// even though in original model 10(1) - 8(0) - 8(1) = 2 <= 5 is strictly feasible!
+		// Row 10*x0 - 8*y1 - 8*y2 <= 5 over binary variables has maxAct = 10.
+		// Tightening y1 (a = -8) uses maxAct + a = 2 < 5 to shift coeff to -5 without mutating maxAct.
+		// Point x0=1, y1=0, y2=1 remains feasible in both original and presolved models.
 		m := gb.NewModel("neg_bin_tighten", gb.Maximize)
 		x0 := m.AddBinaryVar("x0")
 		y1 := m.AddBinaryVar("y1")
 		y2 := m.AddBinaryVar("y2")
-		// Maximize 100*x0 - 50*y1 - 10*y2 => optimal is x0=1, y1=0, y2=1 (obj = 90)
+		// Maximize 100*x0 - 50*y1 - 10*y2 so the optimal solution is (1, 0, 1) with objective 90.
 		m.SetObjective(gb.NewExpr(gb.T(x0, 100), gb.T(y1, -50), gb.T(y2, -10)))
 		m.AddConstraint("c0", gb.Le(gb.NewExpr(gb.T(x0, 10), gb.T(y1, -8), gb.T(y2, -8)), 5.0))
 
@@ -1429,9 +1419,9 @@ func TestSolverEdgeCaseRegressions(t *testing.T) {
 		x0 := m.AddContVar("x0", 0, math.Inf(1))
 		x1 := m.AddContVar("x1", 0, math.Inf(1))
 		m.SetObjective(gb.NewExpr(gb.T(x0, 3.0), gb.T(x1, 5.0)))
-		// Singleton row: x0 >= 4
+		// Singleton row enforces x0 >= 4.
 		m.AddConstraint("r0", gb.Ge(gb.NewExpr(gb.T(x0, 1.0)), 4.0))
-		// Coupling row: x0 + 2*x1 >= 10 => x0=4, x1=3, obj = 12 + 15 = 27
+		// Coupling row x0 + 2*x1 >= 10 yields x0=4, x1=3 with objective 27.
 		m.AddConstraint("r1", gb.Ge(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 2.0)), 10.0))
 
 		res := mustSolve(t, m)
@@ -1441,7 +1431,7 @@ func TestSolverEdgeCaseRegressions(t *testing.T) {
 		if len(res.Duals) != 2 || len(res.ReducedCosts) != 2 {
 			t.Fatalf("expected 2 duals and 2 reduced costs, got %d and %d", len(res.Duals), len(res.ReducedCosts))
 		}
-		// Shadow price of r1 is 2.5, shadow price of r0 is 3 - 2.5 = 0.5
+		// Shadow price of r1 is 2.5 and shadow price of r0 is 0.5.
 		if math.Abs(res.Duals[0]-0.5) > 1e-6 || math.Abs(res.Duals[1]-2.5) > 1e-6 {
 			t.Fatalf("duals = %v, want [0.5, 2.5]", res.Duals)
 		}
@@ -1460,14 +1450,14 @@ func TestSolverEdgeCaseRegressions(t *testing.T) {
 			t.Fatalf("r1: %v %.6f", r1.Status, r1.Objective)
 		}
 
-		// Transition x to (-Inf, 1.0] and y to [-2.0, +Inf) -> x=1, y=3, obj = 1 + 6 = 7
+		// Transition x to (-Inf, 1.0] and y to [-2.0, +Inf) for optimal objective 7.0.
 		lp.SetStructuralBounds([]float64{math.Inf(-1), -2.0}, []float64{1.0, math.Inf(1)})
 		r2 := lp.Solve()
 		if r2.Status != gb.StatusOptimal || math.Abs(r2.Objective-7.0) > 1e-6 {
 			t.Fatalf("r2: got %v %.6f, want Optimal 7.0", r2.Status, r2.Objective)
 		}
 
-		// Transition both to free (-Inf, +Inf) -> Unbounded
+		// Transition both variables to free (-Inf, +Inf), making the LP unbounded.
 		lp.SetStructuralBounds([]float64{math.Inf(-1), math.Inf(-1)}, []float64{math.Inf(1), math.Inf(1)})
 		r3 := lp.Solve()
 		if r3.Status != gb.StatusUnbounded {

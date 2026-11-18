@@ -905,3 +905,142 @@ func TestOneSidedCMIRCutsAndPurgeSlackCuts(t *testing.T) {
 			resWarm.Status, resWarm.Objective)
 	}
 }
+
+// Verifies LP Ruiz scaling, LU singleton drop alignment, presolve near-integer rounding guards,
+// root Diophantine GCD infeasibility without presolve, incumbent polishing, and model validation.
+func TestReviewAuditRegressions(t *testing.T) {
+	ctx := t.Context()
+
+	// 1. Extreme row/column scaling (1e-9 coefficients) must not return false Infeasible or Unbounded.
+	mSmallGe := gb.NewModel("lp_scale_ge", gb.Minimize)
+	xs := mSmallGe.AddContVar("x", 0, 1e4)
+	mSmallGe.SetObjective(gb.VarExpr(xs))
+	mSmallGe.AddConstraint("c", gb.NewExpr(xs.T(1e-9)).Ge(1e-6))
+	resGe, err := mSmallGe.Solve(ctx)
+	if err != nil || resGe.Status != gb.StatusOptimal || math.Abs(resGe.Objective-1000.0) > 1e-5 {
+		t.Fatalf("lp_scale_ge: status=%v obj=%v err=%v, want Optimal 1000", resGe.Status, resGe.Objective, err)
+	}
+	if len(resGe.Duals) != 1 || math.Abs(resGe.Duals[0]-1e9) > 1e2 {
+		t.Fatalf("lp_scale_ge dual=%v, want ~1e9", resGe.Duals)
+	}
+
+	mSmallMax := gb.NewModel("lp_scale_max", gb.Maximize)
+	ym := mSmallMax.AddContVar("y", 0, math.Inf(1))
+	mSmallMax.SetObjective(gb.VarExpr(ym))
+	mSmallMax.AddConstraint("c", gb.NewExpr(ym.T(1e-9)).Le(1.0))
+	resMax, err := mSmallMax.Solve(ctx)
+	if err != nil || resMax.Status != gb.StatusOptimal || math.Abs(resMax.Objective-1e9)/1e9 > 1e-9 {
+		t.Fatalf("lp_scale_max: status=%v obj=%v err=%v, want Optimal 1e9", resMax.Status, resMax.Objective, err)
+	}
+
+	// 2. Unconstrained Maximize reduced-cost sign must match constrained Maximize.
+	mUnc := gb.NewModel("unc_max_rc", gb.Maximize)
+	zu := mUnc.AddContVar("z", 0, 3)
+	mUnc.SetObjective(gb.NewExpr(zu.T(2)))
+	resUnc, err := mUnc.Solve(ctx)
+	if err != nil || len(resUnc.ReducedCosts) != 1 || resUnc.ReducedCosts[0] != 2.0 {
+		t.Fatalf("unc_max_rc: rc=%v err=%v, want [2]", resUnc.ReducedCosts, err)
+	}
+	if resUnc.Value(gb.Var(0)) != 0 {
+		t.Fatalf("expected zero Var handle to return 0, got %v", resUnc.Value(gb.Var(0)))
+	}
+
+	// 3. Presolve near-integer GCD triggers must neither cut off valid optima nor violate original rows.
+	mPreA := gb.NewModel("pre_near_int_a", gb.Maximize)
+	xa := mPreA.AddIntVar("x", 0, 2000)
+	mPreA.SetObjective(gb.VarExpr(xa))
+	mPreA.AddConstraint("c", gb.NewExpr(xa.T(1.000000005)).Le(1000.000005))
+	pPreA := mPreA.Compile()
+	assertOptimal(t, "pre_near_int_a", pPreA, mustSolveCompiled(t, pPreA), 1000.0)
+
+	mPreB := gb.NewModel("pre_near_int_b", gb.Maximize)
+	xb := mPreB.AddIntVar("x", 0, 2e6)
+	mPreB.SetObjective(gb.VarExpr(xb))
+	mPreB.AddConstraint("c", gb.NewExpr(xb.T(2.00000001)).Le(2e6))
+	pPreB := mPreB.Compile()
+	resPreB := mustSolveCompiled(t, pPreB)
+	assertOptimal(t, "pre_near_int_b", pPreB, resPreB, 999999.0)
+	if bV, rV, iV := pPreB.MaxViolation(resPreB.Values, true); bV > 1e-7 || rV > 1e-7 || iV > 1e-7 {
+		t.Fatalf("pre_near_int_b original violation: b=%e r=%e i=%e", bV, rV, iV)
+	}
+
+	// 4. Diophantine parity-infeasible equality over free integers must return Infeasible even with presolve disabled.
+	mParity := gb.NewModel("parity_free_ints", gb.Minimize)
+	px := mParity.AddIntVar("x", math.Inf(-1), math.Inf(1))
+	py := mParity.AddIntVar("y", math.Inf(-1), math.Inf(1))
+	mParity.AddConstraint("eq", gb.NewExpr(px.T(2), py.T(2)).Eq(1))
+	for name, opts := range optionVariants() {
+		rPar := mustSolveCompiled(t, mParity.Compile(), opts...)
+		if rPar.Status != gb.StatusInfeasible {
+			t.Fatalf("parity_free_ints/%s: status=%v, want Infeasible", name, rPar.Status)
+		}
+	}
+
+	// 5. Deep general-integer B&B tree (split inequality 1 <= 2x + 2y <= 1) must explore 5,000 nodes rapidly.
+	mDeep := gb.NewModel("deep_tree_nodes", gb.Minimize)
+	dx := mDeep.AddIntVar("x", math.Inf(-1), math.Inf(1))
+	dy := mDeep.AddIntVar("y", math.Inf(-1), math.Inf(1))
+	mDeep.AddConstraint("lo", gb.NewExpr(dx.T(2), dy.T(2)).Ge(1))
+	mDeep.AddConstraint("hi", gb.NewExpr(dx.T(2), dy.T(2)).Le(1))
+	resDeep, err := mDeep.Solve(ctx, gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false), gb.WithMaxNodes(5000))
+	if err != nil || resDeep.Status != gb.StatusNodeLimit || resDeep.Nodes != 5000 {
+		t.Fatalf("deep_tree_nodes: status=%v nodes=%d err=%v", resDeep.Status, resDeep.Nodes, err)
+	}
+
+	// 6. Mixed-MILP incumbent polishing and sound BestBound on Maximize.
+	mPol := gb.NewModel("polish_max", gb.Maximize)
+	v0 := mPol.AddIntVar("x0", 2, 2)
+	v1 := mPol.AddIntVar("x1", -2, 0)
+	v2 := mPol.AddContVar("x2", 1, 5)
+	v3 := mPol.AddIntVar("x3", -1, 3)
+	v4 := mPol.AddIntVar("x4", 2, 6)
+	mPol.SetObjective(gb.NewExpr(v0.T(3.5), v1.T(-9), v2.T(-10), v3.T(9), v4.T(3.5)).AddConstant(-2))
+	mPol.AddConstraint("r0", gb.NewExpr(v0.T(3), v1.T(1), v2.T(2), v3.T(-7), v4.T(-1)).Eq(-3))
+	mPol.AddConstraint("r1", gb.NewExpr(v1.T(4), v2.T(4), v3.T(4), v4.T(-7)).Ge(5))
+	mPol.AddConstraint("r2", gb.NewExpr(v2.T(-3)).Le(-10))
+	resPol := mustSolveCompiled(t, mPol.Compile())
+	if resPol.Status != gb.StatusOptimal || math.Abs(resPol.Objective - -1.0) > 1e-9 || resPol.BestBound < resPol.Objective-1e-9 {
+		t.Fatalf("polish_max: status=%v obj=%.12g bound=%.12g, want -1", resPol.Status, resPol.Objective, resPol.BestBound)
+	}
+
+	// 7. Auto-generated names yield to later explicit user names, while duplicate explicit names fail validation.
+	mNames := gb.NewModel("auto_names", gb.Minimize)
+	uAuto := mNames.AddContVar("", 0, 5)
+	uExp := mNames.AddContVar("x_0", 0, 5)
+	mNames.AddConstraint("", gb.VarExpr(uAuto).Le(4))
+	mNames.AddConstraint("_C1", gb.VarExpr(uExp).Le(4))
+	if err := mNames.Validate(); err != nil {
+		t.Fatalf("expected auto-names to yield cleanly to explicit names, got %v", err)
+	}
+	mNames.AddConstraint("_C1", gb.VarExpr(uExp).Le(3))
+	if err := mNames.Validate(); err == nil {
+		t.Fatal("expected duplicate explicit constraint name error")
+	}
+
+	// 8. Invalid VarCategory and negative gap tolerances.
+	mBadCat := gb.NewModel("bad_cat", gb.Minimize)
+	_ = mBadCat.AddVar("w", 0.3, 4.7, gb.VarCategory(9))
+	if err := mBadCat.Validate(); err == nil {
+		t.Fatal("expected invalid VarCategory error")
+	}
+	resNegGap, err := mUnc.Solve(ctx, gb.WithRelGapTol(-1), gb.WithAbsGapTol(-1))
+	if err != nil || resNegGap.Status != gb.StatusOptimal {
+		t.Fatalf("negative gap tolerances should clamp to 0 and return Optimal, got %v (%v)", resNegGap.Status, err)
+	}
+
+	// 9. LPSolver.AddCut canonicalizes unsorted and duplicate column indices.
+	lpCutM := gb.NewModel("lp_cut_canon", gb.Maximize)
+	cx0 := lpCutM.AddContVar("cx0", 0, 10)
+	cx1 := lpCutM.AddContVar("cx1", 0, 10)
+	lpCutM.SetObjective(gb.NewExpr(cx0.T(1), cx1.T(1)))
+	lpCutM.AddConstraint("base", gb.NewExpr(cx0.T(1), cx1.T(1)).Le(15))
+	lpS := gb.NewLPSolver(lpCutM.Compile(), nil)
+	defer lpS.Close()
+	if r0 := lpS.Solve(); r0.Status != gb.StatusOptimal || math.Abs(r0.Objective-15.0) > 1e-8 {
+		t.Fatalf("lp_cut_canon base: %v %v", r0.Status, r0.Objective)
+	}
+	lpS.AddCut([]int{1, 0, 1}, []float64{0.5, 1.0, 0.5}, 8.0)
+	if r1 := lpS.Solve(); r1.Status != gb.StatusOptimal || math.Abs(r1.Objective-8.0) > 1e-8 {
+		t.Fatalf("lp_cut_canon after unsorted duplicate cut: status=%v obj=%v, want 8", r1.Status, r1.Objective)
+	}
+}

@@ -62,14 +62,12 @@ func validDims(rows, cols, flatLen int) bool {
 }
 
 func emptyResult(rows, cols int) Result {
-	var u, v []float64
-	if rows > 0 {
-		u = make([]float64, rows)
+	return Result{
+		RowInd: []int{},
+		ColInd: []int{},
+		U:      make([]float64, rows),
+		V:      make([]float64, cols),
 	}
-	if cols > 0 {
-		v = make([]float64, cols)
-	}
-	return Result{U: u, V: v}
 }
 
 // Options configures the Linear Sum Assignment solver.
@@ -132,7 +130,7 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 	}
 	rows := len(cost)
 	if rows == 0 {
-		return Result{}, nil
+		return emptyResult(0, 0), nil
 	}
 	cols := len(cost[0])
 	for i := 1; i < rows; i++ {

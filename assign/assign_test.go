@@ -44,7 +44,11 @@ func verifyOptimalityCertificate(tb testing.TB, label string, rows, cols int, co
 			maxAbsCost = max(maxAbsCost, math.Abs(c))
 		}
 	}
-	tol := certRelTol * max(1.0, maxAbsCost) * float64(max(rows, cols))
+	scaleRef := maxAbsCost
+	if scaleRef == 0 {
+		scaleRef = 1.0
+	}
+	tol := certRelTol * scaleRef * float64(max(rows, cols))
 
 	prevRow := -1
 	for idx := range k {
@@ -1137,5 +1141,120 @@ func TestRowDominatedAndRank1Variants(t *testing.T) {
 			t.Fatalf("%s: unexpected error %v", tc.name, err)
 		}
 		verifyOptimalityCertificate(t, tc.name, n, n, cost, assign.Minimize, res)
+	}
+}
+
+func TestExtremeScaleOffsetAndDownscaleBruteForce(t *testing.T) {
+	ctx := t.Context()
+
+	// Empty inputs return non-nil slices.
+	resZero2D, err := assign.LinearSum(ctx, [][]float64{}, assign.Minimize)
+	if err != nil || resZero2D.RowInd == nil || resZero2D.ColInd == nil || resZero2D.U == nil || resZero2D.V == nil {
+		t.Fatalf("LinearSum(0x0) returned nil slices or err=%v: %+v", err, resZero2D)
+	}
+
+	regimes := []struct {
+		name   string
+		scale  float64
+		offset float64
+	}{
+		{name: "scale_1e-14", scale: 1e-14, offset: 0},
+		{name: "scale_1e-16", scale: 1e-16, offset: 0},
+		{name: "scale_1e-20", scale: 1e-20, offset: 0},
+		{name: "offset_1e14", scale: 1, offset: 1e14},
+		{name: "offset_1e15", scale: 1, offset: 1e15},
+	}
+
+	for _, rg := range regimes {
+		rng := rand.New(rand.NewPCG(11, 12))
+		for trial := range 600 {
+			rows := 2 + rng.IntN(5)
+			cols := 2 + rng.IntN(5)
+			sense := assign.Minimize
+			if trial%2 == 1 {
+				sense = assign.Maximize
+			}
+			flat := make([]float64, rows*cols)
+			mat := make([][]float64, rows)
+			for r := range rows {
+				mat[r] = make([]float64, cols)
+				for c := range cols {
+					v := rg.offset + rg.scale*float64(rng.IntN(10))
+					flat[r*cols+c] = v
+					mat[r][c] = v
+				}
+			}
+			want, ok := exactAssignmentObjective(rows, cols, flat, sense)
+			if !ok {
+				t.Fatalf("%s trial %d: unexpected infeasible oracle", rg.name, trial)
+			}
+			res, err := assign.LinearSum(ctx, mat, sense)
+			if err != nil {
+				t.Fatalf("%s trial %d: unexpected error %v", rg.name, trial, err)
+			}
+			verifyOptimalityCertificate(t, rg.name, rows, cols, flat, sense, res)
+
+			gotDelta := 0.0
+			for idx := range res.RowInd {
+				gotDelta += mat[res.RowInd[idx]][res.ColInd[idx]] - rg.offset
+			}
+			wantDelta := want - float64(min(rows, cols))*rg.offset
+			if math.Abs(gotDelta-wantDelta) > 1e-9*rg.scale*float64(max(rows, cols)) {
+				t.Fatalf("%s trial %d (%dx%d %s): got delta %.15g, want %.15g",
+					rg.name, trial, rows, cols, sense, gotDelta, wantDelta)
+			}
+		}
+	}
+
+	// Verify that mixed 1e299 penalty entries combined with small integer costs trigger the 0x1p-64 exact power-of-two downscale in Jonker-Volgenant preprocessing without losing unit-level optimality resolution across rectangular and square instances.
+	rng := rand.New(rand.NewPCG(91, 92))
+	for trial := range 300 {
+		rows := 3 + rng.IntN(3)
+		cols := 3 + rng.IntN(3)
+		k := min(rows, cols)
+		flat := make([]float64, rows*cols)
+		for i := range flat {
+			flat[i] = float64(rng.IntN(10))
+		}
+		// Place 1e299 blockers off at least one valid permutation so optimum stays finite and small.
+		perm := rng.Perm(cols)
+		protected := make(map[[2]int]bool, k)
+		for r := range k {
+			protected[[2]int{r, perm[r]}] = true
+		}
+		placed := false
+		for r := range rows {
+			for c := range cols {
+				if !protected[[2]int{r, c}] && rng.IntN(4) == 0 {
+					flat[r*cols+c] = 1e299
+					placed = true
+				}
+			}
+		}
+		if !placed {
+			for r := range rows {
+				for c := range cols {
+					if !protected[[2]int{r, c}] {
+						flat[r*cols+c] = 1e299
+						placed = true
+						break
+					}
+				}
+				if placed {
+					break
+				}
+			}
+		}
+		want, ok := exactAssignmentObjective(rows, cols, flat, assign.Minimize)
+		if !ok {
+			t.Fatalf("downscale trial %d: expected finite matching", trial)
+		}
+		res, err := assign.LinearSumFlat(ctx, rows, cols, flat, assign.Minimize)
+		if err != nil {
+			t.Fatalf("downscale trial %d: unexpected error %v", trial, err)
+		}
+		if math.Abs(res.Objective-want) > 1e-9*max(1.0, math.Abs(want)) {
+			t.Fatalf("downscale trial %d: got %.15g, want %.15g", trial, res.Objective, want)
+		}
 	}
 }

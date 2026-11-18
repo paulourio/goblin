@@ -135,11 +135,41 @@ func TestPuLPJSONObjectiveConstantAndValidation(t *testing.T) {
 			name: "empty_var",
 			raw:  `{"parameters":{"name":"emp","sense":1},"objective":{"name":"OBJ","coefficients":[]},"variables":[{"name":"","cat":"Continuous","lowBound":0,"upBound":1}],"constraints":[]}`,
 		},
+		{
+			name: "bad_obj_sense",
+			raw:  `{"parameters":{"name":"bs","sense":0},"objective":{"name":"OBJ","coefficients":[]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":1}],"constraints":[]}`,
+		},
+		{
+			name: "bad_var_cat",
+			raw:  `{"parameters":{"name":"bc","sense":1},"objective":{"name":"OBJ","coefficients":[]},"variables":[{"name":"x","cat":"integer","lowBound":0,"upBound":1}],"constraints":[]}`,
+		},
+		{
+			name: "bad_con_sense",
+			raw:  `{"parameters":{"name":"bcs","sense":1},"objective":{"name":"OBJ","coefficients":[]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":1}],"constraints":[{"name":"c1","sense":5,"coefficients":[{"name":"x","value":1}],"constant":-1}]}`,
+		},
+		{
+			name: "dup_con_name",
+			raw:  `{"parameters":{"name":"dc","sense":1},"objective":{"name":"OBJ","coefficients":[]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":1}],"constraints":[{"name":"c1","sense":-1,"coefficients":[{"name":"x","value":1}],"constant":-1},{"name":"c1","sense":-1,"coefficients":[{"name":"x","value":1}],"constant":-2}]}`,
+		},
 	}
 	for _, tc := range badDocs {
 		if _, err := format.FromPuLPJSON(strings.NewReader(tc.raw)); err == nil {
 			t.Fatalf("expected error on %s, got nil", tc.name)
 		}
+	}
+
+	// Verify omitted lowBound defaults to 0 while explicit null maps to -Inf.
+	omittedLB := `{"parameters":{"name":"omit_lb","sense":1},"objective":{"name":"OBJ","coefficients":[{"name":"x","value":1}]},"variables":[{"name":"x","cat":"Continuous","upBound":10},{"name":"z","cat":"Continuous","lowBound":null,"upBound":5}],"constraints":[]}`
+	mOmit, err := format.FromPuLPJSON(strings.NewReader(omittedLB))
+	if err != nil {
+		t.Fatalf("FromPuLPJSON omitted lowBound failed: %v", err)
+	}
+	pOmit := mOmit.Compile()
+	if pOmit.VarLB[0] != 0 || pOmit.VarUB[0] != 10 {
+		t.Fatalf("expected omitted lowBound -> [0, 10], got [%v, %v]", pOmit.VarLB[0], pOmit.VarUB[0])
+	}
+	if !math.IsInf(pOmit.VarLB[1], -1) || pOmit.VarUB[1] != 5 {
+		t.Fatalf("expected explicit null lowBound -> [-Inf, 5], got [%v, %v]", pOmit.VarLB[1], pOmit.VarUB[1])
 	}
 
 	if err := format.ToPuLPJSON(nil, &bytes.Buffer{}); err == nil {
@@ -181,5 +211,24 @@ func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 	mCollide.AddConstraint("OBJ", gb.Le(gb.NewExpr(gb.T(vOk, 1.0)), 1.0))
 	if err := format.WriteMPS(mCollide.Compile(), &bytes.Buffer{}); err == nil {
 		t.Fatal("expected WriteMPS error when row name collides with objective name OBJ")
+	}
+
+	// Unused columns must still appear in COLUMNS, and lb=0, ub<0 must emit explicit LO BND 0.
+	mUnused := gb.NewModel("mps_unused", gb.Minimize)
+	_ = mUnused.AddIntVar("unused_int", 1, 5)
+	_ = mUnused.AddContVar("infeas_neg_ub", 0, -1)
+	yUsed := mUnused.AddContVar("y", 0, 10)
+	mUnused.SetObjective(gb.VarExpr(yUsed))
+	mUnused.AddConstraint("c", gb.VarExpr(yUsed).Ge(2))
+	var unusedBuf bytes.Buffer
+	if err := format.WriteMPS(mUnused.Compile(), &unusedBuf); err != nil {
+		t.Fatalf("WriteMPS unused failed: %v", err)
+	}
+	unusedMPS := unusedBuf.String()
+	if !strings.Contains(unusedMPS, "unused_int OBJ") {
+		t.Fatalf("expected unused_int in COLUMNS section:\n%s", unusedMPS)
+	}
+	if !strings.Contains(unusedMPS, "LO BND       infeas_neg_ub") {
+		t.Fatalf("expected explicit LO BND 0 for lb=0, ub=-1:\n%s", unusedMPS)
 	}
 }

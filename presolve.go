@@ -14,7 +14,9 @@ const (
 	presolveIntTol         = 1e-7
 	presolveBoundChangeTol = 1e-9
 	presolveGCDIntTol      = 1e-8
+	presolveGCDMaxRowErr   = 1e-9
 	presolveGCDMaxCoeff    = 1e9
+	presolveRelScaleTol    = 1e-12
 	presolveZeroTol        = 1e-12
 	presolveQuantScale     = 1e6
 	presolveQuantOffset    = 0.1234567
@@ -117,7 +119,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	strengthened := 0
 	removedRows := 0
 
-	// 1. Euclidean GCD reduction on pure-integer rows
+	// 1. Euclidean GCD reduction on pure-integer rows with domain-bounded rounding error.
 	if orig.IsMIP {
 		for i := range m {
 			r := &rows[i]
@@ -126,6 +128,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			}
 			allInt := true
 			var g int64
+			maxRoundErr := 0.0
 			for k, col := range r.cols {
 				if orig.VarCat[col] == Continuous {
 					allInt = false
@@ -133,9 +136,22 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 				}
 				cVal := r.vals[k]
 				rc := math.Round(cVal)
-				if math.Abs(cVal-rc) > presolveGCDIntTol || math.Abs(rc) > presolveGCDMaxCoeff {
+				diff := math.Abs(cVal - rc)
+				if diff > presolveGCDIntTol || math.Abs(rc) > presolveGCDMaxCoeff {
 					allInt = false
 					break
+				}
+				if diff > 0 {
+					maxDom := max(math.Abs(lb[col]), math.Abs(ub[col]))
+					if math.IsInf(maxDom, 0) || math.IsNaN(maxDom) {
+						allInt = false
+						break
+					}
+					maxRoundErr += diff * maxDom
+					if maxRoundErr > presolveGCDMaxRowErr {
+						allInt = false
+						break
+					}
 				}
 				ic := int64(math.Abs(rc))
 				if ic == 0 {
@@ -148,37 +164,43 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 				for k := range r.vals {
 					r.vals[k] = math.Round(r.vals[k]) / fg
 				}
+				errScaled := maxRoundErr / fg
 				scaledRHS := r.rhs / fg
 				switch r.sense {
 				case LessEqual:
-					r.rhs = math.Floor(scaledRHS + presolveIntTol)
+					r.rhs = math.Floor(scaledRHS + errScaled + presolveIntTol)
 				case GreaterEqual:
-					r.rhs = math.Ceil(scaledRHS - presolveIntTol)
+					r.rhs = math.Ceil(scaledRHS - errScaled - presolveIntTol)
 				case Equal:
 					nearest := math.Round(scaledRHS)
-					if math.Abs(scaledRHS-nearest) > presolveFeasTol {
+					if math.Abs(scaledRHS-nearest) > presolveFeasTol+errScaled {
 						return PresolveResult{Infeasible: true}
 					}
 					r.rhs = nearest
 				}
 				strengthened++
 			} else if allInt && g == 1 {
+				if maxRoundErr > 0 {
+					for k := range r.vals {
+						r.vals[k] = math.Round(r.vals[k])
+					}
+				}
 				switch r.sense {
 				case LessEqual:
-					fl := math.Floor(r.rhs + presolveIntTol)
+					fl := math.Floor(r.rhs + maxRoundErr + presolveIntTol)
 					if fl < r.rhs-presolveBoundChangeTol {
 						r.rhs = fl
 						strengthened++
 					}
 				case GreaterEqual:
-					cl := math.Ceil(r.rhs - presolveIntTol)
+					cl := math.Ceil(r.rhs - maxRoundErr - presolveIntTol)
 					if cl > r.rhs+presolveBoundChangeTol {
 						r.rhs = cl
 						strengthened++
 					}
 				case Equal:
 					nearest := math.Round(r.rhs)
-					if math.Abs(r.rhs-nearest) > presolveFeasTol {
+					if math.Abs(r.rhs-nearest) > presolveFeasTol+maxRoundErr {
 						return PresolveResult{Infeasible: true}
 					}
 					r.rhs = nearest
@@ -391,11 +413,13 @@ func runActivityTightening(
 
 			hasUpper := r.sense == LessEqual || r.sense == Equal
 			hasLower := r.sense == GreaterEqual || r.sense == Equal
+			rowScale := max(1.0, max(math.Abs(r.rhs), max(math.Abs(minFinite), math.Abs(maxFinite))))
+			rowFeasTol := max(presolveFeasTol, presolveRelScaleTol*rowScale)
 
-			if hasUpper && minInfCount == 0 && minFinite > r.rhs+presolveFeasTol {
+			if hasUpper && minInfCount == 0 && minFinite > r.rhs+rowFeasTol {
 				return tightened, removedRows, true, false
 			}
-			if hasLower && maxInfCount == 0 && maxFinite < r.rhs-presolveFeasTol {
+			if hasLower && maxInfCount == 0 && maxFinite < r.rhs-rowFeasTol {
 				return tightened, removedRows, true, false
 			}
 
@@ -434,7 +458,8 @@ func runActivityTightening(
 						}
 						newUB := (r.rhs - resMin) / a
 						if orig.VarCat[col] != Continuous {
-							newUB = math.Floor(newUB + presolveIntTol)
+							bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
+							newUB = math.Floor(newUB + bTol)
 						}
 						if newUB < u-presolveIntTol {
 							ub[col] = newUB
@@ -458,7 +483,8 @@ func runActivityTightening(
 						}
 						newLB := (r.rhs - resMin) / a
 						if orig.VarCat[col] != Continuous {
-							newLB = math.Ceil(newLB - presolveIntTol)
+							bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/(-a))
+							newLB = math.Ceil(newLB - bTol)
 						}
 						if newLB > l+presolveIntTol {
 							lb[col] = newLB
@@ -494,7 +520,8 @@ func runActivityTightening(
 						}
 						newLB := (r.rhs - resMax) / a
 						if orig.VarCat[col] != Continuous {
-							newLB = math.Ceil(newLB - presolveIntTol)
+							bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
+							newLB = math.Ceil(newLB - bTol)
 						}
 						if newLB > l+presolveIntTol {
 							lb[col] = newLB
@@ -518,7 +545,8 @@ func runActivityTightening(
 						}
 						newUB := (r.rhs - resMax) / a
 						if orig.VarCat[col] != Continuous {
-							newUB = math.Floor(newUB + presolveIntTol)
+							bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/(-a))
+							newUB = math.Floor(newUB + bTol)
 						}
 						if newUB < u-presolveIntTol {
 							ub[col] = newUB

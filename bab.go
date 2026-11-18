@@ -10,7 +10,7 @@ import (
 // incumbentTol is the largest bound, row, or integer residual allowed when a
 // rounded LP point becomes an incumbent.
 const (
-	incumbentTol            = 1e-5
+	incumbentTol            = 1e-6
 	nodeQueueCmpTol         = 1e-7
 	maxRootCutsCap          = 60
 	minRootCutsFloor        = 15
@@ -43,6 +43,8 @@ const (
 	heurMedMissCap          = 4
 	heurSlowMissCap         = 12
 	tightenObjPasses        = 3
+	nodeCompactStepCap      = 128
+	rootIterExpandMult      = 4
 )
 
 type boundDelta struct {
@@ -52,15 +54,19 @@ type boundDelta struct {
 }
 
 type searchNode struct {
+	parent     *searchNode
+	base       []boundDelta
+	delta      boundDelta
 	lowerBound float64
 	estimate   float64
-	depth      int
-	id         int
-	deltas     []boundDelta
+	// brDist is the step from the parent's LP value to the child bound.
+	brDist   float64
+	depth    int
+	id       int
+	steps    uint16
+	hasDelta bool
 	// up is true on an upward branch.
 	up bool
-	// brDist is the step from the parent's LP value to the child bound.
-	brDist float64
 }
 
 type nodeQueue []*searchNode
@@ -137,9 +143,68 @@ type babEngine struct {
 	hitNodeLimit       bool
 	hitLPLimitStatus   Status
 	unsolvedMinBound   float64
+	prunedMinBound     float64
 	nodesExplored      int
 	plungeNode         *searchNode
 	pq                 nodeQueue
+	fixScratchLB       []float64
+	fixScratchUB       []float64
+}
+
+func (b *babEngine) ensureHeurSolver() *LPSolver {
+	if b.heurSolver == nil {
+		b.heurSolver = NewLPSolver(b.p, nil)
+		b.heurSolver.Deadline = b.deadline
+		b.heurSolver.Done = b.done
+		b.heurSolver.DisableSIMD = b.opts.DisableSIMD
+		if b.lpSolver != nil && b.lpSolver.dualValid {
+			b.heurSolver.CopyRootBasisFrom(b.lpSolver)
+		}
+	}
+	return b.heurSolver
+}
+
+func hasInfeasibleIntegerEqRow(p *CompiledProblem) bool {
+	if !p.IsMIP {
+		return false
+	}
+	for i := range p.NumConstraints {
+		if p.RowSense[i] != Equal {
+			continue
+		}
+		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		if s == e {
+			if math.Abs(p.RowRHS[i]) > primalTol {
+				return true
+			}
+			continue
+		}
+		allExactInt := true
+		var g int64
+		for k := s; k < e; k++ {
+			col := p.ColIdx[k]
+			if p.VarCat[col] == Continuous {
+				allExactInt = false
+				break
+			}
+			v := p.RowVal[k]
+			rv := math.Round(v)
+			if v != rv || math.Abs(rv) > presolveGCDMaxCoeff {
+				allExactInt = false
+				break
+			}
+			if iv := int64(math.Abs(rv)); iv > 0 {
+				g = gcdInt64(g, iv)
+			}
+		}
+		if allExactInt && g > 0 {
+			scaled := p.RowRHS[i] / float64(g)
+			if math.Abs(scaled-math.Round(scaled)) > presolveFeasTol {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (b *babEngine) timeExpired() bool {
@@ -183,6 +248,13 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 			SolveTime: time.Since(startTime),
 		}
 	}
+	if !opts.EnablePresolve && hasInfeasibleIntegerEqRow(p) {
+		return Result{
+			modelID:   p.modelID,
+			Status:    StatusInfeasible,
+			SolveTime: time.Since(startTime),
+		}
+	}
 
 	ws := AcquireWorkspace(n, p.NumConstraints)
 	defer ReleaseWorkspace(ws)
@@ -203,12 +275,23 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 		bestObjMin:       math.Inf(1),
 		hitLPLimitStatus: StatusNotSolved,
 		unsolvedMinBound: math.Inf(1),
+		prunedMinBound:   math.Inf(1),
 		nodesExplored:    1,
 	}
+	defer func() {
+		b.heurSolver.Close()
+	}()
 
 	b.capLPIter(lpSolver, b.defaultLPIter)
 	rootRes := lpSolver.Solve()
 	b.totalLPIters = rootRes.Iterations
+	if rootRes.Status == StatusIterationLimit && !b.budgetBound(lpSolver) && !b.timeExpired() {
+		if b.capLPIter(lpSolver, rootIterExpandMult*b.defaultLPIter) {
+			retryRes := lpSolver.Solve()
+			b.totalLPIters += retryRes.Iterations
+			rootRes = retryRes
+		}
+	}
 
 	if rootRes.Status != StatusOptimal {
 		if rootRes.Status == StatusUnbounded && p.IsMIP && len(p.IntCols) > 0 {
@@ -243,13 +326,14 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	}
 
 	if isIntegerFeasible(p, rootRes.Primal) {
-		if cand, ok := roundedIncumbent(p, rootRes.Primal); ok {
+		if cand, ok := b.polishIncumbent(rootRes.Primal); ok {
 			obj := p.EvaluateObjective(cand)
+			boundMin := min(minObjective(p, cand), b.rootLPMin)
 			return Result{
 				modelID:      p.modelID,
 				Status:       StatusOptimal,
 				Objective:    obj,
-				BestBound:    obj,
+				BestBound:    p.ObjectiveFromMin(boundMin),
 				RootLPBound:  b.rootLPUser,
 				RootCutBound: b.rootLPUser,
 				Values:       cand,
@@ -278,12 +362,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	}
 
 	if opts.EnableHeuristics {
-		heurWS := AcquireWorkspace(n, p.NumConstraints)
-		defer ReleaseWorkspace(heurWS)
-		b.heurSolver = NewLPSolver(p, heurWS)
-		b.heurSolver.Deadline = deadline
-		b.heurSolver.Done = done
-		b.heurSolver.DisableSIMD = opts.DisableSIMD
+		b.ensureHeurSolver()
 		b.runPreCutHeuristics(rootRes.Primal)
 	}
 
@@ -445,7 +524,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		curLPRes = nextRes
 
 		if isIntegerFeasible(p, curLPRes.Primal) {
-			if cand, ok := roundedIncumbent(p, curLPRes.Primal); ok {
+			if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 				if objMin := minObjective(p, cand); objMin < b.bestObjMin {
 					b.bestObjMin = objMin
 					b.bestPrimal = cand
@@ -558,13 +637,14 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 	brVar, brVal := selectBranchVar(p, b.lpSolver, curLPRes, curLB, curUB, pCosts, 0, &b.totalLPIters, b.iterLeft)
 	if brVar == -1 {
-		if cand, ok := roundedIncumbent(p, curLPRes.Primal); ok {
+		if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 			obj := p.EvaluateObjective(cand)
+			boundMin := min(minObjective(p, cand), b.rootCutMin)
 			return Result{
 				modelID:      p.modelID,
 				Status:       StatusOptimal,
 				Objective:    obj,
-				BestBound:    obj,
+				BestBound:    p.ObjectiveFromMin(boundMin),
 				RootLPBound:  b.rootLPUser,
 				RootCutBound: b.rootCutUser,
 				Values:       cand,
@@ -620,6 +700,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		}
 
 		if node.lowerBound >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(node.lowerBound, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+			b.prunedMinBound = min(b.prunedMinBound, node.lowerBound)
 			continue
 		}
 
@@ -627,10 +708,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 		copy(curLB, baseLB)
 		copy(curUB, baseUB)
-		for _, d := range node.deltas {
-			curLB[d.col] = max(curLB[d.col], d.lb)
-			curUB[d.col] = min(curUB[d.col], d.ub)
-		}
+		applyNodeBounds(node, curLB, curUB)
 
 		if b.opts.EnablePresolve && !propagateBounds(p, curLB, curUB, nodePropPasses) {
 			continue
@@ -658,17 +736,17 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			continue
 		}
 		if nodeRes.ObjectiveMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(nodeRes.ObjectiveMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+			b.prunedMinBound = min(b.prunedMinBound, nodeRes.ObjectiveMin)
 			continue
 		}
 
-		if len(node.deltas) > 0 {
+		if node.hasDelta {
 			gain := max(0.0, nodeRes.ObjectiveMin-node.lowerBound)
-			lastCol := node.deltas[len(node.deltas)-1].col
-			pCosts[lastCol].record(node.up, gain, node.brDist)
+			pCosts[node.delta.col].record(node.up, gain, node.brDist)
 		}
 
 		if isIntegerFeasible(p, nodeRes.Primal) {
-			if cand, ok := roundedIncumbent(p, nodeRes.Primal); ok {
+			if cand, ok := b.polishIncumbent(nodeRes.Primal); ok {
 				if objMin := minObjective(p, cand); objMin < b.bestObjMin {
 					b.bestObjMin = objMin
 					b.bestPrimal = cand
@@ -688,6 +766,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 				lastIncumbentNode = b.nodesExplored
 				heurMisses = 0
 				if nodeRes.ObjectiveMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(nodeRes.ObjectiveMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+					b.prunedMinBound = min(b.prunedMinBound, nodeRes.ObjectiveMin)
 					continue
 				}
 			} else {
@@ -715,7 +794,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		cDown, cUp := createChildNodes(
 			nodeRes.ObjectiveMin,
 			node.depth+1,
-			node.deltas,
+			node,
 			bVar,
 			bVal,
 			curLB[bVar],
@@ -751,7 +830,7 @@ func (b *babEngine) limitStatus() Status {
 
 func (b *babEngine) finalizeResult() Result {
 	p := b.p
-	bestBoundMin := min(b.bestObjMin, b.unsolvedMinBound)
+	bestBoundMin := min(b.bestObjMin, min(b.unsolvedMinBound, b.prunedMinBound))
 	for _, nd := range b.pq {
 		if nd.lowerBound < bestBoundMin {
 			bestBoundMin = nd.lowerBound
@@ -843,10 +922,54 @@ func solveNodeLP(
 	return res, StatusNotSolved
 }
 
+func applyNodeBounds(node *searchNode, curLB, curUB []float64) {
+	for cur := node; cur != nil; cur = cur.parent {
+		if cur.hasDelta {
+			d := cur.delta
+			curLB[d.col] = max(curLB[d.col], d.lb)
+			curUB[d.col] = min(curUB[d.col], d.ub)
+		}
+		for _, d := range cur.base {
+			curLB[d.col] = max(curLB[d.col], d.lb)
+			curUB[d.col] = min(curUB[d.col], d.ub)
+		}
+	}
+}
+
+func compactAncestorDeltas(node *searchNode) []boundDelta {
+	merged := make(map[int]boundDelta, nodeCompactStepCap)
+	for cur := node; cur != nil; cur = cur.parent {
+		if cur.hasDelta {
+			d := cur.delta
+			if ex, ok := merged[d.col]; ok {
+				ex.lb = max(ex.lb, d.lb)
+				ex.ub = min(ex.ub, d.ub)
+				merged[d.col] = ex
+			} else {
+				merged[d.col] = d
+			}
+		}
+		for _, d := range cur.base {
+			if ex, ok := merged[d.col]; ok {
+				ex.lb = max(ex.lb, d.lb)
+				ex.ub = min(ex.ub, d.ub)
+				merged[d.col] = ex
+			} else {
+				merged[d.col] = d
+			}
+		}
+	}
+	out := make([]boundDelta, 0, len(merged))
+	for _, d := range merged {
+		out = append(out, d)
+	}
+	return out
+}
+
 func createChildNodes(
 	parentLB float64,
 	depth int,
-	parentDeltas []boundDelta,
+	parent *searchNode,
 	brVar int,
 	brVal float64,
 	curLB, curUB float64,
@@ -858,13 +981,17 @@ func createChildNodes(
 	fDown := brVal - floorVal
 	fUp := ceilVal - brVal
 
-	downDeltas := make([]boundDelta, len(parentDeltas)+1)
-	copy(downDeltas, parentDeltas)
-	downDeltas[len(parentDeltas)] = boundDelta{col: brVar, lb: curLB, ub: floorVal}
-
-	upDeltas := make([]boundDelta, len(parentDeltas)+1)
-	copy(upDeltas, parentDeltas)
-	upDeltas[len(parentDeltas)] = boundDelta{col: brVar, lb: ceilVal, ub: curUB}
+	var base []boundDelta
+	nextParent := parent
+	var steps uint16 = 1
+	if parent != nil {
+		if parent.steps >= nodeCompactStepCap {
+			base = compactAncestorDeltas(parent)
+			nextParent = nil
+		} else {
+			steps = parent.steps + 1
+		}
+	}
 
 	*counter++
 	downID := *counter
@@ -872,22 +999,30 @@ func createChildNodes(
 	upID := *counter
 
 	downNode = &searchNode{
+		parent:     nextParent,
+		base:       base,
+		delta:      boundDelta{col: brVar, lb: curLB, ub: floorVal},
 		lowerBound: parentLB,
 		estimate:   parentLB + fDown*pc.avgDown(),
+		brDist:     fDown,
 		depth:      depth,
 		id:         downID,
-		deltas:     downDeltas,
+		steps:      steps,
+		hasDelta:   true,
 		up:         false,
-		brDist:     fDown,
 	}
 	upNode = &searchNode{
+		parent:     nextParent,
+		base:       base,
+		delta:      boundDelta{col: brVar, lb: ceilVal, ub: curUB},
 		lowerBound: parentLB,
 		estimate:   parentLB + fUp*pc.avgUp(),
+		brDist:     fUp,
 		depth:      depth,
 		id:         upID,
-		deltas:     upDeltas,
+		steps:      steps,
+		hasDelta:   true,
 		up:         true,
-		brDist:     fUp,
 	}
 	return downNode, upNode
 }
@@ -1034,11 +1169,54 @@ func selectNearIntegralBranchVar(p *CompiledProblem, x, curLB, curUB []float64) 
 	return best, x[best]
 }
 
-// roundedIncumbent snaps the near-integral integer components of x and checks all bounds and rows within incumbentTol.
-func roundedIncumbent(p *CompiledProblem, x []float64) ([]float64, bool) {
+// polishIncumbent snaps near-integral integer components of x, re-optimizes continuous
+// variables when needed to eliminate snapping residuals, and verifies all bounds and rows within incumbentTol.
+func (b *babEngine) polishIncumbent(x []float64) ([]float64, bool) {
+	p := b.p
 	cand := slices.Clone(x)
-	snapToIntegers(p, cand)
+	for _, col := range p.IntCols {
+		v := cand[col]
+		rv := math.Round(v)
+		if math.Abs(v-rv) <= intSnapTol {
+			cand[col] = rv
+		}
+	}
 	bV, rV, iV := p.MaxViolation(cand, true)
+	if iV > incumbentTol {
+		return nil, false
+	}
+	if len(p.IntCols) < p.NumVars && !b.timeExpired() && (bV > primalTol || rV > primalTol) {
+		n := p.NumVars
+		if len(b.fixScratchLB) < n {
+			b.fixScratchLB = make([]float64, n)
+			b.fixScratchUB = make([]float64, n)
+		}
+		fixLB := b.fixScratchLB[:n]
+		fixUB := b.fixScratchUB[:n]
+		copy(fixLB, p.VarLB)
+		copy(fixUB, p.VarUB)
+		validFix := true
+		for _, col := range p.IntCols {
+			iv := cand[col]
+			if iv < p.VarLB[col]-incumbentTol || iv > p.VarUB[col]+incumbentTol {
+				validFix = false
+				break
+			}
+			iv = min(max(iv, p.VarLB[col]), p.VarUB[col])
+			fixLB[col] = iv
+			fixUB[col] = iv
+		}
+		if validFix {
+			hs := b.ensureHeurSolver()
+			hs.SetStructuralBounds(fixLB, fixUB)
+			polRes := hs.Solve()
+			if polRes.Status == StatusOptimal && len(polRes.Primal) == n {
+				copy(cand, polRes.Primal)
+				snapToIntegers(p, cand)
+				bV, rV, iV = p.MaxViolation(cand, true)
+			}
+		}
+	}
 	return cand, bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol
 }
 

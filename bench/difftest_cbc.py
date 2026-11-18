@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Differential test of goblin against COIN-OR CBC on randomly generated MILPs.
 
-Each run generates problems from four families (mixed general MILPs, big-M fixed-charge
-depot siting with tiny demands, equation-constrained integer knapsacks, and badly
-scaled MILPs), solves them with CBC through PuLP, solves them with goblin in three flag
-modes through ``go run ./cmd/goblin-difftest``, and compares the outcomes.
+Each run generates problems from four families: mixed general MILPs, big-M
+depot siting, equation-constrained integer knapsacks, and badly scaled MILPs.
+The script solves each model with CBC via PuLP and with goblin in three flag
+modes via `go run ./cmd/goblin-difftest`, then compares the outcomes.
 
-CBC is not treated as infallible. When goblin and CBC disagree, goblin's primal vector is checked
-against all bounds and rows in PuLP's own model and CBC is re-run with presolve disabled; the
-mismatch is classified as a CBC defect only if goblin's vector is valid and at
-least as good as every CBC answer. Any other mismatch is a goblin failure and makes the
-script exit with status 1.
+CBC is not treated as infallible. When goblin and CBC disagree, goblin's primal
+vector is checked against all bounds and rows in PuLP's own model, and CBC is
+re-run with presolve disabled. A mismatch counts as a CBC defect only when
+goblin's vector is feasible and at least as good as every CBC answer. Any other
+mismatch is a goblin failure and exits with status 1.
 
 CBC is located through PuLP's bundled binary (PULP_CBC_CMD), the CBC_BIN shell
-variable, ``cbc`` on PATH, or the repository build under ``third_party/Cbc/dist/bin/cbc``.
+variable, `cbc` on PATH, or `third_party/Cbc/dist/bin/cbc`.
 """
 
 from __future__ import annotations

@@ -157,7 +157,9 @@ func (m *Model) Compile() *CompiledProblem {
 			p.IsMIP = true
 			p.IntegerMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			p.IntCols = append(p.IntCols, j)
-			p.IntCols32 = append(p.IntCols32, int32(j))
+			if j <= math.MaxInt32 {
+				p.IntCols32 = append(p.IntCols32, int32(j))
+			}
 			if cat == Binary {
 				p.BinaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			}
@@ -255,18 +257,23 @@ func (m *Model) Compile() *CompiledProblem {
 
 	// Build CSC (Compressed Sparse Column) transpose from CSR
 	nnz := len(p.ColIdx)
+	fit32 := n <= math.MaxInt32 && mc <= math.MaxInt32 && nnz <= math.MaxInt32
 	p.ColPtr = make([]int, n+1)
-	p.ColPtr32 = make([]int32, n+1)
 	p.RowIdx = make([]int, nnz)
-	p.RowIdx32 = make([]int32, nnz)
 	p.ColVal = make([]float64, nnz)
+	if fit32 {
+		p.ColPtr32 = make([]int32, n+1)
+		p.RowIdx32 = make([]int32, nnz)
+	}
 
 	for _, col := range p.ColIdx {
 		p.ColPtr[col+1]++
 	}
 	for j := range n {
 		p.ColPtr[j+1] += p.ColPtr[j]
-		p.ColPtr32[j+1] = int32(p.ColPtr[j+1])
+		if fit32 {
+			p.ColPtr32[j+1] = int32(p.ColPtr[j+1])
+		}
 	}
 	writePos := make([]int, n)
 	copy(writePos, p.ColPtr[:n])
@@ -275,7 +282,9 @@ func (m *Model) Compile() *CompiledProblem {
 			col := p.ColIdx[k]
 			pos := writePos[col]
 			p.RowIdx[pos] = i
-			p.RowIdx32[pos] = int32(i)
+			if fit32 {
+				p.RowIdx32[pos] = int32(i)
+			}
 			p.ColVal[pos] = p.RowVal[k]
 			writePos[col]++
 		}

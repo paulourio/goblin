@@ -31,7 +31,7 @@ By convention, callers can import `github.com/paulourio/goblin` as `gb` (`import
 
 ## 2. Model Validation and Sparse Matrix Compilation (`Model.Compile`)
 
-Calling [`Model.Validate()`](../model.go) or [`Model.CompileChecked()`](../compiled.go) checks that all variable bounds, objective terms, and constraint terms reference `Var` handles owned by the receiver `Model`, contain finite (`non-NaN`, `non-Inf`) individual and accumulated coefficients, use unique variable names, and use a valid `ConstraintSense` (`LessEqual`, `Equal`, or `GreaterEqual`). If an invalid model is passed directly to `Solve()` or `SolveCompiled()`, the solver returns `StatusUndefined` and the validation error. Bounds that become empty after integer rounding (for example an integer variable on `[0.5, 0.7]`) are not a validation error; the solver reports `StatusInfeasible`.
+Calling [`Model.Validate()`](../model.go) or [`Model.CompileChecked()`](../compiled.go) checks that all variable bounds, objective terms, and constraint terms reference `Var` handles owned by the receiver `Model`, contain finite (`non-NaN`, `non-Inf`) individual and accumulated coefficients, use a valid `VarCategory` (`Continuous`, `Integer`, or `Binary`), use unique variable and constraint names, and use a valid `ConstraintSense` (`LessEqual`, `Equal`, or `GreaterEqual`). If an invalid model is passed directly to `Solve()` or `SolveCompiled()`, the solver returns `StatusUndefined` and the validation error. Bounds that become empty after integer rounding (for example an integer variable on `[0.5, 0.7]`) are not a validation error; the solver reports `StatusInfeasible`.
 
 Calling [`Model.Compile()`](../compiled.go) freezes the algebraic model into an immutable [`CompiledProblem`](../compiled.go):
 1. **Term Deduplication and Cancellation**: Within the objective and each constraint row, duplicate references to the same `Var` are summed in preallocated accumulator slices (`rowAcc`, `touched`, `inTouched`), overflowed sums are flagged on `InvalidErr`, and entries with $|a_{i,j}| \le 10^{-15}$ are dropped.
@@ -47,7 +47,8 @@ Both `Model.Solve(ctx, opts...)` and `SolveCompiled(ctx, p, opts...)` accept a `
 
 - **Backend choice**: `WithPureGo()` (`WithBackend(BackendGo)`, default) runs the pure-Go simplex and Branch-and-Cut engine without `cgo`; `WithCBC()` (`WithBackend(BackendCBC)`) dispatches the compiled `CSC` matrix in-process to COIN-OR CBC/CLP via `cgo` when built with `-tags cbc` (otherwise `Solve` returns `StatusUndefined`).
 - **SIMD control**: `WithSIMD(bool)` and `WithoutSIMD()` enable or disable AVX2 SIMD kernels on the pure-Go backend.
-- **Search and tolerance limits**: `WithTimeLimit(d)`, `WithMaxNodes(n)`, `WithMaxIter(n)`, `WithPresolve(bool)`, `WithCuts(bool)`, `WithHeuristics(bool)`, `WithMaxCutPasses(n)`, `WithRelGapTol(tol)`, and `WithAbsGapTol(tol)`.
+- **Search and tolerance limits**: `WithTimeLimit(d)`, `WithMaxNodes(n)` (`DefaultOptions().MaxNodes = 50000`; pass `0` for unlimited), `WithMaxIter(n)`, `WithPresolve(bool)`, `WithCuts(bool)`, `WithHeuristics(bool)`, `WithMaxCutPasses(n)`, `WithRelGapTol(tol)` (measured on the linear objective `c^T x`), and `WithAbsGapTol(tol)`.
+- **Termination codes**: `Status` codes `0`, `1`, `-1`, `-2`, and `-3` match `PuLP`'s `LpStatus` codes (`StatusNotSolved`, `StatusOptimal`, `StatusInfeasible`, `StatusUnbounded`, `StatusUndefined`); codes `-4` through `-12` extend that set for solver resource limits and numerical errors.
 - **Context cancellation vs. solver time limit**: `ctx` handles upstream cancellation and service deadlines; when `ctx` is canceled or its deadline expires, the solver aborts at the next checkpoint, discards partial solutions, and returns `(Result{}, ctx.Err())`. Conversely, `WithTimeLimit(d)` sets a solver time budget that returns `(res, nil)` with `res.Status == StatusTimeLimit` along with the best incumbent (`res.Values`, `res.Objective`) and global bound (`res.BestBound`) found so far.
 
 ```go
@@ -72,8 +73,8 @@ Whenever a solver resource limit (`WithTimeLimit`, `WithMaxNodes`, `WithMaxIter`
 ## 3. `PuLP` JSON Interoperability (`goblin/format`)
 
 The [`format/pulp_json.go`](../format/pulp_json.go) file reads and writes Python `PuLP`'s `LpProblem.toJson()` / `LpProblem.fromJson()` schema:
-- **Objective Offset and Constraint Sign Rule**: Objective scalar offsets round-trip via `objective.constant`. In `PuLP`'s JSON dictionary, each constraint stores `coefficients` and a scalar `constant` representing $\sum_j a_{i,j} x_j + \text{constant} \ \{\le, =, \ge\}\ 0$. The function [`BuildModelFromPuLPJSON`](../format/pulp_json.go) maps `RHS = -c.Constant` and maps `sense` codes (`-1` $\to$ `LessEqual`, `0` $\to$ `Equal`, `1` $\to$ `GreaterEqual`).
-- **Validation Guards**: [`BuildModelFromPuLPJSON`](../format/pulp_json.go) rejects empty or duplicate variable names and returns an explicit error on non-empty `sos1` or `sos2` sets rather than solving a relaxed model.
+- **Objective Offset and Constraint Sign Rule**: Objective scalar offsets round-trip across `goblin` via the `objective.constant` extension field (ignored by Python `PuLP`'s `LpProblem.fromJson`). In `PuLP`'s JSON dictionary, each constraint stores `coefficients` and a scalar `constant` representing $\sum_j a_{i,j} x_j + \text{constant} \ \{\le, =, \ge\}\ 0$, while omitted `"lowBound"` variable keys default to `0` (`null` maps to $-\infty$). The function [`BuildModelFromPuLPJSON`](../format/pulp_json.go) maps `RHS = -c.Constant` and validates `sense` codes (`-1` $\to$ `LessEqual`, `0` $\to$ `Equal`, `1` $\to$ `GreaterEqual`).
+- **Validation Guards**: [`BuildModelFromPuLPJSON`](../format/pulp_json.go) rejects empty or duplicate variable and constraint names, invalid `sense` or `cat` values, and non-empty `sos1` or `sos2` sets rather than solving a relaxed model.
 - **Binary Bounds**: `PuLP` serializes binary variables as `"cat": "Integer"` with `"lowBound": 0, "upBound": 1`. During [`BuildModelFromPuLPJSON`](../format/pulp_json.go), integer variables with bounds $[0, 1]$ become `gb.Binary` so that 0-1 knapsack cover lifting and binary bound tightening activate automatically.
 - **Separated Parse and Build Stages**: [`ParsePuLPJSON(data)`](../format/pulp_json.go) unmarshals raw JSON bytes into `*PuLPJSON`, and [`BuildModelFromPuLPJSON(doc)`](../format/pulp_json.go) constructs the `*gb.Model`, allowing the benchmark harness to time `t_parse` and `t_build` independently.
 
@@ -81,8 +82,8 @@ The [`format/pulp_json.go`](../format/pulp_json.go) file reads and writes Python
 
 ## 4. MPS Serialization (`format.WriteMPS`)
 
-The function [`format.WriteMPS(p *CompiledProblem, w io.Writer)`](../format/mps.go) emits standard MPS output from a valid `CompiledProblem`:
-- Formats all floating-point coefficients, right-hand sides, and variable bounds losslessly via `strconv.FormatFloat(v, 'g', -1, 64)` and validates that variable and row names contain no whitespace or non-printable characters.
+The function [`format.WriteMPS(p *CompiledProblem, w io.Writer)`](../format/mps.go) emits free-format MPS output from a valid `CompiledProblem`:
+- Formats all floating-point coefficients, right-hand sides, and variable bounds losslessly via `strconv.FormatFloat(v, 'g', -1, 64)`, validates that variable and row names are unique and contain no whitespace or non-printable characters, and emits an explicit zero objective entry for any column absent from both the objective and all constraints.
 - Writes `*SENSE:<sense>`, `NAME`, `ROWS` (`N` objective, `L`/`G`/`E` constraints), `COLUMNS` (iterating directly over `CSC` slices `ColPtr`/`RowIdx`/`ColVal` and bracketing integer blocks with `'MARKER' 'INTORG'` and `'INTEND'`), `RHS` (including any nonzero `ObjConstant` on the objective row following COIN-OR sign rules), `BOUNDS`, and `ENDATA`.
 
 ---

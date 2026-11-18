@@ -208,11 +208,13 @@ void goblin_solve_lp(
     double *rc_out
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
+    if (!out) return;
     std::memset(out, 0, sizeof(GoblinResult));
     if (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) {
         out->status = -4; // StatusTimeLimit
         return;
     }
+    try {
 
     OsiClpSolverInterface solver;
     configure_silent_clp(solver);
@@ -302,6 +304,9 @@ void goblin_solve_lp(
     } else {
         out->status = -12; // StatusNumericalError
     }
+    } catch (...) {
+        out->status = -12; // StatusNumericalError
+    }
 }
 
 void goblin_solve_mip(
@@ -331,11 +336,13 @@ void goblin_solve_mip(
     double *primal_out
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
+    if (!out) return;
     std::memset(out, 0, sizeof(GoblinResult));
     if (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0) {
         out->status = -4; // StatusTimeLimit
         return;
     }
+    try {
     tl_total_cuts = 0;
     tl_root_lp_min = 0.0;
     tl_root_cut_min = 0.0;
@@ -464,7 +471,9 @@ void goblin_solve_mip(
         addParamI(CbcParam::MAXNODES, "maxN", max_nodes);
     }
     if (time_limit_sec > 0.0) {
-        cbcSolver.model()->setUseElapsedTime(true);
+        if (cbcSolver.model()) {
+            cbcSolver.model()->setUseElapsedTime(true);
+        }
         addParamD(CbcParam::TIMELIMIT, "sec", time_limit_sec);
     }
 
@@ -475,6 +484,10 @@ void goblin_solve_mip(
     tl_cancel_flag = nullptr;
     tl_max_iter = 0;
 
+    if (!cbcSolver.model()) {
+        out->status = -12; // StatusNumericalError
+        return;
+    }
     CbcModel &m = *cbcSolver.model();
     const CbcSolverStatistics &stats = cbcSolver.getStatistics();
 
@@ -566,6 +579,11 @@ void goblin_solve_mip(
     } else {
         out->status = -3; // StatusUndefined
     }
+    } catch (...) {
+        tl_cancel_flag = nullptr;
+        tl_max_iter = 0;
+        out->status = -12; // StatusNumericalError
+    }
 }
 
 GoblinLPSolver* goblin_lp_new(
@@ -580,31 +598,42 @@ GoblinLPSolver* goblin_lp_new(
     const double *row_lb,
     const double *row_ub
 ) {
-    GoblinLPSolver *s = new GoblinLPSolver();
-    s->num_cols = num_cols;
-    s->num_rows = num_rows;
+    std::lock_guard<std::mutex> lock(g_cbc_mutex);
+    GoblinLPSolver *s = nullptr;
+    try {
+        s = new GoblinLPSolver();
+        s->num_cols = num_cols;
+        s->num_rows = num_rows;
 
-    static const int dummy_ptr[1] = {0};
-    const int *c_ptr = col_ptr ? col_ptr : dummy_ptr;
+        static const int dummy_ptr[1] = {0};
+        const int *c_ptr = col_ptr ? col_ptr : dummy_ptr;
 
-    s->solver.loadProblem(
-        num_cols,
-        num_rows,
-        c_ptr,
-        row_idx,
-        col_val,
-        col_lb,
-        col_ub,
-        obj_min,
-        row_lb,
-        row_ub
-    );
-    s->solver.setObjSense(1.0);
-    return s;
+        s->solver.loadProblem(
+            num_cols,
+            num_rows,
+            c_ptr,
+            row_idx,
+            col_val,
+            col_lb,
+            col_ub,
+            obj_min,
+            row_lb,
+            row_ub
+        );
+        s->solver.setObjSense(1.0);
+        return s;
+    } catch (...) {
+        delete s;
+        return nullptr;
+    }
 }
 
 void goblin_lp_free(GoblinLPSolver *s) {
-    delete s;
+    std::lock_guard<std::mutex> lock(g_cbc_mutex);
+    try {
+        delete s;
+    } catch (...) {
+    }
 }
 
 void goblin_lp_set_bounds(
@@ -613,9 +642,13 @@ void goblin_lp_set_bounds(
     const double *col_lb,
     const double *col_ub
 ) {
-    if (!s) return;
-    for (int j = 0; j < num_cols && j < s->num_cols; ++j) {
-        s->solver.setColBounds(j, col_lb[j], col_ub[j]);
+    std::lock_guard<std::mutex> lock(g_cbc_mutex);
+    if (!s || !col_lb || !col_ub) return;
+    try {
+        for (int j = 0; j < num_cols && j < s->num_cols; ++j) {
+            s->solver.setColBounds(j, col_lb[j], col_ub[j]);
+        }
+    } catch (...) {
     }
 }
 
@@ -626,9 +659,13 @@ void goblin_lp_add_cut(
     const double *val,
     double rhs
 ) {
+    std::lock_guard<std::mutex> lock(g_cbc_mutex);
     if (!s) return;
-    s->solver.addRow(nnz, col_idx, val, -COIN_DBL_MAX, rhs);
-    s->num_rows = s->solver.getNumRows();
+    try {
+        s->solver.addRow(nnz, col_idx, val, -COIN_DBL_MAX, rhs);
+        s->num_rows = s->solver.getNumRows();
+    } catch (...) {
+    }
 }
 
 void goblin_lp_solve(
@@ -639,47 +676,51 @@ void goblin_lp_solve(
     double *rc_out
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
+    if (!out) return;
     std::memset(out, 0, sizeof(GoblinResult));
     if (!s) {
-        out->status = -3; // StatusUndefined
+        out->status = -12; // StatusNumericalError
         return;
     }
-
-    if (!s->initialized) {
-        s->solver.initialSolve();
-        s->initialized = true;
-    } else {
-        s->solver.resolve();
-    }
-
-    out->iterations = s->solver.getIterationCount();
-    int nc = s->solver.getNumCols();
-    int nr = s->solver.getNumRows();
-
-    if (s->solver.isProvenOptimal()) {
-        out->status = 1; // StatusOptimal
-        out->has_sol = 1;
-        double obj = s->solver.getObjValue();
-        out->obj_min = obj;
-        out->best_bound_min = obj;
-        out->root_lp_min = obj;
-        out->root_cut_min = obj;
-        if (nc > 0 && primal_out && s->solver.getColSolution()) {
-            std::memcpy(primal_out, s->solver.getColSolution(), sizeof(double) * nc);
+    try {
+        if (!s->initialized) {
+            s->solver.initialSolve();
+            s->initialized = true;
+        } else {
+            s->solver.resolve();
         }
-        if (nr > 0 && dual_out && s->solver.getRowPrice()) {
-            std::memcpy(dual_out, s->solver.getRowPrice(), sizeof(double) * nr);
+
+        out->iterations = s->solver.getIterationCount();
+        int nc = s->solver.getNumCols();
+        int nr = s->solver.getNumRows();
+
+        if (s->solver.isProvenOptimal()) {
+            out->status = 1; // StatusOptimal
+            out->has_sol = 1;
+            double obj = s->solver.getObjValue();
+            out->obj_min = obj;
+            out->best_bound_min = obj;
+            out->root_lp_min = obj;
+            out->root_cut_min = obj;
+            if (nc > 0 && primal_out && s->solver.getColSolution()) {
+                std::memcpy(primal_out, s->solver.getColSolution(), sizeof(double) * nc);
+            }
+            if (nr > 0 && dual_out && s->solver.getRowPrice()) {
+                std::memcpy(dual_out, s->solver.getRowPrice(), sizeof(double) * nr);
+            }
+            if (nc > 0 && rc_out && s->solver.getReducedCost()) {
+                std::memcpy(rc_out, s->solver.getReducedCost(), sizeof(double) * nc);
+            }
+        } else if (s->solver.isProvenPrimalInfeasible()) {
+            out->status = -1; // StatusInfeasible
+        } else if (s->solver.isProvenDualInfeasible()) {
+            out->status = -2; // StatusUnbounded
+        } else if (s->solver.isIterationLimitReached()) {
+            out->status = -8; // StatusIterationLimit
+        } else {
+            out->status = -12; // StatusNumericalError
         }
-        if (nc > 0 && rc_out && s->solver.getReducedCost()) {
-            std::memcpy(rc_out, s->solver.getReducedCost(), sizeof(double) * nc);
-        }
-    } else if (s->solver.isProvenPrimalInfeasible()) {
-        out->status = -1; // StatusInfeasible
-    } else if (s->solver.isProvenDualInfeasible()) {
-        out->status = -2; // StatusUnbounded
-    } else if (s->solver.isIterationLimitReached()) {
-        out->status = -8; // StatusIterationLimit
-    } else {
+    } catch (...) {
         out->status = -12; // StatusNumericalError
     }
 }

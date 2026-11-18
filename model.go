@@ -50,6 +50,10 @@ func (c VarCategory) String() string {
 	}
 }
 
+func (c VarCategory) valid() bool {
+	return c == Continuous || c == Integer || c == Binary
+}
+
 // ConstraintSense defines the relational operator of a linear constraint.
 type ConstraintSense int8
 
@@ -76,7 +80,8 @@ func (s ConstraintSense) valid() bool {
 	return s == LessEqual || s == Equal || s == GreaterEqual
 }
 
-// Status represents the termination status of a solve call, matching PuLP's LpSolveStatus codes.
+// Status represents the termination status of a solve call. Codes 0, 1, -1, -2, and -3
+// match PuLP's LpStatus codes; codes -4 through -12 report resource limits and numerical errors.
 type Status int8
 
 // Termination status codes returned in Result.Status and LPResult.Status.
@@ -165,7 +170,10 @@ type Model struct {
 	sense       Sense
 	vars        []varDef
 	varByName   map[string]Var
+	autoVarName map[string]int
 	constraints []constraintDef
+	conByName   map[string]int
+	autoConName map[string]int
 	objTerms    []Term
 	objConst    float64
 	objName     string
@@ -186,6 +194,7 @@ func NewModel(name string, sense Sense) *Model {
 		sense:     sense,
 		vars:      make([]varDef, 0, defaultModelCap),
 		varByName: make(map[string]Var, defaultModelCap),
+		conByName: make(map[string]int, defaultModelCap),
 	}
 }
 
@@ -215,6 +224,26 @@ func (m *Model) NumVars() int { return len(m.vars) }
 // NumConstraints returns the number of constraints in the model.
 func (m *Model) NumConstraints() int { return len(m.constraints) }
 
+// Reserve preallocates internal variable and constraint storage when the model dimensions are known ahead of time.
+func (m *Model) Reserve(numVars, numConstraints int) {
+	if numVars > cap(m.vars) {
+		vars := make([]varDef, len(m.vars), numVars)
+		copy(vars, m.vars)
+		m.vars = vars
+		if len(m.varByName) == 0 {
+			m.varByName = make(map[string]Var, numVars)
+		}
+	}
+	if numConstraints > cap(m.constraints) {
+		cons := make([]constraintDef, len(m.constraints), numConstraints)
+		copy(cons, m.constraints)
+		m.constraints = cons
+		if len(m.conByName) == 0 {
+			m.conByName = make(map[string]int, numConstraints)
+		}
+	}
+}
+
 func roundBoundsForCategory(lb, ub float64, cat VarCategory) (float64, float64) {
 	switch cat {
 	case Binary:
@@ -241,9 +270,33 @@ func roundBoundsForCategory(lb, ub float64, cat VarCategory) (float64, float64) 
 	return lb, ub
 }
 
+func (m *Model) nextAutoVarName(idx int) string {
+	cand := fmt.Sprintf("x_%d", idx)
+	for seq := 1; ; seq++ {
+		if _, exists := m.varByName[cand]; !exists {
+			return cand
+		}
+		cand = fmt.Sprintf("x_%d_%d", idx, seq)
+	}
+}
+
+func (m *Model) nextAutoConName(idx int) string {
+	base := idx + 1
+	cand := fmt.Sprintf("_C%d", base)
+	for seq := 1; ; seq++ {
+		if _, exists := m.conByName[cand]; !exists {
+			return cand
+		}
+		cand = fmt.Sprintf("_C%d_%d", base, seq)
+	}
+}
+
 // AddVar adds a decision variable with explicit lower bound, upper bound, and category.
 // Use math.Inf(-1) for no lower bound and math.Inf(1) for no upper bound.
 func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
+	if !cat.valid() {
+		m.recordErr(fmt.Errorf("variable %q has invalid category %d", name, uint8(cat)))
+	}
 	if math.IsNaN(lb) || math.IsNaN(ub) || math.IsInf(lb, 1) || math.IsInf(ub, -1) {
 		m.recordErr(fmt.Errorf("variable %q has invalid bounds [%v, %v]", name, lb, ub))
 	}
@@ -251,13 +304,18 @@ func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
 	idx := len(m.vars)
 	id := makeVar(m.id, idx)
 	if name == "" {
-		name = fmt.Sprintf("x_%d", idx)
-		for seq := 1; ; seq++ {
-			if _, exists := m.varByName[name]; !exists {
-				break
-			}
-			name = fmt.Sprintf("x_%d_%d", idx, seq)
+		name = m.nextAutoVarName(idx)
+		if m.autoVarName == nil {
+			m.autoVarName = make(map[string]int)
 		}
+		m.autoVarName[name] = idx
+	} else if prevIdx, isAuto := m.autoVarName[name]; isAuto {
+		delete(m.autoVarName, name)
+		m.varByName[name] = id
+		newAuto := m.nextAutoVarName(prevIdx)
+		m.vars[prevIdx].name = newAuto
+		m.varByName[newAuto] = makeVar(m.id, prevIdx)
+		m.autoVarName[newAuto] = prevIdx
 	} else if _, exists := m.varByName[name]; exists {
 		m.recordErr(fmt.Errorf("duplicate variable name %q", name))
 	}
@@ -349,13 +407,30 @@ func (m *Model) SetObjectiveNamed(name string, e Expr) {
 
 // AddConstraint adds a linear constraint to the model.
 func (m *Model) AddConstraint(name string, c Constraint) {
+	cIdx := len(m.constraints)
+	if m.conByName == nil {
+		m.conByName = make(map[string]int, defaultModelCap)
+	}
 	if name == "" {
-		name = fmt.Sprintf("_C%d", len(m.constraints)+1)
+		name = m.nextAutoConName(cIdx)
+		if m.autoConName == nil {
+			m.autoConName = make(map[string]int)
+		}
+		m.autoConName[name] = cIdx
+	} else if prevIdx, isAuto := m.autoConName[name]; isAuto {
+		delete(m.autoConName, name)
+		m.conByName[name] = cIdx
+		newAuto := m.nextAutoConName(prevIdx)
+		m.constraints[prevIdx].name = newAuto
+		m.conByName[newAuto] = prevIdx
+		m.autoConName[newAuto] = prevIdx
+	} else if _, exists := m.conByName[name]; exists {
+		m.recordErr(fmt.Errorf("duplicate constraint name %q", name))
 	}
 	if !c.Sense.valid() {
 		m.recordErr(fmt.Errorf("constraint %q has invalid sense %d", name, int8(c.Sense)))
 	}
-	// Normalize: Expr + Constant (<=, =, >=) RHS  =>  Terms (<=, =, >=) RHS - Expr.Constant
+	// Shift Expr.Constant to the right-hand side so Terms (<=, =, >=) RHS - Expr.Constant.
 	rhs := c.RHS - c.Expr.Constant
 	termsCopy := make([]Term, len(c.Expr.Terms))
 	copy(termsCopy, c.Expr.Terms)
@@ -365,6 +440,7 @@ func (m *Model) AddConstraint(name string, c Constraint) {
 		sense: c.Sense,
 		rhs:   rhs,
 	})
+	m.conByName[name] = cIdx
 }
 
 // IsMIP returns true if any variable in the model is Integer or Binary.
@@ -387,6 +463,9 @@ func (m *Model) Validate() error {
 		return m.err
 	}
 	for _, v := range m.vars {
+		if !v.cat.valid() {
+			return fmt.Errorf("variable %q has invalid category %d", v.name, uint8(v.cat))
+		}
 		if math.IsNaN(v.lb) || math.IsNaN(v.ub) || math.IsInf(v.lb, 1) || math.IsInf(v.ub, -1) {
 			return fmt.Errorf("variable %q has invalid bounds [%v, %v]", v.name, v.lb, v.ub)
 		}

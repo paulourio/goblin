@@ -13,7 +13,6 @@ const (
 	etaIdxRowMult  = 24
 	luDropTol      = 1e-13
 	luSolveDropTol = 1e-13
-	luSingDegTol   = 1e-16
 	maxMeritInit   = 1<<30 - 1
 )
 
@@ -153,9 +152,9 @@ func (f *LUFactorization) Reset(m int) {
 	f.etaIdx = f.etaIdx[:0]
 }
 
-// NeedsRefactor reports whether the accumulated PFI eta file has reached its update or nonzero-entry cap.
+// NeedsRefactor reports whether the factorization is invalid or the accumulated PFI eta file has reached its cap.
 func (f *LUFactorization) NeedsRefactor() bool {
-	return len(f.etas) >= maxEtaUpdates || len(f.etaIdx) >= max(minEtaIdxCap, etaIdxRowMult*f.m)
+	return !f.valid || len(f.etas) >= maxEtaUpdates || len(f.etaIdx) >= max(minEtaIdxCap, etaIdxRowMult*f.m)
 }
 
 // Factorize computes the sparse LU factorization of an m-by-m basis populated via dense column callback fillCol.
@@ -337,7 +336,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		k++
 		for p := f.bColPtr[pivCol]; p < f.bColPtr[pivCol+1]; p++ {
 			r2 := f.bRowIdx[p]
-			if !f.rowDone[r2] && math.Abs(f.bVal[p]) > luSingDegTol {
+			if !f.rowDone[r2] && math.Abs(f.bVal[p]) > luDropTol {
 				f.rowDeg[r2]--
 				if f.rowDeg[r2] == 1 {
 					q = append(q, r2)

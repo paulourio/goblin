@@ -49,18 +49,30 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	if err := validateMPSIdent("objective", objName, false); err != nil {
 		return err
 	}
+	seenRows := make(map[string]struct{}, p.NumConstraints)
 	for i := range p.NumConstraints {
-		if err := validateMPSIdent("row", p.RowNames[i], false); err != nil {
+		rname := p.RowNames[i]
+		if err := validateMPSIdent("row", rname, false); err != nil {
 			return err
 		}
-		if p.RowNames[i] == objName {
+		if rname == objName {
 			return fmt.Errorf("MPS row name %q collides with objective row name", objName)
 		}
+		if _, dup := seenRows[rname]; dup {
+			return fmt.Errorf("MPS duplicate row name %q", rname)
+		}
+		seenRows[rname] = struct{}{}
 	}
+	seenCols := make(map[string]struct{}, p.NumVars)
 	for j := range p.NumVars {
-		if err := validateMPSIdent("column", p.VarNames[j], false); err != nil {
+		vname := p.VarNames[j]
+		if err := validateMPSIdent("column", vname, false); err != nil {
 			return err
 		}
+		if _, dup := seenCols[vname]; dup {
+			return fmt.Errorf("MPS duplicate column name %q", vname)
+		}
+		seenCols[vname] = struct{}{}
 	}
 
 	if _, err := fmt.Fprintf(w, "*SENSE:%s\n", p.Sense.String()); err != nil {
@@ -106,15 +118,24 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			inIntBlock = false
 		}
 		vname := p.VarNames[j]
+		hasEntry := false
 		if p.ObjMin[j] != 0 {
 			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, formatMPSFloat(p.ObjMin[j])); err != nil {
 				return err
 			}
+			hasEntry = true
 		}
 		for k := p.ColPtr[j]; k < p.ColPtr[j+1]; k++ {
 			r := p.RowIdx[k]
 			val := p.ColVal[k]
 			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, p.RowNames[r], formatMPSFloat(val)); err != nil {
+				return err
+			}
+			hasEntry = true
+		}
+		if !hasEntry {
+			// Emit an explicit zero objective entry so MPS parsers register unused columns before BOUNDS.
+			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, "0"); err != nil {
 				return err
 			}
 		}
@@ -174,7 +195,7 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			if _, err := fmt.Fprintf(w, " MI BND       %-10s\n", vname); err != nil {
 				return err
 			}
-		} else if lb != 0 || p.VarCat[j] != gb.Continuous {
+		} else if lb != 0 || ub < 0 || p.VarCat[j] != gb.Continuous {
 			bndType := "LO"
 			if p.VarCat[j] != gb.Continuous {
 				bndType = "LI"

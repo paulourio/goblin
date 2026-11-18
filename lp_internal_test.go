@@ -309,3 +309,51 @@ func TestSparseMarkowitzLUAndHyperSparseSolves(t *testing.T) {
 		}
 	}
 }
+
+func TestLUSingletonDropThresholdAndInvalidGuard(t *testing.T) {
+	lu := newLUFactorization(8)
+	if !lu.NeedsRefactor() {
+		t.Fatal("fresh unfactorized LUFactorization must report NeedsRefactor() == true")
+	}
+
+	// Basis with sub-luDropTol (1e-14) entry in column 0 that must not decrement row 1's degree.
+	cols := [4]struct {
+		rows []int
+		vals []float64
+	}{
+		{rows: []int{0, 1, 3}, vals: []float64{1, 1e-14, 1}},
+		{rows: []int{1, 2, 3}, vals: []float64{1, 1, 1}},
+		{rows: []int{1, 2}, vals: []float64{1, 2}},
+		{rows: []int{2, 3}, vals: []float64{1, 1}},
+	}
+	if err := lu.FactorizeSparse(4, func(col int, rows []int, vals []float64) ([]int, []float64) {
+		rows = append(rows, cols[col].rows...)
+		vals = append(vals, cols[col].vals...)
+		return rows, vals
+	}); err != nil {
+		t.Fatalf("FactorizeSparse failed: %v", err)
+	}
+	if lu.NeedsRefactor() {
+		t.Fatal("valid LUFactorization with zero etas must report NeedsRefactor() == false")
+	}
+
+	wantX := [4]float64{1, 2, 3, 4}
+	var rhs [4]float64
+	for c := range 4 {
+		for k, r := range cols[c].rows {
+			rhs[r] += cols[c].vals[k] * wantX[c]
+		}
+	}
+	sol := rhs[:]
+	lu.FTRAN(sol)
+	for i, w := range wantX {
+		if math.Abs(sol[i]-w) > 1e-11 {
+			t.Fatalf("FTRAN[%d] = %.15g, want %.15g", i, sol[i], w)
+		}
+	}
+
+	lu.Reset(4)
+	if !lu.NeedsRefactor() {
+		t.Fatal("Reset LUFactorization must report NeedsRefactor() == true")
+	}
+}
