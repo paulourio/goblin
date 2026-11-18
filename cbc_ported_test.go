@@ -1,3 +1,8 @@
+// Ported test fixtures adapted from COIN-OR Cbc (test/CInterfaceTest.c,
+// test/CInterfaceTest_new.c, test/OsiCbcSolverInterfaceTest.cpp), COIN-OR Cgl
+// (test/unitTest.cpp), and Python PuLP (tests/test_pulp.py). Upstream COIN-OR Cbc and Cgl
+// test sources are distributed under the Eclipse Public License 2.0 (EPL-2.0); upstream
+// PuLP test sources are distributed under the BSD/MIT license.
 package goblin_test
 
 import (

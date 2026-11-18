@@ -175,7 +175,7 @@ func TestFullCorpusMILPParityWithCBC(t *testing.T) {
 					t.Fatalf("[%s] objective mismatch: goblin=%.8f, CBC=%.8f (relDiff=%.2e, nodes=%d, cuts=%d)",
 						c.ID, res.Objective, wantObj, relDiff, res.Nodes, res.CutsAdded)
 				}
-				bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP)
+				bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
 				if bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
 					t.Fatalf("[%s] primal solution violation: bound=%.2e, row=%.2e, int=%.2e",
 						c.ID, bV, rV, iV)
@@ -241,10 +241,14 @@ func TestAllTrialParity(t *testing.T) {
 			if k >= len(py.TrialObjectives) {
 				t.Fatalf("%s[%d]: no CBC reference for this trial", c.ID, k)
 			}
+			wantStatus := py.Status
+			if k < len(py.TrialStatuses) && py.TrialStatuses[k] != "" {
+				wantStatus = py.TrialStatuses[k]
+			}
 			want := py.TrialObjectives[k]
 			if want == nil {
-				if res.Status.String() != py.Status {
-					t.Errorf("%s[%d]: goblin status=%s, CBC status=%s", c.ID, k, res.Status, py.Status)
+				if res.Status.String() != wantStatus {
+					t.Errorf("%s[%d]: goblin status=%s, CBC status=%s", c.ID, k, res.Status, wantStatus)
 				}
 				continue
 			}
@@ -260,7 +264,7 @@ func TestAllTrialParity(t *testing.T) {
 					t.Errorf("%s[%d]: goblin %.8g, goblin_cbc %.8g (rel %.1e)", c.ID, k, res.Objective, cbcRef.TrialObjectives[k], d)
 				}
 			}
-			if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP); bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
+			if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP()); bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
 				t.Errorf("%s[%d]: infeasible solution: bound=%.1e row=%.1e int=%.1e", c.ID, k, bV, rV, iV)
 			}
 		}
@@ -291,7 +295,7 @@ func TestLimitTerminationStatusAndBounds(t *testing.T) {
 				t.Fatalf("[%s] MaxNodes=%d: expected NodeLimit, got %v (obj=%.4f, bestBound=%.4f)",
 					id, maxNodes, res.Status, res.Objective, res.BestBound)
 			}
-			if p.Sense == gb.Maximize {
+			if p.Sense() == gb.Maximize {
 				if res.BestBound < optRes.Objective-1e-4 {
 					t.Fatalf("[%s] MaxNodes=%d: invalid upper bound %.4f < optimal %.4f",
 						id, maxNodes, res.BestBound, optRes.Objective)
@@ -364,8 +368,8 @@ func TestTimeLimitEnforcement(t *testing.T) {
 	if resSym.Status != gb.StatusTimeLimit && resSym.Status != gb.StatusOptimal {
 		t.Fatalf("expected TimeLimit or Optimal on mad_rand_g4_i12_tl, got %v", resSym.Status)
 	}
-	if len(resSym.Values) != pSym.NumVars {
-		t.Fatalf("expected best incumbent Values (len=%d) on TimeLimit, got len=%d", pSym.NumVars, len(resSym.Values))
+	if len(resSym.Values) != pSym.NumVars() {
+		t.Fatalf("expected best incumbent Values (len=%d) on TimeLimit, got len=%d", pSym.NumVars(), len(resSym.Values))
 	}
 	bV, rV, iV := pSym.MaxViolation(resSym.Values, true)
 	if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
@@ -573,7 +577,7 @@ func TestRandomMADNegativeControls(t *testing.T) {
 	if resSym.Status != gb.StatusNodeLimit {
 		t.Fatalf("[mad_rand_g4_i12] expected StatusNodeLimit at MaxNodes=200, got %v", resSym.Status)
 	}
-	if len(resSym.Values) == pSym.NumVars {
+	if len(resSym.Values) == pSym.NumVars() {
 		bV, rV, iV := pSym.MaxViolation(resSym.Values, true)
 		if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
 			t.Fatalf("[mad_rand_g4_i12] incumbent violation: bound=%.2e row=%.2e int=%.2e", bV, rV, iV)

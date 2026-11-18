@@ -1315,6 +1315,125 @@ func (f *LUFactorization) BTRAN(rhs []float64) {
 	}
 }
 
+// BTRANExact solves B^T * y = rhs in place without applying intermediate luDropTol truncation,
+// used to verify Farkas infeasibility certificates when sub-tolerance entries could otherwise vanish.
+func (f *LUFactorization) BTRANExact(rhs []float64) {
+	m := f.m
+	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lRowPtr) <= m || len(f.uRowPtr) <= m {
+		return
+	}
+	rhs = rhs[:m]
+	w := f.work[:m]
+
+	etas := f.etas
+	for e := len(etas) - 1; e >= 0; e-- {
+		eta := &etas[e]
+		pr := eta.pivotRow
+		if uint(pr) >= uint(m) {
+			continue
+		}
+		sum := rhs[pr]
+		idxs := eta.idx
+		vals := eta.val[:len(idxs)]
+		for k, idx := range idxs {
+			if uint(idx) < uint(m) {
+				sum -= vals[k] * rhs[idx]
+			}
+		}
+		rhs[pr] = sum * eta.pivotInv
+	}
+	colPerm := f.colPerm[:m]
+	firstNZ := m
+	lastNZ := -1
+	for k, c := range colPerm {
+		if uint(c) >= uint(m) {
+			continue
+		}
+		v := rhs[c]
+		if v != 0 {
+			rhs[c] = 0
+			w[k] = v
+			if lastNZ < 0 {
+				firstNZ = k
+			}
+			lastNZ = k
+		}
+	}
+	if lastNZ < 0 {
+		return
+	}
+
+	uInvDiag := f.uInvDiag[:m]
+	uRowPtr := f.uRowPtr[:m+1]
+	uColIdx := f.uColIdx
+	uRowVal := f.uRowVal
+	lRowPtr := f.lRowPtr[:m+1]
+	lColIdx := f.lColIdx
+	lRowVal := f.lRowVal
+
+	for i := firstNZ; i <= lastNZ && uint(i) < uint(m); i++ {
+		wi := w[i]
+		if wi == 0 {
+			continue
+		}
+		wi *= uInvDiag[i]
+		w[i] = wi
+		start, end := uRowPtr[i], uRowPtr[i+1]
+		cols := uColIdx[start:end]
+		vals := uRowVal[start:end]
+		if len(cols) > 0 {
+			vals = vals[:len(cols)]
+			for p, c := range cols {
+				if uint(c) < uint(m) {
+					w[c] -= vals[p] * wi
+					if c > lastNZ {
+						lastNZ = c
+					}
+				}
+			}
+		}
+	}
+
+	minNZ := firstNZ
+	stopI := max(f.numColSing, minNZ)
+	for i := lastNZ; i >= stopI; i-- {
+		if uint(i) >= uint(m) {
+			continue
+		}
+		wi := w[i]
+		if wi == 0 {
+			continue
+		}
+		start, end := lRowPtr[i], lRowPtr[i+1]
+		cols := lColIdx[start:end]
+		vals := lRowVal[start:end]
+		if len(cols) > 0 {
+			vals = vals[:len(cols)]
+			for p, c := range cols {
+				if uint(c) < uint(m) {
+					w[c] -= vals[p] * wi
+					if c < minNZ {
+						minNZ = c
+						stopI = max(f.numColSing, minNZ)
+					}
+				}
+			}
+		}
+	}
+
+	perm := f.perm[:lastNZ+1]
+	wOut := w[:lastNZ+1]
+	for i := minNZ; i <= lastNZ; i++ {
+		if wi := wOut[i]; wi != 0 {
+			wOut[i] = 0
+			p := perm[i]
+			if uint(p) < uint(m) {
+				rhs[p] = wi
+			}
+		}
+	}
+}
+
 // BTRANSparse solves B^T * y = rhs in place and appends the indices i with |y[i]| > luDropTol to nzIdx.
 func (f *LUFactorization) BTRANSparse(rhs []float64, nzIdx []int) []int {
 	return f.BTRANSparseHint(rhs, nil, nzIdx)

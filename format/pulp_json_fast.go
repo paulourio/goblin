@@ -1,6 +1,7 @@
 package format
 
 import (
+	"math"
 	"strconv"
 	"unicode/utf8"
 )
@@ -155,6 +156,9 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 		i++
 		if i >= n || (b[i] != '.' && b[i] != 'e' && b[i] != 'E' && (b[i] < '0' || b[i] > '9')) {
 			sc.pos = i
+			if neg {
+				return math.Copysign(0, -1), true
+			}
 			return 0, true
 		}
 		if b[i] >= '0' && b[i] <= '9' {
@@ -223,6 +227,41 @@ func allocFloatSlab(slab *[]float64, v float64) *float64 {
 
 func (sc *pulpScanner) readOptFloat(slab *[]float64) (*float64, bool) {
 	if sc.consumeNull() {
+		return nil, true
+	}
+	v, ok := sc.readFloat()
+	if !ok {
+		return nil, false
+	}
+	return allocFloatSlab(slab, v), true
+}
+
+func (sc *pulpScanner) consumePythonNonFinite() bool {
+	sc.skipWS()
+	rem := sc.b[sc.pos:]
+	var tokLen int
+	switch {
+	case len(rem) >= 3 && string(rem[:3]) == "NaN":
+		tokLen = 3
+	case len(rem) >= 8 && string(rem[:8]) == "Infinity":
+		tokLen = 8
+	case len(rem) >= 9 && string(rem[:9]) == "-Infinity":
+		tokLen = 9
+	default:
+		return false
+	}
+	if sc.pos+tokLen < len(sc.b) {
+		next := sc.b[sc.pos+tokLen]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || (next >= '0' && next <= '9') || next == '_' {
+			return false
+		}
+	}
+	sc.pos += tokLen
+	return true
+}
+
+func (sc *pulpScanner) readIgnoredMetricFloat(slab *[]float64) (*float64, bool) {
+	if sc.consumeNull() || sc.consumePythonNonFinite() {
 		return nil, true
 	}
 	v, ok := sc.readFloat()
@@ -386,9 +425,9 @@ func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
 				case "upBound":
 					v.UpBound, ok = sc.readOptFloat(slab)
 				case "varValue":
-					v.VarValue, ok = sc.readOptFloat(slab)
+					v.VarValue, ok = sc.readIgnoredMetricFloat(slab)
 				case "dj":
-					v.Dj, ok = sc.readOptFloat(slab)
+					v.Dj, ok = sc.readIgnoredMetricFloat(slab)
 				default:
 					return nil, false
 				}
@@ -448,7 +487,7 @@ func (sc *pulpScanner) readConstraints(arena *[]PuLPCoefficient, slab *[]float64
 				case "coefficients":
 					c.Coefficients, ok = sc.readCoefficients(arena)
 				case "pi":
-					c.Pi, ok = sc.readOptFloat(slab)
+					c.Pi, ok = sc.readIgnoredMetricFloat(slab)
 				case "constant":
 					c.Constant, ok = sc.readFloat()
 				default:

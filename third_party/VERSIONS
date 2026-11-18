@@ -1,0 +1,6 @@
+# Upstream COIN-OR revisions vendored under third_party/ (EPL-2.0).
+CoinUtils=devel
+Osi=devel
+Clp=9390927
+Cgl=devel
+Cbc=c1c171ec

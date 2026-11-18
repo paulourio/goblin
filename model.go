@@ -4,12 +4,16 @@
 package goblin
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sync/atomic"
 )
 
-var nextModelID atomic.Uint32
+// ErrNilModel indicates that a nil *Model receiver was passed to Validate.
+var ErrNilModel = errors.New("goblin: nil Model")
+
+var nextModelID atomic.Uint64
 
 // Sense defines the optimization direction (Minimize or Maximize).
 type Sense int8
@@ -119,13 +123,15 @@ func (s Status) String() string {
 		return "NumericalError"
 	case StatusUndefined:
 		return "Undefined"
-	default:
+	case StatusNotSolved:
 		return "NotSolved"
+	default:
+		return fmt.Sprintf("Status(%d)", int(s))
 	}
 }
 
 // Var is a lightweight 64-bit value handle identifying a variable inside a Model
-// (upper 32 bits encode the owning Model ID; lower 32 bits encode the 0-based variable index).
+// (upper 32 bits encode a non-zero owning Model tag; lower 32 bits encode the 0-based variable index).
 type Var uint64
 
 const (
@@ -134,8 +140,15 @@ const (
 	intBoundRoundTol = 1e-12
 )
 
-func makeVar(modelID uint32, idx int) Var {
-	return Var(uint64(modelID)<<varModelShift | uint64(uint32(idx)))
+func modelVarTag(modelID uint64) uint32 {
+	if modelID == 0 {
+		return 0
+	}
+	return uint32((modelID-1)%uint64(math.MaxUint32)) + 1
+}
+
+func makeVar(modelID uint64, idx int) Var {
+	return Var(uint64(modelVarTag(modelID))<<varModelShift | uint64(uint32(idx)))
 }
 
 // Index returns the 0-based column index of v within its parent Model.
@@ -143,7 +156,7 @@ func (v Var) Index() int {
 	return int(uint32(v))
 }
 
-func (v Var) modelID() uint32 {
+func (v Var) modelTag() uint32 {
 	return uint32(v >> varModelShift)
 }
 
@@ -165,7 +178,8 @@ type constraintDef struct {
 
 // Model represents an algebraic LP or MILP optimization problem.
 type Model struct {
-	id          uint32
+	id          uint64
+	varTag      uint32
 	name        string
 	sense       Sense
 	vars        []varDef
@@ -182,19 +196,24 @@ type Model struct {
 
 // NewModel creates a new optimization Model with the given name and objective sense.
 func NewModel(name string, sense Sense) *Model {
-	if sense != Maximize {
+	var initErr error
+	if sense != Minimize && sense != Maximize {
+		initErr = fmt.Errorf("model %q has invalid optimization sense %d", name, int8(sense))
 		sense = Minimize
 	}
 	if name == "" {
 		name = "NoName"
 	}
+	id := nextModelID.Add(1)
 	return &Model{
-		id:        nextModelID.Add(1),
+		id:        id,
+		varTag:    modelVarTag(id),
 		name:      name,
 		sense:     sense,
 		vars:      make([]varDef, 0, defaultModelCap),
 		varByName: make(map[string]Var, defaultModelCap),
 		conByName: make(map[string]int, defaultModelCap),
+		err:       initErr,
 	}
 }
 
@@ -206,7 +225,7 @@ func (m *Model) recordErr(err error) {
 
 func (m *Model) validVar(v Var) (int, bool) {
 	idx := v.Index()
-	if v.modelID() != m.id || idx < 0 || idx >= len(m.vars) {
+	if v == 0 || v.modelTag() != m.varTag || idx < 0 || idx >= len(m.vars) {
 		return -1, false
 	}
 	return idx, true
@@ -266,6 +285,12 @@ func roundBoundsForCategory(lb, ub float64, cat VarCategory) (float64, float64) 
 		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
 			ub = math.Floor(ub + intBoundRoundTol)
 		}
+	}
+	if lb == 0 {
+		lb = 0
+	}
+	if ub == 0 {
+		ub = 0
 	}
 	return lb, ub
 }
@@ -457,7 +482,7 @@ func (m *Model) IsMIP() bool {
 // belong to this Model and contain only finite coefficients and valid bounds.
 func (m *Model) Validate() error {
 	if m == nil {
-		return ErrNilProblem
+		return ErrNilModel
 	}
 	if m.err != nil {
 		return m.err

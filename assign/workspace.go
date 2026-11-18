@@ -1,6 +1,9 @@
 package assign
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 const (
 	defaultDimCap = 64
@@ -23,6 +26,7 @@ type Workspace struct {
 	auxRows   []int
 	workCost  []float64
 	opts      Options
+	inPool    atomic.Bool
 }
 
 var workspacePool = sync.Pool{
@@ -44,6 +48,7 @@ var workspacePool = sync.Pool{
 // AcquireWorkspace returns a pooled Workspace sized for at least rows and cols.
 func AcquireWorkspace(rows, cols int) *Workspace {
 	ws := workspacePool.Get().(*Workspace)
+	ws.inPool.Store(false)
 	m := min(rows, cols)
 	n := max(rows, cols)
 	if m > 0 && n > 0 {
@@ -53,8 +58,12 @@ func AcquireWorkspace(rows, cols int) *Workspace {
 }
 
 // ReleaseWorkspace returns ws to the pool if its capacity is within the pooling bound.
+// Releasing a nil or already-pooled Workspace is a safe no-op.
 func ReleaseWorkspace(ws *Workspace) {
 	if ws == nil || cap(ws.v) > maxPooledDim {
+		return
+	}
+	if !ws.inPool.CompareAndSwap(false, true) {
 		return
 	}
 	if cap(ws.workCost) > maxPooledCost {

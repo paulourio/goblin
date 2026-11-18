@@ -36,22 +36,25 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	if p == nil {
 		return gb.ErrNilProblem
 	}
-	if p.InvalidErr != nil {
-		return p.InvalidErr
-	}
-	if err := validateMPSIdent("problem", p.Name, true); err != nil {
+	if err := p.Err(); err != nil {
 		return err
 	}
-	objName := p.ObjName
+	probName := p.Name()
+	if err := validateMPSIdent("problem", probName, true); err != nil {
+		return err
+	}
+	objName := p.ObjName()
 	if objName == "" {
 		objName = "OBJ"
 	}
 	if err := validateMPSIdent("objective", objName, false); err != nil {
 		return err
 	}
-	seenRows := make(map[string]struct{}, p.NumConstraints)
-	for i := range p.NumConstraints {
-		rname := p.RowNames[i]
+	numRows := p.NumConstraints()
+	numVars := p.NumVars()
+	seenRows := make(map[string]struct{}, numRows)
+	for i := range numRows {
+		rname := p.RowName(i)
 		if err := validateMPSIdent("row", rname, false); err != nil {
 			return err
 		}
@@ -63,9 +66,9 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		}
 		seenRows[rname] = struct{}{}
 	}
-	seenCols := make(map[string]struct{}, p.NumVars)
-	for j := range p.NumVars {
-		vname := p.VarNames[j]
+	seenCols := make(map[string]struct{}, numVars)
+	for j := range numVars {
+		vname := p.VarName(j)
 		if err := validateMPSIdent("column", vname, false); err != nil {
 			return err
 		}
@@ -75,10 +78,11 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		seenCols[vname] = struct{}{}
 	}
 
-	if _, err := fmt.Fprintf(w, "*SENSE:%s\n", p.Sense.String()); err != nil {
+	sense := p.Sense()
+	if _, err := fmt.Fprintf(w, "*SENSE:%s\n", sense.String()); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "NAME          %s\n", p.Name); err != nil {
+	if _, err := fmt.Fprintf(w, "NAME          %s\n", probName); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w, "ROWS\n"); err != nil {
@@ -87,15 +91,15 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	if _, err := fmt.Fprintf(w, " N  %s\n", objName); err != nil {
 		return err
 	}
-	for i := range p.NumConstraints {
+	for i := range numRows {
 		senseChar := "E"
-		switch p.RowSense[i] {
+		switch p.RowSense(i) {
 		case gb.LessEqual:
 			senseChar = "L"
 		case gb.GreaterEqual:
 			senseChar = "G"
 		}
-		if _, err := fmt.Fprintf(w, " %s  %s\n", senseChar, p.RowNames[i]); err != nil {
+		if _, err := fmt.Fprintf(w, " %s  %s\n", senseChar, p.RowName(i)); err != nil {
 			return err
 		}
 	}
@@ -104,8 +108,8 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		return err
 	}
 	inIntBlock := false
-	for j := range p.NumVars {
-		isInt := p.VarCat[j] != gb.Continuous
+	for j := range numVars {
+		isInt := p.VarCategory(j) != gb.Continuous
 		if isInt && !inIntBlock {
 			if _, err := io.WriteString(w, "    MARK      'MARKER'                 'INTORG'\n"); err != nil {
 				return err
@@ -117,21 +121,27 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			}
 			inIntBlock = false
 		}
-		vname := p.VarNames[j]
+		vname := p.VarName(j)
 		hasEntry := false
-		if p.ObjMin[j] != 0 {
-			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, formatMPSFloat(p.ObjMin[j])); err != nil {
+		if objMin := p.ObjMinCoeff(j); objMin != 0 {
+			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, formatMPSFloat(objMin)); err != nil {
 				return err
 			}
 			hasEntry = true
 		}
-		for k := p.ColPtr[j]; k < p.ColPtr[j+1]; k++ {
-			r := p.RowIdx[k]
-			val := p.ColVal[k]
-			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, p.RowNames[r], formatMPSFloat(val)); err != nil {
-				return err
+		var colWriteErr error
+		p.ForEachColTerm(j, func(r int, val float64) {
+			if colWriteErr != nil {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, p.RowName(r), formatMPSFloat(val)); err != nil {
+				colWriteErr = err
+				return
 			}
 			hasEntry = true
+		})
+		if colWriteErr != nil {
+			return colWriteErr
 		}
 		if !hasEntry {
 			// Emit an explicit zero objective entry so MPS parsers register unused columns before BOUNDS.
@@ -149,19 +159,19 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	if _, err := io.WriteString(w, "RHS\n"); err != nil {
 		return err
 	}
-	if p.ObjConstant != 0 {
+	if objConst := p.ObjConstant(); objConst != 0 {
 		senseSign := 1.0
-		if p.Sense == gb.Maximize {
+		if sense == gb.Maximize {
 			senseSign = -1.0
 		}
-		objRHS := -senseSign * p.ObjConstant
+		objRHS := -senseSign * objConst
 		if _, err := fmt.Fprintf(w, "    RHS       %-10s %15s\n", objName, formatMPSFloat(objRHS)); err != nil {
 			return err
 		}
 	}
-	for i := range p.NumConstraints {
-		if p.RowRHS[i] != 0 {
-			if _, err := fmt.Fprintf(w, "    RHS       %-10s %15s\n", p.RowNames[i], formatMPSFloat(p.RowRHS[i])); err != nil {
+	for i := range numRows {
+		if rhs := p.RowRHS(i); rhs != 0 {
+			if _, err := fmt.Fprintf(w, "    RHS       %-10s %15s\n", p.RowName(i), formatMPSFloat(rhs)); err != nil {
 				return err
 			}
 		}
@@ -170,10 +180,11 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	if _, err := io.WriteString(w, "BOUNDS\n"); err != nil {
 		return err
 	}
-	for j := range p.NumVars {
-		vname := p.VarNames[j]
-		lb, ub := p.VarLB[j], p.VarUB[j]
-		if p.VarCat[j] == gb.Binary && lb == 0 && ub == 1 {
+	for j := range numVars {
+		vname := p.VarName(j)
+		lb, ub := p.VarBounds(j)
+		cat := p.VarCategory(j)
+		if cat == gb.Binary && lb == 0 && ub == 1 {
 			if _, err := fmt.Fprintf(w, " BV BND       %-10s\n", vname); err != nil {
 				return err
 			}
@@ -195,9 +206,9 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			if _, err := fmt.Fprintf(w, " MI BND       %-10s\n", vname); err != nil {
 				return err
 			}
-		} else if lb != 0 || ub < 0 || p.VarCat[j] != gb.Continuous {
+		} else if lb != 0 || ub < 0 || cat != gb.Continuous {
 			bndType := "LO"
-			if p.VarCat[j] != gb.Continuous {
+			if cat != gb.Continuous {
 				bndType = "LI"
 			}
 			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, formatMPSFloat(lb)); err != nil {
@@ -206,13 +217,13 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		}
 		if !math.IsInf(ub, 1) {
 			bndType := "UP"
-			if p.VarCat[j] != gb.Continuous {
+			if cat != gb.Continuous {
 				bndType = "UI"
 			}
 			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, formatMPSFloat(ub)); err != nil {
 				return err
 			}
-		} else if p.VarCat[j] != gb.Continuous {
+		} else if cat != gb.Continuous {
 			if _, err := fmt.Fprintf(w, " PL BND       %-10s\n", vname); err != nil {
 				return err
 			}

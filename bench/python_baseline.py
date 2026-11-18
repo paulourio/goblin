@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """
-Python PuLP + COIN-OR CBC Warm-State Benchmark & Multi-Seed Golden Reference Harness.
+Python PuLP and COIN-OR CBC reference harness.
 
-Measures both:
-1. End-to-End JSON-to-Solution Pipeline (in warm state across K randomized trial instances):
-   - t_parse_ms: JSON parsing (json.loads)
-   - t_build_ms: PuLP LpProblem.fromDict construction
-   - t_format_ms: PuLP writeMPS serialization
-   - t_solve_ms: COIN-OR CBC subprocess execution & .sol parsing
-   - t_total_ms: Total end-to-end wall clock time
-2. Pure Optimization Reference Metrics and Provenance:
-   - LP relaxation root objective, canonical (trial 0) optimal objective and primal solution,
-     per-trial optimal objectives across all K randomized trial instances, and solver
-     provenance (pulp_version, cbc_path, cbc_version).
+Each worker times JSON parsing, PuLP model building, MPS writing, and COIN-OR CBC subprocess
+execution in warm state across K randomized trial instances per corpus family, while also
+recording canonical LP relaxations, per-trial statuses, optimal objectives, and full git and
+binary provenance.
 """
 
 from __future__ import annotations
@@ -20,9 +13,11 @@ from __future__ import annotations
 import argparse
 import atexit
 import glob
+import hashlib
 import importlib.metadata
 import json
 import os
+import platform
 import shutil
 import statistics
 import subprocess
@@ -30,9 +25,10 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import UTC, datetime
 from typing import Any
 
-# Support running directly from the workspace with the sibling PuLP checkout/venv.
+# Support running directly from the workspace with the sibling PuLP virtualenv.
 _GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
 _CBC_DIST_DIR = os.path.join(_GOBLIN_ROOT, "third_party", "Cbc", "dist")
@@ -58,7 +54,10 @@ _WORKER_TMPDIR: tempfile.TemporaryDirectory[str] | None = None
 _WORKER_PULP_VERSION: str = "unknown"
 _WORKER_CBC_PATH: str = ""
 _WORKER_CBC_VERSION: str = "unknown"
+_WORKER_CBC_SHA256: str = ""
 _WORKER_SPAWN_FLOOR_MS: float = 0.0
+_WORKER_LP_SPAWN_FLOOR_MS: float = 0.0
+_WORKER_PROVENANCE: dict[str, Any] = {}
 
 
 def _detect_pulp_version() -> str:
@@ -69,6 +68,16 @@ def _detect_pulp_version() -> str:
         return importlib.metadata.version("PuLP")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def _file_sha256_short(path: str) -> str:
+    if not path or not os.path.isfile(path):
+        return "unknown"
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(65536):
+            h.update(chunk)
+    return h.hexdigest()[:16]
 
 
 def _detect_cbc_version(cbc_path: str) -> str:
@@ -89,21 +98,58 @@ def _detect_cbc_version(cbc_path: str) -> str:
                 return s.split("Version:", 1)[1].strip()
         for s in lines:
             if "CBC" in s or "Coin" in s:
-                return s
+                return s.split(" \u2014", 1)[0].strip()
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"[python_baseline] CBC version probe failed: {exc}", file=sys.stderr)
     return "unknown"
 
 
-def _extract_solve_status(solve_ret: Any) -> tuple[int, str]:
+def _repo_provenance() -> dict[str, Any]:
+    git_commit = "unknown"
+    git_dirty = True
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=_GOBLIN_ROOT, text=True, timeout=5
+        ).strip()
+        st = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=_GOBLIN_ROOT, text=True, timeout=5
+        ).strip()
+        git_dirty = len(st) > 0
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    fp = subprocess.check_output(
+        ["go", "run", "./cmd/goblin-bench", "-print-fingerprint"],
+        cwd=_GOBLIN_ROOT,
+        text=True,
+        timeout=30,
+    ).strip()
+
+    return {
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "source_fingerprint": fp,
+        "uname_release": platform.uname().release,
+        "measured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _extract_solve_status(solve_ret: Any, prob: Any) -> tuple[int, str]:
     if hasattr(solve_ret, "status"):
         st = solve_ret.status
         code = int(getattr(st, "value", st))
         name = str(getattr(solve_ret, "status_str", getattr(st, "name", str(st))))
-        return code, name
-    code = int(solve_ret)
-    lp_status_map = getattr(pulp, "LpStatus", {})
-    return code, str(lp_status_map.get(code, "Unknown"))
+    else:
+        code = int(solve_ret)
+        lp_status_map = getattr(pulp, "LpStatus", {})
+        name = str(lp_status_map.get(code, "Unknown"))
+
+    # PuLP 4.x maps CBC's "Optimal (within gap tolerance)" banner at ratioGap=1e-6 to GapLimit (-7).
+    if (code == -7 or name == "GapLimit") and any(
+        v.varValue is not None for v in prob.variables()
+    ):
+        return 1, "Optimal"
+    return code, name
 
 
 def _make_cbc_solver(mip: bool = True) -> tuple[Any, str]:
@@ -113,22 +159,28 @@ def _make_cbc_solver(mip: bool = True) -> tuple[Any, str]:
         if cbc_lib_dir not in ld.split(":"):
             os.environ["LD_LIBRARY_PATH"] = f"{cbc_lib_dir}:{ld}" if ld else cbc_lib_dir
 
-    pulp_cbc = getattr(pulp, "PULP_CBC_CMD", None)
-    if pulp_cbc is not None:
-        solver = pulp_cbc(msg=False, mip=mip, threads=1)
-        if solver.available():
-            return solver, getattr(solver, "path", "") or (shutil.which("cbc") or "")
-
+    mip_opts = ["ratioGap=1e-6", "allowableGap=1e-6"] if mip else []
     candidates = [
         os.environ.get("CBC_BIN", ""),
-        shutil.which("cbc") or "",
         os.path.join(_CBC_DIST_DIR, "bin", "cbc"),
+        shutil.which("cbc") or "",
     ]
     for cand in candidates:
         if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return pulp.COIN_CMD(path=cand, msg=False, mip=mip, threads=1), cand
+            return (
+                pulp.COIN_CMD(
+                    path=cand, msg=False, mip=mip, threads=1, options=mip_opts
+                ),
+                cand,
+            )
 
-    solver = pulp.COIN_CMD(msg=False, mip=mip, threads=1)
+    pulp_cbc = getattr(pulp, "PULP_CBC_CMD", None)
+    if pulp_cbc is not None:
+        solver = pulp_cbc(msg=False, mip=mip, threads=1, options=mip_opts)
+        if solver.available():
+            return solver, getattr(solver, "path", "") or ""
+
+    solver = pulp.COIN_CMD(msg=False, mip=mip, threads=1, options=mip_opts)
     return solver, getattr(solver, "path", "") or ""
 
 
@@ -139,8 +191,8 @@ def _cleanup_worker() -> None:
         _WORKER_TMPDIR = None
 
 
-_SPAWN_FLOOR_MODEL: dict[str, Any] = {
-    "parameters": {"name": "spawn_floor", "sense": 1, "status": 0, "sol_status": 0},
+_SPAWN_FLOOR_MIP_MODEL: dict[str, Any] = {
+    "parameters": {"name": "spawn_floor_mip", "sense": 1, "status": 0, "sol_status": 0},
     "objective": {"name": "obj", "coefficients": [{"name": "x", "value": 1}]},
     "variables": [
         {
@@ -165,9 +217,35 @@ _SPAWN_FLOOR_MODEL: dict[str, Any] = {
     "sos2": [],
 }
 
+_SPAWN_FLOOR_LP_MODEL: dict[str, Any] = {
+    "parameters": {"name": "spawn_floor_lp", "sense": 1, "status": 0, "sol_status": 0},
+    "objective": {"name": "obj", "coefficients": [{"name": "x", "value": 1}]},
+    "variables": [
+        {
+            "name": "x",
+            "cat": "Continuous",
+            "lowBound": 0,
+            "upBound": 10,
+            "varValue": None,
+            "dj": None,
+        }
+    ],
+    "constraints": [
+        {
+            "name": "c",
+            "sense": 1,
+            "coefficients": [{"name": "x", "value": 1}],
+            "pi": None,
+            "constant": -1,
+        }
+    ],
+    "sos1": [],
+    "sos2": [],
+}
+
 
 def _cpu_affinity() -> str:
-    """Return the CPUs this process may run on, compressed into ranges (for example 2 or 0-13)."""
+    """Return the CPUs allowed for the current process compressed into ranges."""
     if not hasattr(os, "sched_getaffinity"):
         return "unknown"
     cpus = sorted(os.sched_getaffinity(0))
@@ -181,34 +259,37 @@ def _cpu_affinity() -> str:
     return ",".join(ranges)
 
 
-def _measure_spawn_floor(repeats: int = 15) -> float:
-    """Median wall time (ms) of prob.solve() on a 1-variable, 1-row MILP (min x, x >= 1).
-
-    The solve of such a model is trivial, so this measures the fixed cost of the PuLP + CBC
-    subprocess path (MPS write, process spawn, CBC start-up, .sol parsing). Reports subtract
-    it to separate interface overhead from solver work. The model is built with fromDict,
-    the same construction path as the benchmark instances.
-    """
+def _measure_spawn_floor(
+    template: dict[str, Any], solver: Any, repeats: int = 15
+) -> float:
+    """Measure median wall time in ms of prob.solve() on a 1-variable 1-row model."""
     times: list[float] = []
+    raw = json.dumps(template)
     for k in range(repeats + 2):
-        _, prob = pulp.LpProblem.fromDict(json.loads(json.dumps(_SPAWN_FLOOR_MODEL)))
-        t0 = time.perf_counter()
-        prob.solve(_WORKER_MIP_SOLVER)
+        _, prob = pulp.LpProblem.fromDict(json.loads(raw))
+        t0 = time.perf_counter_ns()
+        prob.solve(solver)
         if k >= 2:
-            times.append((time.perf_counter() - t0) * 1000.0)
+            times.append((time.perf_counter_ns() - t0) / 1e6)
     return statistics.median(times)
 
 
-def _init_worker(warmup_json_path: str) -> None:
+def _init_worker(warmup_json_path: str, prov: dict[str, Any]) -> None:
     """Warm up Python interpreter, PuLP classes, allocator pages, temp dir, and CBC binary."""
     global _WORKER_MIP_SOLVER, _WORKER_LP_SOLVER, _WORKER_TMPDIR
-    global _WORKER_PULP_VERSION, _WORKER_CBC_PATH, _WORKER_CBC_VERSION
-    global _WORKER_SPAWN_FLOOR_MS
+    global \
+        _WORKER_PULP_VERSION, \
+        _WORKER_CBC_PATH, \
+        _WORKER_CBC_VERSION, \
+        _WORKER_CBC_SHA256
+    global _WORKER_SPAWN_FLOOR_MS, _WORKER_LP_SPAWN_FLOOR_MS, _WORKER_PROVENANCE
+    _WORKER_PROVENANCE = dict(prov)
     _WORKER_MIP_SOLVER, cbc_path = _make_cbc_solver(mip=True)
     _WORKER_LP_SOLVER, _ = _make_cbc_solver(mip=False)
     _WORKER_PULP_VERSION = _detect_pulp_version()
     _WORKER_CBC_PATH = cbc_path
     _WORKER_CBC_VERSION = _detect_cbc_version(cbc_path)
+    _WORKER_CBC_SHA256 = _file_sha256_short(cbc_path)
     _WORKER_TMPDIR = tempfile.TemporaryDirectory(prefix="pulp_warm_")
     atexit.register(_cleanup_worker)
 
@@ -223,7 +304,12 @@ def _init_worker(warmup_json_path: str) -> None:
             prob.solve(_WORKER_MIP_SOLVER)
             _, prob_lp = pulp.LpProblem.fromDict(json.loads(raw))
             prob_lp.solve(_WORKER_LP_SOLVER)
-    _WORKER_SPAWN_FLOOR_MS = _measure_spawn_floor()
+    _WORKER_SPAWN_FLOOR_MS = _measure_spawn_floor(
+        _SPAWN_FLOOR_MIP_MODEL, _WORKER_MIP_SOLVER
+    )
+    _WORKER_LP_SPAWN_FLOOR_MS = _measure_spawn_floor(
+        _SPAWN_FLOOR_LP_MODEL, _WORKER_LP_SOLVER
+    )
 
 
 def _load_trial_lines(json_path: str, n_trials: int) -> list[str]:
@@ -248,7 +334,7 @@ def benchmark_single_json(
     json_path: str, warmup: int = 2, trials: int = 11
 ) -> dict[str, Any]:
     if _WORKER_MIP_SOLVER is None:
-        _init_worker(json_path)
+        _init_worker(json_path, _repo_provenance())
 
     pid = os.path.splitext(os.path.basename(json_path))[0]
     if pid.startswith("t3_"):
@@ -266,6 +352,7 @@ def benchmark_single_json(
     t_solve_list: list[float] = []
     t_total_list: list[float] = []
     trial_objectives: list[float | None] = []
+    trial_statuses: list[str] = []
 
     status_code = 0
     status_str = "NotSolved"
@@ -284,34 +371,36 @@ def benchmark_single_json(
             canonical_raw if run_idx < warmup else trial_lines[run_idx - warmup]
         )
 
-        t0 = time.perf_counter()
+        t0 = time.perf_counter_ns()
         data = json.loads(raw_payload)
-        t1 = time.perf_counter()
+        t1 = time.perf_counter_ns()
 
         var_dict, prob = pulp.LpProblem.fromDict(data)
-        t2 = time.perf_counter()
+        t2 = time.perf_counter_ns()
 
         prob.writeMPS(mps_path)
-        t3 = time.perf_counter()
+        t3 = time.perf_counter_ns()
 
-        t_solve_start = time.perf_counter()
-        solve_ret = prob.solve(_WORKER_MIP_SOLVER)
-        t_solve_end = time.perf_counter()
-        cur_code, cur_str = _extract_solve_status(solve_ret)
+        solver = _WORKER_MIP_SOLVER if prob.isMIP() else _WORKER_LP_SOLVER
+        t_solve_start = time.perf_counter_ns()
+        solve_ret = prob.solve(solver)
+        t_solve_end = time.perf_counter_ns()
+        cur_code, cur_str = _extract_solve_status(solve_ret, prob)
 
         if run_idx >= warmup:
             trial_idx = run_idx - warmup
-            parse_ms = (t1 - t0) * 1000.0
-            build_ms = (t2 - t1) * 1000.0
-            format_ms = (t3 - t2) * 1000.0
-            solve_ms = (t_solve_end - t_solve_start) * 1000.0
-            # End-to-end pipeline is parse + build + solve (since prob.solve internally calls writeMPS)
+            parse_ms = (t1 - t0) / 1e6
+            build_ms = (t2 - t1) / 1e6
+            format_ms = (t3 - t2) / 1e6
+            solve_ms = (t_solve_end - t_solve_start) / 1e6
+            # End-to-end pipeline is parse + build + solve (prob.solve internally calls writeMPS).
             total_ms = parse_ms + build_ms + solve_ms
             t_parse_list.append(parse_ms)
             t_build_list.append(build_ms)
             t_format_list.append(format_ms)
             t_solve_list.append(solve_ms)
             t_total_list.append(total_ms)
+            trial_statuses.append(cur_str)
 
             if cur_code == 1 or cur_str == "Optimal":
                 raw_trial_obj = pulp.value(prob.objective)
@@ -339,10 +428,10 @@ def benchmark_single_json(
                         if vobj.varValue is not None:
                             sol_values[vname] = float(vobj.varValue)
 
-    # Also compute pure LP relaxation objective on canonical trial 0 via CBC (mip=False)
+    # Compute pure LP relaxation objective on canonical trial 0 via CBC (mip=False).
     _, prob_lp = pulp.LpProblem.fromDict(json.loads(canonical_raw))
     lp_ret = prob_lp.solve(_WORKER_LP_SOLVER)
-    lp_code, lp_str = _extract_solve_status(lp_ret)
+    lp_code, lp_str = _extract_solve_status(lp_ret, prob_lp)
     if lp_code == 1 or lp_str == "Optimal":
         raw_lp_obj = pulp.value(prob_lp.objective)
         lp_relaxed_obj = float(raw_lp_obj) if raw_lp_obj is not None else 0.0
@@ -356,14 +445,22 @@ def benchmark_single_json(
         "status": status_str,
         "objective": obj_val,
         "trial_objectives": trial_objectives,
+        "trial_statuses": trial_statuses,
         "lp_relaxation_objective": lp_relaxed_obj,
         "solution": sol_values,
         "trials": trials,
         "pulp_version": _WORKER_PULP_VERSION,
         "cbc_path": os.path.basename(_WORKER_CBC_PATH),
         "cbc_version": _WORKER_CBC_VERSION,
+        "cbc_sha256": _WORKER_CBC_SHA256,
         "cbc_spawn_floor_ms": _WORKER_SPAWN_FLOOR_MS,
+        "cbc_lp_spawn_floor_ms": _WORKER_LP_SPAWN_FLOOR_MS,
         "cpu_affinity": _cpu_affinity(),
+        "git_commit": _WORKER_PROVENANCE.get("git_commit", ""),
+        "git_dirty": bool(_WORKER_PROVENANCE.get("git_dirty", True)),
+        "source_fingerprint": _WORKER_PROVENANCE.get("source_fingerprint", ""),
+        "uname_release": _WORKER_PROVENANCE.get("uname_release", ""),
+        "measured_at": _WORKER_PROVENANCE.get("measured_at", ""),
         "t_solve_trials_ms": t_solve_list,
         "t_total_trials_ms": t_total_list,
         "t_parse_median_ms": statistics.median(t_parse_list),
@@ -391,12 +488,13 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
         "--require-cbc-version",
-        default="2.10.3",
-        help="abort unless every worker ran this CBC version (empty string disables the check); "
+        default="CBC devel (git:c1c171ec)",
+        help="abort unless every worker ran the specified CBC version (empty string disables check); "
         "set CBC_BIN to select the binary",
     )
     args = parser.parse_args()
 
+    prov = _repo_provenance()
     json_files = sorted(glob.glob(os.path.join(args.corpus_dir, "*.json")))
     warmup_json = json_files[0] if json_files else ""
     for jf in json_files:
@@ -410,7 +508,7 @@ def main() -> None:
     with ProcessPoolExecutor(
         max_workers=max(1, args.workers),
         initializer=_init_worker,
-        initargs=(warmup_json,),
+        initargs=(warmup_json, prov),
     ) as pool:
         future_map = {pool.submit(_bench_worker, t): t[0] for t in tasks}
         for fut in as_completed(future_map):
@@ -440,6 +538,7 @@ def main() -> None:
     os.makedirs(os.path.dirname(os.path.abspath(args.out_json)), exist_ok=True)
     with open(args.out_json, "w", encoding="utf-8") as f:
         json.dump(ordered, f, indent=2)
+        f.write("\n")
 
 
 if __name__ == "__main__":

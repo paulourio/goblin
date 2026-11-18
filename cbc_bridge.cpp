@@ -451,11 +451,11 @@ void goblin_solve_mip(
         addParamKwd(CbcParam::CLQSTRENGTHENING, "clqstr", "off");
     }
 
-    if (!enable_cuts) {
+    if (!enable_cuts || max_cut_passes <= 0) {
         addParamKwd(CbcParam::CUTSTRATEGY, "cuts", "off");
         addParamI(CbcParam::CUTPASS, "passC", 0);
         addParamI(CbcParam::CUTPASSINTREE, "passt", 0);
-    } else if (max_cut_passes > 0) {
+    } else {
         addParamI(CbcParam::CUTPASS, "passC", max_cut_passes);
     }
 
@@ -652,7 +652,7 @@ void goblin_lp_set_bounds(
     }
 }
 
-void goblin_lp_add_cut(
+int goblin_lp_add_cut(
     GoblinLPSolver *s,
     int nnz,
     const int *col_idx,
@@ -660,16 +660,20 @@ void goblin_lp_add_cut(
     double rhs
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
-    if (!s) return;
+    if (!s) return 0;
     try {
         s->solver.addRow(nnz, col_idx, val, -COIN_DBL_MAX, rhs);
         s->num_rows = s->solver.getNumRows();
+        return 1;
     } catch (...) {
+        return 0;
     }
 }
 
 void goblin_lp_solve(
     GoblinLPSolver *s,
+    int out_cols,
+    int out_rows,
     GoblinResult *out,
     double *primal_out,
     double *dual_out,
@@ -693,6 +697,10 @@ void goblin_lp_solve(
         out->iterations = s->solver.getIterationCount();
         int nc = s->solver.getNumCols();
         int nr = s->solver.getNumRows();
+        if (nc < 0 || nr < 0 || nc > out_cols || nr > out_rows) {
+            out->status = -12; // StatusNumericalError
+            return;
+        }
 
         if (s->solver.isProvenOptimal()) {
             out->status = 1; // StatusOptimal

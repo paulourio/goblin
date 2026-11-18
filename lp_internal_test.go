@@ -54,7 +54,7 @@ func TestAddCutRowsMatchesCompiledRows(t *testing.T) {
 		for range 4 {
 			var c row
 			act := 0.0
-			for j := range p.NumVars {
+			for j := range p.numVars {
 				if r.Float64() < 0.4 {
 					v := 0.5 + r.Float64()
 					c.cols = append(c.cols, j)
@@ -91,8 +91,8 @@ func TestAddCutRowsMatchesCompiledRows(t *testing.T) {
 		}
 
 		s.restore(snap)
-		if len(s.ExtraRows) != 0 {
-			t.Fatalf("seed %d: restore left %d extra rows", seed, len(s.ExtraRows))
+		if len(s.extraRows) != 0 {
+			t.Fatalf("seed %d: restore left %d extra rows", seed, len(s.extraRows))
 		}
 		again := s.Solve()
 		if again.Status != StatusOptimal || math.Abs(again.ObjectiveMin-base.ObjectiveMin) > 1e-7*max(1, math.Abs(base.ObjectiveMin)) {

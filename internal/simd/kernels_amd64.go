@@ -265,14 +265,20 @@ func AbsMax64(x []float64) float64 {
 	}
 	xp := unsafe.Pointer(&x[0])
 	vmax := archsimd.BroadcastFloat64x4(0)
+	vnan := vmax
 	i := 0
 	for ; i+4 <= n; i += 4 {
 		v := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, i*8))).Abs()
 		vmax = vmax.Max(v)
+		vnan = vnan.Add(v)
 	}
-	var lanes [4]float64
+	var lanes, nanLanes [4]float64
 	vmax.StoreArray(&lanes)
+	vnan.StoreArray(&nanLanes)
 	archsimd.ClearAVXUpperBits()
+	if math.IsNaN((nanLanes[0] + nanLanes[1]) + (nanLanes[2] + nanLanes[3])) {
+		return math.NaN()
+	}
 	res := max(max(lanes[0], lanes[1]), max(lanes[2], lanes[3]))
 	for ; i < n; i++ {
 		res = max(res, math.Abs(*(*float64)(unsafe.Add(xp, i*8))))
@@ -364,6 +370,8 @@ func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
 
 	vminAcc := archsimd.BroadcastFloat64x4(0)
 	vmaxAcc := archsimd.BroadcastFloat64x4(0)
+	vinf := archsimd.BroadcastFloat64x4(math.Inf(1))
+	allOrd := vminAcc.LessEqual(vinf)
 
 	i := 0
 	for ; i+4 <= n; i += 4 {
@@ -372,6 +380,7 @@ func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
 		vu := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(up, i*8)))
 		p1 := vr.Mul(vl)
 		p2 := vr.Mul(vu)
+		allOrd = allOrd.And(p1.Abs().LessEqual(vinf)).And(p2.Abs().LessEqual(vinf))
 		vminAcc = vminAcc.Add(p1.Min(p2))
 		vmaxAcc = vmaxAcc.Add(p1.Max(p2))
 	}
@@ -379,7 +388,11 @@ func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
 	var minLanes, maxLanes [4]float64
 	vminAcc.StoreArray(&minLanes)
 	vmaxAcc.StoreArray(&maxLanes)
+	ord := allOrd.ToBits() == 0xf
 	archsimd.ClearAVXUpperBits()
+	if !ord {
+		return math.NaN(), math.NaN()
+	}
 	minAct = (minLanes[0] + minLanes[1]) + (minLanes[2] + minLanes[3])
 	maxAct = (maxLanes[0] + maxLanes[1]) + (maxLanes[2] + maxLanes[3])
 
@@ -407,27 +420,14 @@ func MinReducedSlice64Scalar(rowCost, v []float64) float64 {
 		r1 := float64(cSlice[1] - vSlice[1])
 		r2 := float64(cSlice[2] - vSlice[2])
 		r3 := float64(cSlice[3] - vSlice[3])
-		if r1 < r0 {
-			r0 = r1
-		}
-		if r3 < r2 {
-			r2 = r3
-		}
-		if r2 < r0 {
-			r0 = r2
-		}
-		if r0 < minRed {
-			minRed = r0
-		}
+		minRed = min(minRed, min(min(r0, r1), min(r2, r3)))
 		cSlice = cSlice[4:]
 		vSlice = vSlice[4:]
 	}
 	if len(cSlice) > 0 {
 		vSlice = vSlice[:len(cSlice)]
 		for j, cj := range cSlice {
-			if r := float64(cj - vSlice[j]); r < minRed {
-				minRed = r
-			}
+			minRed = min(minRed, float64(cj-vSlice[j]))
 		}
 	}
 	return minRed
@@ -444,30 +444,39 @@ func MinReducedSlice64With(rowCost, v []float64, disableSIMD bool) float64 {
 	vp := unsafe.Pointer(&v[0])
 	vmin0 := archsimd.BroadcastFloat64x4(math.Inf(1))
 	vmin1 := vmin0
+	vinf := vmin0
+	allOrd := archsimd.BroadcastFloat64x4(0).LessEqual(vinf)
 	j := 0
 	for ; j+8 <= n; j += 8 {
 		c0 := (*[4]float64)(unsafe.Add(cp, j*8))
 		v0 := (*[4]float64)(unsafe.Add(vp, j*8))
 		c1 := (*[4]float64)(unsafe.Add(cp, (j+4)*8))
 		v1 := (*[4]float64)(unsafe.Add(vp, (j+4)*8))
-		vmin0 = vmin0.Min(archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0)))
-		vmin1 = vmin1.Min(archsimd.LoadFloat64x4Array(c1).Sub(archsimd.LoadFloat64x4Array(v1)))
+		r0 := archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0))
+		r1 := archsimd.LoadFloat64x4Array(c1).Sub(archsimd.LoadFloat64x4Array(v1))
+		allOrd = allOrd.And(r0.Abs().LessEqual(vinf)).And(r1.Abs().LessEqual(vinf))
+		vmin0 = r0.Min(vmin0)
+		vmin1 = r1.Min(vmin1)
 	}
 	for ; j+4 <= n; j += 4 {
 		c0 := (*[4]float64)(unsafe.Add(cp, j*8))
 		v0 := (*[4]float64)(unsafe.Add(vp, j*8))
-		vmin0 = vmin0.Min(archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0)))
+		r0 := archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0))
+		allOrd = allOrd.And(r0.Abs().LessEqual(vinf))
+		vmin0 = r0.Min(vmin0)
 	}
-	vmin0 = vmin0.Min(vmin1)
+	vmin0 = vmin1.Min(vmin0)
 	var lanes [4]float64
 	vmin0.StoreArray(&lanes)
+	ord := allOrd.ToBits() == 0xf
 	archsimd.ClearAVXUpperBits()
+	if !ord {
+		return math.NaN()
+	}
 	minRed := min(min(lanes[0], lanes[1]), min(lanes[2], lanes[3]))
 	for ; j < n; j++ {
 		r := float64(*(*float64)(unsafe.Add(cp, j*8)) - *(*float64)(unsafe.Add(vp, j*8)))
-		if r < minRed {
-			minRed = r
-		}
+		minRed = min(minRed, r)
 	}
 	return minRed
 }
@@ -494,18 +503,10 @@ func InitReducedRow64Scalar(dst, costRow, v []float64, ui float64) float64 {
 		dSlice[1] = d1
 		dSlice[2] = d2
 		dSlice[3] = d3
-		if d0 < m0 {
-			m0 = d0
-		}
-		if d1 < m1 {
-			m1 = d1
-		}
-		if d2 < m2 {
-			m2 = d2
-		}
-		if d3 < m3 {
-			m3 = d3
-		}
+		m0 = min(m0, d0)
+		m1 = min(m1, d1)
+		m2 = min(m2, d2)
+		m3 = min(m3, d3)
 		dSlice = dSlice[4:]
 		cSlice = cSlice[4:]
 		vSlice = vSlice[4:]
@@ -517,9 +518,7 @@ func InitReducedRow64Scalar(dst, costRow, v []float64, ui float64) float64 {
 		for i, ci := range cSlice {
 			d := (ci - vSlice[i]) - ui
 			dSlice[i] = d
-			if d < minVal {
-				minVal = d
-			}
+			minVal = min(minVal, d)
 		}
 	}
 	if minVal == 0 {
@@ -555,6 +554,8 @@ func initReducedRow64AVX2(dst, costRow, v []float64, ui float64) float64 {
 
 	vui := archsimd.BroadcastFloat64x4(ui)
 	vmin := archsimd.BroadcastFloat64x4(math.Inf(1))
+	vinf := vmin
+	allOrd := archsimd.BroadcastFloat64x4(0).LessEqual(vinf)
 
 	i := 0
 	for ; i+8 <= n; i += 8 {
@@ -572,7 +573,8 @@ func initReducedRow64AVX2(dst, costRow, v []float64, ui float64) float64 {
 		vd0.StoreArray(d0)
 		vd1.StoreArray(d1)
 
-		vmin = vmin.Min(vd0).Min(vd1)
+		allOrd = allOrd.And(vd0.Abs().LessEqual(vinf)).And(vd1.Abs().LessEqual(vinf))
+		vmin = vd1.Min(vd0.Min(vmin))
 	}
 	for ; i+4 <= n; i += 4 {
 		c0 := (*[4]float64)(unsafe.Add(cp, i*8))
@@ -581,20 +583,23 @@ func initReducedRow64AVX2(dst, costRow, v []float64, ui float64) float64 {
 
 		vd0 := archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0)).Sub(vui)
 		vd0.StoreArray(d0)
-		vmin = vmin.Min(vd0)
+		allOrd = allOrd.And(vd0.Abs().LessEqual(vinf))
+		vmin = vd0.Min(vmin)
 	}
 
 	var lanes [4]float64
 	vmin.StoreArray(&lanes)
+	ord := allOrd.ToBits() == 0xf
 	archsimd.ClearAVXUpperBits()
 	minVal := min(min(lanes[0], lanes[1]), min(lanes[2], lanes[3]))
+	if !ord {
+		minVal = math.NaN()
+	}
 
 	for ; i < n; i++ {
 		d := (*(*float64)(unsafe.Add(cp, i*8)) - *(*float64)(unsafe.Add(vp, i*8))) - ui
 		*(*float64)(unsafe.Add(dp, i*8)) = d
-		if d < minVal {
-			minVal = d
-		}
+		minVal = min(minVal, d)
 	}
 	if minVal == 0 {
 		minVal = 0

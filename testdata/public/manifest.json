@@ -1,0 +1,156 @@
+[
+  {
+    "id": "netlib_afiro",
+    "collection": "Netlib LP",
+    "upstream_name": "AFIRO",
+    "is_mip": false,
+    "num_vars": 32,
+    "num_constraints": 27,
+    "reference_objective": -464.75314432
+  },
+  {
+    "id": "netlib_sc50a",
+    "collection": "Netlib LP",
+    "upstream_name": "SC50A",
+    "is_mip": false,
+    "num_vars": 48,
+    "num_constraints": 49,
+    "reference_objective": -64.575077
+  },
+  {
+    "id": "netlib_sc50b",
+    "collection": "Netlib LP",
+    "upstream_name": "SC50B",
+    "is_mip": false,
+    "num_vars": 48,
+    "num_constraints": 48,
+    "reference_objective": -70.0
+  },
+  {
+    "id": "netlib_blend",
+    "collection": "Netlib LP",
+    "upstream_name": "BLEND",
+    "is_mip": false,
+    "num_vars": 83,
+    "num_constraints": 74,
+    "reference_objective": -30.812148699525004
+  },
+  {
+    "id": "netlib_adlittle",
+    "collection": "Netlib LP",
+    "upstream_name": "ADLITTLE",
+    "is_mip": false,
+    "num_vars": 97,
+    "num_constraints": 56,
+    "reference_objective": 225494.967093396
+  },
+  {
+    "id": "netlib_share2b",
+    "collection": "Netlib LP",
+    "upstream_name": "SHARE2B",
+    "is_mip": false,
+    "num_vars": 79,
+    "num_constraints": 96,
+    "reference_objective": -415.73224470100354
+  },
+  {
+    "id": "netlib_recipe",
+    "collection": "Netlib LP",
+    "upstream_name": "RECIPE",
+    "is_mip": false,
+    "num_vars": 180,
+    "num_constraints": 91,
+    "reference_objective": -266.6160000000001
+  },
+  {
+    "id": "netlib_sc105",
+    "collection": "Netlib LP",
+    "upstream_name": "SC105",
+    "is_mip": false,
+    "num_vars": 103,
+    "num_constraints": 104,
+    "reference_objective": -52.202061
+  },
+  {
+    "id": "netlib_stocfor1",
+    "collection": "Netlib LP",
+    "upstream_name": "STOCFOR1",
+    "is_mip": false,
+    "num_vars": 111,
+    "num_constraints": 117,
+    "reference_objective": -41131.976310002596
+  },
+  {
+    "id": "netlib_israel",
+    "collection": "Netlib LP",
+    "upstream_name": "ISRAEL",
+    "is_mip": false,
+    "num_vars": 142,
+    "num_constraints": 174,
+    "reference_objective": -896644.8270332
+  },
+  {
+    "id": "netlib_lotfi",
+    "collection": "Netlib LP",
+    "upstream_name": "LOTFI",
+    "is_mip": false,
+    "num_vars": 308,
+    "num_constraints": 153,
+    "reference_objective": -25.26470659
+  },
+  {
+    "id": "netlib_beaconfd",
+    "collection": "Netlib LP",
+    "upstream_name": "BEACONFD",
+    "is_mip": false,
+    "num_vars": 262,
+    "num_constraints": 173,
+    "reference_objective": 33592.48580719999
+  },
+  {
+    "id": "netlib_e226",
+    "collection": "Netlib LP",
+    "upstream_name": "E226",
+    "is_mip": false,
+    "num_vars": 282,
+    "num_constraints": 223,
+    "reference_objective": -18.751929118239897
+  },
+  {
+    "id": "netlib_brandy",
+    "collection": "Netlib LP",
+    "upstream_name": "BRANDY",
+    "is_mip": false,
+    "num_vars": 249,
+    "num_constraints": 182,
+    "reference_objective": 1518.509932
+  },
+  {
+    "id": "miplib_lseu",
+    "collection": "MIPLIB 3.0",
+    "upstream_name": "lseu",
+    "is_mip": true,
+    "num_vars": 89,
+    "num_constraints": 28,
+    "reference_objective": 1120.0
+  },
+  {
+    "id": "miplib_egout",
+    "collection": "MIPLIB 3.0",
+    "upstream_name": "egout",
+    "is_mip": true,
+    "num_vars": 141,
+    "num_constraints": 98,
+    "reference_objective": 568.1007000000001
+  },
+  {
+    "id": "coinor_capplan1",
+    "collection": "COIN-OR CglTestData",
+    "upstream_name": "capPlan1",
+    "is_mip": true,
+    "num_vars": 2172,
+    "num_constraints": 726,
+    "reference_objective": 963.9164403016869,
+    "go_max_nodes": 25
+  }
+]

@@ -3,6 +3,7 @@
 package bench
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -124,7 +125,11 @@ func BuildCorpus() []CorpusCase {
 			Description: "26-var MAD group-item allocation (G=2 groups, I=4 items, T=6 periods)",
 			Model:       buildMADAllocation("t1_mad_g2_i4", 2, 4, 6, 109),
 			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t1_mad_g2_i4", 2, 4, 6, trialSeed(109, trial))
+				effTrial := trial
+				if effTrial >= 10 {
+					effTrial++
+				}
+				return buildMADAllocation("t1_mad_g2_i4", 2, 4, 6, trialSeed(109, effTrial))
 			},
 		},
 		CorpusCase{
@@ -371,9 +376,22 @@ func WriteCorpusJSON(dir string) ([]CorpusCase, error) {
 		if err != nil {
 			return nil, err
 		}
+		seenTrials := make(map[string]int, numTrials)
+		var lineBuf bytes.Buffer
 		for k := range numTrials {
 			tp := c.TrialModel(k).Compile()
-			if err := format.ToPuLPJSONCompact(tp, tf); err != nil {
+			lineBuf.Reset()
+			if err := format.ToPuLPJSONCompact(tp, &lineBuf); err != nil {
+				_ = tf.Close()
+				return nil, err
+			}
+			key := string(bytes.TrimSpace(lineBuf.Bytes()))
+			if prev, dup := seenTrials[key]; dup {
+				_ = tf.Close()
+				return nil, fmt.Errorf("duplicate trial payload in %s: trial %d matches trial %d", c.ID, k, prev)
+			}
+			seenTrials[key] = k
+			if _, err := tf.Write(lineBuf.Bytes()); err != nil {
 				_ = tf.Close()
 				return nil, err
 			}

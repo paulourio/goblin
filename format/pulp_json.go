@@ -3,14 +3,18 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"regexp"
 
 	gb "github.com/paulourio/goblin"
 )
+
+var reIgnoredPythonNonFinite = regexp.MustCompile(`("(?:varValue|dj|pi)"\s*:\s*)(?:-?Infinity|NaN)\b`)
 
 // PuLPJSON represents the native JSON schema produced by PuLP's LpProblem.toJson / toDict
 // and consumed by LpProblem.fromJson / fromDict.
@@ -76,7 +80,16 @@ type pulpLowBoundProbe struct {
 func parsePuLPJSONStd(data []byte) (*PuLPJSON, error) {
 	var doc PuLPJSON
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse PuLP JSON: %w", err)
+		if bytes.Contains(data, []byte("NaN")) || bytes.Contains(data, []byte("Infinity")) {
+			sanitized := reIgnoredPythonNonFinite.ReplaceAll(data, []byte("${1}null"))
+			if err2 := json.Unmarshal(sanitized, &doc); err2 == nil {
+				data = sanitized
+				err = nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse PuLP JSON: %w", err)
+		}
 	}
 	hasNil := false
 	for i := range doc.Variables {
@@ -150,7 +163,17 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 		case "Continuous":
 			cat = gb.Continuous
 		case "Binary":
-			cat = gb.Binary
+			if v.LowBound == nil {
+				lb = 0
+			}
+			if v.UpBound == nil {
+				ub = 1
+			}
+			if lb >= 0 && ub <= 1 {
+				cat = gb.Binary
+			} else {
+				cat = gb.Integer
+			}
 		case "Integer":
 			if lb >= 0 && ub <= 1 {
 				cat = gb.Binary
@@ -226,65 +249,69 @@ func FromPuLPJSON(r io.Reader) (*gb.Model, error) {
 }
 
 func toPuLPJSONDoc(p *gb.CompiledProblem) PuLPJSON {
+	numVars := p.NumVars()
+	numRows := p.NumConstraints()
 	doc := PuLPJSON{
 		Parameters: PuLPParameters{
-			Name:  p.Name,
-			Sense: int(p.Sense),
+			Name:  p.Name(),
+			Sense: int(p.Sense()),
 		},
-		Variables:   make([]PuLPVariable, p.NumVars),
-		Constraints: make([]PuLPConstraint, p.NumConstraints),
+		Variables:   make([]PuLPVariable, numVars),
+		Constraints: make([]PuLPConstraint, numRows),
 		SOS1:        []any{},
 		SOS2:        []any{},
 	}
-	if p.ObjName != "" {
-		nameCopy := p.ObjName
+	if objName := p.ObjName(); objName != "" {
+		nameCopy := objName
 		doc.Objective.Name = &nameCopy
 	}
-	doc.Objective.Constant = p.ObjConstant
-	doc.Objective.Coefficients = make([]PuLPCoefficient, 0, p.NumVars)
-	for j := range p.NumVars {
-		if p.ObjCoeffs[j] != 0 {
+	doc.Objective.Constant = p.ObjConstant()
+	doc.Objective.Coefficients = make([]PuLPCoefficient, 0, numVars)
+	for j := range numVars {
+		vname := p.VarName(j)
+		if c := p.ObjCoeff(j); c != 0 {
 			doc.Objective.Coefficients = append(doc.Objective.Coefficients, PuLPCoefficient{
-				Name:  p.VarNames[j],
-				Value: p.ObjCoeffs[j],
+				Name:  vname,
+				Value: c,
 			})
 		}
+		lb, ub := p.VarBounds(j)
 		var lbPtr, ubPtr *float64
-		if !math.IsInf(p.VarLB[j], -1) {
-			v := p.VarLB[j]
+		if !math.IsInf(lb, -1) {
+			v := lb
 			lbPtr = &v
 		}
-		if !math.IsInf(p.VarUB[j], 1) {
-			v := p.VarUB[j]
+		if !math.IsInf(ub, 1) {
+			v := ub
 			ubPtr = &v
 		}
 		catStr := "Continuous"
-		if p.VarCat[j] == gb.Integer || p.VarCat[j] == gb.Binary {
+		cat := p.VarCategory(j)
+		if cat == gb.Integer || cat == gb.Binary {
 			// PuLP stores both Binary and Integer as "Integer" with [0, 1] bounds in toDict()
 			catStr = "Integer"
 		}
 		doc.Variables[j] = PuLPVariable{
-			Name:     p.VarNames[j],
+			Name:     vname,
 			Cat:      catStr,
 			LowBound: lbPtr,
 			UpBound:  ubPtr,
 		}
 	}
 
-	for i := range p.NumConstraints {
-		rowLen := p.RowPtr[i+1] - p.RowPtr[i]
-		coeffs := make([]PuLPCoefficient, 0, rowLen)
-		for k := p.RowPtr[i]; k < p.RowPtr[i+1]; k++ {
+	for i := range numRows {
+		coeffs := make([]PuLPCoefficient, 0, p.RowLen(i))
+		p.ForEachRowTerm(i, func(col int, val float64) {
 			coeffs = append(coeffs, PuLPCoefficient{
-				Name:  p.VarNames[p.ColIdx[k]],
-				Value: p.RowVal[k],
+				Name:  p.VarName(col),
+				Value: val,
 			})
-		}
+		})
 		doc.Constraints[i] = PuLPConstraint{
-			Name:         p.RowNames[i],
-			Sense:        int(p.RowSense[i]),
+			Name:         p.RowName(i),
+			Sense:        int(p.RowSense(i)),
 			Coefficients: coeffs,
-			Constant:     -p.RowRHS[i],
+			Constant:     -p.RowRHS(i),
 		}
 	}
 	return doc
@@ -297,8 +324,8 @@ func ToPuLPJSON(p *gb.CompiledProblem, w io.Writer) error {
 	if p == nil {
 		return gb.ErrNilProblem
 	}
-	if p.InvalidErr != nil {
-		return p.InvalidErr
+	if err := p.Err(); err != nil {
+		return err
 	}
 	doc := toPuLPJSONDoc(p)
 	enc := json.NewEncoder(w)
@@ -311,8 +338,8 @@ func ToPuLPJSONCompact(p *gb.CompiledProblem, w io.Writer) error {
 	if p == nil {
 		return gb.ErrNilProblem
 	}
-	if p.InvalidErr != nil {
-		return p.InvalidErr
+	if err := p.Err(); err != nil {
+		return err
 	}
 	doc := toPuLPJSONDoc(p)
 	enc := json.NewEncoder(w)

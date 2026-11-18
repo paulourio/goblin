@@ -188,27 +188,14 @@ func MinReducedSlice64Scalar(rowCost, v []float64) float64 {
 		r1 := float64(cSlice[1] - vSlice[1])
 		r2 := float64(cSlice[2] - vSlice[2])
 		r3 := float64(cSlice[3] - vSlice[3])
-		if r1 < r0 {
-			r0 = r1
-		}
-		if r3 < r2 {
-			r2 = r3
-		}
-		if r2 < r0 {
-			r0 = r2
-		}
-		if r0 < minRed {
-			minRed = r0
-		}
+		minRed = min(minRed, min(min(r0, r1), min(r2, r3)))
 		cSlice = cSlice[4:]
 		vSlice = vSlice[4:]
 	}
 	if len(cSlice) > 0 {
 		vSlice = vSlice[:len(cSlice)]
 		for j, cj := range cSlice {
-			if r := float64(cj - vSlice[j]); r < minRed {
-				minRed = r
-			}
+			minRed = min(minRed, float64(cj-vSlice[j]))
 		}
 	}
 	return minRed
@@ -251,18 +238,10 @@ func InitReducedRow64(dst, costRow, v []float64, ui float64) float64 {
 		dSlice[1] = d1
 		dSlice[2] = d2
 		dSlice[3] = d3
-		if d0 < m0 {
-			m0 = d0
-		}
-		if d1 < m1 {
-			m1 = d1
-		}
-		if d2 < m2 {
-			m2 = d2
-		}
-		if d3 < m3 {
-			m3 = d3
-		}
+		m0 = min(m0, d0)
+		m1 = min(m1, d1)
+		m2 = min(m2, d2)
+		m3 = min(m3, d3)
 		dSlice = dSlice[4:]
 		cSlice = cSlice[4:]
 		vSlice = vSlice[4:]
@@ -274,9 +253,7 @@ func InitReducedRow64(dst, costRow, v []float64, ui float64) float64 {
 		for i, ci := range cSlice {
 			d := (ci - vSlice[i]) - ui
 			dSlice[i] = d
-			if d < minVal {
-				minVal = d
-			}
+			minVal = min(minVal, d)
 		}
 	}
 	if minVal == 0 {

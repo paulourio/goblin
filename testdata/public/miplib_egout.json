@@ -1,0 +1,3117 @@
+{
+  "parameters": {
+    "name": "miplib_egout",
+    "sense": 1
+  },
+  "objective": {
+    "name": "COST",
+    "coefficients": [
+      {
+        "name": "I.001...",
+        "value": 28.21
+      },
+      {
+        "name": "I.001003",
+        "value": 18.57
+      },
+      {
+        "name": "I.002003",
+        "value": 8.45
+      },
+      {
+        "name": "I.002...",
+        "value": 21.16
+      },
+      {
+        "name": "I.003005",
+        "value": 28.38
+      },
+      {
+        "name": "I.004005",
+        "value": 9.8
+      },
+      {
+        "name": "I.004...",
+        "value": 23.29
+      },
+      {
+        "name": "I.005007",
+        "value": 5.07
+      },
+      {
+        "name": "I.006007",
+        "value": 6.78
+      },
+      {
+        "name": "I.007008",
+        "value": 2.9
+      },
+      {
+        "name": "I.008...",
+        "value": 27.89
+      },
+      {
+        "name": "I.008009",
+        "value": 10.03
+      },
+      {
+        "name": "I.010012",
+        "value": 14.74
+      },
+      {
+        "name": "I.011012",
+        "value": 6.19
+      },
+      {
+        "name": "I.012...",
+        "value": 22.1
+      },
+      {
+        "name": "I.012013",
+        "value": 15.82
+      },
+      {
+        "name": "I.013016",
+        "value": 11.33
+      },
+      {
+        "name": "I.014015",
+        "value": 5.79
+      },
+      {
+        "name": "I.015016",
+        "value": 3.9
+      },
+      {
+        "name": "I.016...",
+        "value": 24.79
+      },
+      {
+        "name": "I.016017",
+        "value": 16.36
+      },
+      {
+        "name": "I.017018",
+        "value": 3.45
+      },
+      {
+        "name": "I.009018",
+        "value": 2.26
+      },
+      {
+        "name": "I.018019",
+        "value": 3.86
+      },
+      {
+        "name": "I.019024",
+        "value": 8.41
+      },
+      {
+        "name": "I.024...",
+        "value": 26.46
+      },
+      {
+        "name": "I.023024",
+        "value": 16.01
+      },
+      {
+        "name": "I.022023",
+        "value": 16.73
+      },
+      {
+        "name": "I.020022",
+        "value": 11.75
+      },
+      {
+        "name": "I.021022",
+        "value": 3.25
+      },
+      {
+        "name": "I.022...",
+        "value": 27.41
+      },
+      {
+        "name": "I.024026",
+        "value": 5.98
+      },
+      {
+        "name": "I.025026",
+        "value": 21.88
+      },
+      {
+        "name": "I.025...",
+        "value": 43.71
+      },
+      {
+        "name": "I.026027",
+        "value": 11.42
+      },
+      {
+        "name": "I.027...",
+        "value": 23.4
+      },
+      {
+        "name": "I.027032",
+        "value": 7.5
+      },
+      {
+        "name": "I.030031",
+        "value": 6.73
+      },
+      {
+        "name": "I.031032",
+        "value": 5.92
+      },
+      {
+        "name": "I.029031",
+        "value": 9.7
+      },
+      {
+        "name": "I.028029",
+        "value": 12.67
+      },
+      {
+        "name": "I.028...",
+        "value": 26.45
+      },
+      {
+        "name": "I.032033",
+        "value": 2.71
+      },
+      {
+        "name": "I.033037",
+        "value": 5.89
+      },
+      {
+        "name": "I.036037",
+        "value": 9.85
+      },
+      {
+        "name": "I.034036",
+        "value": 8.5
+      },
+      {
+        "name": "I.035036",
+        "value": 9.0
+      },
+      {
+        "name": "I.037038",
+        "value": 2.27
+      },
+      {
+        "name": "I.038040",
+        "value": 6.37
+      },
+      {
+        "name": "I.039040",
+        "value": 16.2
+      },
+      {
+        "name": "I.040...",
+        "value": 23.58
+      },
+      {
+        "name": "I.041...",
+        "value": 29.93
+      },
+      {
+        "name": "I.040041",
+        "value": 6.73
+      },
+      {
+        "name": "I.041042",
+        "value": 20.66
+      },
+      {
+        "name": "I.042...",
+        "value": 30.92
+      },
+      {
+        "name": "F.001...",
+        "value": 0.979
+      },
+      {
+        "name": "F.001003",
+        "value": 0.034
+      },
+      {
+        "name": "F.002003",
+        "value": 0.016
+      },
+      {
+        "name": "F.002...",
+        "value": 0.914
+      },
+      {
+        "name": "F.003005",
+        "value": 0.057
+      },
+      {
+        "name": "F.004005",
+        "value": 0.016
+      },
+      {
+        "name": "F.004...",
+        "value": 0.969
+      },
+      {
+        "name": "F.005007",
+        "value": 0.006
+      },
+      {
+        "name": "F.006007",
+        "value": 0.01
+      },
+      {
+        "name": "F.007008",
+        "value": 0.002
+      },
+      {
+        "name": "F.008...",
+        "value": 0.976
+      },
+      {
+        "name": "F.008009",
+        "value": 0.017
+      },
+      {
+        "name": "F.010012",
+        "value": 0.027
+      },
+      {
+        "name": "F.011012",
+        "value": 0.009
+      },
+      {
+        "name": "F.012...",
+        "value": 0.964
+      },
+      {
+        "name": "F.012013",
+        "value": 0.025
+      },
+      {
+        "name": "F.013016",
+        "value": 0.015
+      },
+      {
+        "name": "F.014015",
+        "value": 0.01
+      },
+      {
+        "name": "F.015016",
+        "value": 0.006
+      },
+      {
+        "name": "F.016...",
+        "value": 0.97
+      },
+      {
+        "name": "F.016017",
+        "value": 0.022
+      },
+      {
+        "name": "F.017018",
+        "value": 0.003
+      },
+      {
+        "name": "F.009018",
+        "value": 0.002
+      },
+      {
+        "name": "F.018019",
+        "value": 0.004
+      },
+      {
+        "name": "F.019024",
+        "value": 0.969
+      },
+      {
+        "name": "F.024...",
+        "value": 0.021
+      },
+      {
+        "name": "F.023024",
+        "value": 0.026
+      },
+      {
+        "name": "F.022023",
+        "value": 0.022
+      },
+      {
+        "name": "F.020022",
+        "value": 0.005
+      },
+      {
+        "name": "F.021022",
+        "value": 0.971
+      },
+      {
+        "name": "F.022...",
+        "value": 0.004
+      },
+      {
+        "name": "F.024026",
+        "value": 0.054
+      },
+      {
+        "name": "F.025026",
+        "value": 0.054
+      },
+      {
+        "name": "F.025...",
+        "value": 1.017
+      },
+      {
+        "name": "F.026027",
+        "value": 0.02
+      },
+      {
+        "name": "F.027...",
+        "value": 0.967
+      },
+      {
+        "name": "F.027032",
+        "value": 0.011
+      },
+      {
+        "name": "F.030031",
+        "value": 0.012
+      },
+      {
+        "name": "F.031032",
+        "value": 0.004
+      },
+      {
+        "name": "F.029031",
+        "value": 0.012
+      },
+      {
+        "name": "F.028029",
+        "value": 0.024
+      },
+      {
+        "name": "F.028...",
+        "value": 0.975
+      },
+      {
+        "name": "F.032033",
+        "value": 0.002
+      },
+      {
+        "name": "F.033037",
+        "value": 0.004
+      },
+      {
+        "name": "F.036037",
+        "value": 0.018
+      },
+      {
+        "name": "F.034036",
+        "value": 0.016
+      },
+      {
+        "name": "F.035036",
+        "value": 0.015
+      },
+      {
+        "name": "F.037038",
+        "value": 0.001
+      },
+      {
+        "name": "F.038040",
+        "value": 0.009
+      },
+      {
+        "name": "F.039040",
+        "value": 0.025
+      },
+      {
+        "name": "F.040...",
+        "value": 0.967
+      },
+      {
+        "name": "F.041...",
+        "value": 0.98
+      },
+      {
+        "name": "F.040041",
+        "value": 0.01
+      },
+      {
+        "name": "F.041042",
+        "value": 0.035
+      },
+      {
+        "name": "F.042...",
+        "value": 0.978
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "I.001...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.001003",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.002003",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.002...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.003005",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.004005",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.004...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.005007",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.006007",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.007008",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.008...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.008009",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.010012",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.011012",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.012...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.012013",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.013016",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.014015",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.015016",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.016...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.016017",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.017018",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.009018",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.018019",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.019024",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.024...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.023024",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.022023",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.020022",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.021022",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.022...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.024026",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.025026",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.025...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.026027",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.027...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.027032",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.030031",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.031032",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.029031",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.028029",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.028...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.032033",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.033037",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.036037",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.034036",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.035036",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.037038",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.038040",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.039040",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.040...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.041...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.040041",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.041042",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "I.042...",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "F....001",
+      "cat": "Continuous",
+      "lowBound": 2.45,
+      "upBound": 2.45
+    },
+    {
+      "name": "F....002",
+      "cat": "Continuous",
+      "lowBound": 0.61,
+      "upBound": 0.61
+    },
+    {
+      "name": "F....004",
+      "cat": "Continuous",
+      "lowBound": 7.91,
+      "upBound": 7.91
+    },
+    {
+      "name": "F....006",
+      "cat": "Continuous",
+      "lowBound": 4.54,
+      "upBound": 4.54
+    },
+    {
+      "name": "F....007",
+      "cat": "Continuous",
+      "lowBound": 1.14,
+      "upBound": 1.14
+    },
+    {
+      "name": "F....009",
+      "cat": "Continuous",
+      "lowBound": 0.28,
+      "upBound": 0.28
+    },
+    {
+      "name": "F....010",
+      "cat": "Continuous",
+      "lowBound": 1.13,
+      "upBound": 1.13
+    },
+    {
+      "name": "F....011",
+      "cat": "Continuous",
+      "lowBound": 21.46,
+      "upBound": 21.46
+    },
+    {
+      "name": "F....013",
+      "cat": "Continuous",
+      "lowBound": 4.64,
+      "upBound": 4.64
+    },
+    {
+      "name": "F....014",
+      "cat": "Continuous",
+      "lowBound": 0.31,
+      "upBound": 0.31
+    },
+    {
+      "name": "F....015",
+      "cat": "Continuous",
+      "lowBound": 1.24,
+      "upBound": 1.24
+    },
+    {
+      "name": "F....017",
+      "cat": "Continuous",
+      "lowBound": 0.07,
+      "upBound": 0.07
+    },
+    {
+      "name": "F....019",
+      "cat": "Continuous",
+      "lowBound": 2.41,
+      "upBound": 2.41
+    },
+    {
+      "name": "F....020",
+      "cat": "Continuous",
+      "lowBound": 0.39,
+      "upBound": 0.39
+    },
+    {
+      "name": "F....021",
+      "cat": "Continuous",
+      "lowBound": 7.41,
+      "upBound": 7.41
+    },
+    {
+      "name": "F....023",
+      "cat": "Continuous",
+      "lowBound": 0.07,
+      "upBound": 0.07
+    },
+    {
+      "name": "F....025",
+      "cat": "Continuous",
+      "lowBound": 19.22,
+      "upBound": 19.22
+    },
+    {
+      "name": "F....026",
+      "cat": "Continuous",
+      "lowBound": 10.49,
+      "upBound": 10.49
+    },
+    {
+      "name": "F....028",
+      "cat": "Continuous",
+      "lowBound": 0.88,
+      "upBound": 0.88
+    },
+    {
+      "name": "F....029",
+      "cat": "Continuous",
+      "lowBound": 5.7,
+      "upBound": 5.7
+    },
+    {
+      "name": "F....030",
+      "cat": "Continuous",
+      "lowBound": 0.28,
+      "upBound": 0.28
+    },
+    {
+      "name": "F....031",
+      "cat": "Continuous",
+      "lowBound": 0.28,
+      "upBound": 0.28
+    },
+    {
+      "name": "F....033",
+      "cat": "Continuous",
+      "lowBound": 0.19,
+      "upBound": 0.19
+    },
+    {
+      "name": "F....034",
+      "cat": "Continuous",
+      "lowBound": 0.19,
+      "upBound": 0.19
+    },
+    {
+      "name": "F....035",
+      "cat": "Continuous",
+      "lowBound": 0.28,
+      "upBound": 0.28
+    },
+    {
+      "name": "F....036",
+      "cat": "Continuous",
+      "lowBound": 0.57,
+      "upBound": 0.57
+    },
+    {
+      "name": "F....038",
+      "cat": "Continuous",
+      "lowBound": 5.3,
+      "upBound": 5.3
+    },
+    {
+      "name": "F....039",
+      "cat": "Continuous",
+      "lowBound": 5.32,
+      "upBound": 5.32
+    },
+    {
+      "name": "F....040",
+      "cat": "Continuous",
+      "lowBound": 0.76,
+      "upBound": 0.76
+    },
+    {
+      "name": "F....041",
+      "cat": "Continuous",
+      "lowBound": 5.08,
+      "upBound": 5.08
+    },
+    {
+      "name": "F....042",
+      "cat": "Continuous",
+      "lowBound": 6.44,
+      "upBound": 6.44
+    },
+    {
+      "name": "F.001...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.001003",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.002003",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.002...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.003005",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.004005",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.004...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.005007",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.006007",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.007008",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.008...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.008009",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.010012",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.011012",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.012...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.012013",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.013016",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.014015",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.015016",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.016...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.016017",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.017018",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.009018",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.018019",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.019024",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.024...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.023024",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.022023",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.020022",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.021022",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.022...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.024026",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.025026",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.025...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.026027",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.027...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.027032",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.030031",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.031032",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.029031",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.028029",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.028...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.032033",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.033037",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.036037",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.034036",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.035036",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.037038",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.038040",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.039040",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.040...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.041...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.040041",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.041042",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "F.042...",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "...",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....001",
+          "value": 1.0
+        },
+        {
+          "name": "F....002",
+          "value": 1.0
+        },
+        {
+          "name": "F....004",
+          "value": 1.0
+        },
+        {
+          "name": "F....006",
+          "value": 1.0
+        },
+        {
+          "name": "F....007",
+          "value": 1.0
+        },
+        {
+          "name": "F....009",
+          "value": 1.0
+        },
+        {
+          "name": "F....010",
+          "value": 1.0
+        },
+        {
+          "name": "F....011",
+          "value": 1.0
+        },
+        {
+          "name": "F....013",
+          "value": 1.0
+        },
+        {
+          "name": "F....014",
+          "value": 1.0
+        },
+        {
+          "name": "F....015",
+          "value": 1.0
+        },
+        {
+          "name": "F....017",
+          "value": 1.0
+        },
+        {
+          "name": "F....019",
+          "value": 1.0
+        },
+        {
+          "name": "F....020",
+          "value": 1.0
+        },
+        {
+          "name": "F....021",
+          "value": 1.0
+        },
+        {
+          "name": "F....023",
+          "value": 1.0
+        },
+        {
+          "name": "F....025",
+          "value": 1.0
+        },
+        {
+          "name": "F....026",
+          "value": 1.0
+        },
+        {
+          "name": "F....028",
+          "value": 1.0
+        },
+        {
+          "name": "F....029",
+          "value": 1.0
+        },
+        {
+          "name": "F....030",
+          "value": 1.0
+        },
+        {
+          "name": "F....031",
+          "value": 1.0
+        },
+        {
+          "name": "F....033",
+          "value": 1.0
+        },
+        {
+          "name": "F....034",
+          "value": 1.0
+        },
+        {
+          "name": "F....035",
+          "value": 1.0
+        },
+        {
+          "name": "F....036",
+          "value": 1.0
+        },
+        {
+          "name": "F....038",
+          "value": 1.0
+        },
+        {
+          "name": "F....039",
+          "value": 1.0
+        },
+        {
+          "name": "F....040",
+          "value": 1.0
+        },
+        {
+          "name": "F....041",
+          "value": 1.0
+        },
+        {
+          "name": "F....042",
+          "value": 1.0
+        },
+        {
+          "name": "F.001...",
+          "value": -1.0
+        },
+        {
+          "name": "F.002...",
+          "value": -1.0
+        },
+        {
+          "name": "F.004...",
+          "value": -1.0
+        },
+        {
+          "name": "F.008...",
+          "value": -1.0
+        },
+        {
+          "name": "F.012...",
+          "value": -1.0
+        },
+        {
+          "name": "F.016...",
+          "value": -1.0
+        },
+        {
+          "name": "F.024...",
+          "value": -1.0
+        },
+        {
+          "name": "F.022...",
+          "value": -1.0
+        },
+        {
+          "name": "F.025...",
+          "value": -1.0
+        },
+        {
+          "name": "F.027...",
+          "value": -1.0
+        },
+        {
+          "name": "F.028...",
+          "value": -1.0
+        },
+        {
+          "name": "F.040...",
+          "value": -1.0
+        },
+        {
+          "name": "F.041...",
+          "value": -1.0
+        },
+        {
+          "name": "F.042...",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "001",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....001",
+          "value": -1.0
+        },
+        {
+          "name": "F.001...",
+          "value": 1.0
+        },
+        {
+          "name": "F.001003",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "002",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....002",
+          "value": -1.0
+        },
+        {
+          "name": "F.002003",
+          "value": 1.0
+        },
+        {
+          "name": "F.002...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "004",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....004",
+          "value": -1.0
+        },
+        {
+          "name": "F.004005",
+          "value": 1.0
+        },
+        {
+          "name": "F.004...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "006",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....006",
+          "value": -1.0
+        },
+        {
+          "name": "F.006007",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "007",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....007",
+          "value": -1.0
+        },
+        {
+          "name": "F.005007",
+          "value": -1.0
+        },
+        {
+          "name": "F.006007",
+          "value": -1.0
+        },
+        {
+          "name": "F.007008",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "009",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....009",
+          "value": -1.0
+        },
+        {
+          "name": "F.008009",
+          "value": -1.0
+        },
+        {
+          "name": "F.009018",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "010",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....010",
+          "value": -1.0
+        },
+        {
+          "name": "F.010012",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "011",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....011",
+          "value": -1.0
+        },
+        {
+          "name": "F.011012",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "013",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....013",
+          "value": -1.0
+        },
+        {
+          "name": "F.012013",
+          "value": -1.0
+        },
+        {
+          "name": "F.013016",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "014",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....014",
+          "value": -1.0
+        },
+        {
+          "name": "F.014015",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "015",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....015",
+          "value": -1.0
+        },
+        {
+          "name": "F.014015",
+          "value": -1.0
+        },
+        {
+          "name": "F.015016",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "017",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....017",
+          "value": -1.0
+        },
+        {
+          "name": "F.016017",
+          "value": -1.0
+        },
+        {
+          "name": "F.017018",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "019",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....019",
+          "value": -1.0
+        },
+        {
+          "name": "F.018019",
+          "value": -1.0
+        },
+        {
+          "name": "F.019024",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "020",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....020",
+          "value": -1.0
+        },
+        {
+          "name": "F.020022",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "021",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....021",
+          "value": -1.0
+        },
+        {
+          "name": "F.021022",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "023",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....023",
+          "value": -1.0
+        },
+        {
+          "name": "F.023024",
+          "value": 1.0
+        },
+        {
+          "name": "F.022023",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "025",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....025",
+          "value": -1.0
+        },
+        {
+          "name": "F.025026",
+          "value": 1.0
+        },
+        {
+          "name": "F.025...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "026",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....026",
+          "value": -1.0
+        },
+        {
+          "name": "F.024026",
+          "value": -1.0
+        },
+        {
+          "name": "F.025026",
+          "value": -1.0
+        },
+        {
+          "name": "F.026027",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "028",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....028",
+          "value": -1.0
+        },
+        {
+          "name": "F.028029",
+          "value": 1.0
+        },
+        {
+          "name": "F.028...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "029",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....029",
+          "value": -1.0
+        },
+        {
+          "name": "F.029031",
+          "value": 1.0
+        },
+        {
+          "name": "F.028029",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "030",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....030",
+          "value": -1.0
+        },
+        {
+          "name": "F.030031",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "031",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....031",
+          "value": -1.0
+        },
+        {
+          "name": "F.030031",
+          "value": -1.0
+        },
+        {
+          "name": "F.031032",
+          "value": 1.0
+        },
+        {
+          "name": "F.029031",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "033",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....033",
+          "value": -1.0
+        },
+        {
+          "name": "F.032033",
+          "value": -1.0
+        },
+        {
+          "name": "F.033037",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "034",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....034",
+          "value": -1.0
+        },
+        {
+          "name": "F.034036",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "035",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....035",
+          "value": -1.0
+        },
+        {
+          "name": "F.035036",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "036",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....036",
+          "value": -1.0
+        },
+        {
+          "name": "F.036037",
+          "value": 1.0
+        },
+        {
+          "name": "F.034036",
+          "value": -1.0
+        },
+        {
+          "name": "F.035036",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "038",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....038",
+          "value": -1.0
+        },
+        {
+          "name": "F.037038",
+          "value": -1.0
+        },
+        {
+          "name": "F.038040",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "039",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....039",
+          "value": -1.0
+        },
+        {
+          "name": "F.039040",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "040",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....040",
+          "value": -1.0
+        },
+        {
+          "name": "F.038040",
+          "value": -1.0
+        },
+        {
+          "name": "F.039040",
+          "value": -1.0
+        },
+        {
+          "name": "F.040...",
+          "value": 1.0
+        },
+        {
+          "name": "F.040041",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "041",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....041",
+          "value": -1.0
+        },
+        {
+          "name": "F.041...",
+          "value": 1.0
+        },
+        {
+          "name": "F.040041",
+          "value": -1.0
+        },
+        {
+          "name": "F.041042",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "042",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F....042",
+          "value": -1.0
+        },
+        {
+          "name": "F.041042",
+          "value": -1.0
+        },
+        {
+          "name": "F.042...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "003",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.001003",
+          "value": -1.0
+        },
+        {
+          "name": "F.002003",
+          "value": -1.0
+        },
+        {
+          "name": "F.003005",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "005",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.003005",
+          "value": -1.0
+        },
+        {
+          "name": "F.004005",
+          "value": -1.0
+        },
+        {
+          "name": "F.005007",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "008",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.007008",
+          "value": -1.0
+        },
+        {
+          "name": "F.008...",
+          "value": 1.0
+        },
+        {
+          "name": "F.008009",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "012",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.010012",
+          "value": -1.0
+        },
+        {
+          "name": "F.011012",
+          "value": -1.0
+        },
+        {
+          "name": "F.012...",
+          "value": 1.0
+        },
+        {
+          "name": "F.012013",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "016",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.013016",
+          "value": -1.0
+        },
+        {
+          "name": "F.015016",
+          "value": -1.0
+        },
+        {
+          "name": "F.016...",
+          "value": 1.0
+        },
+        {
+          "name": "F.016017",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "018",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.017018",
+          "value": -1.0
+        },
+        {
+          "name": "F.009018",
+          "value": -1.0
+        },
+        {
+          "name": "F.018019",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "024",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.019024",
+          "value": -1.0
+        },
+        {
+          "name": "F.024...",
+          "value": 1.0
+        },
+        {
+          "name": "F.023024",
+          "value": -1.0
+        },
+        {
+          "name": "F.024026",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "022",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.022023",
+          "value": 1.0
+        },
+        {
+          "name": "F.020022",
+          "value": -1.0
+        },
+        {
+          "name": "F.021022",
+          "value": -1.0
+        },
+        {
+          "name": "F.022...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "027",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.026027",
+          "value": -1.0
+        },
+        {
+          "name": "F.027...",
+          "value": 1.0
+        },
+        {
+          "name": "F.027032",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "032",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.027032",
+          "value": -1.0
+        },
+        {
+          "name": "F.031032",
+          "value": -1.0
+        },
+        {
+          "name": "F.032033",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "037",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "F.033037",
+          "value": -1.0
+        },
+        {
+          "name": "F.036037",
+          "value": -1.0
+        },
+        {
+          "name": "F.037038",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.001...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.001...",
+          "value": -117.04
+        },
+        {
+          "name": "F.001...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.001003",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.001003",
+          "value": -117.04
+        },
+        {
+          "name": "F.001003",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.002003",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.002003",
+          "value": -117.04
+        },
+        {
+          "name": "F.002003",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.002...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.002...",
+          "value": -117.04
+        },
+        {
+          "name": "F.002...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.003005",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.003005",
+          "value": -117.04
+        },
+        {
+          "name": "F.003005",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.004005",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.004005",
+          "value": -117.04
+        },
+        {
+          "name": "F.004005",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.004...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.004...",
+          "value": -117.04
+        },
+        {
+          "name": "F.004...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.005007",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.005007",
+          "value": -117.04
+        },
+        {
+          "name": "F.005007",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.006007",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.006007",
+          "value": -117.04
+        },
+        {
+          "name": "F.006007",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.007008",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.007008",
+          "value": -117.04
+        },
+        {
+          "name": "F.007008",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.008...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.008...",
+          "value": -117.04
+        },
+        {
+          "name": "F.008...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.008009",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.008009",
+          "value": -117.04
+        },
+        {
+          "name": "F.008009",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.010012",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.010012",
+          "value": -117.04
+        },
+        {
+          "name": "F.010012",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.011012",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.011012",
+          "value": -117.04
+        },
+        {
+          "name": "F.011012",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.012...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.012...",
+          "value": -117.04
+        },
+        {
+          "name": "F.012...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.012013",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.012013",
+          "value": -117.04
+        },
+        {
+          "name": "F.012013",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.013016",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.013016",
+          "value": -117.04
+        },
+        {
+          "name": "F.013016",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.014015",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.014015",
+          "value": -117.04
+        },
+        {
+          "name": "F.014015",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.015016",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.015016",
+          "value": -117.04
+        },
+        {
+          "name": "F.015016",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.016...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.016...",
+          "value": -117.04
+        },
+        {
+          "name": "F.016...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.016017",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.016017",
+          "value": -117.04
+        },
+        {
+          "name": "F.016017",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.017018",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.017018",
+          "value": -117.04
+        },
+        {
+          "name": "F.017018",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.009018",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.009018",
+          "value": -117.04
+        },
+        {
+          "name": "F.009018",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.018019",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.018019",
+          "value": -117.04
+        },
+        {
+          "name": "F.018019",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.019024",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.019024",
+          "value": -117.04
+        },
+        {
+          "name": "F.019024",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.024...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.024...",
+          "value": -117.04
+        },
+        {
+          "name": "F.024...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.023024",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.023024",
+          "value": -117.04
+        },
+        {
+          "name": "F.023024",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.022023",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.022023",
+          "value": -117.04
+        },
+        {
+          "name": "F.022023",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.020022",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.020022",
+          "value": -117.04
+        },
+        {
+          "name": "F.020022",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.021022",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.021022",
+          "value": -117.04
+        },
+        {
+          "name": "F.021022",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.022...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.022...",
+          "value": -117.04
+        },
+        {
+          "name": "F.022...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.024026",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.024026",
+          "value": -117.04
+        },
+        {
+          "name": "F.024026",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.025026",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.025026",
+          "value": -117.04
+        },
+        {
+          "name": "F.025026",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.025...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.025...",
+          "value": -117.04
+        },
+        {
+          "name": "F.025...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.026027",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.026027",
+          "value": -117.04
+        },
+        {
+          "name": "F.026027",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.027...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.027...",
+          "value": -117.04
+        },
+        {
+          "name": "F.027...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.027032",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.027032",
+          "value": -117.04
+        },
+        {
+          "name": "F.027032",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.030031",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.030031",
+          "value": -117.04
+        },
+        {
+          "name": "F.030031",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.031032",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.031032",
+          "value": -117.04
+        },
+        {
+          "name": "F.031032",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.029031",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.029031",
+          "value": -117.04
+        },
+        {
+          "name": "F.029031",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.028029",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.028029",
+          "value": -117.04
+        },
+        {
+          "name": "F.028029",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.028...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.028...",
+          "value": -117.04
+        },
+        {
+          "name": "F.028...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.032033",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.032033",
+          "value": -117.04
+        },
+        {
+          "name": "F.032033",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.033037",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.033037",
+          "value": -117.04
+        },
+        {
+          "name": "F.033037",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.036037",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.036037",
+          "value": -117.04
+        },
+        {
+          "name": "F.036037",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.034036",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.034036",
+          "value": -117.04
+        },
+        {
+          "name": "F.034036",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.035036",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.035036",
+          "value": -117.04
+        },
+        {
+          "name": "F.035036",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.037038",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.037038",
+          "value": -117.04
+        },
+        {
+          "name": "F.037038",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.038040",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.038040",
+          "value": -117.04
+        },
+        {
+          "name": "F.038040",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.039040",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.039040",
+          "value": -117.04
+        },
+        {
+          "name": "F.039040",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.040...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.040...",
+          "value": -117.04
+        },
+        {
+          "name": "F.040...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.041...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.041...",
+          "value": -117.04
+        },
+        {
+          "name": "F.041...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.040041",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.040041",
+          "value": -117.04
+        },
+        {
+          "name": "F.040041",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.041042",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.041042",
+          "value": -117.04
+        },
+        {
+          "name": "F.041042",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "U.042...",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "I.042...",
+          "value": -117.04
+        },
+        {
+          "name": "F.042...",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

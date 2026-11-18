@@ -158,7 +158,7 @@
     {
       "name": "open_00",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -166,7 +166,7 @@
     {
       "name": "open_01",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -174,7 +174,7 @@
     {
       "name": "open_02",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -182,7 +182,7 @@
     {
       "name": "open_03",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -190,7 +190,7 @@
     {
       "name": "open_04",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -198,7 +198,7 @@
     {
       "name": "open_05",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -214,7 +214,7 @@
     {
       "name": "flow_00_01",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -222,7 +222,7 @@
     {
       "name": "flow_00_02",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 10,
       "varValue": null,
       "dj": null
@@ -238,7 +238,7 @@
     {
       "name": "flow_00_04",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -246,7 +246,7 @@
     {
       "name": "flow_01_00",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 9,
       "varValue": null,
       "dj": null
@@ -254,7 +254,7 @@
     {
       "name": "flow_01_01",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -270,7 +270,7 @@
     {
       "name": "flow_01_03",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 7,
       "varValue": null,
       "dj": null
@@ -278,7 +278,7 @@
     {
       "name": "flow_01_04",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -286,7 +286,7 @@
     {
       "name": "flow_02_00",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 9,
       "varValue": null,
       "dj": null
@@ -302,7 +302,7 @@
     {
       "name": "flow_02_02",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 10,
       "varValue": null,
       "dj": null
@@ -310,7 +310,7 @@
     {
       "name": "flow_02_03",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 7,
       "varValue": null,
       "dj": null
@@ -334,7 +334,7 @@
     {
       "name": "flow_03_01",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -342,7 +342,7 @@
     {
       "name": "flow_03_02",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 10,
       "varValue": null,
       "dj": null
@@ -358,7 +358,7 @@
     {
       "name": "flow_03_04",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -366,7 +366,7 @@
     {
       "name": "flow_04_00",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 9,
       "varValue": null,
       "dj": null
@@ -374,7 +374,7 @@
     {
       "name": "flow_04_01",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -390,7 +390,7 @@
     {
       "name": "flow_04_03",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 7,
       "varValue": null,
       "dj": null
@@ -398,7 +398,7 @@
     {
       "name": "flow_04_04",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 16,
       "varValue": null,
       "dj": null
@@ -406,7 +406,7 @@
     {
       "name": "flow_05_00",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 9,
       "varValue": null,
       "dj": null
@@ -422,7 +422,7 @@
     {
       "name": "flow_05_02",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 10,
       "varValue": null,
       "dj": null
@@ -430,7 +430,7 @@
     {
       "name": "flow_05_03",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 7,
       "varValue": null,
       "dj": null

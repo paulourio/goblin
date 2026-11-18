@@ -38,9 +38,9 @@ const (
 // propagateRow tightens variable bounds on row i from residual row activities and reports
 // whether the row remains feasible and whether any bound shrunk by more than heurIntBoundTol.
 func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col int)) (feasible, changed bool) {
-	s, e := p.RowPtr[i], p.RowPtr[i+1]
-	rhs := p.RowRHS[i]
-	sense := p.RowSense[i]
+	s, e := p.rowPtr[i], p.rowPtr[i+1]
+	rhs := p.rowRHS[i]
+	sense := p.rowSense[i]
 	hasUB := sense == LessEqual || sense == Equal
 	hasLB := sense == GreaterEqual || sense == Equal
 
@@ -50,8 +50,8 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 	maxInf := 0
 
 	for k := s; k < e; k++ {
-		col := p.ColIdx[k]
-		a := p.RowVal[k]
+		col := p.colIdx[k]
+		a := p.rowVal[k]
 		l, u := lb[col], ub[col]
 		if a > 0 {
 			if math.IsInf(l, -1) {
@@ -94,15 +94,15 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 	if hasUB && minInf == 0 {
 		slack := rhs - minAct
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			a := p.RowVal[k]
+			col := p.colIdx[k]
+			a := p.rowVal[k]
 			l, u := lb[col], ub[col]
 			if l == u {
 				continue
 			}
 			if a > heurCoeffZeroTol {
 				newUB := l + slack/a
-				if p.VarCat[col] != Continuous {
+				if p.varCat[col] != Continuous {
 					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
 					newUB = math.Floor(newUB + bTol)
 				}
@@ -118,7 +118,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 				}
 			} else if a < -heurCoeffZeroTol {
 				newLB := u + slack/a
-				if p.VarCat[col] != Continuous {
+				if p.varCat[col] != Continuous {
 					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/(-a))
 					newLB = math.Ceil(newLB - bTol)
 				}
@@ -139,15 +139,15 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 	if hasLB && maxInf == 0 {
 		surplus := maxAct - rhs
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			a := p.RowVal[k]
+			col := p.colIdx[k]
+			a := p.rowVal[k]
 			l, u := lb[col], ub[col]
 			if l == u {
 				continue
 			}
 			if a > heurCoeffZeroTol {
 				newLB := u - surplus/a
-				if p.VarCat[col] != Continuous {
+				if p.varCat[col] != Continuous {
 					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
 					newLB = math.Ceil(newLB - bTol)
 				}
@@ -163,7 +163,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 				}
 			} else if a < -heurCoeffZeroTol {
 				newUB := l + surplus/(-a)
-				if p.VarCat[col] != Continuous {
+				if p.varCat[col] != Continuous {
 					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/(-a))
 					newUB = math.Floor(newUB + bTol)
 				}
@@ -184,7 +184,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 }
 
 func propagateBounds(p *CompiledProblem, lb, ub []float64, maxPasses int) bool {
-	m := p.NumConstraints
+	m := p.numConstraints
 	for range maxPasses {
 		anyChanged := false
 		for i := range m {
@@ -206,8 +206,8 @@ func propagateBounds(p *CompiledProblem, lb, ub []float64, maxPasses int) bool {
 func propagateFromCol(p *CompiledProblem, lb, ub []float64, startCol int, queue *[]int, inQueue []bool) bool {
 	q := (*queue)[:0]
 	pushCol := func(col int) {
-		for k := p.ColPtr[col]; k < p.ColPtr[col+1]; k++ {
-			r := p.RowIdx[k]
+		for k := p.colPtr[col]; k < p.colPtr[col+1]; k++ {
+			r := p.rowIdx[k]
 			if !inQueue[r] {
 				inQueue[r] = true
 				q = append(q, r)
@@ -217,7 +217,7 @@ func propagateFromCol(p *CompiledProblem, lb, ub []float64, startCol int, queue 
 	pushCol(startCol)
 
 	head := 0
-	maxSteps := max(minPropSteps, propStepsPerRow*p.NumConstraints)
+	maxSteps := max(minPropSteps, propStepsPerRow*p.numConstraints)
 	for head < len(q) && head < maxSteps {
 		r := q[head]
 		head++
@@ -241,15 +241,15 @@ func propagateFromCol(p *CompiledProblem, lb, ub []float64, startCol int, queue 
 // findContLinkedIntCols marks general integer columns whose nonzeros appear only in mixed rows
 // coupling continuous variables with a single integer variable (such as roundness-penalty multiples).
 func findContLinkedIntCols(p *CompiledProblem) []bool {
-	if len(p.IntCols) == 0 || len(p.IntCols) == p.NumVars {
+	if len(p.intCols) == 0 || len(p.intCols) == p.numVars {
 		return nil
 	}
-	rowHasCont := make([]bool, p.NumConstraints)
-	for i := range p.NumConstraints {
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+	rowHasCont := make([]bool, p.numConstraints)
+	for i := range p.numConstraints {
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		nCont, nInt := 0, 0
 		for k := s; k < e; k++ {
-			if p.VarCat[p.ColIdx[k]] == Continuous {
+			if p.varCat[p.colIdx[k]] == Continuous {
 				nCont++
 			} else {
 				nInt++
@@ -260,24 +260,24 @@ func findContLinkedIntCols(p *CompiledProblem) []bool {
 		}
 	}
 	var isContLinked []bool
-	for _, col := range p.IntCols {
-		if p.VarCat[col] != Integer {
+	for _, col := range p.intCols {
+		if p.varCat[col] != Integer {
 			continue
 		}
-		s, e := p.ColPtr[col], p.ColPtr[col+1]
+		s, e := p.colPtr[col], p.colPtr[col+1]
 		if s == e {
 			continue
 		}
 		allContRows := true
 		for k := s; k < e; k++ {
-			if !rowHasCont[p.RowIdx[k]] {
+			if !rowHasCont[p.rowIdx[k]] {
 				allContRows = false
 				break
 			}
 		}
 		if allContRows {
 			if isContLinked == nil {
-				isContLinked = make([]bool, p.NumVars)
+				isContLinked = make([]bool, p.numVars)
 			}
 			isContLinked[col] = true
 		}
@@ -293,16 +293,16 @@ func tryPropagatedRounding(
 	curLB, curUB []float64,
 	auxSolver *LPSolver,
 ) (sol []float64, objMin float64, ok bool) {
-	n := p.NumVars
-	hasCont := len(p.IntCols) < n
+	n := p.numVars
+	hasCont := len(p.intCols) < n
 	isContLinked := findContLinkedIntCols(p)
 
 	type cand struct {
 		col  int
 		frac float64
 	}
-	cands := make([]cand, 0, len(p.IntCols))
-	for _, col := range p.IntCols {
+	cands := make([]cand, 0, len(p.intCols))
+	for _, col := range p.intCols {
 		if isContLinked != nil && isContLinked[col] {
 			continue
 		}
@@ -338,8 +338,8 @@ func tryPropagatedRounding(
 	hlb := make([]float64, n)
 	hub := make([]float64, n)
 	candX := make([]float64, n)
-	rowQueue := make([]int, 0, p.NumConstraints*rowQueueCapMult)
-	inQueue := make([]bool, p.NumConstraints)
+	rowQueue := make([]int, 0, p.numConstraints*rowQueueCapMult)
+	inQueue := make([]bool, p.numConstraints)
 
 	var bestSol []float64
 	bestObj := math.Inf(1)
@@ -371,9 +371,9 @@ func tryPropagatedRounding(
 			if strategy == 0 || math.Abs(v-math.Round(v)) <= heurSnapNearFrac {
 				target = math.Round(v)
 			} else {
-				if p.ObjMin[col] > heurCoeffZeroTol {
+				if p.objMin[col] > heurCoeffZeroTol {
 					target = math.Floor(v)
-				} else if p.ObjMin[col] < -heurCoeffZeroTol {
+				} else if p.objMin[col] < -heurCoeffZeroTol {
 					target = math.Ceil(v)
 				} else if v >= halfFracTarget {
 					target = math.Floor(v)
@@ -419,7 +419,7 @@ func tryPropagatedRounding(
 			if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 				obj := 0.0
 				for j := range n {
-					obj += p.ObjMin[j] * candX[j]
+					obj += p.objMin[j] * candX[j]
 				}
 				if obj < bestObj {
 					bestObj = obj
@@ -452,12 +452,12 @@ type epigraphRowTerm struct {
 // z >= c + alpha * m + beta * n coupling an epigraph variable z (ObjMin[z] > 0, UB = +Inf)
 // with at most one non-epigraph continuous variable m and one ContLinked integer variable n.
 func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float64, float64, bool) {
-	n := p.NumVars
-	m := p.NumConstraints
+	n := p.numVars
+	m := p.numConstraints
 
 	// Check if all free variables are either Continuous or ContLinked integers.
 	isContLinked := findContLinkedIntCols(p)
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		if hlb[col] < hub[col] && (isContLinked == nil || !isContLinked[col]) {
 			return nil, 0, false
 		}
@@ -466,7 +466,7 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	// Identify candidate epigraph continuous variables.
 	isEpi := make([]bool, n)
 	for j := range n {
-		if hlb[j] < hub[j] && p.VarCat[j] == Continuous && p.ObjMin[j] > heurCoeffZeroTol &&
+		if hlb[j] < hub[j] && p.varCat[j] == Continuous && p.objMin[j] > heurCoeffZeroTol &&
 			!math.IsInf(hlb[j], -1) && math.IsInf(hub[j], 1) {
 			isEpi[j] = true
 		}
@@ -474,10 +474,10 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 
 	// Verify active rows and refine isEpi: in every active row touching z, z must be lower-bounded.
 	for i := range m {
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		hasFree := false
 		for k := s; k < e; k++ {
-			if col := p.ColIdx[k]; hlb[col] < hub[col] {
+			if col := p.colIdx[k]; hlb[col] < hub[col] {
 				hasFree = true
 				break
 			}
@@ -485,13 +485,13 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		if !hasFree {
 			continue
 		}
-		sense := p.RowSense[i]
+		sense := p.rowSense[i]
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
+			col := p.colIdx[k]
 			if !isEpi[col] {
 				continue
 			}
-			a := p.RowVal[k]
+			a := p.rowVal[k]
 			if !((sense == GreaterEqual && a > heurCoeffZeroTol) || (sense == LessEqual && a < -heurCoeffZeroTol)) {
 				isEpi[col] = false
 			}
@@ -528,15 +528,15 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	}
 
 	for i := range m {
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		fixedAct := 0.0
 		epiCol := -1
 		contCol := -1
 		intCol := -1
 		freeCount := 0
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			val := p.RowVal[k]
+			col := p.colIdx[k]
+			val := p.rowVal[k]
 			if hlb[col] == hub[col] {
 				fixedAct += val * hlb[col]
 				continue
@@ -545,27 +545,27 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 			switch {
 			case isEpi[col] && epiCol == -1:
 				epiCol = col
-			case p.VarCat[col] == Continuous && !isEpi[col] && contCol == -1:
+			case p.varCat[col] == Continuous && !isEpi[col] && contCol == -1:
 				contCol = col
-			case p.VarCat[col] != Continuous && intCol == -1:
+			case p.varCat[col] != Continuous && intCol == -1:
 				intCol = col
 			default:
 				return nil, 0, false
 			}
 		}
-		sense := p.RowSense[i]
+		sense := p.rowSense[i]
 		if freeCount == 0 {
 			switch sense {
 			case LessEqual:
-				if fixedAct > p.RowRHS[i]+intFeasTol {
+				if fixedAct > p.rowRHS[i]+intFeasTol {
 					return nil, 0, false
 				}
 			case GreaterEqual:
-				if fixedAct < p.RowRHS[i]-intFeasTol {
+				if fixedAct < p.rowRHS[i]-intFeasTol {
 					return nil, 0, false
 				}
 			case Equal:
-				if math.Abs(fixedAct-p.RowRHS[i]) > intFeasTol {
+				if math.Abs(fixedAct-p.rowRHS[i]) > intFeasTol {
 					return nil, 0, false
 				}
 			}
@@ -576,17 +576,17 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		}
 		var aEpi, aCont, aInt float64
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
+			col := p.colIdx[k]
 			switch col {
 			case epiCol:
-				aEpi = p.RowVal[k]
+				aEpi = p.rowVal[k]
 			case contCol:
-				aCont = p.RowVal[k]
+				aCont = p.rowVal[k]
 			case intCol:
-				aInt = p.RowVal[k]
+				aInt = p.rowVal[k]
 			}
 		}
-		cTerm := (p.RowRHS[i] - fixedAct) / aEpi
+		cTerm := (p.rowRHS[i] - fixedAct) / aEpi
 		alpha := -aCont / aEpi
 		beta := -aInt / aEpi
 
@@ -641,13 +641,13 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 		if hlb[j] < hub[j] {
 			if pureEpiMaxLB != nil && epiOwner[j] == ownerPureEpigraph {
 				cand[j] = pureEpiMaxLB[j]
-			} else if p.ObjMin[j] < 0 {
+			} else if p.objMin[j] < 0 {
 				if math.IsInf(hub[j], 1) {
 					return nil, 0, false
 				}
 				cand[j] = hub[j]
 			} else if math.IsInf(hlb[j], -1) {
-				if !math.IsInf(hub[j], 1) && p.ObjMin[j] == 0 {
+				if !math.IsInf(hub[j], 1) && p.objMin[j] == 0 {
 					cand[j] = hub[j]
 				} else {
 					cand[j] = 0
@@ -664,7 +664,7 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 	if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 		obj := 0.0
 		for j := range n {
-			obj += p.ObjMin[j] * cand[j]
+			obj += p.objMin[j] * cand[j]
 		}
 		return cand, obj, true
 	}
@@ -786,12 +786,12 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 					}
 				}
 			}
-			obj := p.ObjMin[mCol] * mv
+			obj := p.objMin[mCol] * mv
 			if nCol != -1 {
-				obj += p.ObjMin[nCol] * nv
+				obj += p.objMin[nCol] * nv
 			}
 			for ei, ec := range comp.epiCols {
-				obj += p.ObjMin[ec] * epiMax[ei]
+				obj += p.objMin[ec] * epiMax[ei]
 			}
 			if obj < bestCompObj {
 				bestCompObj = obj
@@ -813,15 +813,15 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 
 // trySingleRowContinuousCompletion solves separable single-row bounded continuous knapsacks in closed form when every free column appears in at most one row.
 func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([]float64, float64, bool) {
-	n := p.NumVars
+	n := p.numVars
 	cand := slices.Clone(hlb)
 	allSingleRow := true
 	for j := range n {
 		if hlb[j] < hub[j] {
-			if p.ObjMin[j] < 0 {
+			if p.objMin[j] < 0 {
 				cand[j] = hub[j]
 			}
-			if p.ColPtr[j+1]-p.ColPtr[j] > 1 {
+			if p.colPtr[j+1]-p.colPtr[j] > 1 {
 				allSingleRow = false
 			}
 		}
@@ -835,14 +835,14 @@ func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([
 			unitPenalty float64
 		}
 		var moves []rowMove
-		for i := range p.NumConstraints {
-			s, e := p.RowPtr[i], p.RowPtr[i+1]
+		for i := range p.numConstraints {
+			s, e := p.rowPtr[i], p.rowPtr[i+1]
 			act := 0.0
 			for k := s; k < e; k++ {
-				act += p.RowVal[k] * cand[p.ColIdx[k]]
+				act += p.rowVal[k] * cand[p.colIdx[k]]
 			}
-			rhs := p.RowRHS[i]
-			sense := p.RowSense[i]
+			rhs := p.rowRHS[i]
+			sense := p.rowSense[i]
 			if (sense == LessEqual && act <= rhs+heurIntBoundTol) ||
 				(sense == GreaterEqual && act >= rhs-heurIntBoundTol) ||
 				(sense == Equal && math.Abs(act-rhs) <= heurIntBoundTol) {
@@ -851,11 +851,11 @@ func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([
 			delta := rhs - act // needed change in row activity
 			moves = moves[:0]
 			for k := s; k < e; k++ {
-				col := p.ColIdx[k]
+				col := p.colIdx[k]
 				if hlb[col] >= hub[col] {
 					continue
 				}
-				a := p.RowVal[k]
+				a := p.rowVal[k]
 				var room, dxSign float64
 				if (delta > 0 && a > 0) || (delta < 0 && a < 0) {
 					room = hub[col] - cand[col]
@@ -866,7 +866,7 @@ func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([
 				}
 				if room > heurCoeffZeroTol {
 					absA := math.Abs(a)
-					pen := max(0.0, p.ObjMin[col]*dxSign) / absA
+					pen := max(0.0, p.objMin[col]*dxSign) / absA
 					moves = append(moves, rowMove{
 						col:         col,
 						absA:        absA,
@@ -897,7 +897,7 @@ func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([
 	if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 		obj := 0.0
 		for j := range n {
-			obj += p.ObjMin[j] * cand[j]
+			obj += p.objMin[j] * cand[j]
 		}
 		return cand, obj, true
 	}
@@ -917,10 +917,10 @@ func solveFixedIntContinuousLP(
 	if eSol, eObj, eOk := solveEpigraphContinuousLP(p, hlb, hub); eOk {
 		return eSol, eObj, true
 	}
-	n := p.NumVars
-	nCont := n - len(p.IntCols)
+	n := p.numVars
+	nCont := n - len(p.intCols)
 	hasUnfixedInt := false
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		if hlb[col] < hub[col] {
 			hasUnfixedInt = true
 			break
@@ -932,8 +932,17 @@ func solveFixedIntContinuousLP(
 		}
 	}
 	if !hasUnfixedInt && auxSolver != nil && n <= heurCompactLPMaxVars {
+		var savedLB, savedUB []float64
+		if auxSolver.scaled {
+			savedLB = slices.Clone(auxSolver.origLB)
+			savedUB = slices.Clone(auxSolver.origUB)
+		} else {
+			savedLB = slices.Clone(auxSolver.ws.lb[:n])
+			savedUB = slices.Clone(auxSolver.ws.ub[:n])
+		}
 		auxSolver.SetStructuralBounds(hlb, hub)
 		res := auxSolver.Solve()
+		auxSolver.SetStructuralBounds(savedLB, savedUB)
 		if res.Status == StatusOptimal {
 			bV, rV, iV := p.MaxViolation(res.Primal, true)
 			if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
@@ -959,7 +968,7 @@ func solveFixedIntContinuousLP(
 
 	for j := range n {
 		if hlb[j] == hub[j] {
-			fixedObj += p.ObjMin[j] * hlb[j]
+			fixedObj += p.objMin[j] * hlb[j]
 			continue
 		}
 		isFree[j] = true
@@ -967,41 +976,41 @@ func solveFixedIntContinuousLP(
 		v := subModel.AddVar(fmt.Sprintf("c_%d", j), hlb[j], hub[j], Continuous)
 		subVarMap[j] = v
 		freeCols = append(freeCols, j)
-		if p.VarCat[j] != Continuous {
+		if p.varCat[j] != Continuous {
 			subIntIdxs = append(subIntIdxs, subIdx)
 		}
-		if p.ObjMin[j] != 0 {
-			objTerms = append(objTerms, T(v, p.ObjMin[j]))
+		if p.objMin[j] != 0 {
+			objTerms = append(objTerms, T(v, p.objMin[j]))
 		}
 	}
 	subModel.SetObjective(Expr{Terms: objTerms, Constant: fixedObj})
 
-	for i := range p.NumConstraints {
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+	for i := range p.numConstraints {
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		fixedAct := 0.0
 		var terms []Term
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			val := p.RowVal[k]
+			col := p.colIdx[k]
+			val := p.rowVal[k]
 			if isFree[col] {
 				terms = append(terms, T(subVarMap[col], val))
 			} else {
 				fixedAct += val * hlb[col]
 			}
 		}
-		sense := p.RowSense[i]
+		sense := p.rowSense[i]
 		if len(terms) == 0 {
 			switch sense {
 			case LessEqual:
-				if fixedAct > p.RowRHS[i]+intFeasTol {
+				if fixedAct > p.rowRHS[i]+intFeasTol {
 					return nil, 0, false
 				}
 			case GreaterEqual:
-				if fixedAct < p.RowRHS[i]-intFeasTol {
+				if fixedAct < p.rowRHS[i]-intFeasTol {
 					return nil, 0, false
 				}
 			case Equal:
-				if math.Abs(fixedAct-p.RowRHS[i]) > intFeasTol {
+				if math.Abs(fixedAct-p.rowRHS[i]) > intFeasTol {
 					return nil, 0, false
 				}
 			}
@@ -1010,12 +1019,12 @@ func solveFixedIntContinuousLP(
 		subModel.AddConstraint(fmt.Sprintf("r_%d", i), Constraint{
 			Expr:  Expr{Terms: terms},
 			Sense: sense,
-			RHS:   p.RowRHS[i] - fixedAct,
+			RHS:   p.rowRHS[i] - fixedAct,
 		})
 	}
 
 	subP := subModel.Compile()
-	ws := AcquireWorkspace(subP.NumVars, subP.NumConstraints)
+	ws := AcquireWorkspace(subP.numVars, subP.numConstraints)
 	defer ReleaseWorkspace(ws)
 	lp := NewLPSolver(subP, ws)
 	if auxSolver != nil {
@@ -1024,13 +1033,13 @@ func solveFixedIntContinuousLP(
 		lp.DisableSIMD = auxSolver.DisableSIMD
 	}
 	res := lp.Solve()
-	if res.Status != StatusOptimal || len(res.Primal) != subP.NumVars {
+	if res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
 		return nil, 0, false
 	}
 
 	if len(subIntIdxs) > 0 {
-		subLB := slices.Clone(subP.VarLB)
-		subUB := slices.Clone(subP.VarUB)
+		subLB := slices.Clone(subP.varLB)
+		subUB := slices.Clone(subP.varUB)
 		for _, idx := range subIntIdxs {
 			v := min(max(res.Primal[idx], subLB[idx]), subUB[idx])
 			rv := min(max(math.Round(v), subLB[idx]), subUB[idx])
@@ -1039,7 +1048,7 @@ func solveFixedIntContinuousLP(
 				subUB[idx] = rv
 				lp.SetStructuralBounds(subLB, subUB)
 				res = lp.Solve()
-				if res.Status != StatusOptimal || len(res.Primal) != subP.NumVars {
+				if res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
 					return nil, 0, false
 				}
 				continue
@@ -1050,14 +1059,14 @@ func solveFixedIntContinuousLP(
 			subUB[idx] = lo
 			lp.SetStructuralBounds(subLB, subUB)
 			resLo := lp.Solve()
-			okLo := resLo.Status == StatusOptimal && len(resLo.Primal) == subP.NumVars
+			okLo := resLo.Status == StatusOptimal && len(resLo.Primal) == subP.numVars
 
 			if hi > lo {
 				subLB[idx] = hi
 				subUB[idx] = hi
 				lp.SetStructuralBounds(subLB, subUB)
 				resHi := lp.Solve()
-				okHi := resHi.Status == StatusOptimal && len(resHi.Primal) == subP.NumVars
+				okHi := resHi.Status == StatusOptimal && len(resHi.Primal) == subP.numVars
 				if okHi && (!okLo || resHi.ObjectiveMin < resLo.ObjectiveMin-heurDedupTol) {
 					res = resHi
 					continue
@@ -1070,7 +1079,7 @@ func solveFixedIntContinuousLP(
 			subUB[idx] = lo
 			lp.SetStructuralBounds(subLB, subUB)
 			res = lp.Solve()
-			if res.Status != StatusOptimal || len(res.Primal) != subP.NumVars {
+			if res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
 				return nil, 0, false
 			}
 		}
@@ -1088,7 +1097,7 @@ func solveFixedIntContinuousLP(
 	if bV <= intFeasTol && rV <= intFeasTol && iV <= intFeasTol {
 		obj := 0.0
 		for j := range n {
-			obj += p.ObjMin[j] * cand[j]
+			obj += p.objMin[j] * cand[j]
 		}
 		return cand, obj, true
 	}
@@ -1105,9 +1114,9 @@ func tryFractionalDiving(
 	bestObjMin float64,
 	onlyEqSupport bool,
 ) (sol []float64, objMin float64, ok bool) {
-	n := p.NumVars
+	n := p.numVars
 	isRootFrac := make([]bool, n)
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		v := rootPrimal[col]
 		f := v - math.Floor(v)
 		if f > intFeasTol && f < 1.0-intFeasTol {
@@ -1117,19 +1126,19 @@ func tryFractionalDiving(
 	eqRowCount := make([]int, n)
 	inRootSupport := make([]bool, n)
 	hasEqSupport := false
-	for i := range p.NumConstraints {
-		if p.RowSense[i] != Equal {
+	for i := range p.numConstraints {
+		if p.rowSense[i] != Equal {
 			continue
 		}
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		if e-s < 2 || e-s > maxEqSupportRowNNZ {
 			continue
 		}
 		hasFrac := false
 		allInt := true
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			if p.VarCat[col] == Continuous {
+			col := p.colIdx[k]
+			if p.varCat[col] == Continuous {
 				allInt = false
 				break
 			}
@@ -1139,7 +1148,7 @@ func tryFractionalDiving(
 		}
 		if allInt {
 			for k := s; k < e; k++ {
-				col := p.ColIdx[k]
+				col := p.colIdx[k]
 				eqRowCount[col]++
 				if hasFrac {
 					inRootSupport[col] = true
@@ -1155,20 +1164,20 @@ func tryFractionalDiving(
 	dlb := slices.Clone(baseLB)
 	dub := slices.Clone(baseUB)
 	curX := slices.Clone(rootPrimal)
-	rowQueue := make([]int, 0, p.NumConstraints*rowQueueCapMult)
-	inQueue := make([]bool, p.NumConstraints)
+	rowQueue := make([]int, 0, p.numConstraints*rowQueueCapMult)
+	inQueue := make([]bool, p.numConstraints)
 	isContLinked := findContLinkedIntCols(p)
 
 	curObjMin := 0.0
 	for j := range n {
-		curObjMin += p.ObjMin[j] * curX[j]
+		curObjMin += p.objMin[j] * curX[j]
 	}
 	savedDLB := make([]float64, n)
 	savedDUB := make([]float64, n)
 	branch1DLB := make([]float64, n)
 	branch1DUB := make([]float64, n)
 
-	maxDiveSteps := min(maxDiveStepsCap, len(p.IntCols))
+	maxDiveSteps := min(maxDiveStepsCap, len(p.intCols))
 	for range maxDiveSteps {
 		if diveSolver != nil && diveSolver.timeExpired() {
 			return nil, 0, false
@@ -1176,7 +1185,7 @@ func tryFractionalDiving(
 		bestCol := -1
 		bestScore := -1.0
 		bestVal := 0.0
-		for _, col := range p.IntCols {
+		for _, col := range p.intCols {
 			if (isContLinked != nil && isContLinked[col]) || !inRootSupport[col] || dlb[col] == dub[col] {
 				continue
 			}
@@ -1193,7 +1202,7 @@ func tryFractionalDiving(
 		}
 		if bestCol != -1 && inRootSupport[bestCol] {
 			bestEq := eqRowCount[bestCol]
-			for _, col := range p.IntCols {
+			for _, col := range p.intCols {
 				if (isContLinked != nil && isContLinked[col]) || dlb[col] == dub[col] || eqRowCount[col] <= bestEq {
 					continue
 				}
@@ -1208,7 +1217,7 @@ func tryFractionalDiving(
 		}
 		if bestCol == -1 {
 			bestFrac := -1.0
-			for _, col := range p.IntCols {
+			for _, col := range p.intCols {
 				if (isContLinked != nil && isContLinked[col]) || dlb[col] == dub[col] {
 					continue
 				}
@@ -1233,7 +1242,7 @@ func tryFractionalDiving(
 			if isContLinked != nil {
 				fixLB := slices.Clone(baseLB)
 				fixUB := slices.Clone(baseUB)
-				for _, col := range p.IntCols {
+				for _, col := range p.intCols {
 					if isContLinked[col] {
 						continue
 					}
@@ -1245,14 +1254,14 @@ func tryFractionalDiving(
 					return lpSol, lpObj, true
 				}
 			}
-			for _, col := range p.IntCols {
+			for _, col := range p.intCols {
 				curX[col] = math.Round(curX[col])
 			}
 			bV, rV, iV := p.MaxViolation(curX, true)
 			if bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol {
 				obj := 0.0
 				for j := range n {
-					obj += p.ObjMin[j] * curX[j]
+					obj += p.objMin[j] * curX[j]
 				}
 				if obj < bestObjMin {
 					return curX, obj, true
@@ -1338,7 +1347,7 @@ func tryRootSubMIP(
 	deadline time.Time,
 	isSubMIP bool,
 ) (sol []float64, objMin float64, ok bool) {
-	if isSubMIP || len(p.IntCols) == 0 {
+	if isSubMIP || len(p.intCols) == 0 {
 		return nil, 0, false
 	}
 	var done <-chan struct{}
@@ -1349,13 +1358,13 @@ func tryRootSubMIP(
 		return nil, 0, false
 	}
 
-	n := p.NumVars
+	n := p.numVars
 	hlb := slices.Clone(curLB)
 	hub := slices.Clone(curUB)
 
 	isFrac := make([]bool, n)
 	baseFrac := 0
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		v := lpPrimal[col]
 		rv := math.Round(v)
 		if math.Abs(v-rv) > intFeasTol {
@@ -1368,24 +1377,24 @@ func tryRootSubMIP(
 	}
 
 	var status []varBasisStatus
-	if lpSolver != nil && lpSolver.WS != nil && len(lpSolver.WS.Status) >= n {
-		status = lpSolver.WS.Status
+	if lpSolver != nil && lpSolver.ws != nil && len(lpSolver.ws.status) >= n {
+		status = lpSolver.ws.status
 	}
 
 	hasEqRows := false
-	for i := range p.NumConstraints {
-		if p.RowSense[i] != Equal {
+	for i := range p.numConstraints {
+		if p.rowSense[i] != Equal {
 			continue
 		}
 		hasEqRows = true
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		if e-s > maxEqSupportRowNNZ {
 			continue
 		}
 		rowHasFrac := false
 		basicInRow := 0
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
+			col := p.colIdx[k]
 			if isFrac[col] {
 				rowHasFrac = true
 			}
@@ -1395,8 +1404,8 @@ func tryRootSubMIP(
 		}
 		if rowHasFrac || (n <= heurSubMIPSmallModelVars && basicInRow >= 2) {
 			for k := s; k < e; k++ {
-				col := p.ColIdx[k]
-				if p.VarCat[col] != Continuous {
+				col := p.colIdx[k]
+				if p.varCat[col] != Continuous {
 					isFrac[col] = true
 				}
 			}
@@ -1407,14 +1416,14 @@ func tryRootSubMIP(
 	if !hasEqRows && isContLinked == nil {
 		return nil, 0, false
 	}
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		if isContLinked != nil && isContLinked[col] {
 			isFrac[col] = true
 		}
 	}
 
 	nFrac := 0
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		if isFrac[col] {
 			nFrac++
 		} else {
@@ -1425,7 +1434,7 @@ func tryRootSubMIP(
 		}
 	}
 
-	if nFrac == 0 || nFrac > heurSubMIPFreeFracCap || nFrac >= len(p.IntCols) {
+	if nFrac == 0 || nFrac > heurSubMIPFreeFracCap || nFrac >= len(p.intCols) {
 		return nil, 0, false
 	}
 
@@ -1436,21 +1445,21 @@ func tryRootSubMIP(
 	subModel := NewModel("submip", Minimize)
 	subVarMap := make([]Var, n)
 	isFree := make([]bool, n)
-	freeCols := make([]int, 0, nFrac+(n-len(p.IntCols)))
+	freeCols := make([]int, 0, nFrac+(n-len(p.intCols)))
 
 	var objTerms []Term
 	fixedObjMin := 0.0
 	for j := range n {
 		if hlb[j] == hub[j] {
-			fixedObjMin += p.ObjMin[j] * hlb[j]
+			fixedObjMin += p.objMin[j] * hlb[j]
 			continue
 		}
 		isFree[j] = true
-		v := subModel.AddVar(fmt.Sprintf("v_%d", j), hlb[j], hub[j], p.VarCat[j])
+		v := subModel.AddVar(fmt.Sprintf("v_%d", j), hlb[j], hub[j], p.varCat[j])
 		subVarMap[j] = v
 		freeCols = append(freeCols, j)
-		if p.ObjMin[j] != 0 {
-			objTerms = append(objTerms, T(v, p.ObjMin[j]))
+		if p.objMin[j] != 0 {
+			objTerms = append(objTerms, T(v, p.objMin[j]))
 		}
 	}
 
@@ -1460,33 +1469,33 @@ func tryRootSubMIP(
 
 	subModel.SetObjective(Expr{Terms: objTerms, Constant: fixedObjMin})
 
-	for i := range p.NumConstraints {
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+	for i := range p.numConstraints {
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		fixedAct := 0.0
 		var terms []Term
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			val := p.RowVal[k]
+			col := p.colIdx[k]
+			val := p.rowVal[k]
 			if isFree[col] {
 				terms = append(terms, T(subVarMap[col], val))
 			} else {
 				fixedAct += val * hlb[col]
 			}
 		}
-		rhs := p.RowRHS[i] - fixedAct
-		sense := p.RowSense[i]
+		rhs := p.rowRHS[i] - fixedAct
+		sense := p.rowSense[i]
 		if len(terms) == 0 {
 			switch sense {
 			case LessEqual:
-				if fixedAct > p.RowRHS[i]+intFeasTol {
+				if fixedAct > p.rowRHS[i]+intFeasTol {
 					return nil, 0, false
 				}
 			case GreaterEqual:
-				if fixedAct < p.RowRHS[i]-intFeasTol {
+				if fixedAct < p.rowRHS[i]-intFeasTol {
 					return nil, 0, false
 				}
 			case Equal:
-				if math.Abs(fixedAct-p.RowRHS[i]) > intFeasTol {
+				if math.Abs(fixedAct-p.rowRHS[i]) > intFeasTol {
 					return nil, 0, false
 				}
 			}
@@ -1533,7 +1542,7 @@ func tryRootSubMIP(
 	}
 
 	subRes := solveBranchAndCutWithDone(subP, subOpts, time.Now(), deadline, done)
-	if len(subRes.Values) != subP.NumVars {
+	if len(subRes.Values) != subP.numVars {
 		return nil, 0, false
 	}
 
@@ -1541,7 +1550,7 @@ func tryRootSubMIP(
 	for idx, origCol := range freeCols {
 		cand[origCol] = subRes.Values[idx]
 	}
-	for _, col := range p.IntCols {
+	for _, col := range p.intCols {
 		cand[col] = math.Round(cand[col])
 	}
 
@@ -1549,7 +1558,7 @@ func tryRootSubMIP(
 	if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
 		fixLB := slices.Clone(curLB)
 		fixUB := slices.Clone(curUB)
-		for _, col := range p.IntCols {
+		for _, col := range p.intCols {
 			fixLB[col] = cand[col]
 			fixUB[col] = cand[col]
 		}
@@ -1561,7 +1570,7 @@ func tryRootSubMIP(
 
 	obj := 0.0
 	for j := range n {
-		obj += p.ObjMin[j] * cand[j]
+		obj += p.objMin[j] * cand[j]
 	}
 	if obj >= bestObjMin-heurIntBoundTol {
 		return nil, 0, false

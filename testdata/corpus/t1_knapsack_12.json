@@ -62,7 +62,7 @@
     {
       "name": "x_0000",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -70,7 +70,7 @@
     {
       "name": "x_0001",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -78,7 +78,7 @@
     {
       "name": "x_0002",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -86,7 +86,7 @@
     {
       "name": "x_0003",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -94,7 +94,7 @@
     {
       "name": "x_0004",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -102,7 +102,7 @@
     {
       "name": "x_0005",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -110,7 +110,7 @@
     {
       "name": "x_0006",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -118,7 +118,7 @@
     {
       "name": "x_0007",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 5,
       "varValue": null,
       "dj": null
@@ -126,7 +126,7 @@
     {
       "name": "x_0008",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 5,
       "varValue": null,
       "dj": null
@@ -142,7 +142,7 @@
     {
       "name": "x_0010",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null
@@ -150,7 +150,7 @@
     {
       "name": "x_0011",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 1,
       "varValue": null,
       "dj": null

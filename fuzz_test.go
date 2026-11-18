@@ -130,8 +130,8 @@ func TestCanonicalMADFormulation(t *testing.T) {
 	// G=2, I=4, T=5:
 	// Vars = G*(I + T + 3) = 2*(4 + 5 + 3) = 24
 	// Rows = G*(2*T + 3) + I = 2*(10 + 3) + 4 = 30
-	if p.NumVars != 24 || p.NumConstraints != 30 {
-		t.Fatalf("unexpected dimensions: vars=%d (want 24), rows=%d (want 30)", p.NumVars, p.NumConstraints)
+	if p.NumVars() != 24 || p.NumConstraints() != 30 {
+		t.Fatalf("unexpected dimensions: vars=%d (want 24), rows=%d (want 30)", p.NumVars(), p.NumConstraints())
 	}
 
 	wantObj := exactMADObjective(2, 4, 5, 100.0, w)
@@ -295,10 +295,10 @@ func verifyMILPInvariants(t *testing.T, label string, p *gb.CompiledProblem, res
 	if res.Status != gb.StatusOptimal {
 		return
 	}
-	if len(res.Values) != p.NumVars {
-		t.Fatalf("[%s] Optimal status with len(Values)=%d, want %d", label, len(res.Values), p.NumVars)
+	if len(res.Values) != p.NumVars() {
+		t.Fatalf("[%s] Optimal status with len(Values)=%d, want %d", label, len(res.Values), p.NumVars())
 	}
-	bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP)
+	bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
 	if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
 		t.Fatalf("[%s] Optimal solution violates model: bound=%.2e row=%.2e int=%.2e", label, bV, rV, iV)
 	}
@@ -307,7 +307,7 @@ func verifyMILPInvariants(t *testing.T, label string, p *gb.CompiledProblem, res
 		t.Fatalf("[%s] EvaluateObjective=%.8f != res.Objective=%.8f", label, evalObj, res.Objective)
 	}
 	boundTol := 1e-5 * max(1.0, math.Abs(res.Objective))
-	if p.Sense == gb.Minimize {
+	if p.Sense() == gb.Minimize {
 		if res.BestBound > res.Objective+boundTol {
 			t.Fatalf("[%s] Minimize BestBound %.8f > Objective %.8f", label, res.BestBound, res.Objective)
 		}
@@ -324,6 +324,105 @@ func verifyMILPInvariants(t *testing.T, label string, p *gb.CompiledProblem, res
 	}
 }
 
+func exactFixedChargeObjective(p *gb.CompiledProblem, y []gb.Var) (float64, bool) {
+	nVars := p.NumVars()
+	baseLB := make([]float64, nVars)
+	baseUB := make([]float64, nVars)
+	for j := range nVars {
+		baseLB[j], baseUB[j] = p.VarBounds(j)
+	}
+	ws := gb.AcquireWorkspace(nVars, p.NumConstraints())
+	defer gb.ReleaseWorkspace(ws)
+	best := math.Inf(1)
+	found := false
+	for mask := 1; mask < 1<<len(y); mask++ {
+		lb := append([]float64(nil), baseLB...)
+		ub := append([]float64(nil), baseUB...)
+		for i, v := range y {
+			val := float64(mask >> i & 1)
+			lb[v.Index()], ub[v.Index()] = val, val
+		}
+		s := gb.NewLPSolver(p, ws)
+		s.SetStructuralBounds(lb, ub)
+		if res := s.Solve(); res.Status == gb.StatusOptimal {
+			best = min(best, res.Objective)
+			found = true
+		}
+	}
+	return best, found
+}
+
+func exactSmallMIPObjective(p *gb.CompiledProblem) (want float64, feasible, ok bool) {
+	nInt := p.NumIntVars()
+	if nInt == 0 || nInt > 10 {
+		return 0, false, false
+	}
+	intCols := make([]int, nInt)
+	loVals := make([]int, nInt)
+	span := make([]int, nInt)
+	total := 1
+	for k := range nInt {
+		col := p.IntCol(k)
+		lb, ub := p.VarBounds(col)
+		if math.IsInf(lb, 0) || math.IsInf(ub, 0) {
+			return 0, false, false
+		}
+		lo := int(math.Ceil(lb - 1e-9))
+		hi := int(math.Floor(ub + 1e-9))
+		if hi < lo {
+			return 0, false, true
+		}
+		cnt := hi - lo + 1
+		if cnt > 64 || total*cnt > 64 {
+			return 0, false, false
+		}
+		intCols[k] = col
+		loVals[k] = lo
+		span[k] = cnt
+		total *= cnt
+	}
+	nVars := p.NumVars()
+	baseLB := make([]float64, nVars)
+	baseUB := make([]float64, nVars)
+	for j := range nVars {
+		baseLB[j], baseUB[j] = p.VarBounds(j)
+	}
+	ws := gb.AcquireWorkspace(nVars, p.NumConstraints())
+	defer gb.ReleaseWorkspace(ws)
+	best := math.Inf(1)
+	if p.Sense() == gb.Maximize {
+		best = math.Inf(-1)
+	}
+	lb := make([]float64, nVars)
+	ub := make([]float64, nVars)
+	for idx := range total {
+		copy(lb, baseLB)
+		copy(ub, baseUB)
+		rem := idx
+		for k := range nInt {
+			v := float64(loVals[k] + rem%span[k])
+			rem /= span[k]
+			lb[intCols[k]] = v
+			ub[intCols[k]] = v
+		}
+		s := gb.NewLPSolver(p, ws)
+		s.SetStructuralBounds(lb, ub)
+		res := s.Solve()
+		if res.Status == gb.StatusUnbounded {
+			return 0, false, false
+		}
+		if res.Status == gb.StatusOptimal {
+			feasible = true
+			if p.Sense() == gb.Maximize {
+				best = max(best, res.Objective)
+			} else {
+				best = min(best, res.Objective)
+			}
+		}
+	}
+	return best, feasible, true
+}
+
 func FuzzMILPSolver(f *testing.F) {
 	for seed := range uint64(25) {
 		for fam := range uint8(5) {
@@ -336,6 +435,7 @@ func FuzzMILPSolver(f *testing.F) {
 		tag := fmt.Sprintf("fuzz_%d_%d", family%5, seed)
 
 		var mdl *gb.Model
+		var fcDepots []gb.Var
 		var exactWant float64
 		hasExactWant := false
 
@@ -346,7 +446,7 @@ func FuzzMILPSolver(f *testing.F) {
 		case 1:
 			mdl = buildFuzzGeneralMILP(rng, tag)
 		case 2:
-			mdl, _, _ = buildFixedCharge(seed)
+			mdl, fcDepots, _ = buildFixedCharge(seed)
 		case 3:
 			mdl = buildFuzzEqKnapsack(rng, tag)
 		default:
@@ -356,6 +456,24 @@ func FuzzMILPSolver(f *testing.F) {
 		p, err := mdl.CompileChecked()
 		if err != nil {
 			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+		}
+		exactInfeasible := false
+		if len(fcDepots) > 0 {
+			if want, ok := exactFixedChargeObjective(p, fcDepots); ok {
+				exactWant = want
+				hasExactWant = true
+			} else {
+				exactInfeasible = true
+			}
+		} else if !hasExactWant {
+			if want, feas, ok := exactSmallMIPObjective(p); ok {
+				if feas {
+					exactWant = want
+					hasExactWant = true
+				} else {
+					exactInfeasible = true
+				}
+			}
 		}
 
 		baseLimits := []gb.Option{
@@ -376,10 +494,13 @@ func FuzzMILPSolver(f *testing.F) {
 
 			switch res.Status {
 			case gb.StatusOptimal:
+				if exactInfeasible {
+					t.Fatalf("[%s/%s] returned Optimal %.8f on enumerated-infeasible MIP", tag, name, res.Objective)
+				}
 				if hasExactWant {
 					rel := math.Abs(res.Objective-exactWant) / max(1.0, math.Abs(exactWant))
 					if rel > 1e-5 {
-						t.Fatalf("[%s/%s] MAD objective %.8f != exact ground truth %.8f (rel=%.2e)",
+						t.Fatalf("[%s/%s] objective %.8f != exact ground truth %.8f (rel=%.2e)",
 							tag, name, res.Objective, exactWant, rel)
 					}
 				}
@@ -394,6 +515,9 @@ func FuzzMILPSolver(f *testing.F) {
 					}
 				}
 			case gb.StatusInfeasible:
+				if hasExactWant {
+					t.Fatalf("[%s/%s] returned Infeasible when exact ground truth is %.8f", tag, name, exactWant)
+				}
 				sawInfeasible = name
 			}
 		}
@@ -458,13 +582,13 @@ func FuzzLPSolver(f *testing.F) {
 		}
 
 		p := m.Compile()
-		ws := gb.AcquireWorkspace(p.NumVars, p.NumConstraints)
+		ws := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
 		defer gb.ReleaseWorkspace(ws)
 
 		lpSIMD := gb.NewLPSolver(p, ws)
 		resSIMD := lpSIMD.Solve()
 
-		wsScalar := gb.AcquireWorkspace(p.NumVars, p.NumConstraints)
+		wsScalar := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
 		defer gb.ReleaseWorkspace(wsScalar)
 		lpScalar := gb.NewLPSolver(p, wsScalar)
 		lpScalar.DisableSIMD = true
@@ -519,6 +643,32 @@ func FuzzPuLPJSON(f *testing.F) {
 		var jsonBuf bytes.Buffer
 		if err := format.ToPuLPJSONCompact(p, &jsonBuf); err != nil {
 			t.Fatalf("ToPuLPJSONCompact failed on validated CompiledProblem: %v", err)
+		}
+		m2, err := format.FromPuLPJSON(&jsonBuf)
+		if err != nil {
+			t.Fatalf("FromPuLPJSON failed on round-trip output: %v", err)
+		}
+		p2, err := m2.CompileChecked()
+		if err != nil {
+			t.Fatalf("CompileChecked failed on round-trip model: %v", err)
+		}
+		if p2.NumVars() != p.NumVars() || p2.NumConstraints() != p.NumConstraints() ||
+			p2.NNZ() != p.NNZ() || p2.Sense() != p.Sense() || p2.ObjConstant() != p.ObjConstant() {
+			t.Fatalf("PuLP JSON round-trip metadata mismatch: got (%d,%d,%d,%v,%v), want (%d,%d,%d,%v,%v)",
+				p2.NumVars(), p2.NumConstraints(), p2.NNZ(), p2.Sense(), p2.ObjConstant(),
+				p.NumVars(), p.NumConstraints(), p.NNZ(), p.Sense(), p.ObjConstant())
+		}
+		for j := range p.NumVars() {
+			lb1, ub1 := p.VarBounds(j)
+			lb2, ub2 := p2.VarBounds(j)
+			if lb1 != lb2 || ub1 != ub2 || p.VarCategory(j) != p2.VarCategory(j) || p.ObjCoeff(j) != p2.ObjCoeff(j) {
+				t.Fatalf("PuLP JSON round-trip var %d mismatch", j)
+			}
+		}
+		for i := range p.NumConstraints() {
+			if p.RowSense(i) != p2.RowSense(i) || p.RowRHS(i) != p2.RowRHS(i) || p.RowLen(i) != p2.RowLen(i) {
+				t.Fatalf("PuLP JSON round-trip row %d mismatch", i)
+			}
 		}
 	})
 }

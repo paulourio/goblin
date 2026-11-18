@@ -59,8 +59,8 @@ func assertOptimal(t *testing.T, label string, p *gb.CompiledProblem, res gb.Res
 	// An incumbent may violate rows by up to the primal tolerance, so its objective can
 	// undercut the LP bound by a comparable amount; allow the default gap threshold.
 	boundTol := 1e-6 * max(1.0, math.Abs(res.Objective))
-	if p.Sense == gb.Minimize && res.BestBound > res.Objective+boundTol ||
-		p.Sense == gb.Maximize && res.BestBound < res.Objective-boundTol {
+	if p.Sense() == gb.Minimize && res.BestBound > res.Objective+boundTol ||
+		p.Sense() == gb.Maximize && res.BestBound < res.Objective-boundTol {
 		t.Fatalf("%s: BestBound %.8f is not a valid bound for objective %.8f", label, res.BestBound, res.Objective)
 	}
 }
@@ -173,10 +173,16 @@ func TestFixedChargeGroundTruth(t *testing.T) {
 	for seed := range uint64(40) {
 		m, y, _ := buildFixedCharge(seed)
 		p := m.Compile()
+		nVars := p.NumVars()
+		baseLB := make([]float64, nVars)
+		baseUB := make([]float64, nVars)
+		for j := range nVars {
+			baseLB[j], baseUB[j] = p.VarBounds(j)
+		}
 		best := math.Inf(1)
 		for mask := 1; mask < 1<<len(y); mask++ {
-			lb := append([]float64(nil), p.VarLB...)
-			ub := append([]float64(nil), p.VarUB...)
+			lb := append([]float64(nil), baseLB...)
+			ub := append([]float64(nil), baseUB...)
 			for i, v := range y {
 				val := float64(mask >> i & 1)
 				lb[v.Index()], ub[v.Index()] = val, val
@@ -580,11 +586,12 @@ func TestAddIntVarBoundsAndExprAddTermImmutability(t *testing.T) {
 		t.Fatalf("AddIntVar category = %v, want Integer", m.VarCategoryOf(xWide))
 	}
 	p := m.Compile()
-	if p.VarCat[xWide.Index()] != gb.Integer || p.VarUB[xWide.Index()] != 10 {
-		t.Fatalf("widened variable compiled as cat=%v ub=%v, want Integer ub=10", p.VarCat[xWide.Index()], p.VarUB[xWide.Index()])
+	_, ubWide := p.VarBounds(xWide.Index())
+	if p.VarCategory(xWide.Index()) != gb.Integer || ubWide != 10 {
+		t.Fatalf("widened variable compiled as cat=%v ub=%v, want Integer ub=10", p.VarCategory(xWide.Index()), ubWide)
 	}
-	if p.VarCat[xBin.Index()] != gb.Binary {
-		t.Fatalf("[0, 1] integer variable compiled as cat=%v, want Binary", p.VarCat[xBin.Index()])
+	if p.VarCategory(xBin.Index()) != gb.Binary {
+		t.Fatalf("[0, 1] integer variable compiled as cat=%v, want Binary", p.VarCategory(xBin.Index()))
 	}
 	res := mustSolveCompiled(t, p)
 	if res.Status != gb.StatusOptimal || math.Abs(res.Objective-8.0) > 1e-6 {
@@ -705,9 +712,9 @@ func TestOrbitSymmetryBreaking(t *testing.T) {
 		if preRes.Infeasible {
 			t.Fatalf("Presolve reported infeasible on feasible symmetric model")
 		}
-		if preRes.Reduced.NumConstraints >= p.NumConstraints {
+		if preRes.Reduced.NumConstraints() >= p.NumConstraints() {
 			t.Fatalf("Presolve constraints=%d, want < %d after eliminating fixed designated equations",
-				preRes.Reduced.NumConstraints, p.NumConstraints)
+				preRes.Reduced.NumConstraints(), p.NumConstraints())
 		}
 
 		resNoPre := mustSolveCompiled(t, p, gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false))
@@ -877,7 +884,7 @@ func TestOneSidedCMIRCutsAndPurgeSlackCuts(t *testing.T) {
 	lpModel.AddConstraint("cap", gb.Le(gb.NewExpr(gb.T(x0, 1.0), gb.T(x1, 1.0)), 6.0))
 	lpProb := lpModel.Compile()
 
-	ws := gb.AcquireWorkspace(lpProb.NumVars, lpProb.NumConstraints)
+	ws := gb.AcquireWorkspace(lpProb.NumVars(), lpProb.NumConstraints())
 	defer gb.ReleaseWorkspace(ws)
 	lp := gb.NewLPSolver(lpProb, ws)
 	if res0 := lp.Solve(); res0.Status != gb.StatusOptimal || math.Abs(res0.Objective - -18.0) > 1e-8 {
@@ -892,9 +899,9 @@ func TestOneSidedCMIRCutsAndPurgeSlackCuts(t *testing.T) {
 	if resCut.Status != gb.StatusOptimal || math.Abs(resCut.Objective - -16.0) > 1e-8 {
 		t.Fatalf("cut LP status=%v obj=%.6f, want Optimal -16.0", resCut.Status, resCut.Objective)
 	}
-	if got := lp.PurgeSlackCuts(0.05); got != 2 || len(lp.ExtraRows) != 1 {
+	if got := lp.PurgeSlackCuts(0.05); got != 2 || lp.NumCuts() != 1 {
 		t.Fatalf("PurgeSlackCuts removed %d rows (remaining=%d), want 2 removed and 1 remaining",
-			got, len(lp.ExtraRows))
+			got, lp.NumCuts())
 	}
 
 	// Tighten x1 <= 1.5 and warm-start; optimal is x0 = 4.0 (from kept cut), x1 = 1.5 -> obj = -15.0.
@@ -1043,4 +1050,163 @@ func TestReviewAuditRegressions(t *testing.T) {
 	if r1 := lpS.Solve(); r1.Status != gb.StatusOptimal || math.Abs(r1.Objective-8.0) > 1e-8 {
 		t.Fatalf("lp_cut_canon after unsorted duplicate cut: status=%v obj=%v, want 8", r1.Status, r1.Objective)
 	}
+}
+
+// Verifies that near-integral big-M solutions whose rounded polishing point is strictly
+// suboptimal never terminate or fathom prematurely at the root or at interior B&B nodes.
+func TestPeerReviewRegressions_BigMPolishAndLPNumerics(t *testing.T) {
+	ctx := t.Context()
+
+	// 1. Root big-M facility location where fy = (1, 1e-7) rounds to feasible fy = (1, 0)
+	// with cost 2011, whereas opening depot 1 achieves optimal cost 521.
+	mFL := gb.NewModel("fl_3depot", gb.Minimize)
+	fy0 := mFL.AddBinaryVar("y0")
+	fy1 := mFL.AddBinaryVar("y1")
+	fx00 := mFL.AddContVar("x00", 0, 10)
+	fx01 := mFL.AddContVar("x01", 0, 10)
+	fx11 := mFL.AddContVar("x11", 0, 10)
+	mFL.SetObjective(gb.NewExpr(fy0.T(10), fy1.T(500), fx00.T(1), fx01.T(200), fx11.T(1)))
+	mFL.AddConstraint("d0", gb.VarExpr(fx00).Ge(1))
+	mFL.AddConstraint("d1", gb.NewExpr(fx01.T(1), fx11.T(1)).Ge(10))
+	mFL.AddConstraint("v00", gb.NewExpr(fx00.T(1), fy0.T(-1)).Le(0))
+	mFL.AddConstraint("v0", gb.NewExpr(fx00.T(1), fx01.T(1), fy0.T(-20)).Le(0))
+	mFL.AddConstraint("v1", gb.NewExpr(fx11.T(1), fy1.T(-1e8)).Le(0))
+	pFL := mFL.Compile()
+	for name, opts := range optionVariants() {
+		assertOptimal(t, "fl_root/"+name, pFL, mustSolveCompiled(t, pFL, opts...), 521.0)
+	}
+
+	// 2. Interior tree node big-M fathoming: embed fl_3depot behind a fractional binary split z0 + z1 == 1
+	// so root must branch on z first and only encounters the near-integral big-M LP at depth >= 1.
+	mNodeFL := gb.NewModel("fl_node", gb.Minimize)
+	z0 := mNodeFL.AddBinaryVar("z0")
+	z1 := mNodeFL.AddBinaryVar("z1")
+	z2 := mNodeFL.AddBinaryVar("z2")
+	ny0 := mNodeFL.AddBinaryVar("y0")
+	ny1 := mNodeFL.AddBinaryVar("y1")
+	nx00 := mNodeFL.AddContVar("x00", 0, 10)
+	nx01 := mNodeFL.AddContVar("x01", 0, 10)
+	nx11 := mNodeFL.AddContVar("x11", 0, 10)
+	mNodeFL.SetObjective(gb.NewExpr(
+		z0.T(2), z1.T(2), z2.T(2),
+		ny0.T(10), ny1.T(500), nx00.T(1), nx01.T(200), nx11.T(1),
+	))
+	mNodeFL.AddConstraint("odd1", gb.NewExpr(z0.T(1), z1.T(1)).Ge(1))
+	mNodeFL.AddConstraint("odd2", gb.NewExpr(z1.T(1), z2.T(1)).Ge(1))
+	mNodeFL.AddConstraint("odd3", gb.NewExpr(z0.T(1), z2.T(1)).Ge(1))
+	mNodeFL.AddConstraint("d0", gb.VarExpr(nx00).Ge(1))
+	mNodeFL.AddConstraint("d1", gb.NewExpr(nx01.T(1), nx11.T(1)).Ge(10))
+	mNodeFL.AddConstraint("v00", gb.NewExpr(nx00.T(1), ny0.T(-1)).Le(0))
+	mNodeFL.AddConstraint("v0", gb.NewExpr(nx00.T(1), nx01.T(1), ny0.T(-20)).Le(0))
+	mNodeFL.AddConstraint("v1", gb.NewExpr(nx11.T(1), ny1.T(-1e8)).Le(0))
+	pNodeFL := mNodeFL.Compile()
+	for name, opts := range optionVariants() {
+		assertOptimal(t, "fl_node/"+name, pNodeFL, mustSolveCompiled(t, pNodeFL, opts...), 525.0)
+	}
+
+	// 3. LP scaling & Farkas certificate verification across extreme row/column/cost scales.
+	// Uniformly tiny constraints (1e-8 * x >= 1e-8) must trigger scaling and solve accurately.
+	mTiny := gb.NewModel("lp_uniform_tiny", gb.Minimize)
+	tx := mTiny.AddContVar("tx", 0, 100)
+	ty := mTiny.AddContVar("ty", 0, 100)
+	mTiny.SetObjective(gb.NewExpr(tx.T(1e-8), ty.T(2e-8)))
+	mTiny.AddConstraint("r0", gb.NewExpr(tx.T(1e-8), ty.T(1e-8)).Ge(3e-8))
+	mTiny.AddConstraint("r1", gb.NewExpr(tx.T(2e-8), ty.T(1e-8)).Ge(4e-8))
+	resTiny, err := mTiny.Solve(ctx)
+	if err != nil || resTiny.Status != gb.StatusOptimal || math.Abs(resTiny.Objective-3e-8) > 1e-13 {
+		t.Fatalf("lp_uniform_tiny: status=%v obj=%v err=%v, want Optimal 3e-8", resTiny.Status, resTiny.Objective, err)
+	}
+
+	// Huge intra-row / intra-objective dynamic range (1 vs 1e-8) with large variable bounds.
+	mSpan := gb.NewModel("lp_wide_span", gb.Maximize)
+	sx := mSpan.AddContVar("sx", 0, 1)
+	sy := mSpan.AddContVar("sy", 0, 1e9)
+	mSpan.SetObjective(gb.NewExpr(sx.T(1.0), sy.T(1e-7)))
+	mSpan.AddConstraint("cap", gb.NewExpr(sx.T(1.0), sy.T(1e-8)).Le(2.0))
+	resSpan, err := mSpan.Solve(ctx)
+	if err != nil || resSpan.Status != gb.StatusOptimal || math.Abs(resSpan.Objective-20.0) > 1e-4 {
+		t.Fatalf("lp_wide_span: status=%v obj=%v err=%v, want Optimal 20.0", resSpan.Status, resSpan.Objective, err)
+	}
+
+	// 4. Exact-zero compilation preserves sub-1e-14 nonzero coefficients.
+	mSub := gb.NewModel("sub_1e15_coeff", gb.Minimize)
+	subX := mSub.AddContVar("x", 0, 1e16)
+	mSub.SetObjective(gb.VarExpr(subX))
+	mSub.AddConstraint("c", gb.NewExpr(subX.T(1e-15)).Ge(1.0))
+	pSub := mSub.Compile()
+	if pSub.NNZ() != 1 {
+		t.Fatalf("expected 1e-15 constraint coefficient to be preserved (NNZ=1), got NNZ=%d", pSub.NNZ())
+	}
+
+	// 5. DenseRows memory cap: n=256 with 5000 sparse 2-term rows stays sparse (DenseRowLen == 0).
+	mTall := gb.NewModel("tall_sparse_256", gb.Minimize)
+	tallVars := make([]gb.Var, 256)
+	for j := range 256 {
+		tallVars[j] = mTall.AddContVar(fmt.Sprintf("v_%d", j), 0, 10)
+	}
+	mTall.SetObjective(gb.VarExpr(tallVars[0]))
+	for i := range 5000 {
+		a := tallVars[i%256]
+		b := tallVars[(i+1)%256]
+		mTall.AddConstraint(fmt.Sprintf("r_%d", i), gb.NewExpr(a.T(1), b.T(1)).Ge(1))
+	}
+	pTall := mTall.Compile()
+	if pTall.DenseRowLen() != 0 {
+		t.Fatalf("expected sparse-only layout (DenseRowLen=0) on 5000x256 sparse matrix, got %d", pTall.DenseRowLen())
+	}
+
+	// 6. Presolve GCD normalization with large g (1e7) must not round unscaled fractional RHS.
+	mGCD := gb.NewModel("gcd_large_scale", gb.Minimize)
+	gx := mGCD.AddBinaryVar("gx")
+	gy := mGCD.AddBinaryVar("gy")
+	mGCD.SetObjective(gb.NewExpr(gx.T(1), gy.T(1)))
+	// 1e7 * gx + 1e7 * gy == 1e7 + 20 -> gx + gy == 1.000002 -> integer infeasible!
+	mGCD.AddConstraint("eq", gb.NewExpr(gx.T(1e7), gy.T(1e7)).Eq(1e7+20.0))
+	pGCD := mGCD.Compile()
+	for name, opts := range optionVariants() {
+		if res := mustSolveCompiled(t, pGCD, opts...); res.Status != gb.StatusInfeasible {
+			t.Fatalf("gcd_large_scale/%s: status=%v, want Infeasible", name, res.Status)
+		}
+	}
+
+	// 7. API edge cases: invalid Sense, Status(99).String(), Result.Lookup, double ReleaseWorkspace,
+	// and non-CGO CBCLPSolver nil safety.
+	mBadSense := gb.NewModel("bad_sense", gb.Sense(42))
+	_ = mBadSense.AddContVar("x", 0, 1)
+	if err := mBadSense.Validate(); err == nil {
+		t.Fatal("expected Validate() error on invalid Sense(42)")
+	}
+	if got := gb.Status(99).String(); got != "Status(99)" {
+		t.Fatalf("Status(99).String() = %q, want \"Status(99)\"", got)
+	}
+	mLookup := gb.NewModel("lookup", gb.Minimize)
+	lx := mLookup.AddIntVar("lx", -0.4, 0.0) // Tests -0.0 bound normalization as well.
+	lbLx, ubLx := mLookup.VarBounds(lx)
+	if math.Signbit(lbLx) || math.Signbit(ubLx) {
+		t.Fatalf("expected +0.0 after integer bound rounding on [-0.4, 0], got [%v, %v]", lbLx, ubLx)
+	}
+	mLookup.SetObjective(gb.VarExpr(lx))
+	resLookup, err := mLookup.Solve(ctx)
+	if err != nil || resLookup.Status != gb.StatusOptimal {
+		t.Fatalf("lookup solve: %v %v", resLookup.Status, err)
+	}
+	if val, ok := resLookup.Lookup(lx); !ok || val != 0 {
+		t.Fatalf("Lookup(owned var) = (%v, %v), want (0, true)", val, ok)
+	}
+	otherM := gb.NewModel("other", gb.Minimize)
+	ox := otherM.AddContVar("ox", 0, 1)
+	if _, ok := resLookup.Lookup(ox); ok {
+		t.Fatal("expected Lookup(foreign var) to return ok=false")
+	}
+	ws := gb.AcquireWorkspace(4, 4)
+	gb.ReleaseWorkspace(ws)
+	gb.ReleaseWorkspace(ws) // Double release must be a safe no-op.
+
+	var nilCBC *gb.CBCLPSolver
+	if nilCBC.TotalRows() != 0 || nilCBC.NumVars() != 0 || nilCBC.NumCuts() != 0 {
+		t.Fatal("expected zero dimensions on nil *CBCLPSolver")
+	}
+	nilCBC.AddCut([]int{0}, []float64{1.0}, 1.0)
+	nilCBC.SetStructuralBounds([]float64{0}, []float64{1})
+	nilCBC.Close()
 }

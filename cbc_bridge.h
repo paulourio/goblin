@@ -92,7 +92,7 @@ void goblin_lp_set_bounds(
     const double *col_ub
 );
 
-void goblin_lp_add_cut(
+int goblin_lp_add_cut(
     GoblinLPSolver *s,
     int nnz,
     const int *col_idx,
@@ -102,6 +102,8 @@ void goblin_lp_add_cut(
 
 void goblin_lp_solve(
     GoblinLPSolver *s,
+    int out_cols,
+    int out_rows,
     GoblinResult *out,
     double *primal_out,
     double *dual_out,

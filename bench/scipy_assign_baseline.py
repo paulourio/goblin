@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Python SciPy Warm-State Linear Sum Assignment Benchmark & Multi-Seed Golden Reference Harness.
+Python SciPy warm-state Linear Sum Assignment benchmark and multi-seed reference harness.
 
 Measures in warm state across K randomized trial instances per family:
-1. Pure In-Memory Solve Time (t_solve_ms):
+1. Pure in-memory solve time (t_solve_ms):
    - Direct call to scipy.optimize.linear_sum_assignment(cost_matrix, maximize=...) on a
-     pre-allocated C-contiguous float64 numpy.ndarray.
-2. Matrix Preparation + Solve Pipeline (t_prep_ms, t_total_ms).
-3. Exact Reference Metrics and Provenance:
+     pre-allocated C-contiguous float64 numpy.ndarray, excluding post-solve objective gather.
+2. Matrix preparation and solve pipeline (t_prep_ms, t_total_ms).
+3. Exact reference metrics and provenance:
    - Canonical (trial 0) optimal objective, per-trial optimal objectives across all K trials,
      bit-level SHA-256 verification of Trial 0 cost matrices against manifest.json, and
-     provenance (scipy_version, numpy_version, cpu_affinity).
+     provenance (git_commit, git_dirty, source_fingerprint, scipy_version, numpy_version,
+     cpu_affinity, uname_release, measured_at).
 """
 
 from __future__ import annotations
@@ -20,12 +21,15 @@ import glob
 import hashlib
 import json
 import os
+import platform
 import statistics
+import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from typing import Any
 
-# Support running directly from the workspace with the sibling PuLP venv.
+# Support running directly from the workspace with the sibling PuLP virtualenv.
 _GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
 for _cand_site in sorted(
@@ -42,7 +46,7 @@ from scipy.optimize import linear_sum_assignment
 
 
 def _cpu_affinity() -> str:
-    """Return the CPUs this process may run on, compressed into ranges."""
+    """Return the CPUs allowed for the current process compressed into ranges."""
     if not hasattr(os, "sched_getaffinity"):
         return "unknown"
     cpus = sorted(os.sched_getaffinity(0))
@@ -54,6 +58,36 @@ def _cpu_affinity() -> str:
             start = c
         prev = c
     return ",".join(ranges)
+
+
+def _repo_provenance() -> dict[str, Any]:
+    git_commit = "unknown"
+    git_dirty = True
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=_GOBLIN_ROOT, text=True, timeout=5
+        ).strip()
+        st = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=_GOBLIN_ROOT, text=True, timeout=5
+        ).strip()
+        git_dirty = len(st) > 0
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    fp = subprocess.check_output(
+        ["go", "run", "./cmd/goblin-bench", "-print-fingerprint"],
+        cwd=_GOBLIN_ROOT,
+        text=True,
+        timeout=30,
+    ).strip()
+
+    return {
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "source_fingerprint": fp,
+        "uname_release": platform.uname().release,
+        "measured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def _splitmix64_vec(seed: int, count: int, start_idx: int = 0) -> Any:
@@ -176,7 +210,9 @@ def _warm_scipy() -> None:
         linear_sum_assignment(mat, maximize=True)
 
 
-def benchmark_case(case: dict[str, Any], default_trials: int) -> dict[str, Any]:
+def benchmark_case(
+    case: dict[str, Any], default_trials: int, prov: dict[str, Any]
+) -> dict[str, Any]:
     cid = str(case["id"])
     tier = str(case["tier"])
     rows = int(case["rows"])
@@ -190,7 +226,7 @@ def benchmark_case(case: dict[str, Any], default_trials: int) -> dict[str, Any]:
     else:
         warmup = 2
 
-    # Pre-verify Trial 0 SHA-256 bit-level parity with Go manifest.json
+    # Pre-verify Trial 0 SHA-256 bit-level parity with Go manifest.json.
     mat0 = generate_assign_matrix(case, 0)
     got_sha = _matrix_sha256(mat0)
     want_sha = str(case.get("trial0_sha256", ""))
@@ -207,17 +243,17 @@ def benchmark_case(case: dict[str, Any], default_trials: int) -> dict[str, Any]:
     for run_idx in range(warmup + trials):
         trial_idx = 0 if run_idx < warmup else (run_idx - warmup)
 
-        t0 = time.perf_counter()
+        t0 = time.perf_counter_ns()
         mat = generate_assign_matrix(case, trial_idx)
-        t1 = time.perf_counter()
+        t1 = time.perf_counter_ns()
         row_ind, col_ind = linear_sum_assignment(mat, maximize=maximize)
+        t2 = time.perf_counter_ns()
         obj = float(mat[row_ind, col_ind].sum())
-        t2 = time.perf_counter()
 
         if run_idx >= warmup:
-            t_prep_list.append((t1 - t0) * 1000.0)
-            t_solve_list.append((t2 - t1) * 1000.0)
-            t_total_list.append((t2 - t0) * 1000.0)
+            t_prep_list.append((t1 - t0) / 1e6)
+            t_solve_list.append((t2 - t1) / 1e6)
+            t_total_list.append((t2 - t0) / 1e6)
             trial_objs.append(obj)
 
     solve_mean = statistics.mean(t_solve_list)
@@ -236,6 +272,11 @@ def benchmark_case(case: dict[str, Any], default_trials: int) -> dict[str, Any]:
         "scipy_version": str(scipy.__version__),
         "numpy_version": str(np.__version__),
         "cpu_affinity": _cpu_affinity(),
+        "git_commit": prov.get("git_commit", ""),
+        "git_dirty": bool(prov.get("git_dirty", True)),
+        "source_fingerprint": prov.get("source_fingerprint", ""),
+        "uname_release": prov.get("uname_release", ""),
+        "measured_at": prov.get("measured_at", ""),
         "objective": trial_objs[0],
         "trial_objectives": trial_objs,
         "t_prep_median_ms": statistics.median(t_prep_list),
@@ -278,6 +319,7 @@ def main() -> None:
             f"manifest not found at {manifest_path}; run `go run ./cmd/goblin-bench -generate-corpus` first"
         )
 
+    prov = _repo_provenance()
     with open(manifest_path, "r", encoding="utf-8") as fh:
         manifest = json.load(fh)
 
@@ -294,7 +336,7 @@ def main() -> None:
 
     out_map: dict[str, dict[str, Any]] = {}
     for case in cases:
-        res = benchmark_case(case, args.trials)
+        res = benchmark_case(case, args.trials, prov)
         out_map[res["id"]] = res
         shape_str = f"{res['rows']}x{res['cols']}"
         print(

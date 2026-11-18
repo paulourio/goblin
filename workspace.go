@@ -1,6 +1,9 @@
 package goblin
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type varBasisStatus uint8
 
@@ -31,58 +34,59 @@ const (
 // warm-started Branch-and-Cut node re-optimization, eliminating GC allocations.
 // Callers borrow instances via AcquireWorkspace and return them with ReleaseWorkspace.
 type Workspace struct {
-	LU *LUFactorization
+	lu *LUFactorization
 
 	// Active dimensions (TotVar = N + M).
-	N      int
-	M      int
-	TotVar int
+	n      int
+	m      int
+	totVar int
 
 	// Working bounds and costs.
-	LB       []float64
-	UB       []float64
-	Cost     []float64
-	WorkCost []float64
+	lb       []float64
+	ub       []float64
+	cost     []float64
+	workCost []float64
 
 	// Basis indices: Basis[r] stores slot r's variable, while BasicRow[k] maps variable k back to its basis row or -1 when nonbasic.
-	Basis       []int
-	BasicRow    []int
-	RowBasicDeg []int
-	Status      []varBasisStatus
+	basis       []int
+	basicRow    []int
+	rowBasicDeg []int
+	status      []varBasisStatus
 
 	// Primal, dual, reduced-cost, and steepest-edge vectors.
-	X   []float64
-	XB  []float64
-	Y   []float64
-	Dj  []float64
-	DSE []float64
+	x   []float64
+	xb  []float64
+	y   []float64
+	dj  []float64
+	dse []float64
 
 	// Sparse linear-system scratch buffers: whenever a *Sparse flag is true, every nonzero entry of the paired slice is recorded inside its *Idx support list so subsequent clears touch only active positions.
-	Rho             []float64
-	RhoIdx          []int
-	RhoSparse       bool
-	FCol            []float64
-	FColIdx         []int
-	FColSparse      bool
-	Tau             []float64
-	TauIdx          []int
-	TauSparse       bool
-	TabRow          []float64
-	TabRowIdx       []int
-	TabRowMark      []bool
-	TabRowSparse    bool
-	TabRowChunks    []int
-	TabRowChunkMark []bool
+	rho             []float64
+	rhoIdx          []int
+	rhoSparse       bool
+	fCol            []float64
+	fColIdx         []int
+	fColSparse      bool
+	tau             []float64
+	tauIdx          []int
+	tauSparse       bool
+	tabRow          []float64
+	tabRowIdx       []int
+	tabRowMark      []bool
+	tabRowSparse    bool
+	tabRowChunks    []int
+	tabRowChunkMark []bool
 
 	// Ratio-test scratch buffers.
-	FlipCols  []int
-	BFRTCands []bfrtCand
+	flipCols  []int
+	bfrtCands []bfrtCand
+	inPool    atomic.Bool
 }
 
 var workspacePool = sync.Pool{
 	New: func() any {
 		return &Workspace{
-			LU: newLUFactorization(defaultLUInitCap),
+			lu: newLUFactorization(defaultLUInitCap),
 		}
 	},
 }
@@ -90,73 +94,78 @@ var workspacePool = sync.Pool{
 // AcquireWorkspace retrieves a Workspace from the pool and sizes it for (n, m).
 func AcquireWorkspace(n, m int) *Workspace {
 	ws := workspacePool.Get().(*Workspace)
-	ws.EnsureSize(n, m)
+	ws.inPool.Store(false)
+	ws.ensureSize(n, m)
 	return ws
 }
 
 // ReleaseWorkspace returns a Workspace to the pool unless its buffers exceed maxPooledWorkspaceCap.
+// Releasing a nil or already-pooled Workspace is a safe no-op.
 func ReleaseWorkspace(ws *Workspace) {
-	if ws != nil && cap(ws.X) <= maxPooledWorkspaceCap {
-		workspacePool.Put(ws)
+	if ws == nil || cap(ws.x) > maxPooledWorkspaceCap {
+		return
 	}
+	if !ws.inPool.CompareAndSwap(false, true) {
+		return
+	}
+	workspacePool.Put(ws)
 }
 
-// EnsureSize resizes all slices in ws to accommodate n structural variables and m constraints.
-func (ws *Workspace) EnsureSize(n, m int) {
+func (ws *Workspace) ensureSize(n, m int) {
 	tot := n + m
-	ws.N = n
-	ws.M = m
-	ws.TotVar = tot
+	ws.n = n
+	ws.m = m
+	ws.totVar = tot
 
-	ws.LB = resizeFloat64(ws.LB, tot)
-	ws.UB = resizeFloat64(ws.UB, tot)
-	ws.Cost = resizeFloat64(ws.Cost, tot)
-	ws.WorkCost = resizeFloat64(ws.WorkCost, tot)
+	ws.lb = resizeFloat64(ws.lb, tot)
+	ws.ub = resizeFloat64(ws.ub, tot)
+	ws.cost = resizeFloat64(ws.cost, tot)
+	ws.workCost = resizeFloat64(ws.workCost, tot)
 
-	ws.Basis = resizeInt(ws.Basis, m)
-	ws.BasicRow = resizeInt(ws.BasicRow, tot)
-	ws.RowBasicDeg = resizeInt(ws.RowBasicDeg, m)
-	if cap(ws.Status) < tot {
-		ws.Status = make([]varBasisStatus, tot)
+	ws.basis = resizeInt(ws.basis, m)
+	ws.basicRow = resizeInt(ws.basicRow, tot)
+	ws.rowBasicDeg = resizeInt(ws.rowBasicDeg, m)
+	if cap(ws.status) < tot {
+		ws.status = make([]varBasisStatus, tot)
 	} else {
-		ws.Status = ws.Status[:tot]
+		ws.status = ws.status[:tot]
 	}
 
-	ws.X = resizeFloat64(ws.X, tot)
-	ws.XB = resizeFloat64(ws.XB, m)
-	ws.Y = resizeFloat64(ws.Y, m)
-	ws.Dj = resizeFloat64(ws.Dj, tot)
-	ws.DSE = resizeFloat64(ws.DSE, m)
+	ws.x = resizeFloat64(ws.x, tot)
+	ws.xb = resizeFloat64(ws.xb, m)
+	ws.y = resizeFloat64(ws.y, m)
+	ws.dj = resizeFloat64(ws.dj, tot)
+	ws.dse = resizeFloat64(ws.dse, m)
 
-	ws.Rho = resizeFloat64(ws.Rho, m)
-	ws.RhoIdx = ws.RhoIdx[:0]
-	ws.RhoSparse = false
-	ws.FCol = resizeFloat64(ws.FCol, m)
-	ws.FColIdx = ws.FColIdx[:0]
-	ws.FColSparse = false
-	ws.Tau = resizeFloat64(ws.Tau, m)
-	ws.TauIdx = ws.TauIdx[:0]
-	ws.TauSparse = false
-	ws.TabRow = resizeFloat64(ws.TabRow, tot)
-	if cap(ws.TabRowMark) < tot {
-		ws.TabRowMark = make([]bool, tot)
+	ws.rho = resizeFloat64(ws.rho, m)
+	ws.rhoIdx = ws.rhoIdx[:0]
+	ws.rhoSparse = false
+	ws.fCol = resizeFloat64(ws.fCol, m)
+	ws.fColIdx = ws.fColIdx[:0]
+	ws.fColSparse = false
+	ws.tau = resizeFloat64(ws.tau, m)
+	ws.tauIdx = ws.tauIdx[:0]
+	ws.tauSparse = false
+	ws.tabRow = resizeFloat64(ws.tabRow, tot)
+	if cap(ws.tabRowMark) < tot {
+		ws.tabRowMark = make([]bool, tot)
 	} else {
-		ws.TabRowMark = ws.TabRowMark[:tot]
-		clear(ws.TabRowMark)
+		ws.tabRowMark = ws.tabRowMark[:tot]
+		clear(ws.tabRowMark)
 	}
-	ws.TabRowIdx = ws.TabRowIdx[:0]
-	ws.TabRowSparse = false
+	ws.tabRowIdx = ws.tabRowIdx[:0]
+	ws.tabRowSparse = false
 	numChunks := (n + tabRowChunkMask) >> tabRowChunkBits
-	if cap(ws.TabRowChunkMark) < numChunks {
-		ws.TabRowChunkMark = make([]bool, numChunks)
-		ws.TabRowChunks = make([]int, 0, numChunks)
+	if cap(ws.tabRowChunkMark) < numChunks {
+		ws.tabRowChunkMark = make([]bool, numChunks)
+		ws.tabRowChunks = make([]int, 0, numChunks)
 	} else {
-		ws.TabRowChunkMark = ws.TabRowChunkMark[:numChunks]
-		clear(ws.TabRowChunkMark)
-		ws.TabRowChunks = ws.TabRowChunks[:0]
+		ws.tabRowChunkMark = ws.tabRowChunkMark[:numChunks]
+		clear(ws.tabRowChunkMark)
+		ws.tabRowChunks = ws.tabRowChunks[:0]
 	}
-	ws.FlipCols = ws.FlipCols[:0]
-	ws.BFRTCands = ws.BFRTCands[:0]
+	ws.flipCols = ws.flipCols[:0]
+	ws.bfrtCands = ws.bfrtCands[:0]
 }
 
 func resizeFloat64(s []float64, n int) []float64 {

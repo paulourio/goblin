@@ -3,6 +3,7 @@ package bench
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,11 +12,12 @@ import (
 	"strings"
 )
 
-// fingerprintInputs lists the sources that determine benchmark telemetry: the solver
-// package, its format and kernel packages, the corpus definition, and the harness.
+// fingerprintInputs lists the directories whose sources and benchmark corpus files
+// determine benchmark telemetry across Go, C++ CBC, and Python harnesses.
 var fingerprintInputs = []struct {
 	dir       string
 	recursive bool
+	optional  bool
 }{
 	{dir: ".", recursive: false},
 	{dir: "assign", recursive: false},
@@ -23,36 +25,52 @@ var fingerprintInputs = []struct {
 	{dir: "internal", recursive: true},
 	{dir: "bench", recursive: false},
 	{dir: filepath.Join("cmd", "goblin-bench"), recursive: false},
+	{dir: filepath.Join("testdata", "corpus"), recursive: true, optional: true},
+	{dir: filepath.Join("testdata", "assign_corpus"), recursive: false, optional: true},
 }
 
-// fingerprintExcluded lists bench files that only render documents and do not influence
-// any measured value.
+// fingerprintExcluded lists files that render documents or run standalone fuzz/diff checks
+// without influencing saved benchmark telemetry.
 var fingerprintExcluded = map[string]bool{
-	filepath.Join("bench", "docgen.go"):      true,
-	filepath.Join("bench", "fingerprint.go"): true,
+	filepath.Join("bench", "docgen.go"):          true,
+	filepath.Join("bench", "fingerprint.go"):     true,
+	filepath.Join("bench", "difftest_cbc.py"):    true,
+	filepath.Join("bench", "difftest_assign.py"): true,
 }
 
 func isFingerprintSource(rel string) bool {
 	if fingerprintExcluded[rel] {
 		return false
 	}
+	if strings.HasPrefix(rel, filepath.Join("testdata", "corpus")+string(filepath.Separator)) {
+		return strings.HasSuffix(rel, ".json") || strings.HasSuffix(rel, ".jsonl")
+	}
+	if rel == filepath.Join("testdata", "assign_corpus", "manifest.json") {
+		return true
+	}
 	if strings.HasSuffix(rel, ".go") {
 		return !strings.HasSuffix(rel, "_test.go")
+	}
+	if strings.HasSuffix(rel, ".py") {
+		return strings.HasPrefix(rel, "bench"+string(filepath.Separator))
 	}
 	return strings.HasSuffix(rel, ".c") || strings.HasSuffix(rel, ".cpp") || strings.HasSuffix(rel, ".h")
 }
 
-// SourceFingerprint returns a SHA-256 digest (first 16 hex digits) over go.mod and every
-// non-test Go or C/C++ bridge source that influences benchmark telemetry, relative to the
-// module root. The goblin-bench CLI stores this digest in each telemetry entry, and the
-// documentation gate rejects telemetry whose fingerprint differs from the current tree, so
-// published timings always describe the code that is checked in.
+// SourceFingerprint returns a SHA-256 digest (first 16 hex digits) over go.mod, every
+// non-test Go, C/C++ bridge, or Python baseline harness file, and every benchmark corpus
+// payload in testdata/corpus and testdata/assign_corpus, relative to root. All Go and
+// Python benchmark harnesses store this digest in every telemetry entry, and the
+// documentation gate rejects telemetry whose fingerprint differs from the current tree.
 func SourceFingerprint(root string) (string, error) {
 	files := []string{"go.mod"}
 	for _, in := range fingerprintInputs {
 		base := filepath.Join(root, in.dir)
 		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
+				if path == base && in.optional && errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
 				return err
 			}
 			if d.IsDir() {
@@ -88,8 +106,8 @@ func SourceFingerprint(root string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
-// CheckTelemetryFreshness fails when the goblin telemetry was produced by sources other than
-// those currently under root.
+// CheckTelemetryFreshness fails when any benchmark telemetry file was produced from
+// sources, harness scripts, or corpus payloads other than those currently under root.
 func CheckTelemetryFreshness(root string, tb *TelemetryBundle) error {
 	pv, err := telemetryProvenance(tb)
 	if err != nil {
@@ -101,7 +119,7 @@ func CheckTelemetryFreshness(root string, tb *TelemetryBundle) error {
 	}
 	if pv.fingerprint != cur {
 		return fmt.Errorf("benchmark telemetry is stale: measured with source fingerprint %s, current tree is %s; "+
-			"re-run goblin-bench for all configurations and -sync-docs", pv.fingerprint, cur)
+			"re-run benchmarks for all configurations and -sync-docs", pv.fingerprint, cur)
 	}
 	return nil
 }

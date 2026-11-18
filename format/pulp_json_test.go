@@ -53,14 +53,15 @@ func TestPuLPJSONRoundTrip(t *testing.T) {
 		t.Fatalf("expected Maximize sense, got %v", m.Sense())
 	}
 	p := m.Compile()
-	if p.NumVars != 3 || p.NumConstraints != 1 {
-		t.Fatalf("unexpected compiled size: %d vars, %d rows", p.NumVars, p.NumConstraints)
+	if p.NumVars() != 3 || p.NumConstraints() != 1 {
+		t.Fatalf("unexpected compiled size: %d vars, %d rows", p.NumVars(), p.NumConstraints())
 	}
-	if p.RowRHS[0] != 12.5 {
-		t.Fatalf("expected RHS=12.5 (from constant=-12.5), got %v", p.RowRHS[0])
+	if p.RowRHS(0) != 12.5 {
+		t.Fatalf("expected RHS=12.5 (from constant=-12.5), got %v", p.RowRHS(0))
 	}
-	if !math.IsInf(p.VarLB[2], -1) || p.VarUB[2] != 5.5 {
-		t.Fatalf("unexpected bounds on z: [%v, %v]", p.VarLB[2], p.VarUB[2])
+	lb2, ub2 := p.VarBounds(2)
+	if !math.IsInf(lb2, -1) || ub2 != 5.5 {
+		t.Fatalf("unexpected bounds on z: [%v, %v]", lb2, ub2)
 	}
 
 	var buf bytes.Buffer
@@ -73,7 +74,7 @@ func TestPuLPJSONRoundTrip(t *testing.T) {
 		t.Fatalf("second FromPuLPJSON failed: %v", err)
 	}
 	p2 := m2.Compile()
-	if p2.NumVars != p.NumVars || p2.NumConstraints != p.NumConstraints || p2.RowRHS[0] != p.RowRHS[0] {
+	if p2.NumVars() != p.NumVars() || p2.NumConstraints() != p.NumConstraints() || p2.RowRHS(0) != p.RowRHS(0) {
 		t.Fatalf("round-trip mismatch")
 	}
 
@@ -165,11 +166,13 @@ func TestPuLPJSONObjectiveConstantAndValidation(t *testing.T) {
 		t.Fatalf("FromPuLPJSON omitted lowBound failed: %v", err)
 	}
 	pOmit := mOmit.Compile()
-	if pOmit.VarLB[0] != 0 || pOmit.VarUB[0] != 10 {
-		t.Fatalf("expected omitted lowBound -> [0, 10], got [%v, %v]", pOmit.VarLB[0], pOmit.VarUB[0])
+	lb0, ub0 := pOmit.VarBounds(0)
+	if lb0 != 0 || ub0 != 10 {
+		t.Fatalf("expected omitted lowBound -> [0, 10], got [%v, %v]", lb0, ub0)
 	}
-	if !math.IsInf(pOmit.VarLB[1], -1) || pOmit.VarUB[1] != 5 {
-		t.Fatalf("expected explicit null lowBound -> [-Inf, 5], got [%v, %v]", pOmit.VarLB[1], pOmit.VarUB[1])
+	lb1, ub1 := pOmit.VarBounds(1)
+	if !math.IsInf(lb1, -1) || ub1 != 5 {
+		t.Fatalf("expected explicit null lowBound -> [-Inf, 5], got [%v, %v]", lb1, ub1)
 	}
 
 	if err := format.ToPuLPJSON(nil, &bytes.Buffer{}); err == nil {
@@ -178,7 +181,7 @@ func TestPuLPJSONObjectiveConstantAndValidation(t *testing.T) {
 }
 
 // Verifies lossless float output, objective constant RHS entries, and errors on
-// whitespace or colliding MPS identifiers.
+// whitespace or colliding MPS names.
 func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 	exactVal := 1.0 + 7e-13
 	m := gb.NewModel("mps_prec", gb.Maximize)
@@ -230,5 +233,66 @@ func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 	}
 	if !strings.Contains(unusedMPS, "LO BND       infeas_neg_ub") {
 		t.Fatalf("expected explicit LO BND 0 for lb=0, ub=-1:\n%s", unusedMPS)
+	}
+}
+
+// Checks non-standard JSON floats, signed zeros, and explicit binary bounds.
+// Specifically, the fast scanner must skip Python `NaN` and `Infinity` tokens on primal/dual
+// outputs, preserve `-0.0` sign bits on input numbers, and honor explicit bounds on `Binary`
+// entries while still rejecting non-finite objective or row numbers.
+func TestPuLPJSONEdgeCases(t *testing.T) {
+	// Python json.dumps emits bare `NaN`, `Infinity`, and `-Infinity` on `varValue`, `dj`, and `pi`.
+	rawPyTokens := `{
+  "parameters": {"name": "py_nan", "sense": 1},
+  "objective": {"name": "OBJ", "coefficients": [{"name": "x", "value": 2.0}]},
+  "variables": [
+    {"name": "x", "cat": "Binary", "lowBound": 0, "upBound": 0, "varValue": NaN, "dj": Infinity},
+    {"name": "y", "cat": "Binary", "lowBound": 0, "upBound": 5, "varValue": -Infinity, "dj": -0.0}
+  ],
+  "constraints": [
+    {"name": "c0", "sense": 1, "coefficients": [{"name": "y", "value": 1.0}], "constant": -3.0, "pi": NaN}
+  ],
+  "sos1": [],
+  "sos2": []
+}`
+	doc, err := format.ParsePuLPJSON([]byte(rawPyTokens))
+	if err != nil {
+		t.Fatalf("ParsePuLPJSON failed on Python NaN/Infinity solution tokens: %v", err)
+	}
+	m, err := format.BuildModelFromPuLPJSON(doc)
+	if err != nil {
+		t.Fatalf("BuildModelFromPuLPJSON failed: %v", err)
+	}
+	p, err := m.CompileChecked()
+	if err != nil {
+		t.Fatalf("CompileChecked failed: %v", err)
+	}
+	lb0, ub0 := p.VarBounds(0)
+	if lb0 != 0 || ub0 != 0 {
+		t.Fatalf("Binary var with upBound=0 got bounds [%v, %v], want [0, 0]", lb0, ub0)
+	}
+	lb1, ub1 := p.VarBounds(1)
+	if lb1 != 0 || ub1 != 5 || p.VarCategory(1) != gb.Integer {
+		t.Fatalf("Binary var with explicit [0, 5] got bounds [%v, %v] cat=%v, want [0, 5] Integer",
+			lb1, ub1, p.VarCategory(1))
+	}
+
+	// Fast JSON scanner preserves `-0.0` sign bits identically to `encoding/json`.
+	negZeroJSON := `{"parameters":{"name":"nz","sense":1},"objective":{"name":"OBJ","coefficients":[{"name":"x","value":-0.0}]},"variables":[{"name":"x","cat":"Continuous","lowBound":-0.0,"upBound":1.0}],"constraints":[]}`
+	nzDoc, err := format.ParsePuLPJSON([]byte(negZeroJSON))
+	if err != nil {
+		t.Fatalf("ParsePuLPJSON(-0.0) failed: %v", err)
+	}
+	if nzDoc.Variables[0].LowBound == nil || !math.Signbit(*nzDoc.Variables[0].LowBound) {
+		t.Fatalf("expected LowBound=-0.0 signbit preserved, got %v", nzDoc.Variables[0].LowBound)
+	}
+	if len(nzDoc.Objective.Coefficients) != 1 || !math.Signbit(nzDoc.Objective.Coefficients[0].Value) {
+		t.Fatalf("expected objective coeff -0.0 signbit preserved")
+	}
+
+	// Structural bounds and weights must still reject non-finite tokens.
+	badPyCoef := `{"parameters":{"name":"bad","sense":1},"objective":{"name":"OBJ","coefficients":[{"name":"x","value":NaN}]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":1}],"constraints":[]}`
+	if _, err := format.ParsePuLPJSON([]byte(badPyCoef)); err == nil {
+		t.Fatal("expected ParsePuLPJSON to reject NaN in objective coefficient")
 	}
 }

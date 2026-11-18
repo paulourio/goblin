@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Build the vendored COIN-OR dependency stack (CoinUtils, Osi, Clp, Cgl) and Cbc
-# out-of-tree into third_party/Cbc/dist (which is gitignored) with Go-safe signal
-# handling (no SIGSEGV/SIGABRT/SIGFPE/SIGINT hijacking).
+# out-of-tree into third_party/Cbc/dist (gitignored) with release assertions disabled
+# (-DNDEBUG) and Go-safe signal handling (no SIGSEGV/SIGABRT/SIGFPE/SIGINT hijacking).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GOBLIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -12,6 +12,13 @@ CBC_SRC="${THIRD_PARTY}/Cbc"
 PREFIX="${CBC_SRC}/dist"
 WORK_DIR="${TMPDIR:-/tmp}/goblin_coinor_build"
 JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+
+CBC_REV="c1c171ec"
+CLP_REV="9390927"
+if [ -f "${THIRD_PARTY}/VERSIONS" ]; then
+    CBC_REV="$(awk -F= '/^Cbc=/{print $2}' "${THIRD_PARTY}/VERSIONS" | tr -d '[:space:]')"
+    CLP_REV="$(awk -F= '/^Clp=/{print $2}' "${THIRD_PARTY}/VERSIONS" | tr -d '[:space:]')"
+fi
 
 if [ "${1:-}" = "--clean" ]; then
     rm -rf "${WORK_DIR}" "${PREFIX}"
@@ -40,13 +47,14 @@ build_pkg() {
             --without-sample \
             --without-netlib \
             --without-miplib3 \
-            CXXFLAGS="-O3 -fPIC" \
-            CFLAGS="-O3 -fPIC" \
+            CXXFLAGS="-O3 -DNDEBUG -fPIC" \
+            CFLAGS="-O3 -DNDEBUG -fPIC" \
             "$@"
     fi
     while IFS= read -r -d '' cfg; do
         perl -pi -e 's|#define HAVE_EXECINFO_H 1|/* #undef HAVE_EXECINFO_H */|g; s|#define HAVE_SIGNAL_H 1|/* #undef HAVE_SIGNAL_H */|g' "${cfg}"
-    done < <(find . -name "config.h" -print0 2>/dev/null)
+        perl -pi -e "s|#define CBC_GIT_HASH \".*\"|#define CBC_GIT_HASH \"${CBC_REV}\"|g; s|#define CLP_GIT_HASH \".*\"|#define CLP_GIT_HASH \"${CLP_REV}\"|g" "${cfg}"
+    done < <(find . -name "config*.h" -print0 2>/dev/null)
     make -j"${JOBS}"
     make install
     popd >/dev/null

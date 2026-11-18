@@ -56,19 +56,19 @@ func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int) []cutPl
 		return nil
 	}
 
-	coverCuts := separateKnapsackCoverCuts(solver.Prob, lpPrimal)
+	coverCuts := separateKnapsackCoverCuts(solver.prob, lpPrimal)
 	candidates = append(candidates, coverCuts...)
 	if solver.timeExpired() {
 		return nil
 	}
 
-	flowCuts := separateFlowAndVUBCuts(solver.Prob, lpPrimal)
+	flowCuts := separateFlowAndVUBCuts(solver.prob, lpPrimal)
 	candidates = append(candidates, flowCuts...)
 	if solver.timeExpired() {
 		return nil
 	}
 
-	mirCuts := separateRowMIRCuts(solver.Prob, lpPrimal)
+	mirCuts := separateRowMIRCuts(solver.prob, lpPrimal)
 	candidates = append(candidates, mirCuts...)
 
 	if len(candidates) == 0 {
@@ -100,9 +100,9 @@ func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int) []cutPl
 
 // separateGMICuts derives Gomory mixed-integer cuts from up to maxGMIFraqRows fractional basic integer rows.
 func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
-	p := solver.Prob
-	ws := solver.WS
-	n := p.NumVars
+	p := solver.prob
+	ws := solver.ws
+	n := p.numVars
 	m := solver.TotalRows()
 
 	type gmiRow struct {
@@ -113,8 +113,8 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 	}
 	var fracRows []gmiRow
 	for r := range m {
-		bVar := ws.Basis[r]
-		if bVar >= n || p.VarCat[bVar] == Continuous {
+		bVar := ws.basis[r]
+		if bVar >= n || p.varCat[bVar] == Continuous {
 			continue
 		}
 		xVal := solver.unscaledBasicVal(r)
@@ -154,7 +154,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			if k == bVar {
 				continue
 			}
-			st := ws.Status[k]
+			st := ws.status[k]
 			if st == statusBasic || st == statusFixed {
 				continue
 			}
@@ -181,7 +181,7 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			}
 
 			var gamma float64
-			isIntVar := k < n && p.VarCat[k] != Continuous
+			isIntVar := k < n && p.varCat[k] != Continuous
 			if isIntVar {
 				bnd := solver.unscaledBound(k, st == statusAtUpper)
 				if math.Abs(bnd-math.Round(bnd)) > cutCompareTol {
@@ -225,11 +225,11 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				if st == statusAtLower {
 					rowRHS = solver.unscaledRowRHS(rowIdx) - solver.unscaledBound(k, false)
 					rhs -= gamma * rowRHS
-					addScaledRow(p, solver.ExtraRows, rowIdx, -gamma, structCoeffs)
+					addScaledRow(p, solver.extraRows, rowIdx, -gamma, structCoeffs)
 				} else {
 					rowRHS = solver.unscaledBound(k, true) - solver.unscaledRowRHS(rowIdx)
 					rhs -= gamma * rowRHS
-					addScaledRow(p, solver.ExtraRows, rowIdx, +gamma, structCoeffs)
+					addScaledRow(p, solver.extraRows, rowIdx, +gamma, structCoeffs)
 				}
 			}
 		}
@@ -254,13 +254,13 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 }
 
 func addScaledRow(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale float64, dst []float64) {
-	if rowIdx < p.NumConstraints {
-		for k := p.RowPtr[rowIdx]; k < p.RowPtr[rowIdx+1]; k++ {
-			dst[p.ColIdx[k]] += scale * p.RowVal[k]
+	if rowIdx < p.numConstraints {
+		for k := p.rowPtr[rowIdx]; k < p.rowPtr[rowIdx+1]; k++ {
+			dst[p.colIdx[k]] += scale * p.rowVal[k]
 		}
 		return
 	}
-	dr := extra[rowIdx-p.NumConstraints]
+	dr := extra[rowIdx-p.numConstraints]
 	vals := dr.Val
 	if dr.OrigVal != nil {
 		vals = dr.OrigVal
@@ -272,8 +272,8 @@ func addScaledRow(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale floa
 
 // separateKnapsackCoverCuts relaxes inequality rows to 0-1 knapsacks and sequentially lifts minimal covers via dynamic programming.
 func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
-	n := p.NumVars
-	m := p.NumConstraints
+	n := p.numVars
+	m := p.numConstraints
 	var cuts []cutPlane
 
 	type item struct {
@@ -286,36 +286,36 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 	denseCut := make([]float64, n)
 
 	for i := range m {
-		if p.RowSense[i] == Equal {
+		if p.rowSense[i] == Equal {
 			continue
 		}
 		sign := 1.0
-		if p.RowSense[i] == GreaterEqual {
+		if p.rowSense[i] == GreaterEqual {
 			sign = -1.0
 		}
-		rhs := sign * p.RowRHS[i]
+		rhs := sign * p.rowRHS[i]
 
 		validRelax := true
 		items = items[:0]
-		for k := p.RowPtr[i]; k < p.RowPtr[i+1]; k++ {
-			col := p.ColIdx[k]
-			a := sign * p.RowVal[k]
+		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
+			col := p.colIdx[k]
+			a := sign * p.rowVal[k]
 			if math.Abs(a) <= cutCoeffZeroTol {
 				continue
 			}
-			if p.VarCat[col] != Binary || p.VarLB[col] != 0 || p.VarUB[col] != 1 {
+			if p.varCat[col] != Binary || p.varLB[col] != 0 || p.varUB[col] != 1 {
 				if a > 0 {
-					if math.IsInf(p.VarLB[col], -1) {
+					if math.IsInf(p.varLB[col], -1) {
 						validRelax = false
 						break
 					}
-					rhs -= a * p.VarLB[col]
+					rhs -= a * p.varLB[col]
 				} else {
-					if math.IsInf(p.VarUB[col], 1) {
+					if math.IsInf(p.varUB[col], 1) {
 						validRelax = false
 						break
 					}
-					rhs -= a * p.VarUB[col]
+					rhs -= a * p.varUB[col]
 				}
 				continue
 			}
@@ -452,8 +452,8 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 
 // separateFlowAndVUBCuts separates disaggregated variable-upper-bound inequalities and Barany-Van Roy-Wolsey (l, S) lot-sizing cuts.
 func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
-	n := p.NumVars
-	m := p.NumConstraints
+	n := p.numVars
+	m := p.numConstraints
 	var cuts []cutPlane
 
 	vubBinCol := make([]int, n)
@@ -466,10 +466,10 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 
 	// 1. Detect VUB constraints (p - M*y <= 0) and Disaggregated Implied VUB constraints (sum_k a_k x_k - C*y <= 0)
 	for i := range m {
-		if p.RowSense[i] != LessEqual || math.Abs(p.RowRHS[i]) > unitCoeffTol {
+		if p.rowSense[i] != LessEqual || math.Abs(p.rowRHS[i]) > unitCoeffTol {
 			continue
 		}
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		nnz := e - s
 		if nnz < minPairNNZ {
 			continue
@@ -481,16 +481,16 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		allPosNonNeg := true
 
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			val := p.RowVal[k]
+			col := p.colIdx[k]
+			val := p.rowVal[k]
 			if val < -cutCoeffZeroTol {
 				negCount++
-				if p.VarCat[col] == Binary && p.VarLB[col] == 0 && p.VarUB[col] == 1 {
+				if p.varCat[col] == Binary && p.varLB[col] == 0 && p.varUB[col] == 1 {
 					binCol = col
 					capVal = -val
 				}
 			} else if val > cutCoeffZeroTol {
-				if p.VarLB[col] < -cutCoeffZeroTol {
+				if p.varLB[col] < -cutCoeffZeroTol {
 					allPosNonNeg = false
 				}
 			}
@@ -502,8 +502,8 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 
 		if nnz == minPairNNZ {
 			for k := s; k < e; k++ {
-				col := p.ColIdx[k]
-				val := p.RowVal[k]
+				col := p.colIdx[k]
+				val := p.rowVal[k]
 				if col != binCol && math.Abs(val-1.0) <= unitCoeffTol {
 					vubBinCol[col] = binCol
 					vubCap[col] = capVal
@@ -515,15 +515,15 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		// Disaggregated VUB cuts: for each x_k in sum_k a_k x_k - C*y <= 0, x_k - min(u_k, C/a_k)*y <= 0
 		yStar := lpPrimal[binCol]
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
+			col := p.colIdx[k]
 			if col == binCol {
 				continue
 			}
-			ak := p.RowVal[k]
+			ak := p.rowVal[k]
 			if ak <= cutCoeffZeroTol {
 				continue
 			}
-			effUB := min(p.VarUB[col], capVal/ak)
+			effUB := min(p.varUB[col], capVal/ak)
 			if math.IsInf(effUB, 1) || effUB <= 0 {
 				continue
 			}
@@ -551,10 +551,10 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 	invOutCount := make(map[int]int)
 
 	for i := range m {
-		if p.RowSense[i] != Equal || p.RowRHS[i] <= unitCoeffTol {
+		if p.rowSense[i] != Equal || p.rowRHS[i] <= unitCoeffTol {
 			continue
 		}
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		nnz := e - s
 		if nnz != 2 && nnz != 3 {
 			continue
@@ -566,18 +566,18 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		valid := true
 
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			val := p.RowVal[k]
+			col := p.colIdx[k]
+			val := p.rowVal[k]
 			if math.Abs(val-1.0) <= unitCoeffTol {
-				if vubBinCol[col] != -1 && p.VarLB[col] >= 0 && prodCol == -1 {
+				if vubBinCol[col] != -1 && p.varLB[col] >= 0 && prodCol == -1 {
 					prodCol = col
-				} else if p.VarLB[col] >= 0 && invIn == -1 {
+				} else if p.varLB[col] >= 0 && invIn == -1 {
 					invIn = col
 				} else {
 					valid = false
 					break
 				}
-			} else if math.Abs(val+1.0) <= unitCoeffTol && p.VarLB[col] >= 0 && invOut == -1 {
+			} else if math.Abs(val+1.0) <= unitCoeffTol && p.varLB[col] >= 0 && invOut == -1 {
 				invOut = col
 			} else {
 				valid = false
@@ -597,7 +597,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			prodCol: prodCol,
 			binCol:  vubBinCol[prodCol],
 			invOut:  invOut,
-			demand:  p.RowRHS[i],
+			demand:  p.rowRHS[i],
 		}
 		candNodes = append(candNodes, fn)
 		if invIn != -1 {
@@ -749,21 +749,21 @@ func mirUseLower(x, l, u float64) bool {
 
 // separateRowMIRCuts separates single-row Marchand-Wolsey complemented Mixed-Integer Rounding cuts over bounded and one-sided rows.
 func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
-	n := p.NumVars
-	m := p.NumConstraints
+	n := p.numVars
+	m := p.numConstraints
 	var cuts []cutPlane
 	denseCut := make([]float64, n)
 
 	for i := range m {
-		if p.RowSense[i] == Equal {
+		if p.rowSense[i] == Equal {
 			continue
 		}
 		sign := 1.0
-		if p.RowSense[i] == GreaterEqual {
+		if p.rowSense[i] == GreaterEqual {
 			sign = -1.0
 		}
-		rhs := sign * p.RowRHS[i]
-		s, e := p.RowPtr[i], p.RowPtr[i+1]
+		rhs := sign * p.rowRHS[i]
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		if e-s < minPairNNZ {
 			continue
 		}
@@ -772,9 +772,9 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		act := 0.0
 		validBounds := true
 		for k := s; k < e; k++ {
-			col := p.ColIdx[k]
-			act += sign * p.RowVal[k] * lpPrimal[col]
-			if math.IsInf(p.VarLB[col], -1) && math.IsInf(p.VarUB[col], 1) {
+			col := p.colIdx[k]
+			act += sign * p.rowVal[k] * lpPrimal[col]
+			if math.IsInf(p.varLB[col], -1) && math.IsInf(p.varUB[col], 1) {
 				validBounds = false
 				break
 			}
@@ -786,8 +786,8 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 		// Try Marchand-Wolsey c-MIR scaling with divisor delta = |a_k| for fractional integer variables
 		triedDivs := 0
 		for kDiv := s; kDiv < e && triedDivs < maxMIRDivisors; kDiv++ {
-			divCol := p.ColIdx[kDiv]
-			if p.VarCat[divCol] == Continuous {
+			divCol := p.colIdx[kDiv]
+			if p.varCat[divCol] == Continuous {
 				continue
 			}
 			xv := lpPrimal[divCol]
@@ -795,7 +795,7 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			if fx < minIntInfeas || fx > 1.0-minIntInfeas {
 				continue
 			}
-			delta := math.Abs(p.RowVal[kDiv])
+			delta := math.Abs(p.rowVal[kDiv])
 			if delta <= cutCompareTol {
 				continue
 			}
@@ -804,9 +804,9 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			// Shift variables to closer finite bound
 			beta := rhs
 			for k := s; k < e; k++ {
-				col := p.ColIdx[k]
-				a := sign * p.RowVal[k]
-				l, u := p.VarLB[col], p.VarUB[col]
+				col := p.colIdx[k]
+				a := sign * p.rowVal[k]
+				l, u := p.varLB[col], p.varUB[col]
 				if mirUseLower(lpPrimal[col], l, u) {
 					beta -= a * l
 				} else {
@@ -824,12 +824,12 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			clear(denseCut)
 			cutRHS := b0
 			for k := s; k < e; k++ {
-				col := p.ColIdx[k]
-				a := sign * p.RowVal[k]
-				l, u := p.VarLB[col], p.VarUB[col]
+				col := p.colIdx[k]
+				a := sign * p.rowVal[k]
+				l, u := p.varLB[col], p.varUB[col]
 				atLower := mirUseLower(lpPrimal[col], l, u)
 
-				if p.VarCat[col] == Continuous {
+				if p.varCat[col] == Continuous {
 					if a > 0 {
 						if atLower {
 							// Relax a*(x - l) >= 0 from LHS: coefficient 0
@@ -898,7 +898,7 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 			nnz++
 		} else if v != 0 {
 			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
-			lo := min(v*p.VarLB[j], v*p.VarUB[j])
+			lo := min(v*p.varLB[j], v*p.varUB[j])
 			if math.IsInf(lo, 0) || math.IsNaN(lo) {
 				return cutPlane{}, false
 			}

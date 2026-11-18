@@ -35,22 +35,22 @@ func TestModelAndCompile(t *testing.T) {
 	}
 
 	p := m.Compile()
-	if p.NumVars != 4 || p.NumConstraints != 3 {
-		t.Fatalf("unexpected dimensions: vars=%d, constraints=%d", p.NumVars, p.NumConstraints)
+	if p.NumVars() != 4 || p.NumConstraints() != 3 {
+		t.Fatalf("unexpected dimensions: vars=%d, constraints=%d", p.NumVars(), p.NumConstraints())
 	}
-	if len(p.IntCols) != 2 || p.IntCols[0] != 2 || p.IntCols[1] != 3 {
-		t.Fatalf("unexpected IntCols: %v", p.IntCols)
+	if p.NumIntVars() != 2 || p.IntCol(0) != 2 || p.IntCol(1) != 3 {
+		t.Fatalf("unexpected integer columns: n=%d [%d, %d]", p.NumIntVars(), p.IntCol(0), p.IntCol(1))
 	}
-	if (p.BinaryMask[0] & (1 << 3)) == 0 {
-		t.Fatalf("expected variable 3 (w) to have bit set in BinaryMask")
+	if !p.IsBinaryVar(3) || p.IsBinaryVar(2) {
+		t.Fatalf("expected only variable 3 (w) to have bit set in binary mask")
 	}
-	if p.RowStride != 8 || len(p.DenseRows) != 3*8 {
-		t.Fatalf("expected RowStride=8 and DenseRows len=24, got stride=%d len=%d", p.RowStride, len(p.DenseRows))
+	if p.RowStride() != 8 || p.DenseRowLen() != 3*8 {
+		t.Fatalf("expected RowStride=8 and DenseRowLen=24, got stride=%d len=%d", p.RowStride(), p.DenseRowLen())
 	}
 
 	// Verify CSR and CSC consistency
-	if len(p.ColIdx) != 7 {
-		t.Fatalf("expected 7 non-zeros, got %d", len(p.ColIdx))
+	if p.NNZ() != 7 {
+		t.Fatalf("expected 7 non-zeros, got %d", p.NNZ())
 	}
 
 	// Evaluate candidate solution x=4, y=-1, z=6, w=0 => obj = 4 - 4 + 54 + 0 + 5 = 59

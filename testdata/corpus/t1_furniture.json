@@ -22,7 +22,7 @@
     {
       "name": "Tables",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 100,
       "varValue": null,
       "dj": null
@@ -30,7 +30,7 @@
     {
       "name": "Chairs",
       "cat": "Integer",
-      "lowBound": -0,
+      "lowBound": 0,
       "upBound": 100,
       "varValue": null,
       "dj": null

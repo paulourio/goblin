@@ -112,6 +112,14 @@ func cpuAffinity() string {
 	return "unknown"
 }
 
+func unameRelease() string {
+	raw, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(raw))
+}
+
 func loadTrialPayloads(corpusDir, id string, nTrials int) ([][]byte, error) {
 	trialsPath := filepath.Join(corpusDir, "trials", id+".jsonl")
 	if rawTrials, err := os.ReadFile(trialsPath); err == nil {
@@ -271,6 +279,8 @@ func runAssignBenchSuite(scipyRefPath, outPath string, noSIMD bool, defaultTrial
 	assignCases := bench.BuildAssignCorpus()
 	results := make(map[string]bench.AssignBenchResult, len(assignCases))
 	gitCommit, gitDirty := gitProvenance()
+	kernelRel := unameRelease()
+	measuredAt := time.Now().UTC().Format(time.RFC3339)
 	fingerprint, err := bench.SourceFingerprint(".")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
@@ -372,6 +382,8 @@ func runAssignBenchSuite(scipyRefPath, outPath string, noSIMD bool, defaultTrial
 			GoVersion:         runtime.Version(),
 			SourceFingerprint: fingerprint,
 			CPUAffinity:       cpuAffinity(),
+			UnameRelease:      kernelRel,
+			MeasuredAt:        measuredAt,
 		}
 		results[ac.ID] = r
 
@@ -425,6 +437,7 @@ func runAssignBenchSuite(scipyRefPath, outPath string, noSIMD bool, defaultTrial
 func main() {
 	corpusDir := flag.String("corpus", "testdata/corpus", "Directory for JSON benchmark corpus")
 	genCorpus := flag.Bool("generate-corpus", false, "Generate deterministic 3-tier JSON corpus")
+	printFP := flag.Bool("print-fingerprint", false, "Print canonical source and corpus SHA-256 fingerprint")
 	assignFlag := flag.Bool("assign", false, "Run Linear Sum Assignment (LSAP) benchmark suite")
 	pyRefPath := flag.String("python-ref", "bench/results/python_baseline.json", "Path to Python baseline JSON")
 	scipyRefPath := flag.String("scipy-ref", "bench/results/scipy_assign_baseline.json", "Path to SciPy LSAP baseline JSON")
@@ -439,6 +452,16 @@ func main() {
 	trials := flag.Int("trials", defaultTrialsCount, "Number of measured trials per problem")
 	workers := flag.Int("workers", 1, "Number of concurrent benchmark workers")
 	flag.Parse()
+
+	if *printFP {
+		fp, err := bench.SourceFingerprint(".")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(fp)
+		return
+	}
 
 	if *genCorpus {
 		cases, err := bench.WriteCorpusJSON(*corpusDir)
@@ -538,7 +561,7 @@ func measureRootLPRelaxation(
 			dt = time.Since(t0)
 			lpSolver.Close()
 		} else {
-			ws := gb.AcquireWorkspace(cp.NumVars, cp.NumConstraints)
+			ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
 			t0 := time.Now()
 			lpSolver := gb.NewLPSolver(cp, ws)
 			lpSolver.DisableSIMD = noSIMD
@@ -566,6 +589,8 @@ func benchSingleCorpusCase(
 	gitCommit string,
 	gitDirty bool,
 	fingerprint string,
+	kernelRel string,
+	measuredAt string,
 ) (bench.ProblemBenchResult, gb.Result) {
 	nTrials := cfg.trials
 	if c.Tier == "tier3_large" {
@@ -589,6 +614,7 @@ func benchSingleCorpusCase(
 	tSolve := make([]time.Duration, 0, nTrials)
 	tTotal := make([]time.Duration, 0, nTrials)
 	trialObjs := make([]float64, 0, nTrials)
+	trialStatuses := make([]string, 0, nTrials)
 	compiledTrials := make([]*gb.CompiledProblem, 0, nTrials)
 
 	var canonicalRes gb.Result
@@ -633,6 +659,7 @@ func benchSingleCorpusCase(
 			}
 			compiledTrials = append(compiledTrials, compiled)
 			trialObjs = append(trialObjs, res.Objective)
+			trialStatuses = append(trialStatuses, res.Status.String())
 			tParse = append(tParse, t1.Sub(t0))
 			tBuild = append(tBuild, t2.Sub(t1))
 			tCompile = append(tCompile, t3.Sub(t2))
@@ -701,12 +728,13 @@ func benchSingleCorpusCase(
 	return bench.ProblemBenchResult{
 		ID:                c.ID,
 		Tier:              c.Tier,
-		NumVars:           canonicalCompiled.NumVars,
-		NumConstraints:    canonicalCompiled.NumConstraints,
-		IsMIP:             canonicalCompiled.IsMIP,
+		NumVars:           canonicalCompiled.NumVars(),
+		NumConstraints:    canonicalCompiled.NumConstraints(),
+		IsMIP:             canonicalCompiled.IsMIP(),
 		Backend:           backend.String(),
 		SIMDEnabled:       simdActive,
 		TrialObjectives:   trialObjs,
+		TrialStatuses:     trialStatuses,
 		TParseMS:          medianDurationMS(tParse),
 		TBuildMS:          medianDurationMS(tBuild),
 		TCompileMS:        medianDurationMS(tCompile),
@@ -722,6 +750,8 @@ func benchSingleCorpusCase(
 		GoVersion:         runtime.Version(),
 		SourceFingerprint: fingerprint,
 		CPUAffinity:       cpuAffinity(),
+		UnameRelease:      kernelRel,
+		MeasuredAt:        measuredAt,
 		RootLPTimeMS:      medianDurationMS(lpTimes),
 		RootLPIters:       canonicalRootLP.Iterations,
 		RootLPObj:         canonicalRootLP.Objective,
@@ -761,6 +791,8 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 	cases := bench.BuildCorpus()
 	results := make(map[string]bench.ProblemBenchResult, len(cases))
 	gitCommit, gitDirty := gitProvenance()
+	kernelRel := unameRelease()
+	measuredAt := time.Now().UTC().Format(time.RFC3339)
 	fingerprint, err := bench.SourceFingerprint(".")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
@@ -797,7 +829,7 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 
 			for idx := range jobCh {
 				res, canonicalRes := benchSingleCorpusCase(
-					cases[idx], cfg, backend, simdActive, baseOpts, &mpsBuf, gitCommit, gitDirty, fingerprint,
+					cases[idx], cfg, backend, simdActive, baseOpts, &mpsBuf, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
 				)
 				jobResults[idx] = milpJobResult{
 					idx:          idx,

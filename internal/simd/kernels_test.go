@@ -250,6 +250,42 @@ func TestMinReducedSlice64AndAllAbsLE64(t *testing.T) {
 	}
 }
 
+func TestNaNParity(t *testing.T) {
+	for _, n := range []int{1, 4, 7, 31, 32, 33, 39, 64, 67} {
+		for _, pos := range []int{0, n / 2, n - 1} {
+			x := make([]float64, n)
+			y := make([]float64, n)
+			ub := make([]float64, n)
+			for i := range n {
+				x[i] = float64(i+1) * 0.5
+				y[i] = float64(i) * -0.25
+				ub[i] = float64(i+2) * 1.25
+			}
+			x[pos] = math.NaN()
+
+			if got, want := simd.AbsMax64(x), simd.AbsMax64Scalar(x); !(math.IsNaN(got) && math.IsNaN(want)) {
+				t.Fatalf("n=%d pos=%d: AbsMax64 got=%v scalar=%v, want NaN", n, pos, got, want)
+			}
+			minSIMD, maxSIMD := simd.RowActivityBoundsFinite(x, y, ub)
+			minScal, maxScal := simd.RowActivityBoundsFiniteScalar(x, y, ub)
+			if !(math.IsNaN(minSIMD) && math.IsNaN(maxSIMD) && math.IsNaN(minScal) && math.IsNaN(maxScal)) {
+				t.Fatalf("n=%d pos=%d: RowActivityBoundsFinite simd=(%v,%v) scalar=(%v,%v), want NaN",
+					n, pos, minSIMD, maxSIMD, minScal, maxScal)
+			}
+			if got, want := simd.MinReducedSlice64With(x, y, false), simd.MinReducedSlice64Scalar(x, y); !(math.IsNaN(got) && math.IsNaN(want)) {
+				t.Fatalf("n=%d pos=%d: MinReducedSlice64 got=%v scalar=%v, want NaN", n, pos, got, want)
+			}
+			dstSIMD := make([]float64, n)
+			dstScal := make([]float64, n)
+			rMinSIMD := simd.InitReducedRow64With(dstSIMD, x, y, 1.0, false)
+			rMinScal := simd.InitReducedRow64Scalar(dstScal, x, y, 1.0)
+			if !(math.IsNaN(rMinSIMD) && math.IsNaN(rMinScal)) {
+				t.Fatalf("n=%d pos=%d: InitReducedRow64 min simd=%v scalar=%v, want NaN", n, pos, rMinSIMD, rMinScal)
+			}
+		}
+	}
+}
+
 func BenchmarkAxpy64_N56(b *testing.B) {
 	dst := make([]float64, 56)
 	src := make([]float64, 56)

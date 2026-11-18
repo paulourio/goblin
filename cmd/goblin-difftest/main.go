@@ -193,11 +193,11 @@ func solve(id string, raw json.RawMessage, opts ...gb.Option) result {
 	r.Obj = res.Objective
 	r.Bound = res.BestBound
 	r.Nodes = res.Nodes
-	if len(res.Values) == p.NumVars {
-		r.BViol, r.RViol, r.IViol = p.MaxViolation(res.Values, p.IsMIP)
-		r.X = make(map[string]float64, p.NumVars)
-		for j, name := range p.VarNames {
-			r.X[name] = res.Values[j]
+	if nVars := p.NumVars(); len(res.Values) == nVars {
+		r.BViol, r.RViol, r.IViol = p.MaxViolation(res.Values, p.IsMIP())
+		r.X = make(map[string]float64, nVars)
+		for j := range nVars {
+			r.X[p.VarName(j)] = res.Values[j]
 		}
 	}
 	return r

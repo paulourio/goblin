@@ -63,9 +63,11 @@ type Options struct {
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
 
-	hasCutoff bool
-	cutoffMin float64
-	isSubMIP  bool
+	hasCutoff            bool
+	cutoffMin            float64
+	isSubMIP             bool
+	defaultMaxNodesUsed  bool
+	defaultCutPassesUsed bool
 }
 
 const (
@@ -80,14 +82,16 @@ const (
 // and heuristics enabled, with MaxNodes = 50000; pass WithMaxNodes(0) for an unlimited tree).
 func DefaultOptions() Options {
 	return Options{
-		Backend:          BackendGo,
-		EnablePresolve:   true,
-		EnableCuts:       true,
-		EnableHeuristics: true,
-		MaxNodes:         defaultMaxNodes,
-		MaxCutPasses:     defaultMaxCutPasses,
-		RelGapTol:        defaultRelGapTol,
-		AbsGapTol:        defaultAbsGapTol,
+		Backend:              BackendGo,
+		EnablePresolve:       true,
+		EnableCuts:           true,
+		EnableHeuristics:     true,
+		MaxNodes:             defaultMaxNodes,
+		MaxCutPasses:         defaultMaxCutPasses,
+		RelGapTol:            defaultRelGapTol,
+		AbsGapTol:            defaultAbsGapTol,
+		defaultMaxNodesUsed:  true,
+		defaultCutPassesUsed: true,
 	}
 }
 
@@ -159,12 +163,18 @@ func WithHeuristics(enabled bool) Option {
 
 // WithMaxNodes sets the maximum number of branch-and-bound nodes (0 = unlimited).
 func WithMaxNodes(n int) Option {
-	return func(cfg *Options) { cfg.MaxNodes = n }
+	return func(cfg *Options) {
+		cfg.MaxNodes = n
+		cfg.defaultMaxNodesUsed = false
+	}
 }
 
 // WithMaxCutPasses sets the maximum number of root cutting-plane rounds (0 disables cutting).
 func WithMaxCutPasses(n int) Option {
-	return func(cfg *Options) { cfg.MaxCutPasses = n }
+	return func(cfg *Options) {
+		cfg.MaxCutPasses = n
+		cfg.defaultCutPassesUsed = false
+	}
 }
 
 // WithMaxIter sets the maximum total simplex pivots (0 = unlimited).
@@ -201,7 +211,7 @@ func stopRequested(deadline time.Time, done <-chan struct{}) bool {
 // Result holds the terminal status, objective value, primal and dual vectors,
 // and search counters returned by Solve and SolveCompiled.
 type Result struct {
-	modelID      uint32
+	modelID      uint64
 	Backend      Backend
 	Status       Status
 	Objective    float64
@@ -217,16 +227,26 @@ type Result struct {
 	SolveTime    time.Duration
 }
 
-// Value returns the primal value of variable v in the incumbent vector.
-func (r *Result) Value(v Var) float64 {
-	if v == 0 && r.modelID != 0 {
-		return 0
+// Lookup returns the primal value of variable v in the incumbent vector and reports
+// whether v belongs to the solved model and an incumbent vector is present.
+func (r *Result) Lookup(v Var) (float64, bool) {
+	if r == nil || v == 0 {
+		return 0, false
 	}
 	idx := v.Index()
-	if (r.modelID == 0 || v.modelID() == r.modelID) && idx >= 0 && idx < len(r.Values) {
-		return r.Values[idx]
+	if idx < 0 || idx >= len(r.Values) {
+		return 0, false
 	}
-	return 0
+	if r.modelID != 0 && v.modelTag() != modelVarTag(r.modelID) {
+		return 0, false
+	}
+	return r.Values[idx], true
+}
+
+// Value returns the primal value of variable v in the incumbent vector, or 0 when absent.
+func (r *Result) Value(v Var) float64 {
+	val, _ := r.Lookup(v)
+	return val
 }
 
 // Solve compiles and solves the Model under ctx, applying any supplied functional modifiers to the default settings.
@@ -258,13 +278,13 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			SolveTime: time.Since(start),
 		}, ErrNilProblem
 	}
-	if p.InvalidErr != nil {
+	if p.invalidErr != nil {
 		return Result{
 			modelID:   p.modelID,
 			Backend:   opt.Backend,
 			Status:    StatusUndefined,
 			SolveTime: time.Since(start),
-		}, p.InvalidErr
+		}, p.invalidErr
 	}
 	var deadline time.Time
 	if opt.TimeLimit > 0 {
@@ -289,7 +309,7 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 	}
 
 	workProb := p
-	if opt.EnablePresolve && p.IsMIP {
+	if opt.EnablePresolve && p.isMIP {
 		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
@@ -321,8 +341,8 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			return Result{}, err
 		}
 	}
-	if workProb != p && len(res.Values) == p.NumVars {
-		bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP)
+	if workProb != p && len(res.Values) == p.numVars {
+		bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
 		if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
 			fallbackOpt := opt
 			fallbackOpt.EnablePresolve = false

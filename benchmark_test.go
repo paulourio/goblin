@@ -152,7 +152,7 @@ func BenchmarkRootLP(b *testing.B) {
 		}
 		p := mdl.Compile()
 		b.Run(id, func(b *testing.B) {
-			ws := gb.AcquireWorkspace(p.NumVars, p.NumConstraints)
+			ws := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
 			defer gb.ReleaseWorkspace(ws)
 			b.ReportAllocs()
 			b.ResetTimer()
