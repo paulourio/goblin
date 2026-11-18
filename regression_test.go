@@ -1,7 +1,8 @@
 package goblin_test
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -212,9 +213,9 @@ func TestRegressionInstances(t *testing.T) {
 			t.Fatal(err)
 		}
 		var fx struct {
-			ID                string          `json:"id"`
-			ExpectedObjective float64         `json:"expected_objective"`
-			Doc               json.RawMessage `json:"doc"`
+			ID                string         `json:"id"`
+			ExpectedObjective float64        `json:"expected_objective"`
+			Doc               jsontext.Value `json:"doc"`
 		}
 		if err := json.Unmarshal(raw, &fx); err != nil {
 			t.Fatalf("%s: %v", path, err)

@@ -2,7 +2,7 @@ package bench
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"os"
@@ -37,12 +37,12 @@ type PythonBaselineEntry struct {
 	TTotalMeanMS          float64            `json:"t_total_mean_ms"`
 	TTotalSDMS            float64            `json:"t_total_sd_ms"`
 	CBCSpawnFloorMS       float64            `json:"cbc_spawn_floor_ms"`
-	CBCLPSpawnFloorMS     float64            `json:"cbc_lp_spawn_floor_ms,omitempty"`
+	CBCLPSpawnFloorMS     float64            `json:"cbc_lp_spawn_floor_ms,omitzero"`
 	TSolveTrialsMS        []float64          `json:"t_solve_trials_ms,omitempty"`
 	TTotalTrialsMS        []float64          `json:"t_total_trials_ms,omitempty"`
 	CPUAffinity           string             `json:"cpu_affinity,omitempty"`
 	GitCommit             string             `json:"git_commit,omitempty"`
-	GitDirty              bool               `json:"git_dirty,omitempty"`
+	GitDirty              bool               `json:"git_dirty,omitzero"`
 	SourceFingerprint     string             `json:"source_fingerprint,omitempty"`
 	UnameRelease          string             `json:"uname_release,omitempty"`
 	MeasuredAt            string             `json:"measured_at,omitempty"`
@@ -88,7 +88,7 @@ type ProblemBenchResult struct {
 	TSolveTrialsMS    []float64         `json:"t_solve_trials_ms,omitempty"`
 	TTotalTrialsMS    []float64         `json:"t_total_trials_ms,omitempty"`
 	GitCommit         string            `json:"git_commit,omitempty"`
-	GitDirty          bool              `json:"git_dirty,omitempty"`
+	GitDirty          bool              `json:"git_dirty,omitzero"`
 	GoVersion         string            `json:"go_version,omitempty"`
 	SourceFingerprint string            `json:"source_fingerprint,omitempty"`
 	CPUAffinity       string            `json:"cpu_affinity,omitempty"`
@@ -109,7 +109,7 @@ type SciPyAssignEntry struct {
 	NumPyVersion      string    `json:"numpy_version"`
 	CPUAffinity       string    `json:"cpu_affinity,omitempty"`
 	GitCommit         string    `json:"git_commit,omitempty"`
-	GitDirty          bool      `json:"git_dirty,omitempty"`
+	GitDirty          bool      `json:"git_dirty,omitzero"`
 	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
 	UnameRelease      string    `json:"uname_release,omitempty"`
 	MeasuredAt        string    `json:"measured_at,omitempty"`
@@ -147,7 +147,7 @@ type AssignBenchResult struct {
 	TSolveTrialsMS    []float64 `json:"t_solve_trials_ms,omitempty"`
 	TTotalTrialsMS    []float64 `json:"t_total_trials_ms,omitempty"`
 	GitCommit         string    `json:"git_commit,omitempty"`
-	GitDirty          bool      `json:"git_dirty,omitempty"`
+	GitDirty          bool      `json:"git_dirty,omitzero"`
 	GoVersion         string    `json:"go_version,omitempty"`
 	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
 	CPUAffinity       string    `json:"cpu_affinity,omitempty"`

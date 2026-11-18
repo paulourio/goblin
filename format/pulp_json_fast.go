@@ -46,7 +46,7 @@ func (sc *pulpScanner) consumeNull() bool {
 }
 
 // readUnescapedString reads a JSON string containing no backslash escapes or control bytes.
-// Any escape sequence returns ok=false so the caller falls back to encoding/json.
+// Any escape sequence returns ok=false so the caller falls back to encoding/json/v2.
 func (sc *pulpScanner) readUnescapedString() (string, bool) {
 	sc.skipWS()
 	b := sc.b
@@ -532,7 +532,7 @@ func (sc *pulpScanner) readEmptyArray() ([]any, bool) {
 // parsePuLPJSONFast decodes standard unescaped PuLP JSON payloads without reflection,
 // backing all coefficient slices and float pointers with two contiguous arenas.
 // Any escape sequence, unknown field, non-empty SOS list, or syntax error returns ok=false
-// so ParsePuLPJSON falls back to encoding/json.
+// so ParsePuLPJSON falls back to encoding/json/v2.
 func parsePuLPJSONFast(data []byte) (*PuLPJSON, bool) {
 	sc := pulpScanner{
 		b: data,

@@ -7,7 +7,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -59,7 +60,7 @@ type staticFuncDiag struct {
 	StartLine     int      `json:"start_line"`
 	EndLine       int      `json:"end_line"`
 	CanInline     bool     `json:"can_inline"`
-	InlineCost    int      `json:"inline_cost,omitempty"`
+	InlineCost    int      `json:"inline_cost,omitzero"`
 	InlineReason  string   `json:"inline_reason,omitempty"`
 	BCECount      int      `json:"bce_count"`
 	BCELines      []int    `json:"bce_lines,omitempty"`
@@ -71,8 +72,8 @@ type hotLineSample struct {
 	Line      int     `json:"line"`
 	FlatMS    float64 `json:"flat_ms"`
 	CumMS     float64 `json:"cum_ms"`
-	HasBCE    bool    `json:"has_bce,omitempty"`
-	HasEscape bool    `json:"has_escape,omitempty"`
+	HasBCE    bool    `json:"has_bce,omitzero"`
+	HasEscape bool    `json:"has_escape,omitzero"`
 	Source    string  `json:"source"`
 }
 
@@ -215,7 +216,7 @@ func run() int {
 	printTerminalReport(rep)
 
 	if *jsonOut != "" {
-		raw, err := json.MarshalIndent(rep, "", "  ")
+		raw, err := json.Marshal(&rep, jsontext.WithIndent("  "))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to marshal JSON: %v\n", err)
 			return 1

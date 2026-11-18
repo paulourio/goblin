@@ -82,7 +82,7 @@
       "cols": 32,
       "sense": 1,
       "family": "wide",
-      "description": "16x32 rectangular wide assignment (m \u003c n)",
+      "description": "16x32 rectangular wide assignment (m < n)",
       "base_seed": 1004,
       "trials": 11,
       "trial_seeds": [
@@ -107,7 +107,7 @@
       "cols": 16,
       "sense": 1,
       "family": "tall",
-      "description": "32x16 rectangular tall assignment (m \u003e n)",
+      "description": "32x16 rectangular tall assignment (m > n)",
       "base_seed": 1005,
       "trials": 11,
       "trial_seeds": [
@@ -282,7 +282,7 @@
       "cols": 200,
       "sense": 1,
       "family": "wide",
-      "description": "80x200 rectangular wide assignment (m \u003c n)",
+      "description": "80x200 rectangular wide assignment (m < n)",
       "base_seed": 2006,
       "trials": 11,
       "trial_seeds": [
@@ -307,7 +307,7 @@
       "cols": 80,
       "sense": 1,
       "family": "tall",
-      "description": "200x80 rectangular tall assignment (m \u003e n)",
+      "description": "200x80 rectangular tall assignment (m > n)",
       "base_seed": 2007,
       "trials": 11,
       "trial_seeds": [
@@ -439,7 +439,7 @@
       "cols": 1000,
       "sense": 1,
       "family": "wide",
-      "description": "250x1000 rectangular wide assignment (m \u003c n)",
+      "description": "250x1000 rectangular wide assignment (m < n)",
       "base_seed": 3004,
       "trials": 5,
       "trial_seeds": [
@@ -458,7 +458,7 @@
       "cols": 250,
       "sense": 1,
       "family": "tall",
-      "description": "1000x250 rectangular tall assignment (m \u003e n)",
+      "description": "1000x250 rectangular tall assignment (m > n)",
       "base_seed": 3005,
       "trials": 5,
       "trial_seeds": [

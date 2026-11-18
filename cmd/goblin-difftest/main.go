@@ -9,7 +9,8 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"flag"
 	"fmt"
@@ -83,7 +84,7 @@ func run() int {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, scannerInitBufBytes), scannerMaxBufBytes)
 	out := bufio.NewWriter(os.Stdout)
-	enc := json.NewEncoder(out)
+	enc := jsontext.NewEncoder(out)
 
 	if *assignMode {
 		var assignOpts []assign.Option
@@ -104,7 +105,8 @@ func run() int {
 				fmt.Fprintln(os.Stderr, err)
 				return 1
 			}
-			if err := enc.Encode(solveAssign(line.ID, line.Rows, line.Cols, line.Sense, line.Cost, assignOpts...)); err != nil {
+			ar := solveAssign(line.ID, line.Rows, line.Cols, line.Sense, line.Cost, assignOpts...)
+			if err := json.MarshalEncode(enc, &ar); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return 1
 			}
@@ -141,14 +143,15 @@ func run() int {
 
 	for sc.Scan() {
 		var line struct {
-			ID  string          `json:"id"`
-			Doc json.RawMessage `json:"doc"`
+			ID  string         `json:"id"`
+			Doc jsontext.Value `json:"doc"`
 		}
 		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		if err := enc.Encode(solve(line.ID, line.Doc, opts...)); err != nil {
+		res := solve(line.ID, line.Doc, opts...)
+		if err := json.MarshalEncode(enc, &res, json.Deterministic(true)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -164,7 +167,7 @@ func run() int {
 	return 0
 }
 
-func solve(id string, raw json.RawMessage, opts ...gb.Option) result {
+func solve(id string, raw jsontext.Value, opts ...gb.Option) result {
 	r := result{ID: id, BViol: -1, RViol: -1, IViol: -1}
 	doc, err := format.ParsePuLPJSON(raw)
 	if err != nil {

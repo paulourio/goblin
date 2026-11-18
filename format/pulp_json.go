@@ -4,7 +4,8 @@ package format
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -47,7 +48,7 @@ type PuLPCoefficient struct {
 type PuLPObjective struct {
 	Name         *string           `json:"name"`
 	Coefficients []PuLPCoefficient `json:"coefficients"`
-	Constant     float64           `json:"constant,omitempty"`
+	Constant     float64           `json:"constant,omitzero"`
 }
 
 // PuLPVariable holds a variable specification in PuLP's JSON schema.
@@ -73,7 +74,7 @@ type PuLPConstraint struct {
 
 type pulpLowBoundProbe struct {
 	Variables []struct {
-		LowBound json.RawMessage `json:"lowBound"`
+		LowBound jsontext.Value `json:"lowBound"`
 	} `json:"variables"`
 }
 
@@ -317,6 +318,8 @@ func toPuLPJSONDoc(p *gb.CompiledProblem) PuLPJSON {
 	return doc
 }
 
+var trailingNewline = [1]byte{'\n'}
+
 // ToPuLPJSON serializes a CompiledProblem into PuLP's JSON schema.
 // Nonzero objective offsets are emitted under objective.constant (a goblin extension
 // ignored by Python PuLP's LpProblem.fromJson).
@@ -328,9 +331,11 @@ func ToPuLPJSON(p *gb.CompiledProblem, w io.Writer) error {
 		return err
 	}
 	doc := toPuLPJSONDoc(p)
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(&doc)
+	if err := json.MarshalWrite(w, &doc, jsontext.WithIndent("  ")); err != nil {
+		return err
+	}
+	_, err := w.Write(trailingNewline[:])
+	return err
 }
 
 // ToPuLPJSONCompact serializes a CompiledProblem into a single-line compact PuLP JSON record.
@@ -342,6 +347,9 @@ func ToPuLPJSONCompact(p *gb.CompiledProblem, w io.Writer) error {
 		return err
 	}
 	doc := toPuLPJSONDoc(p)
-	enc := json.NewEncoder(w)
-	return enc.Encode(&doc)
+	if err := json.MarshalWrite(w, &doc); err != nil {
+		return err
+	}
+	_, err := w.Write(trailingNewline[:])
+	return err
 }

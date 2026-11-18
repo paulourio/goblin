@@ -277,7 +277,7 @@ func TestPuLPJSONEdgeCases(t *testing.T) {
 			lb1, ub1, p.VarCategory(1))
 	}
 
-	// Fast JSON scanner preserves `-0.0` sign bits identically to `encoding/json`.
+	// Fast JSON scanner preserves `-0.0` sign bits identically to `encoding/json/v2`.
 	negZeroJSON := `{"parameters":{"name":"nz","sense":1},"objective":{"name":"OBJ","coefficients":[{"name":"x","value":-0.0}]},"variables":[{"name":"x","cat":"Continuous","lowBound":-0.0,"upBound":1.0}],"constraints":[]}`
 	nzDoc, err := format.ParsePuLPJSON([]byte(negZeroJSON))
 	if err != nil {

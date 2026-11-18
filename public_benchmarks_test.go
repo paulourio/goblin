@@ -1,7 +1,7 @@
 package goblin_test
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"math"
 	"os"
 	"path/filepath"
@@ -20,7 +20,7 @@ type publicInstanceMeta struct {
 	NumVars            int     `json:"num_vars"`
 	NumConstraints     int     `json:"num_constraints"`
 	ReferenceObjective float64 `json:"reference_objective"`
-	GoMaxNodes         int     `json:"go_max_nodes,omitempty"`
+	GoMaxNodes         int     `json:"go_max_nodes,omitzero"`
 }
 
 // Verifies status, objective parity, and primal feasibility on held-out public Netlib LP

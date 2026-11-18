@@ -48,6 +48,7 @@ linters:
     - tparallel
 
     # Go 1.22–1.27 modernization & stdlib idioms
+    - depguard
     - intrange
     - modernize
     - perfsprint
@@ -61,6 +62,13 @@ linters:
     - revive
 
   settings:
+    depguard:
+      rules:
+        json-v2-only:
+          deny:
+            - pkg: "encoding/json$"
+              desc: "use encoding/json/v2 and encoding/json/jsontext instead of encoding/json"
+
     dupl:
       threshold: 150
 

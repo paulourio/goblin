@@ -4,7 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"os"
@@ -419,7 +420,7 @@ func WriteAssignCorpusManifest(dir string) ([]AssignCorpusCase, error) {
 	}
 	cases := BuildAssignCorpus()
 	manifest := AssignCorpusManifest{Cases: cases}
-	rawJSON, err := json.MarshalIndent(manifest, "", "  ")
+	rawJSON, err := json.Marshal(&manifest, jsontext.WithIndent("  "))
 	if err != nil {
 		return nil, err
 	}

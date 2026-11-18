@@ -8,7 +8,7 @@ import (
 )
 
 // TestParsePuLPJSONFastParityAndFallback verifies bit-exact structural parity between the
-// zero-reflection fast parser and encoding/json across all 31 benchmark corpus files, scientific
+// zero-reflection fast parser and encoding/json/v2 across all 31 benchmark corpus files, scientific
 // notation, 17-digit floats, omitted lowBound keys, escaped strings, and malformed inputs.
 func TestParsePuLPJSONFastParityAndFallback(t *testing.T) {
 	matches, err := filepath.Glob(filepath.Join("..", "testdata", "corpus", "*.json"))
@@ -81,5 +81,48 @@ func TestParsePuLPJSONFastParityAndFallback(t *testing.T) {
 		if _, err := ParsePuLPJSON([]byte(bad)); err == nil {
 			t.Fatalf("expected ParsePuLPJSON error on malformed payload %q", bad)
 		}
+	}
+}
+
+// BenchmarkParsePuLPJSON compares the arena-backed fast scanner against the encoding/json/v2
+// fallback across Tier 1, Tier 2, and Tier 3 PuLP JSON payloads.
+func BenchmarkParsePuLPJSON(b *testing.B) {
+	workloads := []struct {
+		name string
+		file string
+	}{
+		{"T1_Whiskas", "t1_whiskas.json"},
+		{"T2_Lotsizing48", "t2_lotsizing_48.json"},
+		{"T3_CFLP300", "t3_cflp_300.json"},
+		{"T3_Sched1000", "t3_sched_1000.json"},
+	}
+	for _, wl := range workloads {
+		raw, err := os.ReadFile(filepath.Join("..", "testdata", "corpus", wl.file))
+		if err != nil {
+			raw, err = os.ReadFile(filepath.Join("testdata", "corpus", wl.file))
+		}
+		if err != nil {
+			b.Fatalf("read %s: %v", wl.file, err)
+		}
+		b.Run(wl.name+"/pulp_json_fast", func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				doc, ok := parsePuLPJSONFast(raw)
+				if !ok || doc == nil {
+					b.Fatal("parsePuLPJSONFast failed")
+				}
+			}
+		})
+		b.Run(wl.name+"/json_v2", func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				doc, err := parsePuLPJSONStd(raw)
+				if err != nil || doc == nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

@@ -3,7 +3,7 @@ package goblin_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"math"
 	"os"

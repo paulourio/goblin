@@ -3,7 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"flag"
 	"fmt"
 	"math"
@@ -423,7 +424,7 @@ func runAssignBenchSuite(scipyRefPath, outPath string, noSIMD bool, defaultTrial
 		if err := os.MkdirAll(filepath.Dir(outPath), outDirPerm); err != nil {
 			panic(err)
 		}
-		rawOut, err := json.MarshalIndent(results, "", "  ")
+		rawOut, err := json.Marshal(results, json.Deterministic(true), jsontext.WithIndent("  "))
 		if err != nil {
 			panic(err)
 		}
@@ -852,7 +853,7 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 		if err := os.MkdirAll(filepath.Dir(cfg.outPath), outDirPerm); err != nil {
 			panic(err)
 		}
-		rawOut, err := json.MarshalIndent(results, "", "  ")
+		rawOut, err := json.Marshal(results, json.Deterministic(true), jsontext.WithIndent("  "))
 		if err != nil {
 			panic(err)
 		}
