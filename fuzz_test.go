@@ -615,6 +615,14 @@ func FuzzLPSolver(f *testing.F) {
 }
 
 func FuzzPuLPJSON(f *testing.F) {
+	// Compact seeds maximize mutation throughput across parser edge cases.
+	for _, seed := range []string{
+		`{"parameters":{"name":"s","sense":1},"objective":{"name":"o","coefficients":[{"name":"x","value":1}]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":10}],"constraints":[{"name":"c","sense":-1,"constant":-5,"coefficients":[{"name":"x","value":1}]}],"sos1":[],"sos2":[]}`,
+		`{"parameters":{"name":"m","sense":-1},"objective":{"name":null,"coefficients":[],"constant":2.5},"variables":[{"name":"i","cat":"Integer","lowBound":0,"upBound":-5}],"constraints":[]}`,
+		`{"parameters":{"name":"e","sense":1,"sense":-1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"u\u0031","cat":"Binary","lowBound":null,"upBound":null,"varValue":NaN}],"constraints":[]}`,
+	} {
+		f.Add([]byte(seed))
+	}
 	paths, _ := filepath.Glob("testdata/corpus/t1_*.json")
 	for _, p := range paths {
 		if raw, err := os.ReadFile(p); err == nil {

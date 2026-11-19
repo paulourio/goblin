@@ -116,20 +116,26 @@ func (sc *pulpScanner) readInt() (int, bool) {
 		return 0, false
 	}
 	var u uint64
-	digits := 0
+	limit := uint64(math.MaxInt)
+	if neg {
+		limit = uint64(math.MaxInt) + 1
+	}
 	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
-		u = u*10 + uint64(b[i]-'0')
-		i++
-		digits++
-		if digits > 18 {
+		d := uint64(b[i] - '0')
+		if u > (limit-d)/10 {
 			return 0, false
 		}
+		u = u*10 + d
+		i++
 	}
 	if i < len(b) && (b[i] == '.' || b[i] == 'e' || b[i] == 'E') {
 		return 0, false
 	}
 	sc.pos = i
 	if neg {
+		if u == uint64(math.MaxInt)+1 {
+			return math.MinInt, true
+		}
 		return -int(u), true
 	}
 	return int(u), true
@@ -287,23 +293,28 @@ func (sc *pulpScanner) readCoefficients(arena *[]PuLPCoefficient) ([]PuLPCoeffic
 			return nil, false
 		}
 		var coeff PuLPCoefficient
+		var seen uint8
 		if !sc.consumeByte('}') {
 			for {
 				key, ok := sc.readUnescapedString()
 				if !ok || !sc.consumeByte(':') {
 					return nil, false
 				}
+				var bit uint8
 				switch key {
 				case "name":
+					bit = 1 << 0
 					coeff.Name, ok = sc.readUnescapedString()
 				case "value":
+					bit = 1 << 1
 					coeff.Value, ok = sc.readFloat()
 				default:
 					return nil, false
 				}
-				if !ok {
+				if !ok || seen&bit != 0 {
 					return nil, false
 				}
+				seen |= bit
 				if sc.consumeByte(',') {
 					continue
 				}
@@ -332,26 +343,33 @@ func (sc *pulpScanner) readParameters(dst *PuLPParameters) bool {
 	if sc.consumeByte('}') {
 		return true
 	}
+	var seen uint8
 	for {
 		key, ok := sc.readUnescapedString()
 		if !ok || !sc.consumeByte(':') {
 			return false
 		}
+		var bit uint8
 		switch key {
 		case "name":
+			bit = 1 << 0
 			dst.Name, ok = sc.readUnescapedString()
 		case "sense":
+			bit = 1 << 1
 			dst.Sense, ok = sc.readInt()
 		case "status":
+			bit = 1 << 2
 			dst.Status, ok = sc.readInt()
 		case "sol_status":
+			bit = 1 << 3
 			dst.SolStatus, ok = sc.readInt()
 		default:
 			return false
 		}
-		if !ok {
+		if !ok || seen&bit != 0 {
 			return false
 		}
+		seen |= bit
 		if sc.consumeByte(',') {
 			continue
 		}
@@ -366,24 +384,30 @@ func (sc *pulpScanner) readObjective(dst *PuLPObjective, arena *[]PuLPCoefficien
 	if sc.consumeByte('}') {
 		return true
 	}
+	var seen uint8
 	for {
 		key, ok := sc.readUnescapedString()
 		if !ok || !sc.consumeByte(':') {
 			return false
 		}
+		var bit uint8
 		switch key {
 		case "name":
+			bit = 1 << 0
 			dst.Name, ok = sc.readOptString()
 		case "coefficients":
+			bit = 1 << 1
 			dst.Coefficients, ok = sc.readCoefficients(arena)
 		case "constant":
+			bit = 1 << 2
 			dst.Constant, ok = sc.readFloat()
 		default:
 			return false
 		}
-		if !ok {
+		if !ok || seen&bit != 0 {
 			return false
 		}
+		seen |= bit
 		if sc.consumeByte(',') {
 			continue
 		}
@@ -407,33 +431,40 @@ func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
 			return nil, false
 		}
 		var v PuLPVariable
-		seenLB := false
+		var seen uint8
 		if !sc.consumeByte('}') {
 			for {
 				key, ok := sc.readUnescapedString()
 				if !ok || !sc.consumeByte(':') {
 					return nil, false
 				}
+				var bit uint8
 				switch key {
 				case "name":
+					bit = 1 << 0
 					v.Name, ok = sc.readUnescapedString()
 				case "cat":
+					bit = 1 << 1
 					v.Cat, ok = sc.readUnescapedString()
 				case "lowBound":
-					seenLB = true
+					bit = 1 << 2
 					v.LowBound, ok = sc.readOptFloat(slab)
 				case "upBound":
+					bit = 1 << 3
 					v.UpBound, ok = sc.readOptFloat(slab)
 				case "varValue":
+					bit = 1 << 4
 					v.VarValue, ok = sc.readIgnoredMetricFloat(slab)
 				case "dj":
+					bit = 1 << 5
 					v.Dj, ok = sc.readIgnoredMetricFloat(slab)
 				default:
 					return nil, false
 				}
-				if !ok {
+				if !ok || seen&bit != 0 {
 					return nil, false
 				}
+				seen |= bit
 				if sc.consumeByte(',') {
 					continue
 				}
@@ -443,7 +474,7 @@ func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
 				return nil, false
 			}
 		}
-		if !seenLB {
+		if seen&(1<<2) == 0 {
 			v.LowBound = allocFloatSlab(slab, 0)
 		}
 		vars = append(vars, v)
@@ -473,29 +504,37 @@ func (sc *pulpScanner) readConstraints(arena *[]PuLPCoefficient, slab *[]float64
 			return nil, false
 		}
 		var c PuLPConstraint
+		var seen uint8
 		if !sc.consumeByte('}') {
 			for {
 				key, ok := sc.readUnescapedString()
 				if !ok || !sc.consumeByte(':') {
 					return nil, false
 				}
+				var bit uint8
 				switch key {
 				case "name":
+					bit = 1 << 0
 					c.Name, ok = sc.readUnescapedString()
 				case "sense":
+					bit = 1 << 1
 					c.Sense, ok = sc.readInt()
 				case "coefficients":
+					bit = 1 << 2
 					c.Coefficients, ok = sc.readCoefficients(arena)
 				case "pi":
+					bit = 1 << 3
 					c.Pi, ok = sc.readIgnoredMetricFloat(slab)
 				case "constant":
+					bit = 1 << 4
 					c.Constant, ok = sc.readFloat()
 				default:
 					return nil, false
 				}
-				if !ok {
+				if !ok || seen&bit != 0 {
 					return nil, false
 				}
+				seen |= bit
 				if sc.consumeByte(',') {
 					continue
 				}
@@ -531,8 +570,8 @@ func (sc *pulpScanner) readEmptyArray() ([]any, bool) {
 
 // parsePuLPJSONFast decodes standard unescaped PuLP JSON payloads without reflection,
 // backing all coefficient slices and float pointers with two contiguous arenas.
-// Any escape sequence, unknown field, non-empty SOS list, or syntax error returns ok=false
-// so ParsePuLPJSON falls back to encoding/json/v2.
+// Any escape sequence, unknown field, duplicate key, non-empty SOS list, or syntax error
+// returns ok=false so ParsePuLPJSON falls back to encoding/json/v2.
 func parsePuLPJSONFast(data []byte) (*PuLPJSON, bool) {
 	sc := pulpScanner{
 		b: data,
@@ -544,31 +583,40 @@ func parsePuLPJSONFast(data []byte) (*PuLPJSON, bool) {
 	var doc PuLPJSON
 	coeffArena := make([]PuLPCoefficient, 0, max(16, len(data)/28))
 	floatSlab := make([]float64, 0, max(32, len(data)/64))
+	var seen uint8
 	if !sc.consumeByte('}') {
 		for {
 			key, ok := sc.readUnescapedString()
 			if !ok || !sc.consumeByte(':') {
 				return nil, false
 			}
+			var bit uint8
 			switch key {
 			case "parameters":
+				bit = 1 << 0
 				ok = sc.readParameters(&doc.Parameters)
 			case "objective":
+				bit = 1 << 1
 				ok = sc.readObjective(&doc.Objective, &coeffArena)
 			case "variables":
+				bit = 1 << 2
 				doc.Variables, ok = sc.readVariables(&floatSlab)
 			case "constraints":
+				bit = 1 << 3
 				doc.Constraints, ok = sc.readConstraints(&coeffArena, &floatSlab)
 			case "sos1":
+				bit = 1 << 4
 				doc.SOS1, ok = sc.readEmptyArray()
 			case "sos2":
+				bit = 1 << 5
 				doc.SOS2, ok = sc.readEmptyArray()
 			default:
 				return nil, false
 			}
-			if !ok {
+			if !ok || seen&bit != 0 {
 				return nil, false
 			}
+			seen |= bit
 			if sc.consumeByte(',') {
 				continue
 			}

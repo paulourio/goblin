@@ -1,10 +1,14 @@
 package format
 
 import (
+	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	gb "github.com/paulourio/goblin"
 )
 
 // TestParsePuLPJSONFastParityAndFallback verifies bit-exact structural parity between the
@@ -81,6 +85,75 @@ func TestParsePuLPJSONFastParityAndFallback(t *testing.T) {
 		if _, err := ParsePuLPJSON([]byte(bad)); err == nil {
 			t.Fatalf("expected ParsePuLPJSON error on malformed payload %q", bad)
 		}
+	}
+}
+
+// TestPuLPJSONFastDuplicateKeysOverflowAndInvertedIntBounds verifies parity with
+// encoding/json/v2 on duplicate keys, bounded readInt overflow handling on 32-bit
+// and 64-bit platforms, and inverted integer variable bounds on round-trip.
+func TestPuLPJSONFastDuplicateKeysOverflowAndInvertedIntBounds(t *testing.T) {
+	duplicates := []string{
+		`{"parameters":{"name":"dup","sense":1,"sense":-1},"objective":{"name":"o","coefficients":[]},"variables":[],"constraints":[]}`,
+		`{"parameters":{"name":"dup","sense":1},"objective":{"name":"o","coefficients":[{"name":"x","value":1,"value":2}]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[]}`,
+		`{"parameters":{"name":"dup","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"lowBound":1}],"constraints":[]}`,
+		`{"parameters":{"name":"dup","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[{"name":"r","sense":0,"sense":-1,"coefficients":[]}]}`,
+		`{"parameters":{"name":"dup","sense":1},"parameters":{"name":"dup2","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[],"constraints":[]}`,
+	}
+	for i, payload := range duplicates {
+		raw := []byte(payload)
+		if _, ok := parsePuLPJSONFast(raw); ok {
+			t.Fatalf("case %d: expected parsePuLPJSONFast to fall back on duplicate key", i)
+		}
+		_, fastErr := ParsePuLPJSON(raw)
+		_, stdErr := parsePuLPJSONStd(raw)
+		if (fastErr != nil) != (stdErr != nil) {
+			t.Fatalf("case %d: ParsePuLPJSON err=%v vs std err=%v", i, fastErr, stdErr)
+		}
+		if fastErr == nil {
+			t.Fatalf("case %d: expected duplicate key rejection", i)
+		}
+	}
+
+	// Overflow beyond math.MaxInt (including 4294967297 on 32-bit architectures).
+	overflowPayload := `{"parameters":{"name":"ovf","sense":4294967297},"objective":{"name":"o","coefficients":[]},"variables":[],"constraints":[]}`
+	if math.MaxInt <= math.MaxInt32 {
+		if _, ok := parsePuLPJSONFast([]byte(overflowPayload)); ok {
+			t.Fatal("expected parsePuLPJSONFast to reject sense=4294967297 on 32-bit int")
+		}
+		if _, err := ParsePuLPJSON([]byte(overflowPayload)); err == nil {
+			t.Fatal("expected ParsePuLPJSON error for sense=4294967297 on 32-bit int")
+		}
+	}
+	hugePayload := `{"parameters":{"name":"huge","sense":99999999999999999999},"objective":{"name":"o","coefficients":[]},"variables":[],"constraints":[]}`
+	if _, ok := parsePuLPJSONFast([]byte(hugePayload)); ok {
+		t.Fatal("expected parsePuLPJSONFast to reject huge integer overflow")
+	}
+	if _, err := ParsePuLPJSON([]byte(hugePayload)); err == nil {
+		t.Fatal("expected ParsePuLPJSON error on huge integer overflow")
+	}
+
+	// Inverted integer bounds [0, -5] must remain Integer rather than Binary across PuLP JSON round-trip.
+	m := gb.NewModel("inv_int_rt", gb.Minimize)
+	x := m.AddIntVar("x", 0, -5)
+	m.SetObjective(gb.VarExpr(x))
+	var buf bytes.Buffer
+	if err := ToPuLPJSON(m.Compile(), &buf); err != nil {
+		t.Fatalf("ToPuLPJSON: %v", err)
+	}
+	rt, err := FromPuLPJSON(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("FromPuLPJSON: %v", err)
+	}
+	rtVar, ok := rt.VarByName("x")
+	if !ok {
+		t.Fatal("round-tripped variable x missing")
+	}
+	if rt.VarCategoryOf(rtVar) != gb.Integer {
+		t.Fatalf("round-tripped inverted integer var category = %v, want Integer", rt.VarCategoryOf(rtVar))
+	}
+	lb, ub := rt.VarBounds(rtVar)
+	if lb != 0 || ub != -5 {
+		t.Fatalf("round-tripped bounds = [%v, %v], want [0, -5]", lb, ub)
 	}
 }
 

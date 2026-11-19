@@ -117,13 +117,18 @@ func (m *Model) Compile() *CompiledProblem {
 func (m *Model) compile(validatedErr error) *CompiledProblem {
 	n := len(m.vars)
 	mc := len(m.constraints)
+	modelID := m.id
+	if modelID == 0 {
+		modelID = nextModelID.Add(1)
+	}
+	sense := m.Sense()
 
 	numWords := (n + wordBitMask) / bitsPerWord
 	p := &CompiledProblem{
-		name:           m.name,
-		sense:          m.sense,
+		name:           m.Name(),
+		sense:          sense,
 		invalidErr:     validatedErr,
-		modelID:        m.id,
+		modelID:        modelID,
 		numVars:        n,
 		numConstraints: mc,
 		varNames:       make([]string, n),
@@ -305,6 +310,9 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 // ObjectiveFromMin converts an internal minimized objective value back to the
 // user's original sense and adds ObjConstant.
 func (p *CompiledProblem) ObjectiveFromMin(minObj float64) float64 {
+	if p == nil {
+		return 0
+	}
 	if p.sense == Maximize {
 		return -minObj + p.objConstant
 	}
@@ -313,6 +321,9 @@ func (p *CompiledProblem) ObjectiveFromMin(minObj float64) float64 {
 
 // EvaluateObjective computes the original objective value for primal vector x.
 func (p *CompiledProblem) EvaluateObjective(x []float64) float64 {
+	if p == nil {
+		return 0
+	}
 	sum := p.objConstant
 	for j := 0; j < p.numVars && j < len(x); j++ {
 		sum += p.objCoeffs[j] * x[j]
@@ -322,11 +333,18 @@ func (p *CompiledProblem) EvaluateObjective(x []float64) float64 {
 
 // MaxViolation computes the largest bound, row, and integer residual of x.
 func (p *CompiledProblem) MaxViolation(x []float64, checkIntegrality bool) (boundViol, rowViol, intViol float64) {
-	if len(x) < p.numVars {
+	if p == nil || len(x) < p.numVars {
 		return math.Inf(1), math.Inf(1), math.Inf(1)
 	}
 	for j := range p.numVars {
 		v := x[j]
+		if math.IsNaN(v) {
+			boundViol = math.Inf(1)
+			if checkIntegrality && p.varCat[j] != Continuous {
+				intViol = math.Inf(1)
+			}
+			continue
+		}
 		if v < p.varLB[j] {
 			boundViol = max(boundViol, p.varLB[j]-v)
 		}
@@ -335,13 +353,21 @@ func (p *CompiledProblem) MaxViolation(x []float64, checkIntegrality bool) (boun
 		}
 		if checkIntegrality && p.varCat[j] != Continuous {
 			diff := math.Abs(v - math.Round(v))
-			intViol = max(intViol, diff)
+			if math.IsNaN(diff) {
+				intViol = math.Inf(1)
+			} else {
+				intViol = max(intViol, diff)
+			}
 		}
 	}
 	for i := range p.numConstraints {
 		act := 0.0
 		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
 			act += p.rowVal[k] * x[p.colIdx[k]]
+		}
+		if math.IsNaN(act) {
+			rowViol = math.Inf(1)
+			continue
 		}
 		if act < p.rowLB[i] {
 			rowViol = max(rowViol, p.rowLB[i]-act)
@@ -353,17 +379,20 @@ func (p *CompiledProblem) MaxViolation(x []float64, checkIntegrality bool) (boun
 	return boundViol, rowViol, intViol
 }
 
-// Name returns the compiled problem name.
+// Name returns the compiled problem name ("NoName" when unnamed).
 func (p *CompiledProblem) Name() string {
 	if p == nil {
 		return ""
 	}
+	if p.name == "" {
+		return "NoName"
+	}
 	return p.name
 }
 
-// Sense returns the compiled optimization direction.
+// Sense returns the compiled optimization direction (Minimize when unset).
 func (p *CompiledProblem) Sense() Sense {
-	if p == nil {
+	if p == nil || p.sense == 0 {
 		return Minimize
 	}
 	return p.sense

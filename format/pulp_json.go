@@ -170,13 +170,13 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 			if v.UpBound == nil {
 				ub = 1
 			}
-			if lb >= 0 && ub <= 1 {
+			if lb >= 0 && ub <= 1 && lb <= ub {
 				cat = gb.Binary
 			} else {
 				cat = gb.Integer
 			}
 		case "Integer":
-			if lb >= 0 && ub <= 1 {
+			if lb >= 0 && ub <= 1 && lb <= ub {
 				cat = gb.Binary
 			} else {
 				cat = gb.Integer

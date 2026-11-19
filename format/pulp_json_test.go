@@ -295,4 +295,29 @@ func TestPuLPJSONEdgeCases(t *testing.T) {
 	if _, err := format.ParsePuLPJSON([]byte(badPyCoef)); err == nil {
 		t.Fatal("expected ParsePuLPJSON to reject NaN in objective coefficient")
 	}
+
+	// MIN-1: Zero-value 0-variable Model and CompiledProblem default to "NoName" and Minimize,
+	// round-tripping cleanly through ToPuLPJSON and FromPuLPJSON.
+	var zeroM gb.Model
+	if zeroM.Name() != "NoName" || zeroM.Sense() != gb.Minimize {
+		t.Fatalf("zero-value Model Name=%q Sense=%v, want NoName Minimize", zeroM.Name(), zeroM.Sense())
+	}
+	zeroM.SetObjective(gb.Expr{Constant: 7.5})
+	pZero := zeroM.Compile()
+	if pZero.Name() != "NoName" || pZero.Sense() != gb.Minimize {
+		t.Fatalf("compiled zero-value Model Name=%q Sense=%v, want NoName Minimize", pZero.Name(), pZero.Sense())
+	}
+	for _, pCase := range []*gb.CompiledProblem{pZero, {}} {
+		var zBuf bytes.Buffer
+		if err := format.ToPuLPJSON(pCase, &zBuf); err != nil {
+			t.Fatalf("ToPuLPJSON zero-value problem failed: %v", err)
+		}
+		mRT, err := format.FromPuLPJSON(&zBuf)
+		if err != nil {
+			t.Fatalf("FromPuLPJSON zero-value round-trip failed: %v", err)
+		}
+		if mRT.Sense() != gb.Minimize || mRT.Name() != "NoName" {
+			t.Fatalf("FromPuLPJSON zero-value round-trip Name=%q Sense=%v, want NoName Minimize", mRT.Name(), mRT.Sense())
+		}
+	}
 }

@@ -223,6 +223,19 @@ func (m *Model) recordErr(err error) {
 	}
 }
 
+func (m *Model) ensureInit() {
+	if m.id == 0 {
+		m.id = nextModelID.Add(1)
+		m.varTag = modelVarTag(m.id)
+	}
+	if m.sense == 0 {
+		m.sense = Minimize
+	}
+	if m.name == "" {
+		m.name = "NoName"
+	}
+}
+
 func (m *Model) validVar(v Var) (int, bool) {
 	idx := v.Index()
 	if v == 0 || v.modelTag() != m.varTag || idx < 0 || idx >= len(m.vars) {
@@ -231,11 +244,24 @@ func (m *Model) validVar(v Var) (int, bool) {
 	return idx, true
 }
 
-// Name returns the model's name.
-func (m *Model) Name() string { return m.name }
+// Name returns the model's name ("NoName" on an unnamed zero-value Model).
+func (m *Model) Name() string {
+	if m == nil {
+		return ""
+	}
+	if m.name == "" {
+		return "NoName"
+	}
+	return m.name
+}
 
-// Sense returns the model's optimization sense.
-func (m *Model) Sense() Sense { return m.sense }
+// Sense returns the model's optimization sense (Minimize on a zero-value Model).
+func (m *Model) Sense() Sense {
+	if m == nil || m.sense == 0 {
+		return Minimize
+	}
+	return m.sense
+}
 
 // NumVars returns the number of variables in the model.
 func (m *Model) NumVars() int { return len(m.vars) }
@@ -245,6 +271,7 @@ func (m *Model) NumConstraints() int { return len(m.constraints) }
 
 // Reserve preallocates internal variable and constraint storage when the model dimensions are known ahead of time.
 func (m *Model) Reserve(numVars, numConstraints int) {
+	m.ensureInit()
 	if numVars > cap(m.vars) {
 		vars := make([]varDef, len(m.vars), numVars)
 		copy(vars, m.vars)
@@ -319,6 +346,7 @@ func (m *Model) nextAutoConName(idx int) string {
 // AddVar adds a decision variable with explicit lower bound, upper bound, and category.
 // Use math.Inf(-1) for no lower bound and math.Inf(1) for no upper bound.
 func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
+	m.ensureInit()
 	if !cat.valid() {
 		m.recordErr(fmt.Errorf("variable %q has invalid category %d", name, uint8(cat)))
 	}
@@ -326,6 +354,9 @@ func (m *Model) AddVar(name string, lb, ub float64, cat VarCategory) Var {
 		m.recordErr(fmt.Errorf("variable %q has invalid bounds [%v, %v]", name, lb, ub))
 	}
 	lb, ub = roundBoundsForCategory(lb, ub, cat)
+	if m.varByName == nil {
+		m.varByName = make(map[string]Var, defaultModelCap)
+	}
 	idx := len(m.vars)
 	id := makeVar(m.id, idx)
 	if name == "" {
@@ -420,6 +451,7 @@ func (m *Model) VarCategoryOf(v Var) VarCategory {
 
 // SetObjective sets the linear objective expression of the model.
 func (m *Model) SetObjective(e Expr) {
+	m.ensureInit()
 	m.objTerms = append(m.objTerms[:0], e.Terms...)
 	m.objConst = e.Constant
 }
@@ -432,6 +464,7 @@ func (m *Model) SetObjectiveNamed(name string, e Expr) {
 
 // AddConstraint adds a linear constraint to the model.
 func (m *Model) AddConstraint(name string, c Constraint) {
+	m.ensureInit()
 	cIdx := len(m.constraints)
 	if m.conByName == nil {
 		m.conByName = make(map[string]int, defaultModelCap)
