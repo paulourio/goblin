@@ -11,6 +11,9 @@ extern "C" {
 typedef struct {
     int status;
     int has_sol;
+    int has_best_bound;
+    int has_root_lp;
+    int has_root_cut;
     double obj_min;
     double best_bound_min;
     double root_lp_min;
@@ -99,6 +102,8 @@ int goblin_lp_add_cut(
     const double *val,
     double rhs
 );
+
+void goblin_lp_tighten_dual_tol(GoblinLPSolver *s, double dual_tol);
 
 void goblin_lp_solve(
     GoblinLPSolver *s,
