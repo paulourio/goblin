@@ -4,17 +4,14 @@ import (
 	"context"
 	"errors"
 	"math"
+	"slices"
 
 	"github.com/paulourio/goblin/internal/simd"
 )
 
 var errContextCanceled = errors.New("assign: context canceled")
 
-const (
-	hugeCostThreshold = 1e290
-	hugeCostDownscale = 0x1p-64
-	hugeCostUpscale   = 0x1p64
-)
+const hugeCostThreshold = 1e290
 
 func clampFinite(x float64) float64 {
 	if x > math.MaxFloat64 {
@@ -26,41 +23,132 @@ func clampFinite(x float64) float64 {
 	return x
 }
 
-func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (m, n int, normCost []float64, transposed bool, scaleUp float64, err error) {
+func minimalDownscaleExp(maxAbsFinite float64, n int) int {
+	safeCap := math.MaxFloat64 / float64(max(64, 16*n))
+	if !(maxAbsFinite > safeCap) {
+		return 0
+	}
+	_, me := math.Frexp(maxAbsFinite)
+	_, se := math.Frexp(safeCap)
+	return max(1, me-se+1)
+}
+
+func twoSumAssign(a, b float64) (s, err float64) {
+	s = a + b
+	bb := s - a
+	err = (a - (s - bb)) + (b - bb)
+	return s, err
+}
+
+func isAssignmentStrictlyWorse(m, n int, candCol4Row, baseCol4Row []int, unscaledCost []float64) bool {
+	const bigExp = 24
+	var bigS, bigC, smallS, smallC float64
+	accTerm := func(v float64) {
+		if v == 0 {
+			return
+		}
+		if math.Abs(v) >= 1e150 {
+			var e float64
+			bigS, e = twoSumAssign(bigS, math.Ldexp(v, -bigExp))
+			bigC += e
+		} else {
+			var e float64
+			smallS, e = twoSumAssign(smallS, v)
+			smallC += e
+		}
+	}
+	for i := range m {
+		jc := candCol4Row[i]
+		jb := baseCol4Row[i]
+		if jc < 0 || jc >= n {
+			return true
+		}
+		if jc == jb {
+			continue
+		}
+		cc := unscaledCost[i*n+jc]
+		if math.IsInf(cc, 1) || math.IsNaN(cc) {
+			return true
+		}
+		accTerm(cc)
+		accTerm(-unscaledCost[i*n+jb])
+	}
+	bigSum, bigRem := twoSumAssign(bigS, bigC)
+	smallSum, smallRem := twoSumAssign(smallS, smallC)
+	if bigSum != 0 {
+		return bigSum > 0
+	}
+	if bigRem != 0 {
+		remOrig := math.Ldexp(bigRem, bigExp)
+		if comb := remOrig + smallSum; comb != 0 {
+			return comb > 0
+		}
+	}
+	if smallSum != 0 {
+		return smallSum > 0
+	}
+	return smallRem > 0
+}
+
+func hasTinyEntry(cost []float64) bool {
+	for _, c := range cost {
+		if c != 0 && math.Abs(c) < 1.0 {
+			return true
+		}
+	}
+	return false
+}
+
+func downscaleSlice(orig, dst []float64, downExp int) bool {
+	scaleDown := math.Ldexp(1.0, -downExp)
+	lostSub := false
+	for idx, c := range orig {
+		sc := c * scaleDown
+		dst[idx] = sc
+		if !lostSub && c != 0 && !math.IsInf(c, 0) && (math.Ldexp(sc, downExp) != c || math.Abs(c) < 0x1p950) {
+			lostSub = true
+		}
+	}
+	return lostSub
+}
+
+func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (m, n int, normCost, unscaledCost []float64, transposed, lostSubnormal bool, scaleExp int, err error) {
 	negate := sense == Maximize
 	transposed = rows > cols
 	m = min(rows, cols)
 	n = max(rows, cols)
-	scaleUp = 1.0
-	needsScale := false
+	maxAbsFinite := 0.0
 
 	if !transposed && !negate {
 		if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD || len(cost) < 256) {
-			return m, n, cost, false, 1, nil
+			return m, n, cost, cost, false, false, 0, nil
 		}
 		for _, c := range cost {
 			if !(math.Abs(c) <= hugeCostThreshold) {
 				if math.IsNaN(c) || math.IsInf(c, -1) {
-					return 0, 0, nil, false, 1, ErrInvalidCost
+					return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
 				}
 				if !math.IsInf(c, 1) {
-					needsScale = true
+					if ac := math.Abs(c); ac > maxAbsFinite {
+						maxAbsFinite = ac
+					}
 				}
 			}
 		}
-		if !needsScale {
-			return m, n, cost, false, 1, nil
+		downExp := minimalDownscaleExp(maxAbsFinite, n)
+		if downExp == 0 {
+			return m, n, cost, cost, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(cost), 0, nil
 		}
+		orig := cost
 		var dst []float64
 		if ownedInWork {
+			orig = slices.Clone(cost)
 			dst = cost
 		} else {
 			dst = ws.ensureWorkCost(rows * cols)
 		}
-		for idx, c := range cost {
-			dst[idx] = c * hugeCostDownscale
-		}
-		return m, n, dst, false, hugeCostUpscale, nil
+		lostSub := downscaleSlice(orig, dst, downExp)
+		return m, n, dst, orig, false, lostSub, downExp, nil
 	}
 
 	if !transposed && negate {
@@ -73,10 +161,12 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		for idx, c := range cost {
 			if !(math.Abs(c) <= hugeCostThreshold) {
 				if math.IsNaN(c) || math.IsInf(c, 1) {
-					return 0, 0, nil, false, 1, ErrInvalidCost
+					return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
 				}
 				if !math.IsInf(c, -1) {
-					needsScale = true
+					if ac := math.Abs(c); ac > maxAbsFinite {
+						maxAbsFinite = ac
+					}
 				}
 			}
 			if c == 0 {
@@ -85,13 +175,13 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 				dst[idx] = -c
 			}
 		}
-		if needsScale {
-			for idx, c := range dst {
-				dst[idx] = c * hugeCostDownscale
-			}
-			scaleUp = hugeCostUpscale
+		downExp := minimalDownscaleExp(maxAbsFinite, n)
+		if downExp > 0 {
+			orig := slices.Clone(dst)
+			lostSub := downscaleSlice(orig, dst, downExp)
+			return m, n, dst, orig, false, lostSub, downExp, nil
 		}
-		return m, n, dst, false, scaleUp, nil
+		return m, n, dst, dst, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), 0, nil
 	}
 
 	// Transposed (rows > cols): m = cols, n = rows.
@@ -123,10 +213,12 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 						val := rowSlice[c]
 						if !(math.Abs(val) <= hugeCostThreshold) {
 							if math.IsNaN(val) || math.IsInf(val, 1) {
-								return 0, 0, nil, false, 1, ErrInvalidCost
+								return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
 							}
 							if !math.IsInf(val, -1) {
-								needsScale = true
+								if av := math.Abs(val); av > maxAbsFinite {
+									maxAbsFinite = av
+								}
 							}
 						}
 						if val == 0 {
@@ -149,10 +241,12 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 						val := rowSlice[c]
 						if !(math.Abs(val) <= hugeCostThreshold) {
 							if math.IsNaN(val) || math.IsInf(val, -1) {
-								return 0, 0, nil, false, 1, ErrInvalidCost
+								return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
 							}
 							if !math.IsInf(val, 1) {
-								needsScale = true
+								if av := math.Abs(val); av > maxAbsFinite {
+									maxAbsFinite = av
+								}
 							}
 						}
 						dst[c*rows+r] = val
@@ -161,13 +255,13 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 			}
 		}
 	}
-	if needsScale {
-		for idx, c := range dst {
-			dst[idx] = c * hugeCostDownscale
-		}
-		scaleUp = hugeCostUpscale
+	downExp := minimalDownscaleExp(maxAbsFinite, n)
+	if downExp > 0 {
+		orig := slices.Clone(dst)
+		lostSub := downscaleSlice(orig, dst, downExp)
+		return m, n, dst, orig, true, lostSub, downExp, nil
 	}
-	return m, n, dst, true, scaleUp, nil
+	return m, n, dst, dst, true, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), 0, nil
 }
 
 func solveWithWorkspace(ctx context.Context, rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, cfg Options) (Result, error) {
@@ -204,6 +298,60 @@ func solveIntoPreallocated(ctx context.Context, rows, cols int, cost []float64, 
 	return obj, err
 }
 
+func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD bool, done <-chan struct{}) error {
+	for i := range m {
+		col4row[i] = -1
+	}
+	for j := range n {
+		row4col[j] = -1
+	}
+
+	var numFree int
+	var errPre error
+	if m == n {
+		numFree, errPre = preprocessSquareJV(n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], disableSIMD, done)
+	} else {
+		numFree, errPre = preprocessRectangularBV(m, n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], disableSIMD, done)
+	}
+	if errPre != nil {
+		if errors.Is(errPre, errContextCanceled) {
+			return ctx.Err()
+		}
+		return errPre
+	}
+
+	if numFree > 0 {
+		remaining := ws.remaining[:n]
+		d := ws.d[:n]
+		pred := ws.pred[:n]
+		freeRows := ws.freeRows[:numFree]
+		if done == nil {
+			for _, curRow := range freeRows {
+				if err := augmentRow(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, disableSIMD, nil); err != nil {
+					return err
+				}
+			}
+		} else {
+			for idx, curRow := range freeRows {
+				if idx&3 == 0 {
+					select {
+					case <-done:
+						return ctx.Err()
+					default:
+					}
+				}
+				if err := augmentRow(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, disableSIMD, done); err != nil {
+					if errors.Is(err, errContextCanceled) {
+						return ctx.Err()
+					}
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork bool, sense Sense, rowInd, colInd []int, ws *Workspace, cfg Options) (float64, bool, error) {
 	var done <-chan struct{}
 	if ctx != nil {
@@ -217,7 +365,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		}
 	}
 
-	m, n, normCost, transposed, scaleUp, err := validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+	m, n, normCost, unscaledCost, transposed, lostSubnormal, scaleExp, err := validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
 	if err != nil {
 		return 0, false, err
 	}
@@ -232,7 +380,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	if m == 1 {
 		minVal := math.Inf(1)
 		bestJ := -1
-		for j, val := range normCost[:n] {
+		for j, val := range unscaledCost[:n] {
 			if val < minVal {
 				minVal = val
 				bestJ = j
@@ -241,7 +389,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		if bestJ == -1 || math.IsInf(minVal, 1) {
 			return 0, transposed, ErrInfeasible
 		}
-		u[0] = clampFinite(minVal * scaleUp)
+		u[0] = clampFinite(minVal)
 		clear(v)
 		if !transposed {
 			rowInd[0] = 0
@@ -250,7 +398,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 			rowInd[0] = bestJ
 			colInd[0] = 0
 		}
-		obj := minVal * scaleUp
+		obj := minVal
 		if sense == Maximize {
 			obj = -obj
 		}
@@ -260,95 +408,342 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		return obj, transposed, nil
 	}
 
-	for i := range m {
-		col4row[i] = -1
-	}
-	for j := range n {
-		row4col[j] = -1
+	if err := runNormalizedLSAP(ctx, m, n, normCost, u, v, col4row, row4col, ws, cfg.DisableSIMD, done); err != nil {
+		return 0, transposed, err
 	}
 
-	var numFree int
-	if m == n {
-		var errPre error
-		numFree, errPre = preprocessSquareJV(n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], cfg.DisableSIMD, done)
-		if errPre != nil {
-			if errors.Is(errPre, errContextCanceled) {
-				return 0, transposed, ctx.Err()
+	var uSubOrig, vSubOrig []float64
+	if lostSubnormal {
+		hasDeepSub := false
+		for _, oc := range unscaledCost[:m*n] {
+			if oc != 0 && math.Abs(oc) < 0x1p-950 {
+				hasDeepSub = true
+				break
 			}
-			return 0, transposed, errPre
 		}
-	} else {
-		var errPre error
-		numFree, errPre = preprocessRectangularBV(m, n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], cfg.DisableSIMD, done)
-		if errPre != nil {
-			if errors.Is(errPre, errContextCanceled) {
-				return 0, transposed, ctx.Err()
+		tau := 4.0 * float64(m+1) * math.SmallestNonzeroFloat64
+		subCap := float64(m+2) * tau
+		uBase := make([]float64, m)
+		for i, ui := range u {
+			if math.Abs(ui) > subCap {
+				uBase[i] = ui
 			}
-			return 0, transposed, errPre
 		}
-	}
-
-	if numFree > 0 {
-		remaining := ws.remaining[:n]
-		d := ws.d[:n]
-		pred := ws.pred[:n]
-		freeRows := ws.freeRows[:numFree]
-		if done == nil {
-			for _, curRow := range freeRows {
-				if err := augmentRow(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, cfg.DisableSIMD, nil); err != nil {
-					return 0, transposed, err
+		vBase := make([]float64, n)
+		if m == n {
+			for j, vj := range v {
+				if math.Abs(vj) > subCap {
+					vBase[j] = vj
 				}
 			}
 		} else {
-			for idx, curRow := range freeRows {
-				if idx&3 == 0 {
-					select {
-					case <-done:
-						return 0, transposed, ctx.Err()
-					default:
+			for j, vj := range v {
+				if vj < -subCap {
+					vBase[j] = vj
+				}
+			}
+		}
+		uSubCur := make([]float64, m)
+		vSubCur := make([]float64, n)
+		edgeResidual := func(idx int, ui, uSub, vj, vSub float64) (s2, rem float64) {
+			nc := normCost[idx]
+			s1, e1 := twoSumAssign(nc, -ui)
+			s2, e2 := twoSumAssign(s1, -vj)
+			rem = (e1 + e2) - math.Ldexp(uSub, -scaleExp) - math.Ldexp(vSub, -scaleExp)
+			return s2, rem
+		}
+		maxPasses := 1
+		if hasDeepSub {
+			maxPasses = 2
+		}
+		resCost := make([]float64, m*n)
+		u2 := make([]float64, m)
+		v2 := make([]float64, n)
+		c4r2 := make([]int, m)
+		r4c2 := make([]int, n)
+		capRC := math.MaxFloat64 / (64.0 * float64(m+2) * float64(m+2))
+		for pass := range maxPasses {
+			maxOrigCandAbs := 0.0
+			for i := range m {
+				ui, uSub := uBase[i], uSubCur[i]
+				for j := range n {
+					idx := i*n + j
+					oc := unscaledCost[idx]
+					if math.IsInf(oc, 1) {
+						continue
+					}
+					nc := normCost[idx]
+					s2, rem := edgeResidual(idx, ui, uSub, vBase[j], vSubCur[j])
+					d := s2 + rem
+					edgeScale := math.Abs(nc) + math.Abs(ui) + math.Abs(vBase[j])
+					fpTol := 8.0 * float64(m+2) * 0x1p-53 * edgeScale
+					if pass > 0 {
+						fpTol = 2.0 * float64(m+2) * 0x1p-53 * edgeScale
+					}
+					if d > max(fpTol, 2.0*subCap) {
+						continue
+					}
+					origAbs := math.Ldexp(math.Abs(d), scaleExp)
+					if math.IsInf(origAbs, 1) {
+						origAbs = math.MaxFloat64
+					}
+					if origAbs > maxOrigCandAbs {
+						maxOrigCandAbs = origAbs
 					}
 				}
-				if err := augmentRow(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, cfg.DisableSIMD, done); err != nil {
-					if errors.Is(err, errContextCanceled) {
-						return 0, transposed, ctx.Err()
+			}
+			liftExp := 64
+			if maxOrigCandAbs > 0 {
+				_, maxE := math.Frexp(maxOrigCandAbs)
+				_, capE := math.Frexp(capRC)
+				liftExp = max(0, min(64, capE-maxE-1))
+			}
+			minNegRC := 0.0
+			for i := range m {
+				ui, uSub := uBase[i], uSubCur[i]
+				for j := range n {
+					idx := i*n + j
+					oc := unscaledCost[idx]
+					if math.IsInf(oc, 1) {
+						resCost[idx] = math.Inf(1)
+						continue
 					}
-					return 0, transposed, err
+					nc := normCost[idx]
+					s2, rem := edgeResidual(idx, ui, uSub, vBase[j], vSubCur[j])
+					d := s2 + rem
+					edgeScale := math.Abs(nc) + math.Abs(ui) + math.Abs(vBase[j])
+					fpTol := 8.0 * float64(m+2) * 0x1p-53 * edgeScale
+					if pass > 0 {
+						fpTol = 2.0 * float64(m+2) * 0x1p-53 * edgeScale
+					}
+					if d > max(fpTol, 2.0*subCap) {
+						resCost[idx] = math.Inf(1)
+						continue
+					}
+					s1, e1 := twoSumAssign(nc, -ui)
+					s2b, e2 := twoSumAssign(s1, -vBase[j])
+					rc := math.Ldexp(s2b, scaleExp+liftExp) + math.Ldexp(e1+e2, scaleExp+liftExp) -
+						math.Ldexp(uSub, liftExp) - math.Ldexp(vSubCur[j], liftExp)
+					if math.Ldexp(nc, scaleExp) != oc {
+						rc += math.Ldexp(oc, liftExp) - math.Ldexp(nc, scaleExp+liftExp)
+					}
+					if rc > capRC {
+						rc = capRC
+					} else if rc < -capRC {
+						rc = -capRC
+					} else if math.IsNaN(rc) {
+						rc = 0
+					}
+					resCost[idx] = rc
+					if rc < minNegRC {
+						minNegRC = rc
+					}
 				}
+			}
+			var colBonus []float64
+			if m < n {
+				stage1PosSum := 0.0
+				for i := range m {
+					if j := col4row[i]; uint(j) < uint(n) {
+						if rc := resCost[i*n+j]; rc > 0 && !math.IsInf(rc, 1) {
+							stage1PosSum += rc
+						}
+					}
+				}
+				swing := stage1PosSum - float64(m)*minNegRC
+				mustBonusCap := min(capRC, 4.0*swing+math.Ldexp(8.0*subCap, scaleExp+liftExp))
+				if mustBonusCap <= 0 {
+					mustBonusCap = math.SmallestNonzeroFloat64
+				}
+				colBonus = make([]float64, n)
+				for j, vj := range vBase {
+					totVJ := math.Ldexp(vj, scaleExp) + vSubCur[j]
+					if totVJ >= 0 {
+						continue
+					}
+					b := min(mustBonusCap, math.Ldexp(-totVJ, liftExp))
+					colBonus[j] = b
+					for i := range m {
+						idx := i*n + j
+						if !math.IsInf(resCost[idx], 1) {
+							resCost[idx] -= b
+						}
+					}
+				}
+			}
+			if err2 := runNormalizedLSAP(ctx, m, n, resCost, u2, v2, c4r2, r4c2, ws, cfg.DisableSIMD, done); err2 != nil {
+				if errors.Is(err2, context.Canceled) || errors.Is(err2, context.DeadlineExceeded) {
+					return 0, transposed, err2
+				}
+				break
+			}
+			if !isAssignmentStrictlyWorse(m, n, c4r2, col4row, unscaledCost) {
+				copy(col4row, c4r2)
+				copy(row4col, r4c2)
+				copy(u, uBase)
+				copy(v, vBase)
+				for i := range m {
+					uSubCur[i] += math.Ldexp(u2[i], -liftExp)
+				}
+				for j := range n {
+					vj := v2[j]
+					if m < n && colBonus != nil {
+						vj += colBonus[j]
+					}
+					vSubCur[j] += math.Ldexp(vj, -liftExp)
+				}
+				uSubOrig = uSubCur
+				vSubOrig = vSubCur
+			}
+			if liftExp >= 53 {
+				break
 			}
 		}
 	}
 
 	// Extract primal assignment in ascending row order and compute exact objective on input scale.
 	var totalMin float64
-	if !transposed {
-		for i := range m {
-			j := col4row[i]
-			rowInd[i] = i
-			colInd[i] = j
-			totalMin += normCost[i*n+j]
+	if scaleExp == 0 && uSubOrig == nil {
+		if !transposed {
+			for i := range m {
+				j := col4row[i]
+				rowInd[i] = i
+				colInd[i] = j
+				totalMin += unscaledCost[i*n+j]
+			}
+		} else {
+			outIdx := 0
+			for origRow := range n {
+				origCol := row4col[origRow]
+				if origCol >= 0 {
+					rowInd[outIdx] = origRow
+					colInd[outIdx] = origCol
+					totalMin += unscaledCost[origCol*n+origRow]
+					outIdx++
+				}
+			}
 		}
 	} else {
-		// In transposed coordinates, "columns" j in 0..n-1 with row4col[j] >= 0 are the original rows!
-		// Scanning j = 0..n-1 emits original row indices in strictly ascending order without sorting.
-		outIdx := 0
-		for origRow := range n {
-			origCol := row4col[origRow]
-			if origCol >= 0 {
-				rowInd[outIdx] = origRow
-				colInd[outIdx] = origCol
-				totalMin += normCost[origCol*n+origRow]
-				outIdx++
+		const bigExp = 24
+		var bigS, bigC, smallS, smallC float64
+		accCost := func(c float64) {
+			if math.Abs(c) >= 1e150 {
+				var e float64
+				bigS, e = twoSumAssign(bigS, math.Ldexp(c, -bigExp))
+				bigC += e
+			} else {
+				var e float64
+				smallS, e = twoSumAssign(smallS, c)
+				smallC += e
 			}
+		}
+		if !transposed {
+			for i := range m {
+				j := col4row[i]
+				rowInd[i] = i
+				colInd[i] = j
+				accCost(unscaledCost[i*n+j])
+			}
+		} else {
+			outIdx := 0
+			for origRow := range n {
+				origCol := row4col[origRow]
+				if origCol >= 0 {
+					rowInd[outIdx] = origRow
+					colInd[outIdx] = origCol
+					accCost(unscaledCost[origCol*n+origRow])
+					outIdx++
+				}
+			}
+		}
+		bigSum, bigRem := twoSumAssign(bigS, bigC)
+		smallSum := smallS + smallC
+		hi := math.Ldexp(bigSum, bigExp)
+		if math.IsInf(hi, 0) {
+			mid := math.Ldexp(bigSum, 12) + (math.Ldexp(bigRem, 12) + math.Ldexp(smallSum, -12))
+			totalMin = math.Ldexp(mid, 12)
+		} else {
+			totalMin = hi + (math.Ldexp(bigRem, bigExp) + smallSum)
 		}
 	}
 
-	if scaleUp != 1 {
-		totalMin *= scaleUp
+	if scaleExp > 0 || uSubOrig != nil {
+		shift := 0.0
+		if m == n {
+			minU, maxU := u[0], u[0]
+			for _, ui := range u[1:] {
+				minU = min(minU, ui)
+				maxU = max(maxU, ui)
+			}
+			minV, maxV := v[0], v[0]
+			for _, vj := range v[1:] {
+				minV = min(minV, vj)
+				maxV = max(maxV, vj)
+			}
+			mLim := math.Ldexp(math.MaxFloat64, -scaleExp)
+			deltaLo := max(-mLim-minU, maxV-mLim)
+			deltaHi := min(mLim-maxU, minV+mLim)
+			if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
+				shift = 0.5 * (deltaLo + deltaHi)
+			}
+		}
+		anyClamped := false
 		for i := range m {
-			u[i] = clampFinite(u[i] * scaleUp)
+			scaled := math.Ldexp(u[i]+shift, scaleExp)
+			if uSubOrig != nil {
+				scaled += uSubOrig[i]
+			}
+			clamped := clampFinite(scaled)
+			if clamped != scaled {
+				anyClamped = true
+			}
+			u[i] = clamped
 		}
 		for j := range n {
-			v[j] = clampFinite(v[j] * scaleUp)
+			if m < n && row4col[j] < 0 {
+				v[j] = 0
+				continue
+			}
+			scaled := math.Ldexp(v[j]-shift, scaleExp)
+			if vSubOrig != nil {
+				scaled += vSubOrig[j]
+			}
+			clamped := clampFinite(scaled)
+			if m < n && clamped > 0 {
+				clamped = 0
+			}
+			if clamped != scaled {
+				anyClamped = true
+			}
+			v[j] = clamped
+		}
+		if anyClamped {
+			if m == n {
+				for i := range m {
+					rowSlice := unscaledCost[i*n : (i+1)*n]
+					for j, c := range rowSlice {
+						if c < 0 && math.IsInf(c-v[j], -1) {
+							v[j] = min(v[j], c+math.MaxFloat64)
+						}
+					}
+				}
+			}
+			for i := range m {
+				rowSlice := unscaledCost[i*n : (i+1)*n]
+				ui := u[i]
+				for j, c := range rowSlice {
+					if math.IsInf(c, 1) {
+						continue
+					}
+					lim := c - v[j]
+					if !math.IsInf(lim, 1) && lim < ui {
+						ui = clampFinite(lim)
+					}
+				}
+				u[i] = ui
+			}
+		} else if uSubOrig != nil {
+			polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v)
 		}
 	}
 
@@ -360,6 +755,135 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		obj = 0
 	}
 	return obj, transposed, nil
+}
+
+func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int, u, v []float64) {
+	for i := range m {
+		j := col4row[i]
+		if uint(j) >= uint(n) {
+			return
+		}
+		cij := unscaledCost[i*n+j]
+		if math.IsInf(cij, 0) || math.IsNaN(cij) {
+			return
+		}
+		if lim := cij - v[j]; !math.IsNaN(lim) && !math.IsInf(lim, 0) {
+			s, e := twoSumAssign(u[i], v[j])
+			if math.Abs((cij-s)-e) > 4.0*0x1p-53*(math.Abs(cij)+math.Abs(u[i])+math.Abs(v[j])) {
+				u[i] = lim
+			}
+		}
+	}
+	needPolish := false
+	for i := range m {
+		ui := u[i]
+		rowSlice := unscaledCost[i*n : (i+1)*n]
+		for j, cij := range rowSlice {
+			if math.IsInf(cij, 1) {
+				continue
+			}
+			s, e := twoSumAssign(ui, v[j])
+			tol := max(1e-320, 16.0*0x1p-53*(math.Abs(cij)+math.Abs(ui)+math.Abs(v[j])))
+			if (s-cij)+e > tol {
+				needPolish = true
+				break
+			}
+		}
+		if needPolish {
+			break
+		}
+	}
+	if !needPolish {
+		return
+	}
+
+	pi := make([]float64, m+1)
+	var rootToRow []float64
+	if m < n {
+		rootToRow = make([]float64, m)
+		for i := range m {
+			best := math.Inf(1)
+			ui := u[i]
+			rowSlice := unscaledCost[i*n : (i+1)*n]
+			for j, cij := range rowSlice {
+				if row4col[j] >= 0 || math.IsInf(cij, 1) {
+					continue
+				}
+				s, e := twoSumAssign(cij, -ui)
+				if g := s + e; g < best {
+					best = g
+				}
+			}
+			rootToRow[i] = best
+		}
+	}
+
+	for range m + 1 {
+		changed := false
+		if m < n {
+			pm := pi[m]
+			for i, g := range rootToRow {
+				if math.IsInf(g, 1) {
+					continue
+				}
+				if cand := pm + g; !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
+					pi[i] = cand
+					changed = true
+				}
+			}
+			for k := range m {
+				j := col4row[k]
+				if cand := pi[k] - v[j]; !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[m] {
+					pi[m] = cand
+					changed = true
+				}
+			}
+		}
+		for k := range m {
+			j := col4row[k]
+			pk := pi[k]
+			vj := v[j]
+			for i := range m {
+				if i == k {
+					continue
+				}
+				cij := unscaledCost[i*n+j]
+				if math.IsInf(cij, 1) {
+					continue
+				}
+				s1, e1 := twoSumAssign(cij, -u[i])
+				s2, e2 := twoSumAssign(s1, -vj)
+				cand := pk + (s2 + (e1 + e2))
+				if !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
+					pi[i] = cand
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+
+	base := pi[0]
+	if m < n {
+		base = pi[m]
+	}
+	for i := range m {
+		delta := pi[i] - base
+		if math.IsNaN(delta) || math.IsInf(delta, 0) || delta == 0 {
+			continue
+		}
+		j := col4row[i]
+		newU := clampFinite(u[i] + delta)
+		newV := clampFinite(v[j] - delta)
+		if m < n && newV > 0 {
+			newV = 0
+			newU = clampFinite(unscaledCost[i*n+j])
+		}
+		u[i] = newU
+		v[j] = newV
+	}
 }
 
 func minReducedSlice(rowCost, v []float64, disableSIMD bool) float64 {
@@ -457,6 +981,13 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 	// 2. Reduction Transfer on uniquely matched rows; collect unassigned rows into freeRows.
 	numFree := 0
 	for i, c := range col4row {
+		if done != nil && n > 256 && i&255 == 0 {
+			select {
+			case <-done:
+				return 0, errContextCanceled
+			default:
+			}
+		}
 		if c == -1 {
 			freeRows[numFree] = i
 			numFree++
@@ -567,6 +1098,13 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 		// column reduction): normalize row scales via row minima u[i] = min_j cost[i, j],
 		// then re-run column reduction and reduction transfer on (cost[i, j] - u[i]).
 		for i := range n {
+			if done != nil && n > 256 && i&255 == 0 {
+				select {
+				case <-done:
+					return 0, errContextCanceled
+				default:
+				}
+			}
 			rowCost := cost[i*n : (i+1)*n]
 			minRow := rowCost[0]
 			for _, c := range rowCost[1:] {
@@ -586,6 +1124,13 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 			row4col[j] = 0
 		}
 		for i := 1; i < n; i++ {
+			if done != nil && n > 256 && i&255 == 0 {
+				select {
+				case <-done:
+					return 0, errContextCanceled
+				default:
+				}
+			}
 			ui := u[i]
 			rowCost := cost[i*n : (i+1)*n]
 			for j, c := range rowCost {
@@ -608,6 +1153,13 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 		}
 		numFree = 0
 		for i := range n {
+			if done != nil && n > 256 && i&255 == 0 {
+				select {
+				case <-done:
+					return 0, errContextCanceled
+				default:
+				}
+			}
 			c := col4row[i]
 			if c == -1 {
 				freeRows[numFree] = i
@@ -734,8 +1286,8 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 		}
 		nextFree := 0
 		transfers := 0
-		for _, i := range freeRows[:numFree] {
-			if done != nil && n > 256 && transfers&255 == 0 {
+		for rowIdx, i := range freeRows[:numFree] {
+			if done != nil && n > 256 && rowIdx&127 == 0 {
 				select {
 				case <-done:
 					return 0, errContextCanceled
@@ -769,9 +1321,14 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 
 				i0 := row4col[j1]
 				if i0 == -1 {
-					// Column j1 is unassigned: match (i, j1) and tighten u[i] to u2 (updating v[j1] <= 0).
-					u[i] = u2
-					v[j1] = rowCost[j1] - u2
+					// Column j1 is unassigned: match (i, j1) and tighten u[i] without increasing v[j1].
+					newVj1 := rowCost[j1] - u2
+					if newVj1 < v[j1] {
+						u[i] = u2
+						v[j1] = newVj1
+					} else {
+						u[i] = u1
+					}
 					col4row[i] = j1
 					row4col[j1] = i
 					break

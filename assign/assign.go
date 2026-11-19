@@ -125,6 +125,11 @@ type Result struct {
 // LinearSum solves the rectangular Linear Sum Assignment Problem on a 2D cost matrix under ctx.
 // It returns RowInd (sorted ascending), ColInd, the optimal Objective, and the dual potentials U, V.
 func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Option) (Result, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+	}
 	if !sense.valid() {
 		return Result{}, ErrInvalidSense
 	}
@@ -158,6 +163,11 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 // LinearSumFlat solves the rectangular Linear Sum Assignment Problem on a row-major flat slice
 // of length at least rows*cols under ctx without mutating cost.
 func LinearSumFlat(ctx context.Context, rows, cols int, cost []float64, sense Sense, opts ...Option) (Result, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+	}
 	if !sense.valid() {
 		return Result{}, ErrInvalidSense
 	}
@@ -178,6 +188,11 @@ func LinearSumFlat(ctx context.Context, rows, cols int, cost []float64, sense Se
 // rowInd and colInd slices (each of length at least min(rows, cols)) using ws, performing
 // zero heap allocations when ws has sufficient capacity.
 func SolveInto(ctx context.Context, rows, cols int, cost []float64, sense Sense, rowInd, colInd []int, ws *Workspace, opts ...Option) (float64, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
 	if !sense.valid() {
 		return 0, ErrInvalidSense
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -669,7 +670,7 @@ func TestValidationAndInfeasibilityErrors(t *testing.T) {
 	if _, err := assign.LinearSumFlat(ctx, 2, 2, []float64{1, 2, 3}, assign.Minimize); !errors.Is(err, assign.ErrInvalidDimensions) {
 		t.Fatalf("expected ErrInvalidDimensions on short flat slice, got %v", err)
 	}
-	for _, ov := range [][2]int{{1 << 62, 4}, {1 << 32, 1 << 32}, {3, math.MaxInt / 2}} {
+	for _, ov := range [][2]int{{1 << (bits.UintSize - 2), 4}, {1 << (bits.UintSize / 2), 1 << (bits.UintSize / 2)}, {3, math.MaxInt / 2}} {
 		if _, err := assign.LinearSumFlat(ctx, ov[0], ov[1], []float64{1, 2, 3}, assign.Minimize); !errors.Is(err, assign.ErrInvalidDimensions) {
 			t.Fatalf("LinearSumFlat(%d, %d): expected ErrInvalidDimensions, got %v", ov[0], ov[1], err)
 		}
@@ -996,11 +997,15 @@ func TestAssignContextCancellation(t *testing.T) {
 		t.Fatalf("expected valid solution with active context, got err=%v len=%d", err, len(res.RowInd))
 	}
 
-	// Verify that a mid-solve timeout halts promptly during augmenting path search.
-	const nLarge = 1500
+	// Verify that a mid-solve timeout halts promptly during preprocessing or augmenting path search.
+	const nLarge = 2500
 	largeCost := make([]float64, nLarge*nLarge)
-	for i := range largeCost {
-		largeCost[i] = float64((i*73 + 19) % 997)
+	for r := range nLarge {
+		row := largeCost[r*nLarge : (r+1)*nLarge]
+		rf := float64(r + 1)
+		for c := range nLarge {
+			row[c] = rf*float64(c+1) + float64((r*31+c*17)%7)*1e-6
+		}
 	}
 	midCtx, cancelMid := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancelMid()
@@ -1257,4 +1262,493 @@ func TestExtremeScaleOffsetAndDownscaleBruteForce(t *testing.T) {
 			t.Fatalf("downscale trial %d: got %.15g, want %.15g", trial, res.Objective, want)
 		}
 	}
+}
+
+// TestAssignPeerReviewRegressions verifies dual-feasibility preservation in augmenting row
+// reduction, minimal power-of-two downscaling with unscaled objective accumulation, extreme-cost
+// dual scaling, empty-matrix context cancellation, ApplyOptions, and root goblin aliases.
+func TestAssignPeerReviewRegressions(t *testing.T) {
+	ctx := t.Context()
+
+	// 1. C9: Augmenting row reduction must never increase v[j1] when matching an unassigned column.
+	// Columns 1 and 2 contend for row 0 with v[1]=v[2]=-1000 while row 1 has 1e20 on both columns.
+	c9Mat := [][]float64{
+		{1000, -1000, -1000, 1000},
+		{1e21, 1e20, 1e20, 1e21},
+		{1000, -999, 1000, 0},
+		{0, 1000, 1000, 1000},
+	}
+	c9Flat := make([]float64, 0, 16)
+	for _, row := range c9Mat {
+		c9Flat = append(c9Flat, row...)
+	}
+	c9Res, err := assign.LinearSum(ctx, c9Mat, assign.Minimize)
+	if err != nil {
+		t.Fatalf("C9 matrix solve failed: %v", err)
+	}
+	verifyOptimalityCertificate(t, "C9_square", 4, 4, c9Flat, assign.Minimize, c9Res)
+	// Also test a 7x7 square matrix where a free row sees 1e20 on contended columns with negative v[j1]
+	// alongside another free row that exposes any broken dual feasibility in augmentRow.
+	c9Mat7 := [][]float64{
+		{500, -1000, -1000, -1000, 500, 500, 500},
+		{500, 500, 500, 500, 500, -999, 500},
+		{500, -999, 1.5, 500, 500, 500, 500},
+		{500, 1e20, 1e20, 0, 500, 500, 500},
+		{500, 500, 500, 500, 0, 500, 500},
+		{0, 500, 500, 500, 500, 500, 500},
+		{500, 500, 500, 500, 500, 500, 0},
+	}
+	c9Flat7 := make([]float64, 0, 49)
+	for _, row := range c9Mat7 {
+		c9Flat7 = append(c9Flat7, row...)
+	}
+	want7, ok7 := exactAssignmentObjective(7, 7, c9Flat7, assign.Minimize)
+	if !ok7 {
+		t.Fatal("C9 7x7 expected finite optimum")
+	}
+	c9Res7, err := assign.LinearSum(ctx, c9Mat7, assign.Minimize)
+	if err != nil {
+		t.Fatalf("C9 7x7 solve failed: %v", err)
+	}
+	verifyOptimalityCertificate(t, "C9_7x7", 7, 7, c9Flat7, assign.Minimize, c9Res7)
+	if math.Abs(c9Res7.Objective-want7) > 1e-9*max(1.0, math.Abs(want7)) {
+		t.Fatalf("C9 7x7 objective = %.15g, want %.15g", c9Res7.Objective, want7)
+	}
+
+	// 2. C10: Huge costs paired with small normal (1e-306) and subnormal (1e-315) entries preserve
+	// discrimination and unscaled objective values.
+	for _, tc := range []struct {
+		name string
+		mat  [][]float64
+		want float64
+	}{
+		{
+			name: "1e291_with_normal_1e-306",
+			mat: [][]float64{
+				{1e-306, 1e-315, 1e291},
+				{0, 0, 1e291},
+				{1e291, 1e291, 0},
+			},
+			want: 1e-315,
+		},
+		{
+			name: "1e308_with_subnormal_1e-315",
+			mat: [][]float64{
+				{1e-310, 1e-315, 1e308},
+				{0, 0, 1e308},
+				{1e308, 1e308, 0},
+			},
+			want: 1e-315,
+		},
+	} {
+		res, sErr := assign.LinearSum(ctx, tc.mat, assign.Minimize)
+		if sErr != nil {
+			t.Fatalf("%s: unexpected error %v", tc.name, sErr)
+		}
+		if res.Objective != tc.want {
+			t.Fatalf("%s: Objective = %.17g, want %.17g (cols=%v)", tc.name, res.Objective, tc.want, res.ColInd)
+		}
+		if !slices.Equal(res.ColInd, []int{1, 0, 2}) {
+			t.Fatalf("%s: ColInd = %v, want [1 0 2]", tc.name, res.ColInd)
+		}
+	}
+
+	// 3. M11: Extreme-cost duals remain dual-feasible after upscaling.
+	extremeCases := [][][]float64{
+		{
+			{5e307, -5e307, 0},
+			{-5e307, 5e307, 0},
+			{0, 0, 5e307},
+		},
+		{
+			{1e307, 2e307, 3e307},
+			{4e307, 1e307, 2e307},
+			{2e307, 3e307, 1e307},
+		},
+	}
+	for idx, mat := range extremeCases {
+		flat := make([]float64, 0, 9)
+		for _, row := range mat {
+			flat = append(flat, row...)
+		}
+		res, sErr := assign.LinearSum(ctx, mat, assign.Minimize)
+		if sErr != nil {
+			t.Fatalf("M11 case %d: unexpected error %v", idx, sErr)
+		}
+		verifyOptimalityCertificate(t, fmt.Sprintf("M11_case_%d", idx), 3, 3, flat, assign.Minimize, res)
+	}
+	// Verify cancelling +-1e308 entries still yield finite objective -1e308 and dual-feasible (u, v).
+	mat1e308 := [][]float64{
+		{1e308, -1e308, 0},
+		{-1e308, 1e308, 0},
+		{0, 0, 1e308},
+	}
+	res1e308, err := assign.LinearSum(ctx, mat1e308, assign.Minimize)
+	if err != nil {
+		t.Fatalf("M11 1e308: unexpected error %v", err)
+	}
+	if math.Abs(res1e308.Objective-(-1e308)) > 1e296 {
+		t.Fatalf("M11 1e308 objective = %.15g, want -1e308", res1e308.Objective)
+	}
+	for i := range 3 {
+		for j := range 3 {
+			if viol := res1e308.U[i] + res1e308.V[j] - mat1e308[i][j]; viol > 1e297 {
+				t.Fatalf("M11 1e308 dual violation at (%d,%d): u=%.6e v=%.6e c=%.6e viol=%.6e",
+					i, j, res1e308.U[i], res1e308.V[j], mat1e308[i][j], viol)
+			}
+		}
+	}
+
+	// 4. m1: Already-canceled context returns context.Canceled even on empty matrices.
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := assign.LinearSum(canceledCtx, nil, assign.Minimize); !errors.Is(err, context.Canceled) {
+		t.Fatalf("empty LinearSum with canceled ctx: err=%v, want context.Canceled", err)
+	}
+	if _, err := assign.LinearSum(canceledCtx, [][]float64{{}, {}}, assign.Minimize); !errors.Is(err, context.Canceled) {
+		t.Fatalf("2x0 LinearSum with canceled ctx: err=%v, want context.Canceled", err)
+	}
+	if _, err := assign.LinearSumFlat(canceledCtx, 0, 3, nil, assign.Minimize); !errors.Is(err, context.Canceled) {
+		t.Fatalf("0x3 LinearSumFlat with canceled ctx: err=%v, want context.Canceled", err)
+	}
+
+	// 5. Coverage for assign.ApplyOptions and root goblin LSAP aliases.
+	cfg := assign.ApplyOptions(assign.WithoutSIMD())
+	if !cfg.DisableSIMD {
+		t.Fatal("assign.ApplyOptions(WithNoSIMD()) expected DisableSIMD=true")
+	}
+	aliasMat := [][]float64{{4, 1}, {2, 3}}
+	rAlias, err := gb.LinearSumAssignment(ctx, aliasMat, gb.Minimize)
+	if err != nil || math.Abs(rAlias.Objective-3.0) > 1e-12 || !slices.Equal(rAlias.ColInd, []int{1, 0}) {
+		t.Fatalf("gb.LinearSumAssignment = (%+v, %v), want obj=3 cols=[1 0]", rAlias, err)
+	}
+	rFlatAlias, err := gb.LinearSumAssignmentFlat(ctx, 2, 2, []float64{4, 1, 2, 3}, gb.Maximize)
+	if err != nil || math.Abs(rFlatAlias.Objective-7.0) > 1e-12 || !slices.Equal(rFlatAlias.ColInd, []int{0, 1}) {
+		t.Fatalf("gb.LinearSumAssignmentFlat = (%+v, %v), want obj=7 cols=[0 1]", rFlatAlias, err)
+	}
+}
+
+func TestAdversarialScaledRectangularAndSubnormalLSAP(t *testing.T) {
+	ctx := t.Context()
+
+	// CRIT-6a: Scaled rectangular wide (2x3) and tall (3x2) instances must keep zero
+	// dual potential on unassigned columns/rows and preserve strong duality.
+	wide := [][]float64{
+		{1e307, 2e307, 3e307},
+		{2e307, 1e307, 3e307},
+	}
+	resWide, err := assign.LinearSum(ctx, wide, assign.Minimize)
+	if err != nil {
+		t.Fatalf("wide 2x3 1e307 failed: %v", err)
+	}
+	if math.Abs(resWide.Objective-2e307) > 1e293 {
+		t.Fatalf("wide 2x3 objective = %.15e, want 2e307", resWide.Objective)
+	}
+	if resWide.V[2] != 0 {
+		t.Fatalf("wide 2x3 unassigned V[2] = %.6e, want 0", resWide.V[2])
+	}
+	dualWide := resWide.U[0] + resWide.U[1] + resWide.V[0] + resWide.V[1] + resWide.V[2]
+	if math.Abs(dualWide-resWide.Objective) > 1e293 {
+		t.Fatalf("wide 2x3 strong duality broken: dual=%.15e primal=%.15e", dualWide, resWide.Objective)
+	}
+
+	tall := [][]float64{
+		{1e307, 2e307},
+		{2e307, 1e307},
+		{3e307, 3e307},
+	}
+	resTall, err := assign.LinearSum(ctx, tall, assign.Minimize)
+	if err != nil {
+		t.Fatalf("tall 3x2 1e307 failed: %v", err)
+	}
+	if math.Abs(resTall.Objective-2e307) > 1e293 {
+		t.Fatalf("tall 3x2 objective = %.15e, want 2e307", resTall.Objective)
+	}
+	if resTall.U[2] != 0 {
+		t.Fatalf("tall 3x2 unassigned U[2] = %.6e, want 0", resTall.U[2])
+	}
+	dualTall := resTall.U[0] + resTall.U[1] + resTall.U[2] + resTall.V[0] + resTall.V[1]
+	if math.Abs(dualTall-resTall.Objective) > 1e293 {
+		t.Fatalf("tall 3x2 strong duality broken: dual=%.15e primal=%.15e", dualTall, resTall.Objective)
+	}
+
+	// CRIT-6b: Extreme square 3x3 (+-1.5e308) and 4x4 canceling sum (two -1e308 and two +1e308).
+	sq3 := [][]float64{
+		{-1.5e308, 1.5e308, 0},
+		{1.5e308, 0, -1.5e308},
+		{0, 1.5e308, 1.5e308},
+	}
+	resSq3, err := assign.LinearSum(ctx, sq3, assign.Minimize)
+	if err != nil {
+		t.Fatalf("sq3 +-1.5e308 failed: %v", err)
+	}
+	if math.IsInf(resSq3.Objective, 0) || math.Abs(resSq3.Objective-(-1.5e308)) > 1e294 {
+		t.Fatalf("sq3 objective = %.15e, want -1.5e308", resSq3.Objective)
+	}
+	for i := range 3 {
+		for j := range 3 {
+			if viol := resSq3.U[i] + resSq3.V[j] - sq3[i][j]; viol > 1e294 {
+				t.Fatalf("sq3 dual violation (%d,%d): u=%.6e v=%.6e c=%.6e viol=%.6e",
+					i, j, resSq3.U[i], resSq3.V[j], sq3[i][j], viol)
+			}
+		}
+	}
+
+	sq4 := [][]float64{
+		{-1e308, 1e308, 1e308, 1e308},
+		{1e308, -1e308, 1e308, 1e308},
+		{1e308, 1e308, 1e308, 1e308},
+		{1e308, 1e308, 1e308, 1e308},
+	}
+	resSq4, err := assign.LinearSum(ctx, sq4, assign.Minimize)
+	if err != nil {
+		t.Fatalf("sq4 canceling +-1e308 failed: %v", err)
+	}
+	if math.IsInf(resSq4.Objective, 0) || math.Abs(resSq4.Objective) > 1e293 {
+		t.Fatalf("sq4 objective = %.15e, want 0", resSq4.Objective)
+	}
+
+	// MAJ-1: Mixed subnormal (5e-324, 1e-322) and 1e308 entries must preserve exact subnormal
+	// tie-breaking instead of flushing both subnormals to 0 under 2^-7 downscaling.
+	tiny := math.SmallestNonzeroFloat64
+	sub20 := math.Float64frombits(20)
+	matSub := [][]float64{
+		{sub20, tiny, 1e308},
+		{0, sub20, 1e308},
+		{1e308, 1e308, 0},
+	}
+	resSub, err := assign.LinearSum(ctx, matSub, assign.Minimize)
+	if err != nil {
+		t.Fatalf("subnormal+1e308 Minimize failed: %v", err)
+	}
+	if resSub.Objective != tiny || !slices.Equal(resSub.ColInd, []int{1, 0, 2}) {
+		t.Fatalf("subnormal+1e308 Minimize = (obj=%g cols=%v), want (obj=%g cols=[1 0 2])",
+			resSub.Objective, resSub.ColInd, tiny)
+	}
+
+	// Maximize counterpart with negated entries.
+	matSubMax := [][]float64{
+		{-sub20, -tiny, -1e308},
+		{0, -sub20, -1e308},
+		{-1e308, -1e308, 0},
+	}
+	resSubMax, err := assign.LinearSum(ctx, matSubMax, assign.Maximize)
+	if err != nil {
+		t.Fatalf("subnormal+1e308 Maximize failed: %v", err)
+	}
+	if resSubMax.Objective != -tiny || !slices.Equal(resSubMax.ColInd, []int{1, 0, 2}) {
+		t.Fatalf("subnormal+1e308 Maximize = (obj=%g cols=%v), want (obj=%g cols=[1 0 2])",
+			resSubMax.Objective, resSubMax.ColInd, -tiny)
+	}
+
+	// Coupled 4x4 cycle with 1e308, normal 1/3 costs, and subnormal tie-breaking (5e-324 vs 9.88e-322).
+	sub200 := tiny * 200
+	third := 1.0 / 3.0
+	matCycle := [][]float64{
+		{third, 2.0 * third, 1e308, 1e308},
+		{1e308, 2.0 * third, third, 1e308},
+		{1e308, 1e308, sub200, tiny},
+		{0, 1e308, 1e308, 0},
+	}
+	resCycle, err := assign.LinearSum(ctx, matCycle, assign.Minimize)
+	if err != nil {
+		t.Fatalf("coupled subnormal+1e308 4x4 failed: %v", err)
+	}
+	if !slices.Equal(resCycle.ColInd, []int{1, 2, 3, 0}) {
+		t.Fatalf("coupled subnormal+1e308 4x4 ColInd=%v, want [1 2 3 0]", resCycle.ColInd)
+	}
+	flatCycle := make([]float64, 0, 16)
+	for _, r := range matCycle {
+		flatCycle = append(flatCycle, r...)
+	}
+	verifyOptimalityCertificate(t, "coupled_subnormal_4x4", 4, 4, flatCycle, assign.Minimize, resCycle)
+
+	// Rectangular 2x3 and 2x4 with 1e308 and negative/positive subnormal residual edges.
+	cNegSub := -math.Ldexp(tiny, 8)
+	matRectSub := [][]float64{
+		{cNegSub, tiny, 1e308},
+		{cNegSub, tiny * 10, tiny * 3},
+	}
+	resRectSub, err := assign.LinearSum(ctx, matRectSub, assign.Minimize)
+	if err != nil || !slices.Equal(resRectSub.ColInd, []int{1, 0}) {
+		t.Fatalf("rect subnormal+1e308 2x3: err=%v cols=%v, want [1 0]", err, resRectSub.ColInd)
+	}
+	for i := range 2 {
+		for j := range 3 {
+			if resRectSub.U[i]+resRectSub.V[j] > matRectSub[i][j]+1e-320 {
+				t.Fatalf("rect subnormal+1e308 dual violation at (%d,%d): u+v=%g > c=%g",
+					i, j, resRectSub.U[i]+resRectSub.V[j], matRectSub[i][j])
+			}
+		}
+	}
+
+	// Stress 200 deterministic 5x5 matrices mixing +-1e305 normal blocks, 1e308, and subnormals
+	// so Stage-1 dual roundoff (~1e289) never overflows Stage-2 resCost to -Inf or NaN.
+	var seed uint64 = 1
+	nextRand := func() uint64 {
+		seed ^= seed << 13
+		seed ^= seed >> 7
+		seed ^= seed << 17
+		return seed
+	}
+	for trial := range 200 {
+		mat5 := make([][]float64, 5)
+		for i := range 5 {
+			mat5[i] = make([]float64, 5)
+			for j := range 5 {
+				r := nextRand()
+				switch r % 6 {
+				case 0:
+					mat5[i][j] = 1e308
+				case 1:
+					mat5[i][j] = tiny * float64(1+(r%15))
+				default:
+					sgn := 1.0
+					if (r>>8)&1 == 1 {
+						sgn = -1.0
+					}
+					mat5[i][j] = sgn * 1e305 * (1.0 + float64((r>>16)%10000)/10000.0)
+				}
+			}
+			mat5[i][i] = min(mat5[i][i], 1e305)
+		}
+		mat5[0][1] = tiny
+		mat5[4][4] = 1e308
+		res5, sErr := assign.LinearSum(ctx, mat5, assign.Minimize)
+		if sErr != nil {
+			continue
+		}
+		for i, u := range res5.U {
+			if math.IsNaN(u) || math.IsInf(u, 0) {
+				t.Fatalf("trial %d: non-finite U[%d]=%v", trial, i, u)
+			}
+		}
+		for j, v := range res5.V {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				t.Fatalf("trial %d: non-finite V[%d]=%v", trial, j, v)
+			}
+		}
+		for i := range 5 {
+			for j := range 5 {
+				c := mat5[i][j]
+				tol := 1e-11 * max(1.0, math.Abs(c)+math.Abs(res5.U[i])+math.Abs(res5.V[j]))
+				if res5.U[i]+res5.V[j] > c+tol {
+					t.Fatalf("trial %d (%d,%d): dual violation u+v=%.15g > c=%.15g",
+						trial, i, j, res5.U[i]+res5.V[j], c)
+				}
+			}
+		}
+	}
+
+	// Stage-2 must preserve multi-ULP normal reduced-cost gaps (2^970 at 2^1020 scale)
+	// when subnormal entries exist in other columns, rather than zeroing 0 < d <= fpTol.
+	hi := math.Ldexp(1, 1020)
+	hiGap := hi + math.Ldexp(1, 970)
+	matGap3 := [][]float64{
+		{hi, math.Inf(1), tiny},
+		{math.Inf(1), hiGap, sub200},
+		{hi, hi, math.Inf(1)},
+	}
+	resGap3, err := assign.LinearSum(ctx, matGap3, assign.Minimize)
+	if err != nil {
+		t.Fatalf("Stage-2 normal-gap 3x3 Minimize failed: %v", err)
+	}
+	if !slices.Equal(resGap3.ColInd, []int{0, 2, 1}) {
+		t.Fatalf("Stage-2 normal-gap 3x3 ColInd=%v, want [0 2 1]", resGap3.ColInd)
+	}
+	flatGap3 := make([]float64, 0, 9)
+	for _, r := range matGap3 {
+		flatGap3 = append(flatGap3, r...)
+	}
+	verifyOptimalityCertificate(t, "stage2_normal_gap_3x3", 3, 3, flatGap3, assign.Minimize, resGap3)
+
+	// Coupled 5x5 combining the 2^970 normal gap with an independent 2x2 subnormal tie block.
+	matGap5 := [][]float64{
+		{hi, math.Inf(1), tiny, math.Inf(1), math.Inf(1)},
+		{math.Inf(1), hiGap, sub200, math.Inf(1), math.Inf(1)},
+		{hi, hi, math.Inf(1), math.Inf(1), math.Inf(1)},
+		{math.Inf(1), math.Inf(1), math.Inf(1), tiny, sub200},
+		{math.Inf(1), math.Inf(1), math.Inf(1), tiny, tiny * 2},
+	}
+	resGap5, err := assign.LinearSum(ctx, matGap5, assign.Minimize)
+	if err != nil {
+		t.Fatalf("coupled 5x5 normal-gap + subnormal tie failed: %v", err)
+	}
+	if !slices.Equal(resGap5.ColInd, []int{0, 2, 1, 3, 4}) {
+		t.Fatalf("coupled 5x5 ColInd=%v, want [0 2 1 3 4]", resGap5.ColInd)
+	}
+	flatGap5 := make([]float64, 0, 25)
+	for _, r := range matGap5 {
+		flatGap5 = append(flatGap5, r...)
+	}
+	verifyOptimalityCertificate(t, "stage2_coupled_5x5", 5, 5, flatGap5, assign.Minimize, resGap5)
+
+	// Rectangular 2x3 with 2^970 normal gap, negative column duals (mustAssign), and subnormals.
+	matGapRect := [][]float64{
+		{-hi, hiGap, tiny},
+		{-hi, hi, sub200},
+	}
+	resGapRect, err := assign.LinearSum(ctx, matGapRect, assign.Minimize)
+	if err != nil {
+		t.Fatalf("rectangular 2x3 normal-gap + subnormal failed: %v", err)
+	}
+	if !slices.Equal(resGapRect.ColInd, []int{2, 0}) {
+		t.Fatalf("rectangular 2x3 normal-gap ColInd=%v, want [2 0]", resGapRect.ColInd)
+	}
+	flatGapRect := make([]float64, 0, 6)
+	for _, r := range matGapRect {
+		flatGapRect = append(flatGapRect, r...)
+	}
+	verifyOptimalityCertificate(t, "stage2_rect_2x3", 2, 3, flatGapRect, assign.Minimize, resGapRect)
+
+	// Transposed 3x2 rectangular normal-gap + mustAssign + subnormal certificate check.
+	flatGapTall := []float64{-hi, -hi, hiGap, hi, tiny, sub200}
+	resGapTall, err := assign.LinearSumFlat(ctx, 3, 2, flatGapTall, assign.Minimize)
+	if err != nil {
+		t.Fatalf("rectangular 3x2 normal-gap + subnormal failed: %v", err)
+	}
+	verifyOptimalityCertificate(t, "stage2_tall_3x2", 3, 2, flatGapTall, assign.Minimize, resGapTall)
+
+	// Rectangular 5x4 three-scale case (1.12e307, +-3.99e292, subnormals) verifying bounded colBonus
+	// does not flip v[j] > 0 or break complementary slackness after transpose.
+	flatRect5x4 := []float64{
+		math.Inf(1), -7.98336123813888e292, 1.1235582092889534e307, math.Inf(1),
+		-2.3e-322, math.Inf(1), 3.99168061906944e292, 0,
+		-1e-323, -1.43e-322, 0, 2.17e-322,
+		0, 0, 0, -1.1235582092889444e307,
+		1.123558209288957e307, -1.1235582092889395e307, -1.1235582092889514e307, 0,
+	}
+	resRect5x4, err := assign.LinearSumFlat(ctx, 5, 4, flatRect5x4, assign.Minimize)
+	if err != nil {
+		t.Fatalf("rectangular 5x4 three-scale Minimize failed: %v", err)
+	}
+	verifyOptimalityCertificate(t, "stage2_rect_5x4_colbonus", 5, 4, flatRect5x4, assign.Minimize, resRect5x4)
+
+	// Divisible subnormal (8 * 5e-324 = 4e-323 with downExp = 3) and unscaled >1e290 + subnormal 2x2 cases.
+	matDivSub := [][]float64{
+		{4e-323, -hi},
+		{hi, 0},
+	}
+	resDivSub, err := assign.LinearSum(ctx, matDivSub, assign.Minimize)
+	if err != nil {
+		t.Fatalf("divisible subnormal 2x2 failed: %v", err)
+	}
+	if !slices.Equal(resDivSub.ColInd, []int{1, 0}) {
+		t.Fatalf("divisible subnormal 2x2 ColInd=%v, want [1 0]", resDivSub.ColInd)
+	}
+	verifyOptimalityCertificate(t, "stage2_div_sub_2x2", 2, 2, []float64{4e-323, -hi, hi, 0}, assign.Minimize, resDivSub)
+
+	c292 := math.Ldexp(1, 972)
+	matUnscaledSub := [][]float64{
+		{2e-323, -c292},
+		{c292, -4e-323},
+	}
+	resUnscaledSub, err := assign.LinearSum(ctx, matUnscaledSub, assign.Maximize)
+	if err != nil {
+		t.Fatalf("unscaled 2^972 + subnormal 2x2 Maximize failed: %v", err)
+	}
+	if !slices.Equal(resUnscaledSub.ColInd, []int{1, 0}) {
+		t.Fatalf("unscaled 2^972 + subnormal 2x2 ColInd=%v, want [1 0]", resUnscaledSub.ColInd)
+	}
+	verifyOptimalityCertificate(t, "stage2_unscaled_sub_2x2", 2, 2, []float64{2e-323, -c292, c292, -4e-323}, assign.Maximize, resUnscaledSub)
 }
