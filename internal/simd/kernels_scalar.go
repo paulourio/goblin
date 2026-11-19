@@ -292,8 +292,11 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		r1 := cSlice[1] - vSlice[1]
 		r2 := cSlice[2] - vSlice[2]
 		r3 := cSlice[3] - vSlice[3]
-		if r0 < u2 || r1 < u2 || r2 < u2 || r3 < u2 {
-			if r0 < u2 {
+		if !(r0 >= u2 && r1 >= u2 && r2 >= u2 && r3 >= u2) {
+			if !(r0 >= u2) {
+				if math.IsNaN(r0) {
+					return r0, r0, j, -1
+				}
 				if r0 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r0, j
@@ -301,7 +304,10 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 					u2, j2 = r0, j
 				}
 			}
-			if r1 < u2 {
+			if !(r1 >= u2) {
+				if math.IsNaN(r1) {
+					return r1, r1, j + 1, -1
+				}
 				if r1 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r1, j+1
@@ -309,7 +315,10 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 					u2, j2 = r1, j+1
 				}
 			}
-			if r2 < u2 {
+			if !(r2 >= u2) {
+				if math.IsNaN(r2) {
+					return r2, r2, j + 2, -1
+				}
 				if r2 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r2, j+2
@@ -317,7 +326,10 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 					u2, j2 = r2, j+2
 				}
 			}
-			if r3 < u2 {
+			if !(r3 >= u2) {
+				if math.IsNaN(r3) {
+					return r3, r3, j + 3, -1
+				}
 				if r3 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r3, j+3
@@ -334,8 +346,11 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		vSlice = vSlice[:len(cSlice)]
 		for k, ck := range cSlice {
 			r := ck - vSlice[k]
-			if r < u2 {
+			if !(r >= u2) {
 				idx := j + k
+				if math.IsNaN(r) {
+					return r, r, idx, -1
+				}
 				if r < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r, idx

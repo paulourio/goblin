@@ -14,10 +14,16 @@ import (
 
 const minAVX2Len = 32
 
-var simdDisabled atomic.Bool
+var (
+	simdDisabled atomic.Bool
+	hasAVX2FMA   = archsimd.X86.AVX2() && archsimd.X86.FMA()
+)
 
-// HardwareSIMDAvailable returns true when compiled with GOEXPERIMENT=simd on amd64.
-func HardwareSIMDAvailable() bool { return true }
+func simdOff() bool { return !hasAVX2FMA || simdDisabled.Load() }
+
+// HardwareSIMDAvailable reports whether the binary was compiled with GOEXPERIMENT=simd on amd64
+// and the host CPU advertises AVX2 and FMA support.
+func HardwareSIMDAvailable() bool { return hasAVX2FMA }
 
 // SetDisabled toggles the process-wide SIMD disable flag.
 func SetDisabled(disabled bool) { simdDisabled.Store(disabled) }
@@ -25,11 +31,11 @@ func SetDisabled(disabled bool) { simdDisabled.Store(disabled) }
 // IsDisabled reports whether SIMD has been disabled via SetDisabled.
 func IsDisabled() bool { return simdDisabled.Load() }
 
-// UsingHardwareSIMD returns true when compiled with GOEXPERIMENT=simd on amd64 and not disabled.
-func UsingHardwareSIMD() bool { return !simdDisabled.Load() }
+// UsingHardwareSIMD reports whether hardware AVX2/FMA kernels are available and enabled.
+func UsingHardwareSIMD() bool { return !simdOff() }
 
 // UsingHardwareSIMDWith reports whether hardware SIMD is active given a per-solve disable flag.
-func UsingHardwareSIMDWith(disable bool) bool { return !disable && !simdDisabled.Load() }
+func UsingHardwareSIMDWith(disable bool) bool { return !disable && !simdOff() }
 
 // Dot64Scalar computes the dot product sum_i (a[i] * b[i]) using 4-way scalar loop unrolling.
 func Dot64Scalar(a, b []float64) float64 {
@@ -62,7 +68,7 @@ func Dot64Scalar(a, b []float64) float64 {
 // Slices of length < 32 use 4-way scalar accumulators; slices of length >= 32 dispatch to
 // dual 256-bit AVX2/FMA vector accumulators with VZEROUPPER cleanup.
 func Dot64(a, b []float64) float64 {
-	if simdDisabled.Load() {
+	if simdOff() {
 		return Dot64Scalar(a, b)
 	}
 	n := min(len(a), len(b))
@@ -142,7 +148,7 @@ func Axpy64Scalar(dst, src []float64, alpha float64) {
 // Slices of length < 32 use 4-way scalar unrolling; slices of length >= 32 dispatch to
 // 256-bit AVX2 vector instructions with VZEROUPPER cleanup.
 func Axpy64(dst, src []float64, alpha float64) {
-	if simdDisabled.Load() {
+	if simdOff() {
 		Axpy64Scalar(dst, src, alpha)
 		return
 	}
@@ -216,7 +222,7 @@ func Scale64Scalar(dst []float64, alpha float64) {
 
 // Scale64 computes dst[i] *= alpha using AVX2 vector multiplication.
 func Scale64(dst []float64, alpha float64) {
-	if simdDisabled.Load() {
+	if simdOff() {
 		Scale64Scalar(dst, alpha)
 		return
 	}
@@ -260,7 +266,7 @@ func AbsMax64Scalar(x []float64) float64 {
 // AbsMax64 returns max_i |x[i]| using AVX2 Abs and Max instructions.
 func AbsMax64(x []float64) float64 {
 	n := len(x)
-	if simdDisabled.Load() || n < minAVX2Len {
+	if simdOff() || n < minAVX2Len {
 		return AbsMax64Scalar(x)
 	}
 	xp := unsafe.Pointer(&x[0])
@@ -308,7 +314,7 @@ func AllAbsLE64Scalar(x []float64, limit float64) bool {
 // AllAbsLE64With reports whether every element x[i] is finite with |x[i]| <= limit.
 func AllAbsLE64With(x []float64, limit float64, disableSIMD bool) bool {
 	n := len(x)
-	if disableSIMD || simdDisabled.Load() || n < minAVX2Len {
+	if disableSIMD || simdOff() || n < minAVX2Len {
 		return AllAbsLE64Scalar(x, limit)
 	}
 	xp := unsafe.Pointer(&x[0])
@@ -361,7 +367,7 @@ func RowActivityBoundsFiniteScalar(row, lb, ub []float64) (minAct, maxAct float6
 // assuming all lb[j] and ub[j] are finite.
 func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
 	n := min(len(row), min(len(lb), len(ub)))
-	if simdDisabled.Load() || n < minAVX2Len {
+	if simdOff() || n < minAVX2Len {
 		return RowActivityBoundsFiniteScalar(row, lb, ub)
 	}
 	rp := unsafe.Pointer(&row[0])
@@ -437,7 +443,7 @@ func MinReducedSlice64Scalar(rowCost, v []float64) float64 {
 // dispatching to AVX2 when n >= 32 and SIMD is enabled.
 func MinReducedSlice64With(rowCost, v []float64, disableSIMD bool) float64 {
 	n := min(len(rowCost), len(v))
-	if disableSIMD || simdDisabled.Load() || n < minAVX2Len {
+	if disableSIMD || simdOff() || n < minAVX2Len {
 		return MinReducedSlice64Scalar(rowCost, v)
 	}
 	cp := unsafe.Pointer(&rowCost[0])
@@ -530,7 +536,7 @@ func InitReducedRow64Scalar(dst, costRow, v []float64, ui float64) float64 {
 // InitReducedRow64With computes dst[j] = (costRow[j] - v[j]) - ui and returns min_j dst[j],
 // honoring a per-call disableSIMD flag in addition to the process-wide flag.
 func InitReducedRow64With(dst, costRow, v []float64, ui float64, disableSIMD bool) float64 {
-	if disableSIMD || simdDisabled.Load() {
+	if disableSIMD || simdOff() {
 		return InitReducedRow64Scalar(dst, costRow, v, ui)
 	}
 	n := min(len(dst), min(len(costRow), len(v)))
@@ -625,8 +631,11 @@ func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		r1 := cSlice[1] - vSlice[1]
 		r2 := cSlice[2] - vSlice[2]
 		r3 := cSlice[3] - vSlice[3]
-		if r0 < u2 || r1 < u2 || r2 < u2 || r3 < u2 {
-			if r0 < u2 {
+		if !(r0 >= u2 && r1 >= u2 && r2 >= u2 && r3 >= u2) {
+			if !(r0 >= u2) {
+				if math.IsNaN(r0) {
+					return r0, r0, j, -1
+				}
 				if r0 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r0, j
@@ -634,7 +643,10 @@ func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 					u2, j2 = r0, j
 				}
 			}
-			if r1 < u2 {
+			if !(r1 >= u2) {
+				if math.IsNaN(r1) {
+					return r1, r1, j + 1, -1
+				}
 				if r1 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r1, j+1
@@ -642,7 +654,10 @@ func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 					u2, j2 = r1, j+1
 				}
 			}
-			if r2 < u2 {
+			if !(r2 >= u2) {
+				if math.IsNaN(r2) {
+					return r2, r2, j + 2, -1
+				}
 				if r2 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r2, j+2
@@ -650,7 +665,10 @@ func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 					u2, j2 = r2, j+2
 				}
 			}
-			if r3 < u2 {
+			if !(r3 >= u2) {
+				if math.IsNaN(r3) {
+					return r3, r3, j + 3, -1
+				}
 				if r3 < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r3, j+3
@@ -667,8 +685,11 @@ func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		vSlice = vSlice[:len(cSlice)]
 		for k, ck := range cSlice {
 			r := ck - vSlice[k]
-			if r < u2 {
+			if !(r >= u2) {
 				idx := j + k
+				if math.IsNaN(r) {
+					return r, r, idx, -1
+				}
 				if r < u1 {
 					u2, j2 = u1, j1
 					u1, j1 = r, idx
@@ -684,7 +705,7 @@ func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 // Min2ReducedRow64With computes the smallest (u1, j1) and second-smallest (u2, j2)
 // values of costRow[j] - v[j], honoring a per-call disableSIMD flag.
 func Min2ReducedRow64With(costRow, v []float64, disableSIMD bool) (u1, u2 float64, j1, j2 int) {
-	if disableSIMD || simdDisabled.Load() {
+	if disableSIMD || simdOff() {
 		return Min2ReducedRow64Scalar(costRow, v)
 	}
 	n := min(len(costRow), len(v))
@@ -700,6 +721,28 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 	return Min2ReducedRow64With(costRow, v, false)
 }
 
+//go:noinline
+func min2ScanAVX2(cp, vp unsafe.Pointer, j, n int, u2 float64, out *[8]float64) int {
+	vu2 := archsimd.BroadcastFloat64x4(u2)
+	for ; j+8 <= n; j += 8 {
+		c0 := (*[4]float64)(unsafe.Add(cp, j*8))
+		v0 := (*[4]float64)(unsafe.Add(vp, j*8))
+		c1 := (*[4]float64)(unsafe.Add(cp, (j+4)*8))
+		v1 := (*[4]float64)(unsafe.Add(vp, (j+4)*8))
+
+		vr0 := archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0))
+		vr1 := archsimd.LoadFloat64x4Array(c1).Sub(archsimd.LoadFloat64x4Array(v1))
+		if vr0.GreaterEqual(vu2).And(vr1.GreaterEqual(vu2)).ToBits() != 0xF {
+			vr0.StoreArray((*[4]float64)(unsafe.Pointer(&out[0])))
+			vr1.StoreArray((*[4]float64)(unsafe.Pointer(&out[4])))
+			archsimd.ClearAVXUpperBits()
+			return j
+		}
+	}
+	archsimd.ClearAVXUpperBits()
+	return j
+}
+
 func min2ReducedRow64AVX2(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 	n := len(costRow)
 	cp := unsafe.Pointer(&costRow[0])
@@ -710,7 +753,10 @@ func min2ReducedRow64AVX2(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 	j1, j2 = 0, -1
 	for j := range 16 {
 		r := *(*float64)(unsafe.Add(cp, j*8)) - *(*float64)(unsafe.Add(vp, j*8))
-		if r < u2 {
+		if !(r >= u2) {
+			if math.IsNaN(r) {
+				return r, r, j, -1
+			}
 			if r < u1 {
 				u2, j2 = u1, j1
 				u1, j1 = r, j
@@ -720,82 +766,35 @@ func min2ReducedRow64AVX2(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		}
 	}
 
-	vu2 := archsimd.BroadcastFloat64x4(u2)
+	var buf [8]float64
 	j := 16
-	for ; j+8 <= n; j += 8 {
-		c0 := (*[4]float64)(unsafe.Add(cp, j*8))
-		v0 := (*[4]float64)(unsafe.Add(vp, j*8))
-		c1 := (*[4]float64)(unsafe.Add(cp, (j+4)*8))
-		v1 := (*[4]float64)(unsafe.Add(vp, (j+4)*8))
-
-		vr0 := archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0))
-		vr1 := archsimd.LoadFloat64x4Array(c1).Sub(archsimd.LoadFloat64x4Array(v1))
-		if vr0.Min(vr1).Less(vu2).ToBits() != 0 {
-			m0 := vr0.Less(vu2).ToBits()
-			m1 := vr1.Less(vu2).ToBits()
-			var b0, b1 [4]float64
-			if m0 != 0 {
-				vr0.StoreArray(&b0)
-			}
-			if m1 != 0 {
-				vr1.StoreArray(&b1)
-			}
-			archsimd.ClearAVXUpperBits()
-			if m0 != 0 {
-				for k, r := range b0 {
-					if r < u2 {
-						idx := j + k
-						if r < u1 {
-							u2, j2 = u1, j1
-							u1, j1 = r, idx
-						} else {
-							u2, j2 = r, idx
-						}
-					}
-				}
-			}
-			if m1 != 0 {
-				for k, r := range b1 {
-					if r < u2 {
-						idx := j + 4 + k
-						if r < u1 {
-							u2, j2 = u1, j1
-							u1, j1 = r, idx
-						} else {
-							u2, j2 = r, idx
-						}
-					}
-				}
-			}
-			vu2 = archsimd.BroadcastFloat64x4(u2)
+	for j+8 <= n {
+		j = min2ScanAVX2(cp, vp, j, n, u2, &buf)
+		if j+8 > n {
+			break
 		}
-	}
-	for ; j+4 <= n; j += 4 {
-		c0 := (*[4]float64)(unsafe.Add(cp, j*8))
-		v0 := (*[4]float64)(unsafe.Add(vp, j*8))
-		vr0 := archsimd.LoadFloat64x4Array(c0).Sub(archsimd.LoadFloat64x4Array(v0))
-		if vr0.Less(vu2).ToBits() != 0 {
-			var b0 [4]float64
-			vr0.StoreArray(&b0)
-			archsimd.ClearAVXUpperBits()
-			for k, r := range b0 {
-				if r < u2 {
-					idx := j + k
-					if r < u1 {
-						u2, j2 = u1, j1
-						u1, j1 = r, idx
-					} else {
-						u2, j2 = r, idx
-					}
+		for k, r := range buf {
+			if !(r >= u2) {
+				idx := j + k
+				if math.IsNaN(r) {
+					return r, r, idx, -1
+				}
+				if r < u1 {
+					u2, j2 = u1, j1
+					u1, j1 = r, idx
+				} else {
+					u2, j2 = r, idx
 				}
 			}
-			vu2 = archsimd.BroadcastFloat64x4(u2)
 		}
+		j += 8
 	}
-	archsimd.ClearAVXUpperBits()
 	for ; j < n; j++ {
 		r := *(*float64)(unsafe.Add(cp, j*8)) - *(*float64)(unsafe.Add(vp, j*8))
-		if r < u2 {
+		if !(r >= u2) {
+			if math.IsNaN(r) {
+				return r, r, j, -1
+			}
 			if r < u1 {
 				u2, j2 = u1, j1
 				u1, j1 = r, j

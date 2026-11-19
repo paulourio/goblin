@@ -282,7 +282,30 @@ func TestNaNParity(t *testing.T) {
 			if !(math.IsNaN(rMinSIMD) && math.IsNaN(rMinScal)) {
 				t.Fatalf("n=%d pos=%d: InitReducedRow64 min simd=%v scalar=%v, want NaN", n, pos, rMinSIMD, rMinScal)
 			}
+			u1SIMD, u2SIMD, j1SIMD, j2SIMD := simd.Min2ReducedRow64With(x, y, false)
+			u1Scal, u2Scal, j1Scal, j2Scal := simd.Min2ReducedRow64Scalar(x, y)
+			if !(math.IsNaN(u1SIMD) && math.IsNaN(u2SIMD) && math.IsNaN(u1Scal) && math.IsNaN(u2Scal)) ||
+				j1SIMD != pos || j1Scal != pos || j2SIMD != -1 || j2Scal != -1 {
+				t.Fatalf("n=%d pos=%d: Min2ReducedRow64 simd=(%v,%v,%d,%d) scalar=(%v,%v,%d,%d), want NaN at %d",
+					n, pos, u1SIMD, u2SIMD, j1SIMD, j2SIMD, u1Scal, u2Scal, j1Scal, j2Scal, pos)
+			}
 		}
+	}
+
+	// Verify paired low-cost element (index 16) and NaN (index 20) in the same 8-wide AVX2 step.
+	cost := make([]float64, 64)
+	v := make([]float64, 64)
+	for i := range cost {
+		cost[i] = 10.0
+	}
+	cost[16] = 1.0
+	cost[20] = math.NaN()
+	u1SIMD, u2SIMD, j1SIMD, j2SIMD := simd.Min2ReducedRow64With(cost, v, false)
+	u1Scal, u2Scal, j1Scal, j2Scal := simd.Min2ReducedRow64Scalar(cost, v)
+	if !(math.IsNaN(u1SIMD) && math.IsNaN(u2SIMD) && math.IsNaN(u1Scal) && math.IsNaN(u2Scal)) ||
+		j1SIMD != 20 || j1Scal != 20 || j2SIMD != -1 || j2Scal != -1 {
+		t.Fatalf("paired NaN: simd=(%v,%v,%d,%d) scalar=(%v,%v,%d,%d), want NaN at 20",
+			u1SIMD, u2SIMD, j1SIMD, j2SIMD, u1Scal, u2Scal, j1Scal, j2Scal)
 	}
 }
 
