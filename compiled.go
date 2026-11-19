@@ -177,11 +177,26 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 		}
 	}
 
-	// Accumulate objective terms
+	// Accumulate objective terms (falling back to wideDotAcc if intermediate duplicate sum overflows).
+	var objOverflowCols []int
 	for _, t := range m.objTerms {
 		if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) {
-			p.objCoeffs[col] += t.Coeff
+			prev := p.objCoeffs[col]
+			next := prev + t.Coeff
+			p.objCoeffs[col] = next
+			if (math.IsNaN(next) || math.IsInf(next, 0)) && !math.IsNaN(prev) && !math.IsInf(prev, 0) {
+				objOverflowCols = append(objOverflowCols, col)
+			}
 		}
+	}
+	for _, col := range objOverflowCols {
+		var w wideDotAcc
+		for _, t := range m.objTerms {
+			if c, ok := m.validVar(t.Var); ok && c == col && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) {
+				w.addVal(t.Coeff)
+			}
+		}
+		p.objCoeffs[col] = w.finish(p.objCoeffs[col])
 	}
 	senseSign := 1.0
 	if m.sense == Maximize {
@@ -235,6 +250,7 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 		p.rowUBClp[i] = clampCBCBound(p.rowUB[i])
 
 		touched = touched[:0]
+		rowOverflow := false
 		for _, t := range c.terms {
 			col, ok := m.validVar(t.Var)
 			if !ok || t.Coeff == 0 || math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
@@ -244,7 +260,25 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 				inTouched[col] = true
 				touched = append(touched, col)
 			}
-			rowAcc[col] += t.Coeff
+			prev := rowAcc[col]
+			next := prev + t.Coeff
+			rowAcc[col] = next
+			if (math.IsNaN(next) || math.IsInf(next, 0)) && !math.IsNaN(prev) && !math.IsInf(prev, 0) {
+				rowOverflow = true
+			}
+		}
+		if rowOverflow {
+			for _, col := range touched {
+				if math.IsNaN(rowAcc[col]) || math.IsInf(rowAcc[col], 0) {
+					var w wideDotAcc
+					for _, t := range c.terms {
+						if tc, ok := m.validVar(t.Var); ok && tc == col && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) {
+							w.addVal(t.Coeff)
+						}
+					}
+					rowAcc[col] = w.finish(rowAcc[col])
+				}
+			}
 		}
 		sort.Ints(touched)
 
@@ -313,10 +347,260 @@ func (p *CompiledProblem) ObjectiveFromMin(minObj float64) float64 {
 	if p == nil {
 		return 0
 	}
+	v := minObj
 	if p.sense == Maximize {
-		return -minObj + p.objConstant
+		v = -minObj
 	}
-	return minObj + p.objConstant
+	res := v + p.objConstant
+	if math.IsInf(res, 0) && !math.IsInf(v, 0) && !math.IsInf(p.objConstant, 0) && (v > 0) != (p.objConstant > 0) {
+		return math.Ldexp(math.Ldexp(v, -2)+math.Ldexp(p.objConstant, -2), 2)
+	}
+	return res
+}
+
+const (
+	wideHiShift   = 1056
+	wideHalfShift = 528
+	wideExpCutoff = 960
+)
+
+// wideDotAcc accumulates values and products across two power-of-two buckets (2^1056 and 2^0)
+// so finite float64 products up to MaxFloat64^2 never overflow intermediate partial sums.
+type wideDotAcc struct {
+	hi  dot2Acc
+	mid dot2Acc
+}
+
+func (w *wideDotAcc) addVal(v float64) {
+	if v == 0 {
+		return
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		w.hi.nonFin = true
+		return
+	}
+	_, e := math.Frexp(math.Abs(v))
+	if e > wideExpCutoff {
+		w.hi.addVal(math.Ldexp(v, -wideHiShift))
+	} else {
+		w.mid.addVal(v)
+	}
+}
+
+func (w *wideDotAcc) addProd(a, b float64) {
+	if a == 0 || b == 0 {
+		return
+	}
+	if math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) {
+		w.hi.nonFin = true
+		return
+	}
+	_, ea := math.Frexp(math.Abs(a))
+	_, eb := math.Frexp(math.Abs(b))
+	if ea+eb > wideExpCutoff {
+		w.hi.addProd(math.Ldexp(a, -wideHalfShift), math.Ldexp(b, -wideHalfShift))
+	} else {
+		w.mid.addProd(a, b)
+	}
+}
+
+func (w *wideDotAcc) finish(fallback float64) float64 {
+	if w.hi.nonFin || w.mid.nonFin {
+		return fallback
+	}
+	hiS, hiRem := twoSum(w.hi.s, w.hi.c)
+	midS, midRem := twoSum(w.mid.s, w.mid.c)
+	if hiS == 0 && hiRem == 0 {
+		return midS + midRem
+	}
+	hiHalf := math.Ldexp(hiS, wideHalfShift)
+	if math.IsInf(hiHalf, 0) {
+		return hiHalf
+	}
+	s1, e1 := twoSum(hiHalf, math.Ldexp(midS, -wideHalfShift))
+	remHalf := e1 + math.Ldexp(hiRem, wideHalfShift) + math.Ldexp(midRem, -wideHalfShift)
+	totHalf, totRemHalf := twoSum(s1, remHalf)
+	res := math.Ldexp(totHalf, wideHalfShift)
+	if math.IsInf(res, 0) {
+		return res
+	}
+	comb := res + math.Ldexp(totRemHalf, wideHalfShift)
+	if math.IsNaN(comb) {
+		return res
+	}
+	return comb
+}
+
+func evalLinearSum(constant float64, coeffs, x []float64, n int) float64 {
+	k := min(n, min(len(coeffs), len(x)))
+	sum := constant
+	for j := range k {
+		sum += coeffs[j] * x[j]
+	}
+	if !math.IsNaN(sum) && !math.IsInf(sum, 0) {
+		return sum
+	}
+	if math.IsNaN(constant) {
+		return math.NaN()
+	}
+	hasPosInf := math.IsInf(constant, 1)
+	hasNegInf := math.IsInf(constant, -1)
+	for j := range k {
+		c := coeffs[j]
+		xj := x[j]
+		if math.IsNaN(c) || math.IsNaN(xj) {
+			return math.NaN()
+		}
+		if c == 0 || xj == 0 {
+			if (c == 0 && math.IsInf(xj, 0)) || (xj == 0 && math.IsInf(c, 0)) {
+				return math.NaN()
+			}
+			continue
+		}
+		if math.IsInf(c, 0) || math.IsInf(xj, 0) {
+			if (c > 0) == (xj > 0) {
+				hasPosInf = true
+			} else {
+				hasNegInf = true
+			}
+		}
+	}
+	if hasPosInf && hasNegInf {
+		return math.NaN()
+	}
+	if hasPosInf {
+		return math.Inf(1)
+	}
+	if hasNegInf {
+		return math.Inf(-1)
+	}
+	var w wideDotAcc
+	w.addVal(constant)
+	for j := range k {
+		w.addProd(coeffs[j], x[j])
+	}
+	return w.finish(sum)
+}
+
+func evalSparseRowSum(cols []int, vals, x []float64) float64 {
+	kLim := min(len(cols), len(vals))
+	sum := 0.0
+	for k := range kLim {
+		sum += vals[k] * x[cols[k]]
+	}
+	if !math.IsNaN(sum) && !math.IsInf(sum, 0) {
+		return sum
+	}
+	hasPosInf := false
+	hasNegInf := false
+	for k := range kLim {
+		c := vals[k]
+		xj := x[cols[k]]
+		if math.IsNaN(c) || math.IsNaN(xj) {
+			return math.NaN()
+		}
+		if c == 0 || xj == 0 {
+			if (c == 0 && math.IsInf(xj, 0)) || (xj == 0 && math.IsInf(c, 0)) {
+				return math.NaN()
+			}
+			continue
+		}
+		if math.IsInf(c, 0) || math.IsInf(xj, 0) {
+			if (c > 0) == (xj > 0) {
+				hasPosInf = true
+			} else {
+				hasNegInf = true
+			}
+		}
+	}
+	if hasPosInf && hasNegInf {
+		return math.NaN()
+	}
+	if hasPosInf {
+		return math.Inf(1)
+	}
+	if hasNegInf {
+		return math.Inf(-1)
+	}
+	var w wideDotAcc
+	for k := range kLim {
+		w.addProd(vals[k], x[cols[k]])
+	}
+	return w.finish(sum)
+}
+
+func evalSparseRowSumAndTol(cols []int, vals, x []float64, rhs, minTol, relFactor float64) (act, rTol float64, ok bool) {
+	kLim := min(len(cols), len(vals))
+	act = 0.0
+	l1 := math.Abs(rhs)
+	for k := range kLim {
+		term := vals[k] * x[cols[k]]
+		act += term
+		l1 += math.Abs(term)
+	}
+	if !math.IsNaN(act) && !math.IsInf(act, 0) && !math.IsNaN(l1) && !math.IsInf(l1, 0) {
+		if minTol > 0 {
+			rTol = max(minTol, relFactor*max(1.0, l1))
+		} else {
+			rTol = relFactor * l1
+		}
+		return act, rTol, true
+	}
+	act = evalSparseRowSum(cols, vals, x)
+	if math.IsNaN(act) || math.IsInf(act, 0) {
+		return 0, 0, false
+	}
+	maxExp := 0
+	if rhs != 0 && !math.IsInf(rhs, 0) && !math.IsNaN(rhs) {
+		_, re := math.Frexp(math.Abs(rhs))
+		if re > maxExp {
+			maxExp = re
+		}
+	}
+	for k := range kLim {
+		ac := math.Abs(vals[k])
+		ax := math.Abs(x[cols[k]])
+		if ac == 0 || ax == 0 {
+			continue
+		}
+		_, ea := math.Frexp(ac)
+		_, ex := math.Frexp(ax)
+		if ea+ex > maxExp {
+			maxExp = ea + ex
+		}
+	}
+	shift := max(32, maxExp-wideExpCutoff)
+	s1 := shift / 2
+	s2 := shift - s1
+	l1Scaled := 0.0
+	if rhs != 0 && !math.IsInf(rhs, 0) && !math.IsNaN(rhs) {
+		l1Scaled = math.Ldexp(math.Abs(rhs), -shift)
+	}
+	for k := range kLim {
+		ac := math.Abs(vals[k])
+		ax := math.Abs(x[cols[k]])
+		if ac == 0 || ax == 0 {
+			continue
+		}
+		pScaled := math.Ldexp(ac, -s1) * math.Ldexp(ax, -s2)
+		if math.IsNaN(pScaled) || math.IsInf(pScaled, 0) {
+			return 0, 0, false
+		}
+		l1Scaled += pScaled
+	}
+	if math.IsNaN(l1Scaled) || math.IsInf(l1Scaled, 0) {
+		return 0, 0, false
+	}
+	relVal := math.Ldexp(relFactor*l1Scaled, shift)
+	if math.IsInf(relVal, 1) {
+		relVal = math.MaxFloat64
+	}
+	if minTol > 0 {
+		rTol = max(minTol, max(relFactor, relVal))
+	} else {
+		rTol = relVal
+	}
+	return act, rTol, true
 }
 
 // EvaluateObjective computes the original objective value for primal vector x.
@@ -324,11 +608,7 @@ func (p *CompiledProblem) EvaluateObjective(x []float64) float64 {
 	if p == nil {
 		return 0
 	}
-	sum := p.objConstant
-	for j := 0; j < p.numVars && j < len(x); j++ {
-		sum += p.objCoeffs[j] * x[j]
-	}
-	return sum
+	return evalLinearSum(p.objConstant, p.objCoeffs, x, p.numVars)
 }
 
 // MaxViolation computes the largest bound, row, and integer residual of x.
@@ -361,10 +641,8 @@ func (p *CompiledProblem) MaxViolation(x []float64, checkIntegrality bool) (boun
 		}
 	}
 	for i := range p.numConstraints {
-		act := 0.0
-		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
-			act += p.rowVal[k] * x[p.colIdx[k]]
-		}
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
+		act := evalSparseRowSum(p.colIdx[s:e], p.rowVal[s:e], x)
 		if math.IsNaN(act) {
 			rowViol = math.Inf(1)
 			continue

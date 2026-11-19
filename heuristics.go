@@ -26,7 +26,6 @@ const (
 	heurSubMIPFreeFracCap    = 240
 	heurSubMIPSmallModelVars = 200
 	heurSubMIPMaxNodes       = 800
-	heurSubMIPFallbackNodes  = 120
 	heurSubMIPCutPasses      = 3
 	nodePropPasses           = 2
 	subMIPPresolvePasses     = 4
@@ -46,6 +45,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 
 	minAct := 0.0
 	maxAct := 0.0
+	l1Act := 0.0
 	minInf := 0
 	maxInf := 0
 
@@ -57,23 +57,31 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 			if math.IsInf(l, -1) {
 				minInf++
 			} else {
-				minAct += a * l
+				t := a * l
+				minAct += t
+				l1Act += math.Abs(t)
 			}
 			if math.IsInf(u, 1) {
 				maxInf++
 			} else {
-				maxAct += a * u
+				t := a * u
+				maxAct += t
+				l1Act += math.Abs(t)
 			}
 		} else if a < 0 {
 			if math.IsInf(u, 1) {
 				minInf++
 			} else {
-				minAct += a * u
+				t := a * u
+				minAct += t
+				l1Act += math.Abs(t)
 			}
 			if math.IsInf(l, -1) {
 				maxInf++
 			} else {
-				maxAct += a * l
+				t := a * l
+				maxAct += t
+				l1Act += math.Abs(t)
 			}
 		}
 		if (!hasUB || minInf > 0) && (!hasLB || maxInf > 0) {
@@ -81,7 +89,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 		}
 	}
 
-	rowScale := max(1.0, max(math.Abs(rhs), max(math.Abs(minAct), math.Abs(maxAct))))
+	rowScale := max(1.0, max(math.Abs(rhs), l1Act))
 	rowFeasTol := max(intFeasTol, presolveRelScaleTol*rowScale)
 
 	if hasUB && minInf == 0 && minAct > rhs+rowFeasTol {
@@ -91,6 +99,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 		return false, false
 	}
 
+	upperChanged := false
 	if hasUB && minInf == 0 {
 		slack := rhs - minAct
 		for k := s; k < e; k++ {
@@ -105,34 +114,83 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 				if p.varCat[col] != Continuous {
 					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
 					newUB = math.Floor(newUB + bTol)
+				} else {
+					newUB += rowFeasTol / a
 				}
 				if newUB < u-heurIntBoundTol {
-					if newUB < l-intFeasTol {
+					feasCheck := max(intFeasTol, rowFeasTol/a)
+					if newUB < l-feasCheck {
 						return false, false
 					}
-					ub[col] = max(l, newUB)
-					changed = true
-					if pushCol != nil {
-						pushCol(col)
+					clamped := max(l, newUB)
+					if clamped < u-heurIntBoundTol {
+						ub[col] = clamped
+						changed = true
+						upperChanged = true
+						if pushCol != nil {
+							pushCol(col)
+						}
 					}
 				}
 			} else if a < -heurCoeffZeroTol {
+				absA := -a
 				newLB := u + slack/a
 				if p.varCat[col] != Continuous {
-					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/(-a))
+					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/absA)
 					newLB = math.Ceil(newLB - bTol)
+				} else {
+					newLB -= rowFeasTol / absA
 				}
 				if newLB > l+heurIntBoundTol {
-					if newLB > u+intFeasTol {
+					feasCheck := max(intFeasTol, rowFeasTol/absA)
+					if newLB > u+feasCheck {
 						return false, false
 					}
-					lb[col] = min(u, newLB)
-					changed = true
-					if pushCol != nil {
-						pushCol(col)
+					clamped := min(u, newLB)
+					if clamped > l+heurIntBoundTol {
+						lb[col] = clamped
+						changed = true
+						upperChanged = true
+						if pushCol != nil {
+							pushCol(col)
+						}
 					}
 				}
 			}
+		}
+	}
+
+	if hasLB && upperChanged {
+		maxAct = 0
+		maxInf = 0
+		l1Max := 0.0
+		for k := s; k < e; k++ {
+			col := p.colIdx[k]
+			a := p.rowVal[k]
+			if a > 0 {
+				u := ub[col]
+				if math.IsInf(u, 1) {
+					maxInf++
+				} else {
+					t := a * u
+					maxAct += t
+					l1Max += math.Abs(t)
+				}
+			} else if a < 0 {
+				l := lb[col]
+				if math.IsInf(l, -1) {
+					maxInf++
+				} else {
+					t := a * l
+					maxAct += t
+					l1Max += math.Abs(t)
+				}
+			}
+		}
+		rowScale = max(1.0, max(math.Abs(rhs), l1Max))
+		rowFeasTol = max(intFeasTol, presolveRelScaleTol*rowScale)
+		if maxInf == 0 && maxAct < rhs-rowFeasTol {
+			return false, false
 		}
 	}
 
@@ -150,31 +208,44 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 				if p.varCat[col] != Continuous {
 					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
 					newLB = math.Ceil(newLB - bTol)
+				} else {
+					newLB -= rowFeasTol / a
 				}
 				if newLB > l+heurIntBoundTol {
-					if newLB > u+intFeasTol {
+					feasCheck := max(intFeasTol, rowFeasTol/a)
+					if newLB > u+feasCheck {
 						return false, false
 					}
-					lb[col] = min(u, newLB)
-					changed = true
-					if pushCol != nil {
-						pushCol(col)
+					clamped := min(u, newLB)
+					if clamped > l+heurIntBoundTol {
+						lb[col] = clamped
+						changed = true
+						if pushCol != nil {
+							pushCol(col)
+						}
 					}
 				}
 			} else if a < -heurCoeffZeroTol {
-				newUB := l + surplus/(-a)
+				absA := -a
+				newUB := l + surplus/absA
 				if p.varCat[col] != Continuous {
-					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/(-a))
+					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/absA)
 					newUB = math.Floor(newUB + bTol)
+				} else {
+					newUB += rowFeasTol / absA
 				}
 				if newUB < u-heurIntBoundTol {
-					if newUB < l-intFeasTol {
+					feasCheck := max(intFeasTol, rowFeasTol/absA)
+					if newUB < l-feasCheck {
 						return false, false
 					}
-					ub[col] = max(l, newUB)
-					changed = true
-					if pushCol != nil {
-						pushCol(col)
+					clamped := max(l, newUB)
+					if clamped < u-heurIntBoundTol {
+						ub[col] = clamped
+						changed = true
+						if pushCol != nil {
+							pushCol(col)
+						}
 					}
 				}
 			}
@@ -349,6 +420,8 @@ func tryPropagatedRounding(
 		maxStrat = 1
 	}
 
+	snapHLB := make([]float64, n)
+	snapHUB := make([]float64, n)
 	for strategy := range maxStrat {
 		if auxSolver != nil && auxSolver.timeExpired() {
 			break
@@ -383,12 +456,16 @@ func tryPropagatedRounding(
 			}
 			target = min(max(target, hlb[col]), hub[col])
 
+			copy(snapHLB, hlb)
+			copy(snapHUB, hub)
 			savedLB := hlb[col]
 			savedUB := hub[col]
 			hlb[col] = target
 			hub[col] = target
 
 			if !propagateFromCol(p, hlb, hub, col, &rowQueue, inQueue) {
+				copy(hlb, snapHLB)
+				copy(hub, snapHUB)
 				alt := math.Ceil(v)
 				if target == alt {
 					alt = math.Floor(v)
@@ -732,6 +809,7 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 		}
 		addNCand(nLB)
 		addNCand(nUB)
+		addNCand(0.0)
 		baseMCands := slices.Clone(mCands)
 		for _, mv := range baseMCands {
 			for _, r := range rows {
@@ -764,6 +842,9 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 		nCands = []float64{0.0}
 	}
 
+	if len(mCands) == 0 || len(nCands) == 0 {
+		return
+	}
 	bestCompObj := math.Inf(1)
 	bestM := mCands[0]
 	bestN := nCands[0]
@@ -1337,7 +1418,8 @@ func tryFractionalDiving(
 
 // tryRootSubMIP fixes integer variables that are already integral at the root LP
 // relaxation and solves the compact reduced sub-MIP over the remaining fractional
-// integer variables and continuous variables.
+// integer variables and continuous variables, returning any explored sub-MIP nodes
+// and simplex pivots so the parent search accounts for shared budgets.
 func tryRootSubMIP(
 	p *CompiledProblem,
 	lpSolver *LPSolver,
@@ -1346,16 +1428,18 @@ func tryRootSubMIP(
 	bestObjMin float64,
 	deadline time.Time,
 	isSubMIP bool,
-) (sol []float64, objMin float64, ok bool) {
-	if isSubMIP || len(p.intCols) == 0 {
-		return nil, 0, false
+	maxNodesCap int,
+	maxIterCap int,
+) (sol []float64, objMin float64, nodesUsed, itersUsed int, ok bool) {
+	if isSubMIP || len(p.intCols) == 0 || maxNodesCap <= 0 || maxIterCap <= 0 {
+		return nil, 0, 0, 0, false
 	}
 	var done <-chan struct{}
 	if lpSolver != nil {
 		done = lpSolver.Done
 	}
 	if stopRequested(deadline, done) {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
 
 	n := p.numVars
@@ -1373,7 +1457,7 @@ func tryRootSubMIP(
 		}
 	}
 	if baseFrac == 0 || baseFrac > heurSubMIPBaseFracCap {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
 
 	var status []varBasisStatus
@@ -1414,7 +1498,7 @@ func tryRootSubMIP(
 
 	isContLinked := findContLinkedIntCols(p)
 	if !hasEqRows && isContLinked == nil {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
 	for _, col := range p.intCols {
 		if isContLinked != nil && isContLinked[col] {
@@ -1435,11 +1519,11 @@ func tryRootSubMIP(
 	}
 
 	if nFrac == 0 || nFrac > heurSubMIPFreeFracCap || nFrac >= len(p.intCols) {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
 
 	if !propagateBounds(p, hlb, hub, nodePropPasses) {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
 
 	subModel := NewModel("submip", Minimize)
@@ -1464,7 +1548,7 @@ func tryRootSubMIP(
 	}
 
 	if len(freeCols) == 0 {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
 
 	subModel.SetObjective(Expr{Terms: objTerms, Constant: fixedObjMin})
@@ -1488,15 +1572,15 @@ func tryRootSubMIP(
 			switch sense {
 			case LessEqual:
 				if fixedAct > p.rowRHS[i]+intFeasTol {
-					return nil, 0, false
+					return nil, 0, 0, 0, false
 				}
 			case GreaterEqual:
 				if fixedAct < p.rowRHS[i]-intFeasTol {
-					return nil, 0, false
+					return nil, 0, 0, 0, false
 				}
 			case Equal:
 				if math.Abs(fixedAct-p.rowRHS[i]) > intFeasTol {
-					return nil, 0, false
+					return nil, 0, 0, 0, false
 				}
 			}
 			continue
@@ -1510,22 +1594,22 @@ func tryRootSubMIP(
 
 	subP := subModel.Compile()
 	if pres := presolveWithDeadline(subP, subMIPPresolvePasses, deadline, done); pres.TimedOut || pres.Infeasible {
-		return nil, 0, false
-	} else if pres.Reduced != nil {
+		return nil, 0, 0, 0, false
+	} else if pres.Reduced != nil && pres.Reduced.invalidErr == nil {
 		subP = pres.Reduced
 	}
 
 	subOpts := DefaultOptions()
 	subOpts.isSubMIP = true
-	subOpts.MaxNodes = heurSubMIPMaxNodes
-	if !hasEqRows && isContLinked == nil {
-		subOpts.MaxNodes = heurSubMIPFallbackNodes
+	subOpts.MaxNodes = min(heurSubMIPMaxNodes, maxNodesCap)
+	if maxIterCap < math.MaxInt {
+		subOpts.MaxIter = maxIterCap
 	}
 	subOpts.TimeLimit = subMIPTimeLimitMillis * time.Millisecond
 	if !deadline.IsZero() {
 		rem := time.Until(deadline)
 		if rem <= 0 {
-			return nil, 0, false
+			return nil, 0, 0, 0, false
 		}
 		subOpts.TimeLimit = min(subOpts.TimeLimit, rem)
 	}
@@ -1542,8 +1626,9 @@ func tryRootSubMIP(
 	}
 
 	subRes := solveBranchAndCutWithDone(subP, subOpts, time.Now(), deadline, done)
+	usedN, usedIt := subRes.Nodes, subRes.Iterations
 	if len(subRes.Values) != subP.numVars {
-		return nil, 0, false
+		return nil, 0, usedN, usedIt, false
 	}
 
 	cand := slices.Clone(hlb)
@@ -1563,17 +1648,14 @@ func tryRootSubMIP(
 			fixUB[col] = cand[col]
 		}
 		if lpSol, lpObj, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, lpSolver); okLP && lpObj < bestObjMin-heurIntBoundTol {
-			return lpSol, lpObj, true
+			return lpSol, lpObj, usedN, usedIt, true
 		}
-		return nil, 0, false
+		return nil, 0, usedN, usedIt, false
 	}
 
-	obj := 0.0
-	for j := range n {
-		obj += p.objMin[j] * cand[j]
-	}
+	obj := minObjective(p, cand)
 	if obj >= bestObjMin-heurIntBoundTol {
-		return nil, 0, false
+		return nil, 0, usedN, usedIt, false
 	}
-	return cand, obj, true
+	return cand, obj, usedN, usedIt, true
 }

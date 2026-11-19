@@ -71,6 +71,7 @@ type Workspace struct {
 	tauIdx          []int
 	tauSparse       bool
 	tabRow          []float64
+	tabRowErr       []float64
 	tabRowIdx       []int
 	tabRowMark      []bool
 	tabRowSparse    bool
@@ -93,6 +94,8 @@ var workspacePool = sync.Pool{
 
 // AcquireWorkspace retrieves a Workspace from the pool and sizes it for (n, m).
 func AcquireWorkspace(n, m int) *Workspace {
+	n = max(0, n)
+	m = max(0, m)
 	ws := workspacePool.Get().(*Workspace)
 	ws.inPool.Store(false)
 	ws.ensureSize(n, m)
@@ -112,6 +115,11 @@ func ReleaseWorkspace(ws *Workspace) {
 }
 
 func (ws *Workspace) ensureSize(n, m int) {
+	n = max(0, n)
+	m = max(0, m)
+	if ws.lu == nil {
+		ws.lu = newLUFactorization(max(defaultLUInitCap, m))
+	}
 	tot := n + m
 	ws.n = n
 	ws.m = m
@@ -147,6 +155,7 @@ func (ws *Workspace) ensureSize(n, m int) {
 	ws.tauIdx = ws.tauIdx[:0]
 	ws.tauSparse = false
 	ws.tabRow = resizeFloat64(ws.tabRow, tot)
+	ws.tabRowErr = resizeFloat64(ws.tabRowErr, tot)
 	if cap(ws.tabRowMark) < tot {
 		ws.tabRowMark = make([]bool, tot)
 	} else {

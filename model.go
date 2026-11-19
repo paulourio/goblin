@@ -534,6 +534,7 @@ func (m *Model) Validate() error {
 	acc := make([]float64, len(m.vars))
 	touched := make([]int, 0, min(len(m.vars), defaultModelCap))
 	inTouched := make([]bool, len(m.vars))
+	objOverflow := false
 	for _, t := range m.objTerms {
 		col, ok := m.validVar(t.Var)
 		if !ok {
@@ -548,7 +549,30 @@ func (m *Model) Validate() error {
 		}
 		acc[col] += t.Coeff
 		if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
-			return fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
+			objOverflow = true
+		}
+	}
+	if objOverflow {
+		wideMap := make(map[int]*wideDotAcc)
+		for _, col := range touched {
+			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+				wideMap[col] = &wideDotAcc{}
+			}
+		}
+		for _, t := range m.objTerms {
+			if col, ok := m.validVar(t.Var); ok {
+				if w, exists := wideMap[col]; exists {
+					w.addVal(t.Coeff)
+				}
+			}
+		}
+		for _, col := range touched {
+			if w, exists := wideMap[col]; exists {
+				v := w.finish(acc[col])
+				if math.IsNaN(v) || math.IsInf(v, 0) {
+					return fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
+				}
+			}
 		}
 	}
 	for _, col := range touched {
@@ -563,6 +587,7 @@ func (m *Model) Validate() error {
 			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
 		}
 		touched = touched[:0]
+		rowOverflow := false
 		for _, t := range c.terms {
 			col, ok := m.validVar(t.Var)
 			if !ok {
@@ -577,7 +602,30 @@ func (m *Model) Validate() error {
 			}
 			acc[col] += t.Coeff
 			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
-				return fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
+				rowOverflow = true
+			}
+		}
+		if rowOverflow {
+			wideMap := make(map[int]*wideDotAcc)
+			for _, col := range touched {
+				if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+					wideMap[col] = &wideDotAcc{}
+				}
+			}
+			for _, t := range c.terms {
+				if col, ok := m.validVar(t.Var); ok {
+					if w, exists := wideMap[col]; exists {
+						w.addVal(t.Coeff)
+					}
+				}
+			}
+			for _, col := range touched {
+				if w, exists := wideMap[col]; exists {
+					v := w.finish(acc[col])
+					if math.IsNaN(v) || math.IsInf(v, 0) {
+						return fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
+					}
+				}
 			}
 		}
 		for _, col := range touched {

@@ -3,6 +3,7 @@ package goblin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -45,15 +46,16 @@ type Options struct {
 	EnableCuts bool
 	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
 	EnableHeuristics bool
-	// MaxNodes limits the number of explored branch-and-bound nodes (default 50000; 0 = unlimited).
-	// Exceeding it returns StatusNodeLimit with a valid global bound.
+	// MaxNodes limits the number of explored branch-and-bound nodes, including any root
+	// sub-MIP nodes (default 50000; 0 = unlimited). Exceeding it returns StatusNodeLimit
+	// with a valid global bound.
 	MaxNodes int
 	// MaxCutPasses limits the number of root cut rounds (0 disables cutting).
 	MaxCutPasses int
-	// MaxIter limits the total main-tree simplex pivots reported in Result.Iterations
-	// (0 = unlimited). Auxiliary primal-heuristic LP probes use bounded local budgets.
-	// Exceeding MaxIter returns StatusIterationLimit; once the root LP is solved,
-	// BestBound remains a valid global bound.
+	// MaxIter limits the total main-tree and root sub-MIP simplex pivots reported in
+	// Result.Iterations (0 = unlimited). Auxiliary primal-heuristic LP probes use bounded
+	// local budgets. Exceeding MaxIter returns StatusIterationLimit; once the root LP is
+	// solved, BestBound remains a valid global bound.
 	MaxIter int
 	// RelGapTol is the relative MIP gap threshold measured on the linear objective
 	// (|upper - lower| / max(1, |upper|), excluding ObjConstant, matching BackendCBC).
@@ -117,7 +119,11 @@ func ApplyOptions(opts ...Option) Options {
 
 // WithOptions overwrites the solver settings with the supplied struct.
 func WithOptions(o Options) Option {
-	return func(cfg *Options) { *cfg = o }
+	return func(cfg *Options) {
+		*cfg = o
+		cfg.defaultMaxNodesUsed = false
+		cfg.defaultCutPassesUsed = false
+	}
 }
 
 // WithBackend selects the solver backend (BackendGo or BackendCBC).
@@ -253,6 +259,18 @@ func (r *Result) Value(v Var) float64 {
 // When ctx is canceled or its deadline expires, Solve aborts and returns (Result{}, ctx.Err()).
 // When WithTimeLimit expires, Solve returns (res, nil) with res.Status == StatusTimeLimit and the best incumbent found.
 func (m *Model) Solve(ctx context.Context, opts ...Option) (Result, error) {
+	if m == nil {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
+		}
+		opt := ApplyOptions(opts...)
+		return Result{
+			Backend: opt.Backend,
+			Status:  StatusUndefined,
+		}, ErrNilModel
+	}
 	p := m.Compile()
 	return SolveCompiled(ctx, p, opts...)
 }
@@ -278,6 +296,14 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			SolveTime: time.Since(start),
 		}, ErrNilProblem
 	}
+	if opt.Backend != BackendGo && opt.Backend != BackendCBC {
+		return Result{
+			modelID:   p.modelID,
+			Backend:   opt.Backend,
+			Status:    StatusUndefined,
+			SolveTime: time.Since(start),
+		}, fmt.Errorf("goblin: invalid backend %d", opt.Backend)
+	}
 	if p.invalidErr != nil {
 		return Result{
 			modelID:   p.modelID,
@@ -287,6 +313,14 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 		}, p.invalidErr
 	}
 	var deadline time.Time
+	if opt.TimeLimit < 0 {
+		return Result{
+			modelID:   p.modelID,
+			Backend:   opt.Backend,
+			Status:    StatusTimeLimit,
+			SolveTime: time.Since(start),
+		}, nil
+	}
 	if opt.TimeLimit > 0 {
 		deadline = start.Add(opt.TimeLimit)
 		if !start.Before(deadline) {
@@ -332,7 +366,9 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 				SolveTime: time.Since(start),
 			}, nil
 		}
-		workProb = preRes.Reduced
+		if preRes.Reduced != nil && preRes.Reduced.invalidErr == nil {
+			workProb = preRes.Reduced
+		}
 	}
 
 	res := solveBranchAndCutWithDone(workProb, opt, start, deadline, done)
@@ -343,19 +379,36 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 	}
 	if workProb != p && len(res.Values) == p.numVars {
 		bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
-		if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
+		if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) {
 			fallbackOpt := opt
 			fallbackOpt.EnablePresolve = false
 			if fallbackOpt.MaxIter > 0 {
 				rem := fallbackOpt.MaxIter - res.Iterations
 				if rem <= 0 {
-					res.Values = nil
-					res.Objective = 0
-					res.Status = StatusIterationLimit
-					res.Backend = BackendGo
-					return res, nil
+					return Result{
+						modelID:    p.modelID,
+						Backend:    BackendGo,
+						Status:     StatusIterationLimit,
+						Nodes:      res.Nodes,
+						Iterations: res.Iterations,
+						SolveTime:  time.Since(start),
+					}, nil
 				}
 				fallbackOpt.MaxIter = rem
+			}
+			if fallbackOpt.MaxNodes > 0 {
+				remNodes := fallbackOpt.MaxNodes - res.Nodes
+				if remNodes <= 0 {
+					return Result{
+						modelID:    p.modelID,
+						Backend:    BackendGo,
+						Status:     StatusNodeLimit,
+						Nodes:      res.Nodes,
+						Iterations: res.Iterations,
+						SolveTime:  time.Since(start),
+					}, nil
+				}
+				fallbackOpt.MaxNodes = remNodes
 			}
 			fbRes := solveBranchAndCutWithDone(p, fallbackOpt, start, deadline, done)
 			if ctx != nil {
@@ -363,6 +416,7 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 					return Result{}, err
 				}
 			}
+			fbRes.Nodes += res.Nodes
 			fbRes.Iterations += res.Iterations
 			fbRes.Backend = BackendGo
 			return fbRes, nil

@@ -357,3 +357,282 @@ func TestLUSingletonDropThresholdAndInvalidGuard(t *testing.T) {
 		t.Fatal("Reset LUFactorization must report NeedsRefactor() == true")
 	}
 }
+
+// TestRuizScaledCutsCrashRecoveryAndInternalGuards exercises Ruiz-scaled dynamic cuts
+// (pow2EquilibrateExp, rowScaleOf, unscaledBasicVal, unscaledTabEntry, snapshot/restore,
+// PurgeSlackCuts), pre-equilibration overflow protection, crash basis recovery helpers,
+// MIR/finalizeCut non-finite guards, and branch selection invariants.
+func TestRuizScaledCutsCrashRecoveryAndInternalGuards(t *testing.T) {
+	// 1. Ruiz-scaled LP with dynamic cut insertion, snapshot/restore, and slack cut purging.
+	m := NewModel("ruiz_cuts", Minimize)
+	x := m.AddContVar("x", 0, 100)
+	y := m.AddContVar("y", 0, 100)
+	m.SetObjective(NewExpr(x.T(1), y.T(2)))
+	m.AddConstraint("r0", NewExpr(x.T(1e-8), y.T(1e-8)).Ge(3e-8))
+	m.AddConstraint("r1", NewExpr(x.T(2e4), y.T(1e4)).Ge(4e4))
+	p := m.Compile()
+	s := NewLPSolver(p, nil)
+	defer s.Close()
+	if !s.scaled {
+		t.Fatal("expected Ruiz scaling to activate on wide-scale LP")
+	}
+	// PurgeSlackCuts before Solve() must be a safe no-op.
+	if purged := s.PurgeSlackCuts(1e-4); purged != 0 {
+		t.Fatalf("PurgeSlackCuts before Solve = %d, want 0", purged)
+	}
+	var nilSolver *LPSolver
+	if purged := nilSolver.PurgeSlackCuts(1e-4); purged != 0 {
+		t.Fatalf("nil PurgeSlackCuts = %d, want 0", purged)
+	}
+
+	r0 := s.Solve()
+	if r0.Status != StatusOptimal || math.Abs(r0.ObjectiveMin-3.0) > 1e-6 {
+		t.Fatalf("Ruiz base solve: status=%v obj=%v, want Optimal 3", r0.Status, r0.ObjectiveMin)
+	}
+	if rs := s.rowScaleOf(0); rs <= 0 || math.IsNaN(rs) || math.IsInf(rs, 0) {
+		t.Fatalf("invalid rowScaleOf(0) = %v", rs)
+	}
+	_ = s.unscaledBasicVal(0)
+	_ = s.unscaledTabEntry(s.ws.basis[0], 0)
+
+	snap := s.snapshot()
+	// Active cut: x <= 2 -> optimum shifts to x=2, y=1, obj=4.
+	s.AddCut([]int{0}, []float64{1.0}, 2.0)
+	// Inactive slack cut: x + y <= 100.
+	s.AddCut([]int{0, 1}, []float64{1.0, 1.0}, 100.0)
+	if len(s.extraRows) != 2 {
+		t.Fatalf("expected 2 extraRows, got %d", len(s.extraRows))
+	}
+	r1 := s.Solve()
+	if r1.Status != StatusOptimal || math.Abs(r1.ObjectiveMin-4.0) > 1e-6 {
+		t.Fatalf("Ruiz cut solve: status=%v obj=%v, want Optimal 4", r1.Status, r1.ObjectiveMin)
+	}
+	if rsCut := s.rowScaleOf(p.numConstraints); rsCut <= 0 {
+		t.Fatalf("invalid extra rowScaleOf = %v", rsCut)
+	}
+	if purged := s.PurgeSlackCuts(1e-4); purged < 1 {
+		t.Fatalf("expected inactive cut purge >= 1, got %d", purged)
+	}
+	s.restore(snap)
+	if len(s.extraRows) != 0 {
+		t.Fatalf("restore left %d extraRows", len(s.extraRows))
+	}
+	r2 := s.Solve()
+	if r2.Status != StatusOptimal || math.Abs(r2.ObjectiveMin-3.0) > 1e-6 {
+		t.Fatalf("after restore: status=%v obj=%v, want Optimal 3", r2.Status, r2.ObjectiveMin)
+	}
+
+	// Ruiz AddCut with huge coefficient that would overflow naive vals[k] * colScale[c]
+	// must use Ldexp safely without producing NaN/Inf.
+	mBig := NewModel("ruiz_cut_ldexp", Minimize)
+	bx := mBig.AddContVar("bx", 0, 10)
+	by := mBig.AddContVar("by", 0, 10)
+	mBig.SetObjective(NewExpr(bx.T(1), by.T(1)))
+	mBig.AddConstraint("tiny", NewExpr(bx.T(1e-8), by.T(1e-8)).Ge(1e-8))
+	mBig.AddConstraint("big", NewExpr(bx.T(1e4), by.T(1e-8)).Ge(1e4))
+	sBig := NewLPSolver(mBig.Compile(), nil)
+	defer sBig.Close()
+	if rB0 := sBig.Solve(); rB0.Status != StatusOptimal {
+		t.Fatalf("ruiz_cut_ldexp base: %v", rB0.Status)
+	}
+	sBig.AddCut([]int{1}, []float64{1e305}, 1e306)
+	if rB1 := sBig.Solve(); rB1.Status != StatusOptimal || math.IsNaN(rB1.ObjectiveMin) {
+		t.Fatalf("ruiz_cut_ldexp after huge cut: status=%v obj=%v", rB1.Status, rB1.ObjectiveMin)
+	}
+
+	// CopyRootBasisFrom rejects mismatched problem dimensions safely.
+	mOther := NewModel("other_dim", Minimize)
+	ox := mOther.AddContVar("ox", 0, 5)
+	mOther.SetObjective(VarExpr(ox))
+	mOther.AddConstraint("c0", VarExpr(ox).Ge(1))
+	sOther := NewLPSolver(mOther.Compile(), nil)
+	defer sOther.Close()
+	sOther.CopyRootBasisFrom(s)
+	if sOther.dualValid {
+		t.Fatal("CopyRootBasisFrom copied root basis across mismatched dimensions")
+	}
+
+	// 2. Crash basis recovery helpers (reinitCrashKeepingBounds and reinitSmallestMagnitudeCrash).
+	s.reinitCrashKeepingBounds()
+	if rCrash := s.Solve(); rCrash.Status != StatusOptimal || math.Abs(rCrash.ObjectiveMin-3.0) > 1e-6 {
+		t.Fatalf("after reinitCrashKeepingBounds: status=%v obj=%v", rCrash.Status, rCrash.ObjectiveMin)
+	}
+	s.reinitSmallestMagnitudeCrash()
+	if rSmall := s.Solve(); rSmall.Status != StatusOptimal || math.Abs(rSmall.ObjectiveMin-3.0) > 1e-6 {
+		t.Fatalf("after reinitSmallestMagnitudeCrash: status=%v obj=%v", rSmall.Status, rSmall.ObjectiveMin)
+	}
+
+	// 3. budgetBound helper.
+	eng := &babEngine{defaultLPIter: 1000}
+	s.MaxIter = 500
+	if !eng.budgetBound(s) {
+		t.Fatal("expected budgetBound == true when MaxIter < defaultLPIter")
+	}
+	s.MaxIter = 1000
+	if eng.budgetBound(s) {
+		t.Fatal("expected budgetBound == false when MaxIter == defaultLPIter")
+	}
+
+	// 4. M9: separateRowMIRCuts overflow and finalizeCut non-finite guards.
+	mMIR := NewModel("mir_overflow", Minimize)
+	mx := mMIR.AddIntVar("mx", 0, 10)
+	my := mMIR.AddContVar("my", 0, 10)
+	mMIR.SetObjective(NewExpr(mx.T(1), my.T(1)))
+	mMIR.AddConstraint("r0", NewExpr(mx.T(1e-200), my.T(1)).Le(-1e200))
+	pMIR := mMIR.Compile()
+	for _, c := range separateRowMIRCuts(pMIR, []float64{0.5, 0.0}) {
+		if math.IsNaN(c.RHS) || math.IsInf(c.RHS, 0) || math.IsNaN(c.Efficacy) || math.IsInf(c.Efficacy, 0) {
+			t.Fatalf("separateRowMIRCuts emitted non-finite cut: %+v", c)
+		}
+	}
+	if _, ok := finalizeCut(pMIR, []float64{1.0, 0.0}, math.NaN(), []float64{0.5, 0.0}); ok {
+		t.Fatal("finalizeCut accepted NaN rhs")
+	}
+	if _, ok := finalizeCut(pMIR, []float64{1.0, 0.0}, math.Inf(-1), []float64{0.5, 0.0}); ok {
+		t.Fatal("finalizeCut accepted -Inf rhs")
+	}
+	if cLarge, ok := finalizeCut(pMIR, []float64{1e200, 1e200}, 0.0, []float64{1.0, 1.0}); !ok || math.IsNaN(cLarge.RHS) || math.IsInf(cLarge.RHS, 0) {
+		t.Fatalf("finalizeCut failed scaled norm on [1e200, 1e200]: ok=%v cut=%+v", ok, cLarge)
+	}
+	if _, ok := finalizeCut(pMIR, []float64{1.5e308, 1.5e308}, 0.0, []float64{1.0, 1.0}); ok {
+		t.Fatal("finalizeCut accepted norm-overflowing [1.5e308, 1.5e308] cut")
+	}
+
+	// 5. M6: selectBranchVar equal-score sorting, out-of-bounds v clamping, and createChildNodes strict tightening.
+	mBr := NewModel("branch_select", Minimize)
+	bVars := make([]Var, 20)
+	for j := range bVars {
+		bVars[j] = mBr.AddIntVar(fmt.Sprintf("x%d", j), 0, 1)
+	}
+	mBr.SetObjective(VarExpr(bVars[0]))
+	pBr := mBr.Compile()
+	lpBr := NewLPSolver(pBr, nil)
+	defer lpBr.Close()
+	primal := make([]float64, 20)
+	curLB := make([]float64, 20)
+	curUB := make([]float64, 20)
+	for j := range 20 {
+		primal[j] = 0.5
+		curLB[j] = 0
+		curUB[j] = 1
+	}
+	// Fix col 0 to [1, 1] and give col 1 an out-of-bounds value -1e-5; equal scores on remaining cols.
+	curLB[0] = 1
+	curUB[0] = 1
+	primal[0] = 0.5
+	primal[1] = -1e-5
+	pCosts := make([]pseudoCost, 20)
+	iters := 0
+	brCol, brVal := selectBranchVar(pBr, lpBr, LPResult{Status: StatusOptimal, Primal: primal}, curLB, curUB, pCosts, 1, &iters, func() int { return 100 })
+	if brCol <= 0 || brVal <= curLB[brCol] || brVal >= curUB[brCol] {
+		t.Fatalf("selectBranchVar returned invalid (%d, %v) for bounds [%v, %v]", brCol, brVal, curLB[max(0, brCol)], curUB[max(0, brCol)])
+	}
+	// Near-integral selector must clamp out-of-bounds value strictly inside (curLB, curUB).
+	nearPrimal := make([]float64, 20)
+	nearPrimal[1] = 1.0 + 5e-6
+	nearCol, nearVal := selectNearIntegralBranchVar(pBr, nearPrimal, curLB, curUB)
+	if nearCol != 1 || nearVal <= 0.0 || nearVal >= 1.0 {
+		t.Fatalf("selectNearIntegralBranchVar = (%d, %v), want col=1 strictly in (0, 1)", nearCol, nearVal)
+	}
+	// createChildNodes must strictly tighten both children even when brVal is at a bound.
+	cnt := 0
+	downN, upN := createChildNodes(0, 1, nil, 1, 1.0, 0.0, 1.0, pseudoCost{}, &cnt)
+	if downN.delta.ub >= 1.0 || upN.delta.lb <= 0.0 {
+		t.Fatalf("createChildNodes failed strict tightening: down.ub=%v up.lb=%v", downN.delta.ub, upN.delta.lb)
+	}
+
+	// 6. MAJ-3: Ruiz-scaled SetStructuralBounds and AddCut with 1e305 bounds/RHS unscale cleanly
+	// instead of overflowing colExp/rowExp into StatusUndefined or rejecting finite cuts.
+	mUnscale := NewModel("ruiz_unscale_1e305", Minimize)
+	ux := mUnscale.AddContVar("ux", 0, 10)
+	uy := mUnscale.AddContVar("uy", 0, 10)
+	mUnscale.SetObjective(NewExpr(ux.T(1), uy.T(2)))
+	mUnscale.AddConstraint("r0", NewExpr(ux.T(1e-8), uy.T(1e-8)).Ge(2e-8))
+	mUnscale.AddConstraint("r1", NewExpr(ux.T(1e4), uy.T(1e-8)).Ge(1e4))
+	sUnscale := NewLPSolver(mUnscale.Compile(), nil)
+	defer sUnscale.Close()
+	if !sUnscale.scaled {
+		t.Fatal("expected initial Ruiz scaling on ruiz_unscale_1e305")
+	}
+	if rInit := sUnscale.Solve(); rInit.Status != StatusOptimal || math.Abs(rInit.ObjectiveMin-2.0) > 1e-5 {
+		t.Fatalf("ruiz_unscale_1e305 initial solve: status=%v obj=%v, want Optimal 2", rInit.Status, rInit.ObjectiveMin)
+	}
+	snapScaled := sUnscale.snapshot()
+	sUnscale.AddCut([]int{0}, []float64{1.0}, 1e305)
+	if rCut := sUnscale.Solve(); rCut.Status != StatusOptimal || math.Abs(rCut.ObjectiveMin-2.0) > 1e-5 {
+		t.Fatalf("ruiz_unscale_1e305 after 1e305 RHS cut: status=%v obj=%v, want Optimal 2", rCut.Status, rCut.ObjectiveMin)
+	}
+	sUnscale.SetStructuralBounds([]float64{0, 0}, []float64{10, 1e305})
+	if rBnd := sUnscale.Solve(); rBnd.Status != StatusOptimal || math.Abs(rBnd.ObjectiveMin-2.0) > 1e-5 {
+		t.Fatalf("ruiz_unscale_1e305 after 1e305 UB: status=%v obj=%v, want Optimal 2", rBnd.Status, rBnd.ObjectiveMin)
+	}
+	sUnscale.restore(snapScaled)
+	if !sUnscale.scaled && (math.Abs(sUnscale.ws.x[0]-1.0) > 1e-4 || math.Abs(sUnscale.ws.x[1]-1.0) > 1e-4) {
+		t.Fatalf("ruiz_unscale_1e305 restore left scaled xb in unscaled ws.x: %v, want [1 1]", sUnscale.ws.x[:2])
+	}
+	if rRest := sUnscale.Solve(); rRest.Status != StatusOptimal || math.Abs(rRest.ObjectiveMin-2.0) > 1e-5 {
+		t.Fatalf("ruiz_unscale_1e305 after restore across unscale: status=%v obj=%v, want Optimal 2", rRest.Status, rRest.ObjectiveMin)
+	}
+
+	// 7. finalizeCut power-of-two scaling preserves exact zero-slack witness feasibility across integer ratios.
+	mNorm := NewModel("finalize_cut_pow2", Minimize)
+	_ = mNorm.AddBinaryVar("x0")
+	_ = mNorm.AddContVar("x1", 0, 1e18)
+	_ = mNorm.AddContVar("x2", -1e18, 0)
+	pNorm := mNorm.Compile()
+	scale52 := math.Ldexp(1.0, 52)
+	for a := 1; a <= 15; a++ {
+		for b := a + 1; b <= 15; b++ {
+			cut, ok := finalizeCut(pNorm, []float64{0, float64(a), float64(b)}, 0.0, []float64{0, 1.0, 0})
+			if !ok {
+				continue
+			}
+			pt := []float64{1.0, float64(b) * scale52, -float64(a) * scale52}
+			act := 0.0
+			for k, c := range cut.ColIdx {
+				act += cut.Val[k] * pt[c]
+			}
+			if act > cut.RHS+1e-7 {
+				t.Fatalf("finalizeCut(%d,%d) violated exact witness: act=%.9f > rhs=%.9f", a, b, act, cut.RHS)
+			}
+		}
+	}
+
+	// 8. tightenRowLeVerifyBounds rounds (numVal + numErr) / at outward across 1.0 power-of-two boundary.
+	lbBnd := []float64{1.0 - 3.0*math.Ldexp(1.0, -53), 0, 0}
+	ubBnd := []float64{math.Inf(1), 1, 1}
+	at := 1.0 + math.Ldexp(1.0, -51)
+	if tightenRowLeVerifyBounds(
+		[]int{0, 1, 2},
+		[]float64{at, -1.0, -math.Ldexp(1.0, -54)},
+		0.0,
+		1.0,
+		lbBnd,
+		ubBnd,
+	) {
+		t.Fatal("tightenRowLeVerifyBounds falsely declared infeasibility across 1.0 ULP boundary")
+	}
+
+	// 9. separateRowMIRCuts downward quotient rounding keeps every emitted cut valid at exact integer witnesses.
+	mirDelta := 5.0 + math.Ldexp(1.0, -50)
+	mirA1 := 15.0 + math.Ldexp(1.0, -49)
+	mirA2 := -(10.0 + math.Ldexp(1.0, -49))
+	mirU1 := math.Ldexp(1.0, 49)
+	mirU2 := 3.0 * math.Ldexp(1.0, 48)
+	mMIRCuts := NewModel("mir_direct_soundness", Maximize)
+	mx0 := mMIRCuts.AddBinaryVar("x0")
+	mx1 := mMIRCuts.AddIntVar("x1", 0, mirU1)
+	mx2 := mMIRCuts.AddIntVar("x2", 0, mirU2)
+	mMIRCuts.AddConstraint("r", NewExpr(mx0.T(mirDelta), mx1.T(mirA1), mx2.T(mirA2)).Le(4.9))
+	pMIRCuts := mMIRCuts.Compile()
+	mirWit := []float64{1.0, mirU1, mirU2}
+	for _, cut := range separateRowMIRCuts(pMIRCuts, []float64{4.9 / mirDelta, 0, 0}) {
+		act := 0.0
+		for k, c := range cut.ColIdx {
+			act += cut.Val[k] * mirWit[c]
+		}
+		if act > cut.RHS+1e-7 {
+			t.Fatalf("separateRowMIRCuts emitted cut violating exact witness: act=%.9f > rhs=%.9f", act, cut.RHS)
+		}
+	}
+}

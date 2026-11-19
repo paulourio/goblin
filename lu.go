@@ -12,6 +12,7 @@ const (
 	minEtaIdxCap   = 16384
 	etaIdxRowMult  = 24
 	luDropTol      = 1e-13
+	luCancelRelTol = 1e-15
 	luSolveDropTol = 1e-13
 	maxMeritInit   = 1<<30 - 1
 )
@@ -164,7 +165,7 @@ func (f *LUFactorization) Factorize(m int, fillCol func(col int, dst []float64))
 		clear(colBuf)
 		fillCol(col, colBuf)
 		for r, v := range colBuf {
-			if math.Abs(v) > luDropTol {
+			if v != 0 {
 				rows = append(rows, r)
 				vals = append(vals, v)
 			}
@@ -207,7 +208,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 	for col := range m {
 		deg := 0
 		for p := bColPtr[col]; p < bColPtr[col+1]; p++ {
-			if math.Abs(bVal[p]) > luDropTol {
+			if bVal[p] != 0 {
 				rowDeg[bRowIdx[p]]++
 				deg++
 			}
@@ -233,7 +234,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 	for col := range m {
 		for p := bColPtr[col]; p < bColPtr[col+1]; p++ {
 			v := bVal[p]
-			if math.Abs(v) > luDropTol {
+			if v != 0 {
 				r := bRowIdx[p]
 				pos := workInt[r]
 				bColIdx[pos] = col
@@ -260,7 +261,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		pivVal := 0.0
 		for p := f.bColPtr[col]; p < f.bColPtr[col+1]; p++ {
 			r := f.bRowIdx[p]
-			if !f.rowDone[r] && math.Abs(f.bVal[p]) > luDropTol {
+			if !f.rowDone[r] && f.bVal[p] != 0 {
 				pivRow = r
 				pivVal = f.bVal[p]
 				break
@@ -336,7 +337,7 @@ func (f *LUFactorization) FactorizeSparse(m int, appendCol func(col int, rows []
 		k++
 		for p := f.bColPtr[pivCol]; p < f.bColPtr[pivCol+1]; p++ {
 			r2 := f.bRowIdx[p]
-			if !f.rowDone[r2] && math.Abs(f.bVal[p]) > luDropTol {
+			if !f.rowDone[r2] && f.bVal[p] != 0 {
 				f.rowDeg[r2]--
 				if f.rowDeg[r2] == 1 {
 					q = append(q, r2)
@@ -434,7 +435,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 		c := f.nucCols[ncIdx]
 		for p := f.bColPtr[c]; p < f.bColPtr[c+1]; p++ {
 			v := f.bVal[p]
-			if math.Abs(v) <= luDropTol {
+			if v == 0 {
 				continue
 			}
 			r := f.bRowIdx[p]
@@ -626,7 +627,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 		for idx, r := range pivCRows {
 			aik := pivCVals[idx]
 			removeEntry(rCols, rVals, r, pivNC)
-			if math.Abs(aik) <= luDropTol {
+			if aik == 0 {
 				if len(rCols[r]) == 1 {
 					rowSingQ = append(rowSingQ, r)
 				}
@@ -653,10 +654,14 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 				delta := -mult * pivRVals[p]
 				pos := workPos[c]
 				if pos >= 0 {
-					newV := rv[pos] + delta
+					oldV := rv[pos]
+					newV := oldV + delta
+					if math.Abs(newV) <= luCancelRelTol*max(math.Abs(oldV), math.Abs(delta)) {
+						newV = 0
+					}
 					rv[pos] = newV
 					updateEntry(cRows[c], cVals[c], r, newV)
-				} else if math.Abs(delta) > luDropTol {
+				} else if delta != 0 {
 					workPos[c] = len(rc)
 					rc = append(rc, c)
 					rv = append(rv, delta)
@@ -669,7 +674,7 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 			for p, c := range rc {
 				workPos[c] = -1
 				v := rv[p]
-				if math.Abs(v) > luDropTol {
+				if v != 0 {
 					rc[w] = c
 					rv[w] = v
 					w++
@@ -751,7 +756,7 @@ func (f *LUFactorization) assembleFactors(m, numColSing, nucStart, nNuc int) {
 		invD := uInvDiag[k]
 		for p := bColPtr[c]; p < bColPtr[c+1]; p++ {
 			v := bVal[p]
-			if math.Abs(v) <= luDropTol {
+			if v == 0 {
 				continue
 			}
 			i := invPerm[bRowIdx[p]]
@@ -994,6 +999,127 @@ func (f *LUFactorization) FTRAN(rhs []float64) {
 		}
 		if xp <= luDropTol && xp >= -luDropTol {
 			rhs[pr] = 0
+			continue
+		}
+		xp *= eta.pivotInv
+		rhs[pr] = xp
+		idxs := eta.idx
+		vals := eta.val[:len(idxs)]
+		for k, idx := range idxs {
+			if uint(idx) < uint(m) {
+				rhs[idx] -= vals[k] * xp
+			}
+		}
+	}
+}
+
+// FTRANExact solves the forward basis system B * x = rhs in place without intermediate
+// luDropTol truncation so sub-tolerance right-hand-side entries are preserved across U and etas.
+func (f *LUFactorization) FTRANExact(rhs []float64) {
+	m := f.m
+	if !f.valid || m <= 0 || len(rhs) < m || len(f.work) < m || len(f.perm) < m || len(f.colPerm) < m || len(f.uInvDiag) < m || len(f.lColPtr) <= m || len(f.uColPtr) <= m {
+		return
+	}
+	rhs = rhs[:m]
+	w := f.work[:m]
+	perm := f.perm[:m]
+	firstNZ := m
+	lastNZ := -1
+	for i, p := range perm {
+		if uint(p) >= uint(m) {
+			continue
+		}
+		v := rhs[p]
+		if v != 0 {
+			rhs[p] = 0
+			w[i] = v
+			if lastNZ < 0 {
+				firstNZ = i
+			}
+			lastNZ = i
+		}
+	}
+
+	if lastNZ >= 0 {
+		lColPtr := f.lColPtr[:m+1]
+		lRowIdx := f.lRowIdx
+		lColVal := f.lColVal
+		uInvDiag := f.uInvDiag[:m]
+		uColPtr := f.uColPtr[:m+1]
+		uRowIdx := f.uRowIdx
+		uColVal := f.uColVal
+
+		startK := max(f.numColSing, firstNZ)
+		for k := startK; k <= lastNZ && uint(k) < uint(m); k++ {
+			wk := w[k]
+			if wk == 0 {
+				continue
+			}
+			start, end := lColPtr[k], lColPtr[k+1]
+			rows := lRowIdx[start:end]
+			vals := lColVal[start:end]
+			if len(rows) > 0 {
+				vals = vals[:len(rows)]
+				for p, r := range rows {
+					if uint(r) < uint(m) {
+						w[r] -= vals[p] * wk
+						if r > lastNZ {
+							lastNZ = r
+						}
+					}
+				}
+			}
+		}
+
+		minNZ := firstNZ
+		for j := lastNZ; j >= minNZ; j-- {
+			if uint(j) >= uint(m) {
+				continue
+			}
+			wj := w[j]
+			if wj == 0 {
+				continue
+			}
+			wj *= uInvDiag[j]
+			w[j] = wj
+			start, end := uColPtr[j], uColPtr[j+1]
+			rows := uRowIdx[start:end]
+			vals := uColVal[start:end]
+			if len(rows) > 0 {
+				vals = vals[:len(rows)]
+				for p, r := range rows {
+					if uint(r) < uint(m) {
+						w[r] -= vals[p] * wj
+						if r < minNZ {
+							minNZ = r
+						}
+					}
+				}
+			}
+		}
+
+		colPerm := f.colPerm[:lastNZ+1]
+		wOut := w[:lastNZ+1]
+		for k := minNZ; k <= lastNZ; k++ {
+			if wk := wOut[k]; wk != 0 {
+				wOut[k] = 0
+				c := colPerm[k]
+				if uint(c) < uint(m) {
+					rhs[c] = wk
+				}
+			}
+		}
+	}
+
+	etas := f.etas
+	for e := range etas {
+		eta := &etas[e]
+		pr := eta.pivotRow
+		if uint(pr) >= uint(m) {
+			continue
+		}
+		xp := rhs[pr]
+		if xp == 0 {
 			continue
 		}
 		xp *= eta.pivotInv
