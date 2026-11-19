@@ -169,6 +169,11 @@ func run() int {
 	jsonOut := flag.String("json", "", "optional path to write structured JSON report")
 	flag.Parse()
 
+	if *topN < 0 {
+		fmt.Fprintf(os.Stderr, "-top must be non-negative (got %d)\n", *topN)
+		return exitCodeBadArgument
+	}
+
 	suites, err := resolveSuites(*suiteFlag, *pkgFlag, *benchFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -683,18 +688,35 @@ func symbolTail(shortSym string) string {
 	return shortSym
 }
 
+func pprofPackageDir(pprofSym string) string {
+	const modPrefix = "github.com/paulourio/goblin"
+	_, rest, ok := strings.Cut(pprofSym, modPrefix)
+	if !ok {
+		return ""
+	}
+	if strings.HasPrefix(rest, ".") {
+		return "."
+	}
+	if rest, ok = strings.CutPrefix(rest, "/"); ok {
+		pkgPath, _, found := strings.Cut(rest, ".")
+		if found {
+			return filepath.Clean(pkgPath)
+		}
+	}
+	return ""
+}
+
 func matchFuncSpan(spans []funcSpan, pprofSym, shortSym string) *funcSpan {
+	wantDir := pprofPackageDir(pprofSym)
 	for i := range spans {
 		s := &spans[i]
-		if s.FullName == shortSym || s.ShortName == shortSym {
-			if strings.Contains(pprofSym, "/assign.") && !strings.HasPrefix(s.File, "assign/") {
-				continue
-			}
-			if strings.Contains(pprofSym, "/internal/simd.") && !strings.HasPrefix(s.File, "internal/simd/") {
-				continue
-			}
-			return s
+		if s.FullName != shortSym && s.ShortName != shortSym {
+			continue
 		}
+		if wantDir != "" && filepath.Dir(s.File) != wantDir {
+			continue
+		}
+		return s
 	}
 	return nil
 }

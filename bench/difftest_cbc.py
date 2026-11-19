@@ -295,22 +295,44 @@ def better_or_equal(a: float, b: float, sense: int) -> bool:
     return a <= b + tol if sense == pulp.LpMinimize else a >= b - tol
 
 
+def dual_bound_valid(bound: float | None, obj: float, sense: int) -> bool:
+    if bound is None:
+        return True
+    tol = OBJ_RTOL * max(1.0, abs(obj))
+    return bound <= obj + tol if sense == pulp.LpMinimize else bound >= obj - tol
+
+
 def classify(ref: dict[str, Any], got: dict[str, Any]) -> str:
     """Return 'ok', 'cbc-defect', or a summary of a goblin failure."""
     cs, gs = ref["status"], got["status"]
+    sense = ref["doc"]["parameters"]["sense"]
     if gs == "Optimal" and cs == "Optimal":
-        if abs(got["obj"] - ref["obj"]) <= OBJ_RTOL * max(1.0, abs(ref["obj"])):
-            if max(got["bviol"], got["rviol"], got["iviol"]) <= 1e-5:
+        got_obj = got["obj"]
+        if got_obj is None:
+            return "goblin returned non-finite Optimal objective"
+        if not dual_bound_valid(got.get("bound"), got_obj, sense):
+            return f"goblin invalid dual bound {got.get('bound')} vs obj {got_obj:.6g}"
+        if not dual_bound_valid(got.get("bound"), ref["obj"], sense):
+            return f"goblin dual bound {got.get('bound')} cuts off CBC obj {ref['obj']:.6g}"
+        if abs(got_obj - ref["obj"]) <= OBJ_RTOL * max(1.0, abs(ref["obj"])):
+            viols = [got.get("bviol"), got.get("rviol"), got.get("iviol")]
+            if any(v is None for v in viols):
+                return "goblin reported non-finite feasibility violation"
+            if max(float(v) for v in viols if v is not None) <= 1e-5:
                 return "ok"
             return f"goblin solution violates the model (b={got['bviol']:.1e} r={got['rviol']:.1e})"
     elif gs == cs:
         return "ok"
     if gs != "Optimal":
         return f"status goblin={gs} cbc={cs}"
+    got_obj = got["obj"]
+    if got_obj is None:
+        return "goblin returned non-finite Optimal objective"
     feasible, obj = feasible_in_pulp(ref["doc"], got["x"])
     if not feasible:
-        return f"goblin Optimal {got['obj']:.6g} is infeasible in PuLP (cbc={cs} {ref['obj']})"
-    sense = ref["doc"]["parameters"]["sense"]
+        return f"goblin Optimal {got_obj:.6g} is infeasible in PuLP (cbc={cs} {ref['obj']})"
+    if not dual_bound_valid(got.get("bound"), obj, sense):
+        return f"goblin invalid dual bound {got.get('bound')} vs obj {obj:.6g}"
     answers = [(cs, ref["obj"])]
     answers.append(solve_cbc(ref["doc"], ["preprocess off", "presolve off"]))
     for status, cbc_obj in answers:

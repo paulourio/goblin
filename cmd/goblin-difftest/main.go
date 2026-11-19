@@ -27,15 +27,22 @@ import (
 type result struct {
 	ID     string             `json:"id"`
 	Status string             `json:"status"`
-	Obj    float64            `json:"obj"`
-	Bound  float64            `json:"bound"`
+	Obj    *float64           `json:"obj"`
+	Bound  *float64           `json:"bound"`
 	Nodes  int                `json:"nodes"`
 	MS     float64            `json:"ms"`
-	BViol  float64            `json:"bviol"`
-	RViol  float64            `json:"rviol"`
-	IViol  float64            `json:"iviol"`
+	BViol  *float64           `json:"bviol"`
+	RViol  *float64           `json:"rviol"`
+	IViol  *float64           `json:"iviol"`
 	X      map[string]float64 `json:"x,omitempty"`
 	Err    string             `json:"err,omitempty"`
+}
+
+func finitePtr(v float64) *float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
+	return &v
 }
 
 const (
@@ -51,12 +58,12 @@ func main() {
 }
 
 type assignResult struct {
-	ID     string  `json:"id"`
-	Status string  `json:"status"`
-	Obj    float64 `json:"obj"`
-	RowInd []int   `json:"row_ind,omitempty"`
-	ColInd []int   `json:"col_ind,omitempty"`
-	Err    string  `json:"err,omitempty"`
+	ID     string   `json:"id"`
+	Status string   `json:"status"`
+	Obj    *float64 `json:"obj"`
+	RowInd []int    `json:"row_ind,omitempty"`
+	ColInd []int    `json:"col_ind,omitempty"`
+	Err    string   `json:"err,omitempty"`
 }
 
 func run() int {
@@ -128,14 +135,18 @@ func run() int {
 		gb.WithCuts(!*noCuts),
 		gb.WithHeuristics(!*noHeur),
 	}
-	if strings.EqualFold(*backendFlag, "cbc") {
+	switch strings.ToLower(strings.TrimSpace(*backendFlag)) {
+	case "go", "":
+		opts = append(opts, gb.WithPureGo())
+	case "cbc":
 		if !gb.CBCAvailable() {
 			fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built without -tags cbc (or with CGO_ENABLED=0)")
 			return 1
 		}
 		opts = append(opts, gb.WithCBC())
-	} else {
-		opts = append(opts, gb.WithPureGo())
+	default:
+		fmt.Fprintf(os.Stderr, "unknown -backend %q (expected 'go' or 'cbc')\n", *backendFlag)
+		return exitCodeUsage
 	}
 	if *noSIMD {
 		opts = append(opts, gb.WithoutSIMD())
@@ -168,7 +179,7 @@ func run() int {
 }
 
 func solve(id string, raw jsontext.Value, opts ...gb.Option) result {
-	r := result{ID: id, BViol: -1, RViol: -1, IViol: -1}
+	r := result{ID: id, BViol: finitePtr(-1), RViol: finitePtr(-1), IViol: finitePtr(-1)}
 	doc, err := format.ParsePuLPJSON(raw)
 	if err != nil {
 		r.Err = err.Error()
@@ -193,14 +204,20 @@ func solve(id string, raw jsontext.Value, opts ...gb.Option) result {
 		return r
 	}
 	r.Status = res.Status.String()
-	r.Obj = res.Objective
-	r.Bound = res.BestBound
+	r.Obj = finitePtr(res.Objective)
+	r.Bound = finitePtr(res.BestBound)
 	r.Nodes = res.Nodes
 	if nVars := p.NumVars(); len(res.Values) == nVars {
-		r.BViol, r.RViol, r.IViol = p.MaxViolation(res.Values, p.IsMIP())
+		bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
+		r.BViol = finitePtr(bV)
+		r.RViol = finitePtr(rV)
+		r.IViol = finitePtr(iV)
 		r.X = make(map[string]float64, nVars)
 		for j := range nVars {
-			r.X[p.VarName(j)] = res.Values[j]
+			v := res.Values[j]
+			if !math.IsNaN(v) && !math.IsInf(v, 0) {
+				r.X[p.VarName(j)] = v
+			}
 		}
 	}
 	return r
@@ -239,7 +256,7 @@ func solveAssign(id string, rows, cols, senseInt int, rawCost []any, opts ...ass
 	return assignResult{
 		ID:     id,
 		Status: "Optimal",
-		Obj:    res.Objective,
+		Obj:    finitePtr(res.Objective),
 		RowInd: res.RowInd,
 		ColInd: res.ColInd,
 	}

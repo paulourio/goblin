@@ -425,19 +425,23 @@ func relDiff(a, b float64) float64 { return math.Abs(a-b) / max(1.0, math.Abs(b)
 
 // provenance summarizes the code version and host kernel that produced all benchmark telemetry.
 type provenance struct {
-	commit       string
-	dirty        bool
-	goVersion    string
-	fingerprint  string
-	unameRelease string
-	affinity     map[string]bool
+	commit         string
+	dirty          bool
+	goVersion      string
+	fingerprint    string
+	unameRelease   string
+	affinity       map[string]bool
+	goblinAffinity map[string]bool
 }
 
 // telemetryProvenance requires every Python, SciPy, scalar, SIMD, CBC, and LSAP entry to carry
 // the same git commit, source fingerprint, and host kernel release.
 func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
-	pv := provenance{affinity: map[string]bool{}}
-	checkRec := func(sourceLabel, id, commit, fp, uname, goVer, aff string, dirty bool) error {
+	pv := provenance{
+		affinity:       map[string]bool{},
+		goblinAffinity: map[string]bool{},
+	}
+	checkRec := func(sourceLabel, id, commit, fp, uname, goVer, aff string, dirty, isGoblin bool) error {
 		if commit == "" || fp == "" {
 			return fmt.Errorf("%s entry %q lacks git_commit/source_fingerprint provenance (re-run benchmark suite)", sourceLabel, id)
 		}
@@ -462,17 +466,20 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 		pv.dirty = pv.dirty || dirty
 		if aff != "" {
 			pv.affinity[aff] = true
+			if isGoblin {
+				pv.goblinAffinity[aff] = true
+			}
 		}
 		return nil
 	}
 
 	for id, py := range tb.Python {
-		if err := checkRec("python_baseline", id, py.GitCommit, py.SourceFingerprint, py.UnameRelease, "", py.CPUAffinity, py.GitDirty); err != nil {
+		if err := checkRec("python_baseline", id, py.GitCommit, py.SourceFingerprint, py.UnameRelease, "", py.CPUAffinity, py.GitDirty, false); err != nil {
 			return pv, err
 		}
 	}
 	for id, sp := range tb.SciPyAssign {
-		if err := checkRec("scipy_assign_baseline", id, sp.GitCommit, sp.SourceFingerprint, sp.UnameRelease, "", sp.CPUAffinity, sp.GitDirty); err != nil {
+		if err := checkRec("scipy_assign_baseline", id, sp.GitCommit, sp.SourceFingerprint, sp.UnameRelease, "", sp.CPUAffinity, sp.GitDirty, false); err != nil {
 			return pv, err
 		}
 	}
@@ -492,7 +499,7 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 	}
 	for _, item := range maps {
 		for id, r := range item.m {
-			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.GoVersion, r.CPUAffinity, r.GitDirty); err != nil {
+			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.GoVersion, r.CPUAffinity, r.GitDirty, true); err != nil {
 				return pv, err
 			}
 		}
@@ -505,7 +512,7 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 		{"goblin_assign_simd", tb.AssignSIMD},
 	} {
 		for id, r := range item.m {
-			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.GoVersion, r.CPUAffinity, r.GitDirty); err != nil {
+			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.GoVersion, r.CPUAffinity, r.GitDirty, true); err != nil {
 				return pv, err
 			}
 		}
@@ -1047,7 +1054,7 @@ func renderProvenance(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) 
 	fmt.Fprintf(b, "- **Unified telemetry source**: fingerprint `%s` (%s), `%s`, Linux kernel `%s`; the documentation gate rejects any telemetry file whose commit, fingerprint, or kernel differs.\n",
 		pv.fingerprint, base, pv.goVersion, kernelStr)
 	fmt.Fprintf(b, "- **CPU affinity**: goblin %s; Python + CBC %s; Python + SciPy %s.\n",
-		affinityList(pv.affinity),
+		affinityList(pv.goblinAffinity),
 		affinityList(map[string]bool{anyPy.CPUAffinity: true}),
 		affinityList(map[string]bool{anySciPy.CPUAffinity: true}))
 	fmt.Fprintf(b, "- **Python MILP reference**: PuLP `%s`, `%s` (`%s`, SHA-256 `%s`, `ratioGap=1e-6`, `allowableGap=1e-6`).\n",
@@ -1276,7 +1283,7 @@ func BuildFinalReportMarkdown(tb *TelemetryBundle) (string, error) {
 
 ## 2. Aggregate Workload Tier Summary
 
-Tier 1 micro-models are dominated by Python subprocess spawn overhead, and the planted-gap MAD family is constructed so that root heuristics close the gap at node 1; the bold row isolates solver-dominated Tier 2 and Tier 3 non-planted MILPs across paired trial instances.
+Tier 1 micro-models are dominated by Python subprocess spawn overhead, and the planted-gap MAD family is constructed so that root heuristics close the gap without branching; the bold row isolates solver-dominated Tier 2 and Tier 3 non-planted MILPs across paired trial instances.
 
 <!-- BEGIN GENERATED:TIER_SUMMARY_TABLE -->
 <!-- END GENERATED:TIER_SUMMARY_TABLE -->

@@ -12,7 +12,7 @@ flowchart LR
     B --> C["CompiledProblem (CSR + CSC)"]
     C --> D["Presolve (GCD + Savelsbergh + Orbit Symmetry)"]
     D --> E["LPSolver (Dual / Primal Simplex + LU)"]
-    E --> F["solveBranchAndCut (Cuts + Heuristics + B&B)"]
+    E --> F["solveBranchAndCutWithDone (Cuts + Heuristics + B&B)"]
     F --> G["Result (Primal + Dual + Telemetry)"]
 ```
 
@@ -30,7 +30,7 @@ flowchart LR
 
 ### Dual-Index Sparse Representation (`CompiledProblem`)
 The function [`Model.Compile()`](../compiled.go) produces an immutable [`CompiledProblem`](../compiled.go) whose internal `CSR` and `CSC` slices are unexported so external callers cannot violate matrix or C++ ABI invariants, while read-only accessors (`NumVars`, `NumConstraints`, `NNZ`, `VarBounds`, `VarCategory`, `RowRHS`, `ForEachRowTerm`, `ForEachColTerm`) expose structural inspection:
-- **Row-Major (`CSR`)**: `rowPtr` ($m+1$), `colIdx` ($\text{nnz}$), and `rowVal` ($\text{nnz}$), sorted by ascending column index within each row. Presolve row propagation (`propagateRow`), cutting-plane rounds (`generateCutRound`), and primal residual checks (`MaxViolation`) scan `CSR` slices sequentially.
+- **Row-Major (`CSR`)**: `rowPtr` ($m+1$), `colIdx` ($\text{nnz}$), and `rowVal` ($\text{nnz}$), sorted by ascending column index within each row. Node bound propagation (`propagateBounds` and `propagateRow`), cutting-plane rounds (`generateCutRound`), and primal residual checks (`MaxViolation`) scan `CSR` slices sequentially.
 - **Column-Major (`CSC`)**: `colPtr` ($n+1$), `rowIdx` ($\text{nnz}$), and `colVal` ($\text{nnz}$), sorted by ascending row index within each column, paired with 32-bit `colPtr32` and `rowIdx32` views validated before zero-copy C++ `loadProblem` calls. Simplex column pricing, basis matrix assembly (`factorizeBasis`), and `FTRAN` spike updates scan `CSC` slices sequentially.
 - **Internal Objective Sense**: Every problem is normalized internally to minimize `objMin[j] = sense * objCoeffs[j]`. User-facing objectives and bounds convert back through `ObjectiveFromMin` and `EvaluateObjective`.
 

@@ -68,7 +68,10 @@ def _repo_provenance() -> dict[str, Any]:
             ["git", "rev-parse", "HEAD"], cwd=_GOBLIN_ROOT, text=True, timeout=5
         ).strip()
         st = subprocess.check_output(
-            ["git", "status", "--porcelain"], cwd=_GOBLIN_ROOT, text=True, timeout=5
+            ["git", "status", "--porcelain", "--", ".", ":(exclude)bench/results"],
+            cwd=_GOBLIN_ROOT,
+            text=True,
+            timeout=5,
         ).strip()
         git_dirty = len(st) > 0
     except (OSError, subprocess.SubprocessError):

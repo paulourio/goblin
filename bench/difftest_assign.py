@@ -170,7 +170,10 @@ def main() -> None:
                 fh.write(json.dumps(payload) + "\n")
 
         failures: list[str] = []
-        for mode_name, extra_flags in [("simd", []), ("scalar", ["-no-simd"])]:
+        for mode_name, extra_flags, env_patch in [
+            ("simd", [], {"GOEXPERIMENT": "simd"}),
+            ("scalar", ["-no-simd"], {}),
+        ]:
             cmd = [
                 "go",
                 "run",
@@ -180,8 +183,16 @@ def main() -> None:
                 str(inst_path),
                 *extra_flags,
             ]
+            run_env = {**os.environ, **env_patch}
+            if not env_patch:
+                run_env.pop("GOEXPERIMENT", None)
             proc = subprocess.run(
-                cmd, cwd=_GOBLIN_ROOT, capture_output=True, text=True, check=True
+                cmd,
+                cwd=_GOBLIN_ROOT,
+                env=run_env,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             for line in proc.stdout.splitlines():
                 if not line.strip():
@@ -196,6 +207,11 @@ def main() -> None:
                     continue
                 if got_status == "Optimal":
                     assert ref_obj is not None
+                    if got["obj"] is None:
+                        failures.append(
+                            f"[{mode_name}] {got['id']}: non-finite Optimal obj"
+                        )
+                        continue
                     ok, msg = verify_goblin_solution(
                         inst, got["row_ind"], got["col_ind"], got["obj"]
                     )

@@ -37,10 +37,14 @@ legacy_pkg="g""opt"
 unprefixed_import='"gob'"lin"'(/|")'
 unaliased_root_import='^[[:space:]]*"github\.com/paulourio/gob'"lin"'"'
 unaliased_pkg_qual='gob'"lin"'\.[A-Z]'
-forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${unaliased_root_import}|${unaliased_pkg_qual}|${HOME})"
+forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${unaliased_root_import}|${unaliased_pkg_qual})"
 if grep -rnI --exclude-dir=.git --exclude-dir=third_party -E "${forbidden_pattern}" . >/dev/null 2>&1; then
     grep -rnI --exclude-dir=.git --exclude-dir=third_party -E "${forbidden_pattern}" . >&2 || true
-    fail "Forbidden legacy identifier, unprefixed module import, or hardcoded home directory path detected."
+    fail "Forbidden legacy identifier or unprefixed module import detected."
+fi
+if [ -n "${HOME:-}" ] && grep -rnIF --exclude-dir=.git --exclude-dir=third_party -- "${HOME}" . >/dev/null 2>&1; then
+    grep -rnIF --exclude-dir=.git --exclude-dir=third_party -- "${HOME}" . >&2 || true
+    fail "Hardcoded home directory path detected."
 fi
 
 # 2. Go Formatting Gate
@@ -204,6 +208,7 @@ CGO_ENABLED=0 go test ./...
 go test -race -short ./...
 if [ -d "third_party/Cbc/dist/lib" ]; then
     go test -tags=cbc ./...
+    go test -race -tags=cbc -short ./...
 fi
 
 printf '\nAll pre-commit quality gates passed.\n'
