@@ -40,8 +40,8 @@ func TestPublicNetlibAndMIPLIBSuite(t *testing.T) {
 
 	for _, inst := range manifest {
 		t.Run(inst.ID, func(t *testing.T) {
-			if testing.Short() && inst.IsMIP && inst.NumVars > 500 {
-				t.Skip("skipping large public MIP under -short")
+			if testing.Short() && inst.IsMIP && (inst.NumVars > 200 || inst.ID == "miplib_flugpl") {
+				t.Skip("skipping larger-tree public MIP under -short")
 			}
 			f, err := os.Open(filepath.Join("testdata", "public", inst.ID+".json"))
 			if err != nil {

@@ -1,0 +1,850 @@
+{
+  "parameters": {
+    "name": "miplib_p0033",
+    "sense": 1
+  },
+  "objective": {
+    "name": "R100",
+    "coefficients": [
+      {
+        "name": "C157",
+        "value": 171.0
+      },
+      {
+        "name": "C158",
+        "value": 171.0
+      },
+      {
+        "name": "C159",
+        "value": 171.0
+      },
+      {
+        "name": "C160",
+        "value": 171.0
+      },
+      {
+        "name": "C161",
+        "value": 163.0
+      },
+      {
+        "name": "C162",
+        "value": 162.0
+      },
+      {
+        "name": "C163",
+        "value": 163.0
+      },
+      {
+        "name": "C164",
+        "value": 69.0
+      },
+      {
+        "name": "C165",
+        "value": 69.0
+      },
+      {
+        "name": "C166",
+        "value": 183.0
+      },
+      {
+        "name": "C167",
+        "value": 183.0
+      },
+      {
+        "name": "C168",
+        "value": 183.0
+      },
+      {
+        "name": "C169",
+        "value": 183.0
+      },
+      {
+        "name": "C170",
+        "value": 49.0
+      },
+      {
+        "name": "C171",
+        "value": 183.0
+      },
+      {
+        "name": "C172",
+        "value": 258.0
+      },
+      {
+        "name": "C173",
+        "value": 517.0
+      },
+      {
+        "name": "C174",
+        "value": 250.0
+      },
+      {
+        "name": "C175",
+        "value": 500.0
+      },
+      {
+        "name": "C176",
+        "value": 250.0
+      },
+      {
+        "name": "C177",
+        "value": 500.0
+      },
+      {
+        "name": "C178",
+        "value": 159.0
+      },
+      {
+        "name": "C179",
+        "value": 318.0
+      },
+      {
+        "name": "C180",
+        "value": 159.0
+      },
+      {
+        "name": "C181",
+        "value": 318.0
+      },
+      {
+        "name": "C182",
+        "value": 159.0
+      },
+      {
+        "name": "C183",
+        "value": 318.0
+      },
+      {
+        "name": "C184",
+        "value": 159.0
+      },
+      {
+        "name": "C185",
+        "value": 318.0
+      },
+      {
+        "name": "C186",
+        "value": 114.0
+      },
+      {
+        "name": "C187",
+        "value": 228.0
+      },
+      {
+        "name": "C188",
+        "value": 159.0
+      },
+      {
+        "name": "C189",
+        "value": 318.0
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "C157",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C158",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C159",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C160",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C161",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C162",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C163",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C164",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C165",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C166",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C167",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C168",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C169",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C170",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C171",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C172",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C173",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C174",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C175",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C176",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C177",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C178",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C179",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C180",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C181",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C182",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C183",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C184",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C185",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C186",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C187",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C188",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    },
+    {
+      "name": "C189",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 1.0
+    }
+  ],
+  "constraints": [
+    {
+      "name": "R114",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C157",
+          "value": 1.0
+        },
+        {
+          "name": "C158",
+          "value": 1.0
+        },
+        {
+          "name": "C159",
+          "value": 1.0
+        },
+        {
+          "name": "C160",
+          "value": 1.0
+        }
+      ],
+      "constant": -1.0
+    },
+    {
+      "name": "R115",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C161",
+          "value": 1.0
+        },
+        {
+          "name": "C162",
+          "value": 1.0
+        },
+        {
+          "name": "C163",
+          "value": 1.0
+        }
+      ],
+      "constant": -1.0
+    },
+    {
+      "name": "R116",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C164",
+          "value": 1.0
+        },
+        {
+          "name": "C165",
+          "value": 1.0
+        }
+      ],
+      "constant": -1.0
+    },
+    {
+      "name": "R117",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C166",
+          "value": 1.0
+        },
+        {
+          "name": "C167",
+          "value": 1.0
+        },
+        {
+          "name": "C168",
+          "value": 1.0
+        },
+        {
+          "name": "C169",
+          "value": 1.0
+        },
+        {
+          "name": "C171",
+          "value": 1.0
+        }
+      ],
+      "constant": -1.0
+    },
+    {
+      "name": "R118",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C166",
+          "value": -230.0
+        },
+        {
+          "name": "C172",
+          "value": -200.0
+        },
+        {
+          "name": "C173",
+          "value": -400.0
+        }
+      ],
+      "constant": 5.0
+    },
+    {
+      "name": "R119",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C159",
+          "value": 300.0
+        },
+        {
+          "name": "C160",
+          "value": 300.0
+        },
+        {
+          "name": "C161",
+          "value": 285.0
+        },
+        {
+          "name": "C162",
+          "value": 285.0
+        },
+        {
+          "name": "C164",
+          "value": 265.0
+        },
+        {
+          "name": "C165",
+          "value": 265.0
+        },
+        {
+          "name": "C168",
+          "value": 230.0
+        },
+        {
+          "name": "C169",
+          "value": 230.0
+        },
+        {
+          "name": "C170",
+          "value": 190.0
+        },
+        {
+          "name": "C178",
+          "value": 200.0
+        },
+        {
+          "name": "C179",
+          "value": 400.0
+        },
+        {
+          "name": "C180",
+          "value": 200.0
+        },
+        {
+          "name": "C181",
+          "value": 400.0
+        },
+        {
+          "name": "C182",
+          "value": 200.0
+        },
+        {
+          "name": "C183",
+          "value": 400.0
+        },
+        {
+          "name": "C184",
+          "value": 200.0
+        },
+        {
+          "name": "C185",
+          "value": 400.0
+        },
+        {
+          "name": "C186",
+          "value": 200.0
+        },
+        {
+          "name": "C187",
+          "value": 400.0
+        }
+      ],
+      "constant": -2700.0
+    },
+    {
+      "name": "R120",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C159",
+          "value": -300.0
+        },
+        {
+          "name": "C160",
+          "value": -300.0
+        },
+        {
+          "name": "C161",
+          "value": -285.0
+        },
+        {
+          "name": "C162",
+          "value": -285.0
+        },
+        {
+          "name": "C164",
+          "value": -265.0
+        },
+        {
+          "name": "C165",
+          "value": -265.0
+        },
+        {
+          "name": "C168",
+          "value": -230.0
+        },
+        {
+          "name": "C169",
+          "value": -230.0
+        },
+        {
+          "name": "C170",
+          "value": -190.0
+        },
+        {
+          "name": "C178",
+          "value": -200.0
+        },
+        {
+          "name": "C179",
+          "value": -400.0
+        },
+        {
+          "name": "C180",
+          "value": -200.0
+        },
+        {
+          "name": "C181",
+          "value": -400.0
+        },
+        {
+          "name": "C182",
+          "value": -200.0
+        },
+        {
+          "name": "C183",
+          "value": -400.0
+        },
+        {
+          "name": "C184",
+          "value": -200.0
+        },
+        {
+          "name": "C185",
+          "value": -400.0
+        },
+        {
+          "name": "C186",
+          "value": -200.0
+        },
+        {
+          "name": "C187",
+          "value": -400.0
+        }
+      ],
+      "constant": 2600.0
+    },
+    {
+      "name": "R121",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C160",
+          "value": -300.0
+        },
+        {
+          "name": "C186",
+          "value": -200.0
+        },
+        {
+          "name": "C187",
+          "value": -400.0
+        }
+      ],
+      "constant": 100.0
+    },
+    {
+      "name": "R122",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C157",
+          "value": -300.0
+        },
+        {
+          "name": "C162",
+          "value": -285.0
+        },
+        {
+          "name": "C165",
+          "value": -265.0
+        },
+        {
+          "name": "C170",
+          "value": -190.0
+        },
+        {
+          "name": "C182",
+          "value": -200.0
+        },
+        {
+          "name": "C183",
+          "value": -400.0
+        }
+      ],
+      "constant": 900.0
+    },
+    {
+      "name": "R123",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C157",
+          "value": -300.0
+        },
+        {
+          "name": "C159",
+          "value": -300.0
+        },
+        {
+          "name": "C162",
+          "value": -285.0
+        },
+        {
+          "name": "C165",
+          "value": -265.0
+        },
+        {
+          "name": "C169",
+          "value": -230.0
+        },
+        {
+          "name": "C170",
+          "value": -190.0
+        },
+        {
+          "name": "C182",
+          "value": -200.0
+        },
+        {
+          "name": "C183",
+          "value": -400.0
+        },
+        {
+          "name": "C184",
+          "value": -200.0
+        },
+        {
+          "name": "C185",
+          "value": -400.0
+        }
+      ],
+      "constant": 1656.0
+    },
+    {
+      "name": "R124",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C161",
+          "value": -285.0
+        },
+        {
+          "name": "C164",
+          "value": -265.0
+        },
+        {
+          "name": "C167",
+          "value": -230.0
+        },
+        {
+          "name": "C178",
+          "value": -200.0
+        },
+        {
+          "name": "C179",
+          "value": -400.0
+        }
+      ],
+      "constant": 335.0
+    },
+    {
+      "name": "R125",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C161",
+          "value": -285.0
+        },
+        {
+          "name": "C164",
+          "value": -265.0
+        },
+        {
+          "name": "C167",
+          "value": -230.0
+        },
+        {
+          "name": "C168",
+          "value": -230.0
+        },
+        {
+          "name": "C178",
+          "value": -200.0
+        },
+        {
+          "name": "C179",
+          "value": -400.0
+        },
+        {
+          "name": "C180",
+          "value": -200.0
+        },
+        {
+          "name": "C181",
+          "value": -400.0
+        }
+      ],
+      "constant": 1026.0
+    },
+    {
+      "name": "R126",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C158",
+          "value": -300.0
+        },
+        {
+          "name": "C174",
+          "value": -200.0
+        },
+        {
+          "name": "C175",
+          "value": -400.0
+        }
+      ],
+      "constant": 5.0
+    },
+    {
+      "name": "R127",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C158",
+          "value": -300.0
+        },
+        {
+          "name": "C174",
+          "value": -200.0
+        },
+        {
+          "name": "C175",
+          "value": -400.0
+        },
+        {
+          "name": "C176",
+          "value": -200.0
+        },
+        {
+          "name": "C177",
+          "value": -400.0
+        }
+      ],
+      "constant": 500.0
+    },
+    {
+      "name": "R128",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "C163",
+          "value": -285.0
+        },
+        {
+          "name": "C188",
+          "value": -200.0
+        },
+        {
+          "name": "C189",
+          "value": -400.0
+        }
+      ],
+      "constant": 270.0
+    },
+    {
+      "name": "ZBESTROW",
+      "sense": -1,
+      "coefficients": [],
+      "constant": 0.0
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

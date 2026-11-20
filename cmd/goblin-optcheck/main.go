@@ -445,7 +445,7 @@ func collectStaticDiagnostics(
 		}
 
 		if cm := reCanInline.FindStringSubmatch(msg); cm != nil {
-			if d != nil {
+			if d != nil && sp != nil && sp.StartLine == lineNum {
 				cost, _ := strconv.Atoi(cm[2])
 				d.CanInline = true
 				d.InlineCost = cost

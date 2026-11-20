@@ -1,0 +1,507 @@
+{
+  "parameters": {
+    "name": "miplib_flugpl",
+    "sense": 1
+  },
+  "objective": {
+    "name": "KOSTEN",
+    "coefficients": [
+      {
+        "name": "STM1",
+        "value": 2700.0
+      },
+      {
+        "name": "ANM1",
+        "value": 1500.0
+      },
+      {
+        "name": "UE1",
+        "value": 30.0
+      },
+      {
+        "name": "STM2",
+        "value": 2700.0
+      },
+      {
+        "name": "ANM2",
+        "value": 1500.0
+      },
+      {
+        "name": "UE2",
+        "value": 30.0
+      },
+      {
+        "name": "STM3",
+        "value": 2700.0
+      },
+      {
+        "name": "ANM3",
+        "value": 1500.0
+      },
+      {
+        "name": "UE3",
+        "value": 30.0
+      },
+      {
+        "name": "STM4",
+        "value": 2700.0
+      },
+      {
+        "name": "ANM4",
+        "value": 1500.0
+      },
+      {
+        "name": "UE4",
+        "value": 30.0
+      },
+      {
+        "name": "STM5",
+        "value": 2700.0
+      },
+      {
+        "name": "ANM5",
+        "value": 1500.0
+      },
+      {
+        "name": "UE5",
+        "value": 30.0
+      },
+      {
+        "name": "STM6",
+        "value": 2700.0
+      },
+      {
+        "name": "ANM6",
+        "value": 1500.0
+      },
+      {
+        "name": "UE6",
+        "value": 30.0
+      }
+    ]
+  },
+  "variables": [
+    {
+      "name": "STM1",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "ANM1",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 18.0
+    },
+    {
+      "name": "UE1",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "STM2",
+      "cat": "Integer",
+      "lowBound": 57.0,
+      "upBound": 75.0
+    },
+    {
+      "name": "ANM2",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 18.0
+    },
+    {
+      "name": "UE2",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "STM3",
+      "cat": "Integer",
+      "lowBound": 57.0,
+      "upBound": 75.0
+    },
+    {
+      "name": "ANM3",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 18.0
+    },
+    {
+      "name": "UE3",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "STM4",
+      "cat": "Integer",
+      "lowBound": 57.0,
+      "upBound": 75.0
+    },
+    {
+      "name": "ANM4",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 18.0
+    },
+    {
+      "name": "UE4",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "STM5",
+      "cat": "Integer",
+      "lowBound": 57.0,
+      "upBound": 75.0
+    },
+    {
+      "name": "ANM5",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 18.0
+    },
+    {
+      "name": "UE5",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    },
+    {
+      "name": "STM6",
+      "cat": "Integer",
+      "lowBound": 57.0,
+      "upBound": 75.0
+    },
+    {
+      "name": "ANM6",
+      "cat": "Integer",
+      "lowBound": 0.0,
+      "upBound": 18.0
+    },
+    {
+      "name": "UE6",
+      "cat": "Continuous",
+      "lowBound": 0.0,
+      "upBound": null
+    }
+  ],
+  "constraints": [
+    {
+      "name": "ANZ1",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "STM1",
+          "value": 1.0
+        }
+      ],
+      "constant": -60.0
+    },
+    {
+      "name": "STD1",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "STM1",
+          "value": 150.0
+        },
+        {
+          "name": "ANM1",
+          "value": -100.0
+        },
+        {
+          "name": "UE1",
+          "value": 1.0
+        }
+      ],
+      "constant": -8000.0
+    },
+    {
+      "name": "UEB1",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "STM1",
+          "value": -20.0
+        },
+        {
+          "name": "UE1",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "ANZ2",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "STM1",
+          "value": 0.9
+        },
+        {
+          "name": "ANM1",
+          "value": 1.0
+        },
+        {
+          "name": "STM2",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "STD2",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "STM2",
+          "value": 150.0
+        },
+        {
+          "name": "ANM2",
+          "value": -100.0
+        },
+        {
+          "name": "UE2",
+          "value": 1.0
+        }
+      ],
+      "constant": -9000.0
+    },
+    {
+      "name": "UEB2",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "STM2",
+          "value": -20.0
+        },
+        {
+          "name": "UE2",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "ANZ3",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "STM2",
+          "value": 0.9
+        },
+        {
+          "name": "ANM2",
+          "value": 1.0
+        },
+        {
+          "name": "STM3",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "STD3",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "STM3",
+          "value": 150.0
+        },
+        {
+          "name": "ANM3",
+          "value": -100.0
+        },
+        {
+          "name": "UE3",
+          "value": 1.0
+        }
+      ],
+      "constant": -8000.0
+    },
+    {
+      "name": "UEB3",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "STM3",
+          "value": -20.0
+        },
+        {
+          "name": "UE3",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "ANZ4",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "STM3",
+          "value": 0.9
+        },
+        {
+          "name": "ANM3",
+          "value": 1.0
+        },
+        {
+          "name": "STM4",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "STD4",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "STM4",
+          "value": 150.0
+        },
+        {
+          "name": "ANM4",
+          "value": -100.0
+        },
+        {
+          "name": "UE4",
+          "value": 1.0
+        }
+      ],
+      "constant": -10000.0
+    },
+    {
+      "name": "UEB4",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "STM4",
+          "value": -20.0
+        },
+        {
+          "name": "UE4",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "ANZ5",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "STM4",
+          "value": 0.9
+        },
+        {
+          "name": "ANM4",
+          "value": 1.0
+        },
+        {
+          "name": "STM5",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "STD5",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "STM5",
+          "value": 150.0
+        },
+        {
+          "name": "ANM5",
+          "value": -100.0
+        },
+        {
+          "name": "UE5",
+          "value": 1.0
+        }
+      ],
+      "constant": -9000.0
+    },
+    {
+      "name": "UEB5",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "STM5",
+          "value": -20.0
+        },
+        {
+          "name": "UE5",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "ANZ6",
+      "sense": 0,
+      "coefficients": [
+        {
+          "name": "STM5",
+          "value": 0.9
+        },
+        {
+          "name": "ANM5",
+          "value": 1.0
+        },
+        {
+          "name": "STM6",
+          "value": -1.0
+        }
+      ],
+      "constant": 0.0
+    },
+    {
+      "name": "STD6",
+      "sense": 1,
+      "coefficients": [
+        {
+          "name": "STM6",
+          "value": 150.0
+        },
+        {
+          "name": "ANM6",
+          "value": -100.0
+        },
+        {
+          "name": "UE6",
+          "value": 1.0
+        }
+      ],
+      "constant": -12000.0
+    },
+    {
+      "name": "UEB6",
+      "sense": -1,
+      "coefficients": [
+        {
+          "name": "STM6",
+          "value": -20.0
+        },
+        {
+          "name": "UE6",
+          "value": 1.0
+        }
+      ],
+      "constant": 0.0
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}

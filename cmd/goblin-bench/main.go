@@ -655,6 +655,9 @@ func measureRootLPRelaxation(
 			dt = time.Since(t0)
 			gb.ReleaseWorkspace(ws)
 		}
+		if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
+			panic(fmt.Sprintf("root LP relaxation failed on %s (backend=%v): status=%v", cp.Name(), backend, lpRes.Status))
+		}
 		if i >= warmup {
 			if i == warmup {
 				canonicalRootLP = lpRes
@@ -756,96 +759,15 @@ func benchSingleCorpusCase(
 	}
 
 	lpTimes, canonicalRootLP := measureRootLPRelaxation(canonicalCompiled, compiledTrials, warmup, nTrials, backend, cfg.noSIMD)
-
-	cpTrials := 3
-	if c.Tier == "tier3_large" {
-		cpTrials = 1
-	}
-	cpTimeout := cpTimeoutMS * time.Millisecond
-
-	cp4 := runCheckpoint(compiledTrials, cpTrials,
-		gb.WithBackend(backend),
-		gb.WithSIMD(!cfg.noSIMD),
-		gb.WithPresolve(false),
-		gb.WithCuts(false),
-		gb.WithHeuristics(false),
-		gb.WithMaxNodes(cpMaxNodes),
-		gb.WithRelGapTol(cpGapTol),
-		gb.WithAbsGapTol(cpGapTol),
-		gb.WithTimeLimit(cpTimeout),
+	res := buildMILPBenchResult(
+		c, backend, simdActive,
+		canonicalCompiled, canonicalRes, compiledTrials,
+		trialObjs, trialStatuses,
+		tParse, tBuild, tCompile, tMPS, tSolve, tTotal,
+		lpTimes, canonicalRootLP,
+		cfg.noSIMD, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
 	)
-
-	cp5 := runCheckpoint(compiledTrials, cpTrials,
-		gb.WithBackend(backend),
-		gb.WithSIMD(!cfg.noSIMD),
-		gb.WithPresolve(true),
-		gb.WithCuts(false),
-		gb.WithHeuristics(false),
-		gb.WithMaxNodes(cpMaxNodes),
-		gb.WithRelGapTol(cpGapTol),
-		gb.WithAbsGapTol(cpGapTol),
-		gb.WithTimeLimit(cpTimeout),
-	)
-
-	cp6 := runCheckpoint(compiledTrials, cpTrials,
-		gb.WithBackend(backend),
-		gb.WithSIMD(!cfg.noSIMD),
-		gb.WithPresolve(true),
-		gb.WithCuts(true),
-		gb.WithHeuristics(false),
-		gb.WithMaxNodes(cpMaxNodes),
-		gb.WithMaxCutPasses(cpMaxCutPasses),
-		gb.WithRelGapTol(cpGapTol),
-		gb.WithAbsGapTol(cpGapTol),
-		gb.WithTimeLimit(cpTimeout),
-	)
-
-	cp7 := bench.CheckpointMetrics{
-		Status:     canonicalRes.Status.String(),
-		Objective:  canonicalRes.Objective,
-		BestBound:  canonicalRes.BestBound,
-		Nodes:      canonicalRes.Nodes,
-		Iterations: canonicalRes.Iterations,
-		CutsAdded:  canonicalRes.CutsAdded,
-		TimeMS:     medianDurationMS(tSolve),
-	}
-
-	goMeanMS, goSDMS := meanSDDurationMS(tTotal)
-	return bench.ProblemBenchResult{
-		ID:                c.ID,
-		Tier:              c.Tier,
-		NumVars:           canonicalCompiled.NumVars(),
-		NumConstraints:    canonicalCompiled.NumConstraints(),
-		IsMIP:             canonicalCompiled.IsMIP(),
-		Backend:           backend.String(),
-		SIMDEnabled:       simdActive,
-		TrialObjectives:   trialObjs,
-		TrialStatuses:     trialStatuses,
-		TParseMS:          medianDurationMS(tParse),
-		TBuildMS:          medianDurationMS(tBuild),
-		TCompileMS:        medianDurationMS(tCompile),
-		TMPSWriteMS:       medianDurationMS(tMPS),
-		TSolveMS:          medianDurationMS(tSolve),
-		TTotalMS:          medianDurationMS(tTotal),
-		TTotalMeanMS:      goMeanMS,
-		TTotalSDMS:        goSDMS,
-		TSolveTrialsMS:    durationsMS(tSolve),
-		TTotalTrialsMS:    durationsMS(tTotal),
-		GitCommit:         gitCommit,
-		GitDirty:          gitDirty,
-		GoVersion:         runtime.Version(),
-		SourceFingerprint: fingerprint,
-		CPUAffinity:       cpuAffinity(),
-		UnameRelease:      kernelRel,
-		MeasuredAt:        measuredAt,
-		RootLPTimeMS:      medianDurationMS(lpTimes),
-		RootLPIters:       canonicalRootLP.Iterations,
-		RootLPObj:         canonicalRootLP.Objective,
-		CP4Baseline:       cp4,
-		CP5Presolve:       cp5,
-		CP6Cuts:           cp6,
-		CP7Full:           cp7,
-	}, canonicalRes
+	return res, canonicalRes
 }
 
 func buildMILPBenchResult(
@@ -949,6 +871,7 @@ func buildMILPBenchResult(
 		RootLPTimeMS:      medianDurationMS(lpTimes),
 		RootLPIters:       canonicalRootLP.Iterations,
 		RootLPObj:         canonicalRootLP.Objective,
+		RootLPStatus:      canonicalRootLP.Status.String(),
 		CP4Baseline:       cp4,
 		CP5Presolve:       cp5,
 		CP6Cuts:           cp6,
@@ -1098,6 +1021,9 @@ func benchPairedCorpusCase(
 		lpRes := lpSolver.Solve()
 		dt := time.Since(t0)
 		gb.ReleaseWorkspace(ws)
+		if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
+			panic(fmt.Sprintf("paired root LP relaxation failed on %s (noSIMD=%v): status=%v", cp.Name(), noSIMD, lpRes.Status))
+		}
 		return dt, lpRes
 	}
 	for i := range warmup + nTrials {

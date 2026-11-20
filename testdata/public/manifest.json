@@ -144,6 +144,42 @@
     "reference_objective": 568.1007000000001
   },
   {
+    "id": "miplib_p0033",
+    "collection": "MIPLIB 3.0",
+    "upstream_name": "p0033",
+    "is_mip": true,
+    "num_vars": 33,
+    "num_constraints": 16,
+    "reference_objective": 3089.0
+  },
+  {
+    "id": "miplib_flugpl",
+    "collection": "MIPLIB 3.0",
+    "upstream_name": "flugpl",
+    "is_mip": true,
+    "num_vars": 18,
+    "num_constraints": 18,
+    "reference_objective": 1201500.0
+  },
+  {
+    "id": "miplib_p0201",
+    "collection": "MIPLIB 3.0",
+    "upstream_name": "p0201",
+    "is_mip": true,
+    "num_vars": 201,
+    "num_constraints": 133,
+    "reference_objective": 7615.0
+  },
+  {
+    "id": "miplib_p0548",
+    "collection": "MIPLIB 3.0",
+    "upstream_name": "p0548",
+    "is_mip": true,
+    "num_vars": 548,
+    "num_constraints": 176,
+    "reference_objective": 8691.0
+  },
+  {
     "id": "coinor_capplan1",
     "collection": "COIN-OR CglTestData",
     "upstream_name": "capPlan1",

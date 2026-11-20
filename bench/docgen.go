@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/paulourio/goblin/assign"
 )
 
 // PythonBaselineEntry matches the JSON output produced by bench/python_baseline.py.
@@ -81,6 +83,7 @@ type ProblemBenchResult struct {
 	RootLPTimeMS      float64           `json:"root_lp_time_ms"`
 	RootLPIters       int               `json:"root_lp_iters"`
 	RootLPObj         float64           `json:"root_lp_obj"`
+	RootLPStatus      string            `json:"root_lp_status,omitempty"`
 	CP4Baseline       CheckpointMetrics `json:"cp4_baseline"`
 	CP5Presolve       CheckpointMetrics `json:"cp5_presolve"`
 	CP6Cuts           CheckpointMetrics `json:"cp6_cuts"`
@@ -388,6 +391,13 @@ func CheckParity(tb *TelemetryBundle, id string) []string {
 		if py.Objective != nil && relDiff(b.res.CP7Full.Objective, *py.Objective) > parityRelTol {
 			out = append(out, fmt.Sprintf("%s/%s: objective %.8g, CBC %.8g", id, b.label, b.res.CP7Full.Objective, *py.Objective))
 		}
+		if py.LPRelaxationObjective != nil {
+			if b.res.RootLPStatus != "Optimal" {
+				out = append(out, fmt.Sprintf("%s/%s: root LP status %s, want Optimal", id, b.label, b.res.RootLPStatus))
+			} else if relDiff(b.res.RootLPObj, *py.LPRelaxationObjective) > parityRelTol {
+				out = append(out, fmt.Sprintf("%s/%s: root LP objective %.8g, CBC %.8g", id, b.label, b.res.RootLPObj, *py.LPRelaxationObjective))
+			}
+		}
 		for k, wantSt := range py.TrialStatuses {
 			if k < len(b.res.TrialStatuses) && wantSt != "" && b.res.TrialStatuses[k] != "" && b.res.TrialStatuses[k] != wantSt {
 				out = append(out, fmt.Sprintf("%s/%s: trial %d status %s, CBC %s", id, b.label, k, b.res.TrialStatuses[k], wantSt))
@@ -416,7 +426,7 @@ const (
 	madTimeHorizon     = 6
 	geoMeanMinFloor    = 1e-6
 	evenMedianHalf     = 0.5
-	zCrit975           = 1.96
+	zCrit975           = 1.959963984540054
 	minPairedSamples   = 2
 	syncedDocPerm      = 0o644
 )
@@ -556,7 +566,8 @@ func medianMinMax(vals []float64) (med, minV, maxV float64) {
 	return med, cp[0], cp[n-1]
 }
 
-// tCrit975 returns the two-sided 95% Student-t critical value for df degrees of freedom.
+// tCrit975 returns the two-sided 95% Student-t critical value for df degrees of freedom,
+// using exact tabulated values for df <= 20 and a 4-term Cornish-Fisher expansion for df >= 21.
 func tCrit975(df int) float64 {
 	table := []float64{0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
 		2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086}
@@ -566,7 +577,50 @@ func tCrit975(df int) float64 {
 	if df < len(table) {
 		return table[df]
 	}
-	return zCrit975
+	z := zCrit975
+	z2 := z * z
+	z3 := z2 * z
+	z5 := z3 * z2
+	z7 := z5 * z2
+	z9 := z7 * z2
+	inv := 1.0 / float64(df)
+	inv2 := inv * inv
+	inv3 := inv2 * inv
+	inv4 := inv2 * inv2
+	g1 := (z3 + z) / 4.0
+	g2 := (5.0*z5 + 16.0*z3 + 3.0*z) / 96.0
+	g3 := (3.0*z7 + 19.0*z5 + 17.0*z3 - 15.0*z) / 384.0
+	g4 := (79.0*z9 + 776.0*z7 + 1482.0*z5 - 1920.0*z3 - 945.0*z) / 92160.0
+	return z + g1*inv + g2*inv2 + g3*inv3 + g4*inv4
+}
+
+// familyClusteredRatio returns the equal-family geometric mean over per-family geometric means
+// and its two-sided 95% Student-t_{F-1} confidence interval on family log-means.
+func familyClusteredRatio(famGMs []float64) (gm, lo, hi float64) {
+	var logs []float64
+	for _, g := range famGMs {
+		if g > 0 && !math.IsNaN(g) && !math.IsInf(g, 0) {
+			logs = append(logs, math.Log(g))
+		}
+	}
+	f := len(logs)
+	if f == 0 {
+		return math.NaN(), math.NaN(), math.NaN()
+	}
+	mean := 0.0
+	for _, v := range logs {
+		mean += v
+	}
+	mean /= float64(f)
+	if f < minPairedSamples {
+		return math.Exp(mean), math.Inf(-1), math.Inf(1)
+	}
+	ss := 0.0
+	for _, v := range logs {
+		ss += (v - mean) * (v - mean)
+	}
+	half := tCrit975(f-1) * math.Sqrt(ss/float64(f-1)) / math.Sqrt(float64(f))
+	return math.Exp(mean), math.Exp(mean - half), math.Exp(mean + half)
 }
 
 // pairedRatio returns the geometric-mean ratio a[k]/b[k] over paired trials and its 95%
@@ -748,12 +802,12 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 		{"All 31 synthetic corpus families", func(_ CorpusCase) bool { return true }},
 	}
 
-	b.WriteString("| Workload Subset | Families (Instances) | Paired `Py / Go` GeoMean [95% CI] | Paired `Go / CBC` | `Go` Sum (ms) | `CBC` Sum (ms) | `Py` Sum (ms) | Per-Instance `Py / Go` Median [Min-Max] |\n")
-	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	b.WriteString("| Workload Subset | Families (Trials) | Equal-Family `Py / Go` GeoMean [Clustered 95% CI] | Pooled Trial `Py / Go` | Equal-Family `Go / CBC` | `Go` Trial (Med) Sum (ms) | `CBC` Trial (Med) Sum (ms) | `Py` Trial (Med) Sum (ms) | Per-Instance `Py / Go` Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range groups {
 		var nFams int
-		var pyPaired, goPaired, cbcPaired, instSpeedups []float64
-		var goSum, cbcSum, pySum float64
+		var famPyGo, famGoCBC, pyPaired, goPaired, instSpeedups []float64
+		var goSum, cbcSum, pySum, goMedSum, cbcMedSum, pyMedSum float64
 		hasAllCBC := true
 		for _, c := range cases {
 			if !grp.filter(c) {
@@ -766,6 +820,11 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 			if !hasCBC || len(gbRes.TTotalTrialsMS) == 0 {
 				hasAllCBC = false
 			}
+			pyMedSum += py.TTotalMedianMS
+			goMedSum += sc.TTotalMS
+			if hasCBC {
+				cbcMedSum += gbRes.TTotalMS
+			}
 			nInst := min(len(py.TTotalTrialsMS), len(sc.TTotalTrialsMS))
 			if nInst == 0 {
 				pyPaired = append(pyPaired, py.TTotalMedianMS)
@@ -773,13 +832,25 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 				pySum += py.TTotalMedianMS
 				goSum += sc.TTotalMS
 				if sc.TTotalMS > 0 {
-					instSpeedups = append(instSpeedups, py.TTotalMedianMS/sc.TTotalMS)
+					r := py.TTotalMedianMS / sc.TTotalMS
+					instSpeedups = append(instSpeedups, r)
+					famPyGo = append(famPyGo, r)
 				}
 				if hasCBC {
-					cbcPaired = append(cbcPaired, gbRes.TTotalMS)
 					cbcSum += gbRes.TTotalMS
+					if gbRes.TTotalMS > 0 {
+						famGoCBC = append(famGoCBC, sc.TTotalMS/gbRes.TTotalMS)
+					}
 				}
 				continue
+			}
+			if fgm, _, _, _ := pairedRatio(py.TTotalTrialsMS[:nInst], sc.TTotalTrialsMS[:nInst]); !math.IsNaN(fgm) {
+				famPyGo = append(famPyGo, fgm)
+			}
+			if hasCBC && len(gbRes.TTotalTrialsMS) >= nInst {
+				if cgm, _, _, _ := pairedRatio(sc.TTotalTrialsMS[:nInst], gbRes.TTotalTrialsMS[:nInst]); !math.IsNaN(cgm) {
+					famGoCBC = append(famGoCBC, cgm)
+				}
 			}
 			for k := range nInst {
 				pt := py.TTotalTrialsMS[k]
@@ -792,22 +863,22 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 					instSpeedups = append(instSpeedups, pt/gt)
 				}
 				if hasCBC && k < len(gbRes.TTotalTrialsMS) {
-					ct := gbRes.TTotalTrialsMS[k]
-					cbcPaired = append(cbcPaired, ct)
-					cbcSum += ct
+					cbcSum += gbRes.TTotalTrialsMS[k]
 				}
 			}
 		}
-		gm, lo, hi, nInst := pairedRatio(pyPaired, goPaired)
+		famGM, famLo, famHi := familyClusteredRatio(famPyGo)
+		pooledGM, _, _, nInst := pairedRatio(pyPaired, goPaired)
 		medSp, minSp, maxSp := medianMinMax(instSpeedups)
 		cbcRatioStr, cbcSumStr := "N/A", "N/A"
-		if hasAllCBC && len(cbcPaired) == len(goPaired) && len(cbcPaired) > 0 {
-			cbcGM, _, _, _ := pairedRatio(goPaired, cbcPaired)
+		if hasAllCBC && len(famGoCBC) == nFams && len(famGoCBC) > 0 {
+			cbcGM, _, _ := familyClusteredRatio(famGoCBC)
 			cbcRatioStr = fmt.Sprintf("%.2fx", cbcGM)
-			cbcSumStr = fmt.Sprintf("%.1f", cbcSum)
+			cbcSumStr = fmt.Sprintf("%.1f (%.1f)", cbcSum, cbcMedSum)
 		}
-		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | %s | %.1f | %s | %.1f | %.2fx [%.2fx-%.2fx] |\n",
-			grp.label, nFams, nInst, gm, lo, hi, cbcRatioStr, goSum, cbcSumStr, pySum, medSp, minSp, maxSp)
+		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | %.2fx | %s | %.1f (%.1f) | %s | %.1f (%.1f) | %.2fx [%.2fx-%.2fx] |\n",
+			grp.label, nFams, nInst, famGM, famLo, famHi, pooledGM, cbcRatioStr,
+			goSum, goMedSum, cbcSumStr, pySum, pyMedSum, medSp, minSp, maxSp)
 	}
 }
 
@@ -1085,12 +1156,12 @@ func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 		{"**All 22 synthetic LSAP families**", func(_ AssignCorpusCase) bool { return true }},
 	}
 
-	b.WriteString("| Workload Subset | Families (Instances) | Paired `SciPy Solve / goblin` GeoMean [95% CI] | Paired `SciPy Total / goblin` GeoMean | `goblin` Solve Sum (ms) | SciPy Solve Sum (ms) | Per-Instance `SciPy Solve / goblin` Median [Min-Max] |\n")
-	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	b.WriteString("| Workload Subset | Families (Trials) | Equal-Family `SciPy Solve / goblin` GeoMean [Clustered 95% CI] | Pooled Trial `SciPy Solve / goblin` | Equal-Family `SciPy Total / goblin` | `goblin` Solve Trial (Med) Sum (ms) | SciPy Solve Trial (Med) Sum (ms) | Per-Instance `SciPy Solve / goblin` Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range groups {
 		var nFams int
-		var spSolvePaired, goSolvePaired, spTotPaired, goTotPaired, solveSpeedups []float64
-		var goSolveSum, spSolveSum float64
+		var famSolveGMs, famTotGMs, spSolvePaired, goSolvePaired, solveSpeedups []float64
+		var goSolveSum, spSolveSum, goSolveMedSum, spSolveMedSum float64
 		for _, ac := range assignCases {
 			if !grp.filter(ac) {
 				continue
@@ -1098,7 +1169,12 @@ func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 			nFams++
 			sp := tb.SciPyAssign[ac.ID]
 			sc := tb.AssignScalar[ac.ID]
+			goSolveMedSum += sc.TSolveMS
+			spSolveMedSum += sp.TSolveMedianMS
 			nInst := min(len(sp.TSolveTrialsMS), len(sc.TSolveTrialsMS))
+			if fgm, _, _, _ := pairedRatio(sp.TSolveTrialsMS[:nInst], sc.TSolveTrialsMS[:nInst]); !math.IsNaN(fgm) {
+				famSolveGMs = append(famSolveGMs, fgm)
+			}
 			for k := range nInst {
 				ss := sp.TSolveTrialsMS[k]
 				gs := sc.TSolveTrialsMS[k]
@@ -1111,18 +1187,19 @@ func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 				}
 			}
 			nTot := min(len(sp.TTotalTrialsMS), len(sc.TTotalTrialsMS))
-			for k := range nTot {
-				spTotPaired = append(spTotPaired, sp.TTotalTrialsMS[k])
-				goTotPaired = append(goTotPaired, sc.TTotalTrialsMS[k])
+			if tgm, _, _, _ := pairedRatio(sp.TTotalTrialsMS[:nTot], sc.TTotalTrialsMS[:nTot]); !math.IsNaN(tgm) {
+				famTotGMs = append(famTotGMs, tgm)
 			}
 		}
-		solveGM, solveLo, solveHi, nInst := pairedRatio(spSolvePaired, goSolvePaired)
-		totGM, _, _, _ := pairedRatio(spTotPaired, goTotPaired)
+		famSolveGM, famSolveLo, famSolveHi := familyClusteredRatio(famSolveGMs)
+		pooledSolveGM, _, _, nInst := pairedRatio(spSolvePaired, goSolvePaired)
+		famTotGM, _, _ := familyClusteredRatio(famTotGMs)
 		medSp, minSp, maxSp := medianMinMax(solveSpeedups)
-		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | %.2fx | %s | %s | %.2fx [%.2fx-%.2fx] |\n",
+		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | %.2fx | %.2fx | %s (%s) | %s (%s) | %.2fx [%.2fx-%.2fx] |\n",
 			grp.label, nFams, nInst,
-			solveGM, solveLo, solveHi, totGM,
-			formatAssignMS(goSolveSum), formatAssignMS(spSolveSum),
+			famSolveGM, famSolveLo, famSolveHi, pooledSolveGM, famTotGM,
+			formatAssignMS(goSolveSum), formatAssignMS(goSolveMedSum),
+			formatAssignMS(spSolveSum), formatAssignMS(spSolveMedSum),
 			medSp, minSp, maxSp)
 	}
 }
@@ -1150,19 +1227,25 @@ func renderAssignPipelineTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	}
 }
 
+func assignSIMDReachable(ac AssignCorpusCase) bool {
+	if max(ac.Rows, ac.Cols) >= simdReachSize {
+		return true
+	}
+	return ac.Sense == assign.Minimize && ac.Rows <= ac.Cols && ac.Rows*ac.Cols >= 256
+}
+
 func renderAssignSIMDSummary(b *bytes.Buffer, tb *TelemetryBundle) {
 	assignCases := BuildAssignCorpus()
 	var controls, controlsFlagged, reachable, faster, slower int
 	for _, ac := range assignCases {
 		sc := tb.AssignScalar[ac.ID]
 		sm := tb.AssignSIMD[ac.ID]
-		size := max(sm.Rows, sm.Cols)
 		_, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
 		if n < minPairedSamples {
 			continue
 		}
 		excludesOne := lo > 1 || hi < 1
-		if size < simdReachSize {
+		if !assignSIMDReachable(ac) {
 			controls++
 			if excludesOne {
 				controlsFlagged++
@@ -1177,22 +1260,26 @@ func renderAssignSIMDSummary(b *bytes.Buffer, tb *TelemetryBundle) {
 			slower++
 		}
 	}
-	fmt.Fprintf(b, "- **Negative controls** (`max(rows, cols) < %d`, no AVX2 row-reduction kernel runs): %d of %d have a 95%% interval excluding 1.\n",
+	fmt.Fprintf(b, "- **Negative controls** (`max(rows, cols) < %d` and `rows * cols < 256`, no AVX2 kernel runs): %d of %d have a 95%% interval excluding 1.\n",
 		simdReachSize, controlsFlagged, controls)
-	fmt.Fprintf(b, "- **Instances where AVX2 row kernels run** (`max(rows, cols) >= %d`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
+	fmt.Fprintf(b, "- **Instances where AVX2 kernels run** (`max(rows, cols) >= %d` or `AllAbsLE64` at `rows * cols >= 256`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
 		simdReachSize, faster, slower, reachable-faster-slower, reachable)
 }
 
 func renderAssignSIMDTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	assignCases := BuildAssignCorpus()
-	b.WriteString("| Problem ID | Shape ($m \\times n$) | `max(m, n)` | AVX2 row kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
+	b.WriteString("| Problem ID | Shape ($m \\times n$) | `max(m, n)` | AVX2 kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
 	b.WriteString("| :--- | :---: | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
 	for _, ac := range assignCases {
 		sc := tb.AssignScalar[ac.ID]
 		sm := tb.AssignSIMD[ac.ID]
 		size := max(sm.Rows, sm.Cols)
+		effSize := size
+		if assignSIMDReachable(ac) && effSize < simdReachSize {
+			effSize = simdReachSize
+		}
 		gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-		reach, verdict := simdVerdict(size, lo, hi, n)
+		reach, verdict := simdVerdict(effSize, lo, hi, n)
 		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %s | %s | %d |\n",
 			ac.ID, ac.Rows, ac.Cols, size, reach, verdict, gm, lo, hi,
 			formatAssignMS(sc.TSolveMS), formatAssignMS(sm.TSolveMS), n)
@@ -1276,7 +1363,7 @@ func BuildFinalReportMarkdown(tb *TelemetryBundle) (string, error) {
 - **Experimental SIMD build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels for slices of length 32 or more; see section 4.
 - **Optional C++ backend**: ` + "`gb.WithCBC()`" + ` (` + "`BackendCBC`" + `, built with ` + "`-tags cbc`" + `), driving in-process COIN-OR CBC/CLP (` + "`c1c171ec`" + `) through ` + "`cgo`" + `.
 - **Python baseline**: Python + ` + "`PuLP`" + ` + ` + "`COIN-OR CBC`" + ` (` + "`c1c171ec`" + `, ` + "`threads=1`" + `, ` + "`ratioGap=1e-6`" + `, ` + "`allowableGap=1e-6`" + `) subprocess. Its solve time includes MPS writing, process spawn, and ` + "`.sol`" + ` parsing.
-- **Synthetic corpus and public validation**: 31 synthetic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 distinct randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state, complemented by 17 held-out public Netlib LP and MIPLIB/COIN-OR instances verified in ` + "`public_benchmarks_test.go`" + `.
+- **Synthetic corpus and public validation**: 31 synthetic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 distinct randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state, complemented by 20 held-out public Netlib LP and MIPLIB 3.0 MILP instances solved to optimality plus a 25-node dual-bound check on ` + "`coinor_capplan1`" + ` (` + "`public_benchmarks_test.go`" + `).
 
 <!-- BEGIN GENERATED:PROVENANCE -->
 <!-- END GENERATED:PROVENANCE -->
