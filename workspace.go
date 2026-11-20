@@ -78,10 +78,11 @@ type Workspace struct {
 	tabRowChunks    []int
 	tabRowChunkMark []bool
 
-	// Ratio-test scratch buffers.
-	flipCols  []int
-	bfrtCands []bfrtCand
-	inPool    atomic.Bool
+	// Ratio-test and residual-tracking scratch buffers.
+	flipCols   []int
+	bfrtCands  []bfrtCand
+	rowMaxTerm []float64
+	inPool     atomic.Bool
 }
 
 var workspacePool = sync.Pool{
@@ -175,6 +176,16 @@ func (ws *Workspace) ensureSize(n, m int) {
 	}
 	ws.flipCols = ws.flipCols[:0]
 	ws.bfrtCands = ws.bfrtCands[:0]
+	ws.rowMaxTerm = resizeFloat64(ws.rowMaxTerm, m)
+}
+
+func (ws *Workspace) ensureRowMaxTerm(m int) []float64 {
+	if cap(ws.rowMaxTerm) < m {
+		ws.rowMaxTerm = make([]float64, m)
+	} else {
+		ws.rowMaxTerm = ws.rowMaxTerm[:m]
+	}
+	return ws.rowMaxTerm
 }
 
 func resizeFloat64(s []float64, n int) []float64 {

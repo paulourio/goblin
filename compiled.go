@@ -401,12 +401,9 @@ const (
 	expansionCap  = 64
 )
 
-func growExpansion(e []float64, b float64) ([]float64, bool) {
-	if b == 0 {
-		return e, true
-	}
-	if math.IsNaN(b) || math.IsInf(b, 0) {
-		return e, false
+func growExpansion(e []float64, b float64) []float64 {
+	if b == 0 || math.IsNaN(b) || math.IsInf(b, 0) {
+		return e
 	}
 	q := b
 	w := 0
@@ -414,7 +411,7 @@ func growExpansion(e []float64, b float64) ([]float64, bool) {
 		var h float64
 		q, h = twoSum(q, en)
 		if math.IsNaN(q) || math.IsInf(q, 0) {
-			return e[:w], false
+			return e[:w]
 		}
 		if h != 0 {
 			e[w] = h
@@ -425,7 +422,7 @@ func growExpansion(e []float64, b float64) ([]float64, bool) {
 	if q != 0 {
 		e = append(e, q)
 	}
-	return e, true
+	return e
 }
 
 func compressExpansion(e []float64) []float64 {
@@ -486,24 +483,76 @@ func roundToOddSticky(top, rem float64) float64 {
 	return math.Nextafter(top, 0)
 }
 
+func collapseExpansionBuf(e *[expansionCap]float64, n int) int {
+	if n <= 1 {
+		return n
+	}
+	return len(compressExpansion(e[:n]))
+}
+
+func growExpansionBuf(e *[expansionCap]float64, n int, b float64) (int, bool) {
+	if b == 0 {
+		return n, true
+	}
+	if math.IsNaN(b) || math.IsInf(b, 0) {
+		return n, false
+	}
+	if n >= expansionCap {
+		n = collapseExpansionBuf(e, n)
+		if n >= expansionCap {
+			top, rem := expansionTopRem(e[:n])
+			n = 0
+			if rem != 0 {
+				e[0] = rem
+				n = 1
+			}
+			if top != 0 {
+				e[n] = top
+				n++
+			}
+		}
+	}
+	q := b
+	w := 0
+	for i := range n {
+		var h float64
+		q, h = twoSum(q, e[i])
+		if math.IsNaN(q) || math.IsInf(q, 0) {
+			return w, false
+		}
+		if h != 0 {
+			e[w] = h
+			w++
+		}
+	}
+	if q != 0 {
+		e[w] = q
+		w++
+	}
+	return w, true
+}
+
 // wideDotAcc accumulates values and products across three power-of-two Shewchuk expansions
-// (2^1056, 2^0, and 2^-1056) so finite float64 products never overflow, underflow, or cancel inaccurately.
+// (2^1056, 2^0, and 2^-1056) using pointer-free fixed buffers so stack instances never escape.
 type wideDotAcc struct {
-	hi     []float64
-	mid    []float64
-	lo     []float64
 	hiBuf  [expansionCap]float64
 	midBuf [expansionCap]float64
 	loBuf  [expansionCap]float64
+	hiLen  int
+	midLen int
+	loLen  int
 	nonFin bool
 }
 
-func (w *wideDotAcc) ensureInit() {
-	if w.hi == nil {
-		w.hi = w.hiBuf[:0]
-		w.mid = w.midBuf[:0]
-		w.lo = w.loBuf[:0]
-	}
+func (w *wideDotAcc) reset() {
+	w.hiLen = 0
+	w.midLen = 0
+	w.loLen = 0
+	w.nonFin = false
+}
+
+func (w *wideDotAcc) isEmpty() bool {
+	return w.hiLen == 0 && w.midLen == 0 && w.loLen == 0
 }
 
 func (w *wideDotAcc) addVal(v float64) {
@@ -514,16 +563,15 @@ func (w *wideDotAcc) addVal(v float64) {
 		w.nonFin = true
 		return
 	}
-	w.ensureInit()
 	_, e := math.Frexp(math.Abs(v))
 	var ok bool
 	switch {
 	case e > wideExpCutoff:
-		w.hi, ok = growExpansion(w.hi, math.Ldexp(v, -wideHiShift))
+		w.hiLen, ok = growExpansionBuf(&w.hiBuf, w.hiLen, math.Ldexp(v, -wideHiShift))
 	case e < -wideExpCutoff:
-		w.lo, ok = growExpansion(w.lo, math.Ldexp(v, wideHiShift))
+		w.loLen, ok = growExpansionBuf(&w.loBuf, w.loLen, math.Ldexp(v, wideHiShift))
 	default:
-		w.mid, ok = growExpansion(w.mid, v)
+		w.midLen, ok = growExpansionBuf(&w.midBuf, w.midLen, v)
 	}
 	if !ok {
 		w.nonFin = true
@@ -538,7 +586,6 @@ func (w *wideDotAcc) addProd(a, b float64) {
 		w.nonFin = true
 		return
 	}
-	w.ensureInit()
 	_, ea := math.Frexp(math.Abs(a))
 	_, eb := math.Frexp(math.Abs(b))
 	sumExp := ea + eb
@@ -546,16 +593,16 @@ func (w *wideDotAcc) addProd(a, b float64) {
 	switch {
 	case sumExp > wideExpCutoff:
 		p, pe := twoProd(math.Ldexp(a, -wideHalfShift), math.Ldexp(b, -wideHalfShift))
-		w.hi, ok1 = growExpansion(w.hi, pe)
-		w.hi, ok2 = growExpansion(w.hi, p)
+		w.hiLen, ok1 = growExpansionBuf(&w.hiBuf, w.hiLen, pe)
+		w.hiLen, ok2 = growExpansionBuf(&w.hiBuf, w.hiLen, p)
 	case sumExp < -wideExpCutoff:
 		p, pe := twoProd(math.Ldexp(a, wideHalfShift), math.Ldexp(b, wideHalfShift))
-		w.lo, ok1 = growExpansion(w.lo, pe)
-		w.lo, ok2 = growExpansion(w.lo, p)
+		w.loLen, ok1 = growExpansionBuf(&w.loBuf, w.loLen, pe)
+		w.loLen, ok2 = growExpansionBuf(&w.loBuf, w.loLen, p)
 	default:
 		p, pe := twoProd(a, b)
-		w.mid, ok1 = growExpansion(w.mid, pe)
-		w.mid, ok2 = growExpansion(w.mid, p)
+		w.midLen, ok1 = growExpansionBuf(&w.midBuf, w.midLen, pe)
+		w.midLen, ok2 = growExpansionBuf(&w.midBuf, w.midLen, p)
 	}
 	if !ok1 || !ok2 {
 		w.nonFin = true
@@ -581,31 +628,43 @@ func (w *wideDotAcc) finishDD() (top, rem float64, ok bool) {
 	if w.nonFin {
 		return 0, 0, false
 	}
-	if w.hi == nil {
+	if w.isEmpty() {
 		return 0, 0, true
 	}
-	w.hi = compressExpansion(w.hi)
-	w.mid = compressExpansion(w.mid)
-	w.lo = compressExpansion(w.lo)
+	if w.hiLen == 0 && w.loLen == 0 {
+		w.midLen = collapseExpansionBuf(&w.midBuf, w.midLen)
+		s, e := expansionTopRem(w.midBuf[:w.midLen])
+		return s, e, true
+	}
+	return w.finishDDMultiBucket()
+}
+
+func (w *wideDotAcc) finishDDMultiBucket() (top, rem float64, ok bool) {
+	w.hiLen = collapseExpansionBuf(&w.hiBuf, w.hiLen)
+	w.midLen = collapseExpansionBuf(&w.midBuf, w.midLen)
+	w.loLen = collapseExpansionBuf(&w.loBuf, w.loLen)
+	hi := w.hiBuf[:w.hiLen]
+	mid := w.midBuf[:w.midLen]
+	lo := w.loBuf[:w.loLen]
 
 	var midBuf [3 * expansionCap]float64
 	midMerged := midBuf[:0]
-	if len(w.hi) == 0 {
-		midMerged = append(midMerged, w.mid...)
+	if len(hi) == 0 {
+		midMerged = append(midMerged, mid...)
 	} else {
-		hiTop := w.hi[len(w.hi)-1]
+		hiTop := hi[len(hi)-1]
 		_, eHi := math.Frexp(math.Abs(hiTop))
 		if eHi+wideHiShift > 1026 {
 			return math.Copysign(math.Inf(1), hiTop), 0, false
 		}
 		var halfBuf [2 * expansionCap]float64
 		half := halfBuf[:0]
-		for _, h := range w.hi {
-			half, _ = growExpansion(half, math.Ldexp(h, wideHalfShift))
+		for _, h := range hi {
+			half = growExpansion(half, math.Ldexp(h, wideHalfShift))
 		}
-		for _, m := range w.mid {
+		for _, m := range mid {
 			if math.Abs(m) >= 0x1p-400 {
-				half, _ = growExpansion(half, math.Ldexp(m, -wideHalfShift))
+				half = growExpansion(half, math.Ldexp(m, -wideHalfShift))
 			}
 		}
 		half = compressExpansion(half)
@@ -615,13 +674,13 @@ func (w *wideDotAcc) finishDD() (top, rem float64, ok bool) {
 			if eHalf+wideHalfShift > 1024 {
 				var sc4Buf [3 * expansionCap]float64
 				sc4 := sc4Buf[:0]
-				for _, m := range w.mid {
+				for _, m := range mid {
 					if math.Abs(m) < 0x1p-400 && math.Abs(m) >= 0x1p-1018 {
-						sc4, _ = growExpansion(sc4, math.Ldexp(m, -4))
+						sc4 = growExpansion(sc4, math.Ldexp(m, -4))
 					}
 				}
 				for _, c := range half {
-					sc4, _ = growExpansion(sc4, math.Ldexp(c, wideHalfShift-4))
+					sc4 = growExpansion(sc4, math.Ldexp(c, wideHalfShift-4))
 				}
 				sc4 = compressExpansion(sc4)
 				t4, r4 := expansionTopRem(sc4)
@@ -640,18 +699,18 @@ func (w *wideDotAcc) finishDD() (top, rem float64, ok bool) {
 				return s, e, true
 			}
 		}
-		for _, m := range w.mid {
+		for _, m := range mid {
 			if math.Abs(m) < 0x1p-400 {
-				midMerged, _ = growExpansion(midMerged, m)
+				midMerged = growExpansion(midMerged, m)
 			}
 		}
 		for _, c := range half {
-			midMerged, _ = growExpansion(midMerged, math.Ldexp(c, wideHalfShift))
+			midMerged = growExpansion(midMerged, math.Ldexp(c, wideHalfShift))
 		}
 		midMerged = compressExpansion(midMerged)
 	}
 
-	if len(w.lo) == 0 {
+	if len(lo) == 0 {
 		s, e := expansionTopRem(midMerged)
 		return s, e, true
 	}
@@ -659,9 +718,9 @@ func (w *wideDotAcc) finishDD() (top, rem float64, ok bool) {
 	var loSmallBuf [expansionCap]float64
 	loSmall := loSmallBuf[:0]
 	addedLoNorm := false
-	for _, l := range w.lo {
+	for _, l := range lo {
 		if math.Abs(l) >= 0x1p34 {
-			midMerged, _ = growExpansion(midMerged, math.Ldexp(math.Ldexp(l, -wideHalfShift), -wideHalfShift))
+			midMerged = growExpansion(midMerged, math.Ldexp(math.Ldexp(l, -wideHalfShift), -wideHalfShift))
 			addedLoNorm = true
 		} else {
 			loSmall = append(loSmall, l)
@@ -691,14 +750,14 @@ func (w *wideDotAcc) finishDD() (top, rem float64, ok bool) {
 		topKeep := topKeepBuf[:0]
 		for _, m := range midMerged {
 			if math.Abs(m) < 0x1p400 {
-				up, _ = growExpansion(up, math.Ldexp(m, wideHalfShift))
+				up = growExpansion(up, math.Ldexp(m, wideHalfShift))
 			} else {
 				topKeep = append(topKeep, m)
 			}
 		}
 		for _, l := range loSmall {
 			if math.Abs(l) >= 0x1p-490 {
-				up, _ = growExpansion(up, math.Ldexp(l, -wideHalfShift))
+				up = growExpansion(up, math.Ldexp(l, -wideHalfShift))
 			}
 		}
 		up = compressExpansion(up)
@@ -719,11 +778,11 @@ func (w *wideDotAcc) finishDD() (top, rem float64, ok bool) {
 		rebuilt := midBuf[:0]
 		for _, u := range up {
 			if math.Abs(u) >= 0x1p-494 {
-				rebuilt, _ = growExpansion(rebuilt, math.Ldexp(u, -wideHalfShift))
+				rebuilt = growExpansion(rebuilt, math.Ldexp(u, -wideHalfShift))
 			}
 		}
 		for _, m := range topKeep {
-			rebuilt, _ = growExpansion(rebuilt, m)
+			rebuilt = growExpansion(rebuilt, m)
 		}
 		rebuilt = compressExpansion(rebuilt)
 		s, e := expansionTopRem(rebuilt)

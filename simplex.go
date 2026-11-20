@@ -1974,18 +1974,21 @@ func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCan
 	status := ws.status[:tot]
 	xSlice := ws.x[:tot]
 
-	var w wideDotAcc
-	w.addVal(s.rowRHS(row))
+	rhs := s.rowRHS(row)
 	slackVar := n + row
+	var slackTerm float64
+	hasSlackTerm := false
 	if status[slackVar] == statusBasic {
 		if includeBasic {
 			bSlot := ws.basicRow[slackVar]
 			if bSlot >= 0 && bSlot < len(xbCand) {
-				w.addVal(-xbCand[bSlot])
+				slackTerm = -xbCand[bSlot]
+				hasSlackTerm = true
 			}
 		}
 	} else {
-		w.addVal(-xSlice[slackVar])
+		slackTerm = -xSlice[slackVar]
+		hasSlackTerm = true
 	}
 
 	var cols []int
@@ -1998,6 +2001,38 @@ func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCan
 		dr := s.extraRows[row-baseM]
 		cols = dr.ColIdx
 		vals = dr.Val[:len(cols)]
+	}
+
+	// Evaluate in double-double first and escalate to wideDotAcc only on overflow, underflow, or deep cancellation.
+	var acc dot2Acc
+	acc.addVal(rhs)
+	if hasSlackTerm {
+		acc.addVal(slackTerm)
+	}
+	for k, col := range cols {
+		if uint(col) >= uint(n) {
+			continue
+		}
+		if status[col] == statusBasic {
+			if !includeBasic {
+				continue
+			}
+			bSlot := ws.basicRow[col]
+			if bSlot >= 0 && bSlot < len(xbCand) {
+				acc.addProd(-vals[k], xbCand[bSlot])
+			}
+		} else {
+			acc.addProd(-vals[k], xSlice[col])
+		}
+	}
+	if val, eb, ok := acc.result(); ok && eb <= 0x1p-48*math.Abs(val) {
+		return val
+	}
+
+	var w wideDotAcc
+	w.addVal(rhs)
+	if hasSlackTerm {
+		w.addVal(slackTerm)
 	}
 	for k, col := range cols {
 		if uint(col) >= uint(n) {
@@ -2036,20 +2071,19 @@ func (s *LPSolver) computePrimalValues() {
 	xbSlice := ws.xb[:m]
 	basis := ws.basis[:m]
 
-	maxTerm := 0.0
+	rowMax := ws.ensureRowMaxTerm(m)
 	for i := range m {
 		xb := s.rowRHS(i)
-		if ax := math.Abs(xb); !(ax <= maxTerm) {
-			maxTerm = ax
-		}
+		rm := math.Abs(xb)
 		slackVar := n + i
 		if status[slackVar] != statusBasic {
 			xs := xSlice[slackVar]
-			if axs := math.Abs(xs); !(axs <= maxTerm) {
-				maxTerm = axs
+			if axs := math.Abs(xs); !(axs <= rm) {
+				rm = axs
 			}
 			xb -= xs
 		}
+		rowMax[i] = rm
 		xbSlice[i] = xb
 	}
 
@@ -2071,8 +2105,8 @@ func (s *LPSolver) computePrimalValues() {
 		for k, r := range rows {
 			if uint(r) < uint(m) {
 				prod := vals[k] * xj
-				if ap := math.Abs(prod); !(ap <= maxTerm) {
-					maxTerm = ap
+				if ap := math.Abs(prod); !(ap <= rowMax[r]) {
+					rowMax[r] = ap
 				}
 				xbSlice[r] -= prod
 			}
@@ -2080,22 +2114,28 @@ func (s *LPSolver) computePrimalValues() {
 	}
 	for r, dr := range s.extraRows {
 		sum := 0.0
+		row := baseM + r
+		rm := rowMax[row]
 		cols := dr.ColIdx
 		vals := dr.Val[:len(cols)]
 		for k, c := range cols {
 			if uint(c) < uint(tot) && status[c] != statusBasic {
 				prod := vals[k] * xSlice[c]
-				if ap := math.Abs(prod); !(ap <= maxTerm) {
-					maxTerm = ap
+				if ap := math.Abs(prod); !(ap <= rm) {
+					rm = ap
 				}
 				sum += prod
 			}
 		}
-		xbSlice[baseM+r] -= sum
+		rowMax[row] = rm
+		xbSlice[row] -= sum
 	}
-	cancelThresh := maxTerm * 0x1p-30
 	for i := range m {
-		if !(math.Abs(xbSlice[i]) >= cancelThresh) || math.IsInf(xbSlice[i], 0) {
+		rm := rowMax[i]
+		if rm == 0 {
+			continue
+		}
+		if !(math.Abs(xbSlice[i]) >= rm*0x1p-30) || math.IsInf(xbSlice[i], 0) || math.IsInf(rm, 0) {
 			xbSlice[i] = s.recomputeWorkingRowResidual(i, false, nil, xbSlice[i])
 		}
 	}
@@ -4516,24 +4556,23 @@ func (s *LPSolver) refineOptimalBasis() {
 	}
 
 	evalPrimalRes := func(xbCand []float64, dst []float64) float64 {
-		maxTerm := 0.0
+		rowMax := ws.ensureRowMaxTerm(m)
 		for i := range m {
 			r := s.rowRHS(i)
-			if ar := math.Abs(r); !(ar <= maxTerm) {
-				maxTerm = ar
-			}
+			rm := math.Abs(r)
 			slackVar := n + i
 			if q := basicPos[slackVar]; q >= 0 {
-				if aq := math.Abs(xbCand[q]); !(aq <= maxTerm) {
-					maxTerm = aq
+				if aq := math.Abs(xbCand[q]); !(aq <= rm) {
+					rm = aq
 				}
 				r -= xbCand[q]
 			} else {
-				if as := math.Abs(xSlice[slackVar]); !(as <= maxTerm) {
-					maxTerm = as
+				if as := math.Abs(xSlice[slackVar]); !(as <= rm) {
+					rm = as
 				}
 				r -= xSlice[slackVar]
 			}
+			rowMax[i] = rm
 			dst[i] = r
 		}
 		for j := range n {
@@ -4545,15 +4584,18 @@ func (s *LPSolver) refineOptimalBasis() {
 				continue
 			}
 			for idx := p.colPtr[j]; idx < p.colPtr[j+1]; idx++ {
+				row := p.rowIdx[idx]
 				prod := p.colVal[idx] * xj
-				if ap := math.Abs(prod); !(ap <= maxTerm) {
-					maxTerm = ap
+				if ap := math.Abs(prod); !(ap <= rowMax[row]) {
+					rowMax[row] = ap
 				}
-				dst[p.rowIdx[idx]] -= prod
+				dst[row] -= prod
 			}
 		}
 		for e, dr := range s.extraRows {
 			sum := 0.0
+			row := baseM + e
+			rm := rowMax[row]
 			for k, c := range dr.ColIdx {
 				xc := xSlice[c]
 				if q := basicPos[c]; q >= 0 {
@@ -4561,18 +4603,19 @@ func (s *LPSolver) refineOptimalBasis() {
 				}
 				if xc != 0 {
 					prod := dr.Val[k] * xc
-					if ap := math.Abs(prod); !(ap <= maxTerm) {
-						maxTerm = ap
+					if ap := math.Abs(prod); !(ap <= rm) {
+						rm = ap
 					}
 					sum += prod
 				}
 			}
-			dst[baseM+e] -= sum
+			rowMax[row] = rm
+			dst[row] -= sum
 		}
-		cancelThresh := maxTerm * 0x1p-30
 		maxR := 0.0
 		for i, v := range dst {
-			if !(math.Abs(v) >= cancelThresh) || math.IsInf(v, 0) {
+			rm := rowMax[i]
+			if rm != 0 && (!(math.Abs(v) >= rm*0x1p-30) || math.IsInf(v, 0) || math.IsInf(rm, 0)) {
 				v = s.recomputeWorkingRowResidual(i, true, xbCand, v)
 				dst[i] = v
 				if math.IsNaN(v) || math.IsInf(v, 0) {

@@ -2851,24 +2851,55 @@ func buildCBCEqRREFBasis(wRows []cbcWorkRow, exclude []bool, scaleLB, scaleUB []
 }
 
 func cloneWideDotAcc(src *wideDotAcc) wideDotAcc {
-	var dst wideDotAcc
-	dst.nonFin = src.nonFin
-	if src.hi != nil {
-		dst.ensureInit()
-		dst.hi = append(dst.hi, src.hi...)
-		dst.mid = append(dst.mid, src.mid...)
-		dst.lo = append(dst.lo, src.lo...)
-	}
-	return dst
+	return *src
 }
 
 func evalShiftedConstMin(fixedW *wideDotAcc, baseConstMin float64) float64 {
-	if fixedW == nil || (fixedW.hi == nil && !fixedW.nonFin) {
+	if fixedW == nil || (fixedW.isEmpty() && !fixedW.nonFin) {
 		return baseConstMin
 	}
 	w := cloneWideDotAcc(fixedW)
 	w.addVal(baseConstMin)
 	return w.finish(math.NaN())
+}
+
+func seedWideDotAcc(w *wideDotAcc, hi, mid, lo []float64) {
+	if len(hi) <= expansionCap {
+		w.hiLen = copy(w.hiBuf[:], hi)
+	} else {
+		for _, v := range hi {
+			var ok bool
+			w.hiLen, ok = growExpansionBuf(&w.hiBuf, w.hiLen, v)
+			if !ok {
+				w.nonFin = true
+				return
+			}
+		}
+	}
+	if len(mid) <= expansionCap {
+		w.midLen = copy(w.midBuf[:], mid)
+	} else {
+		for _, v := range mid {
+			var ok bool
+			w.midLen, ok = growExpansionBuf(&w.midBuf, w.midLen, v)
+			if !ok {
+				w.nonFin = true
+				return
+			}
+		}
+	}
+	if len(lo) <= expansionCap {
+		w.loLen = copy(w.loBuf[:], lo)
+	} else {
+		for _, v := range lo {
+			var ok bool
+			w.loLen, ok = growExpansionBuf(&w.loBuf, w.loLen, v)
+			if !ok {
+				w.nonFin = true
+				return
+			}
+		}
+	}
 }
 
 func rowBoundsFromSense(sense ConstraintSense, rhs float64) (rLB, rUB float64) {
@@ -3416,10 +3447,13 @@ func preconditionCBC(
 	if hasFixedObj {
 		if fixedObjW.nonFin {
 			fixedNonFin = true
-		} else if fixedObjW.hi != nil {
-			fixedHi = slices.Clone(compressExpansion(fixedObjW.hi))
-			fixedMid = slices.Clone(compressExpansion(fixedObjW.mid))
-			fixedLo = slices.Clone(compressExpansion(fixedObjW.lo))
+		} else if !fixedObjW.isEmpty() {
+			fixedObjW.hiLen = collapseExpansionBuf(&fixedObjW.hiBuf, fixedObjW.hiLen)
+			fixedObjW.midLen = collapseExpansionBuf(&fixedObjW.midBuf, fixedObjW.midLen)
+			fixedObjW.loLen = collapseExpansionBuf(&fixedObjW.loBuf, fixedObjW.loLen)
+			fixedHi = slices.Clone(fixedObjW.hiBuf[:fixedObjW.hiLen])
+			fixedMid = slices.Clone(fixedObjW.midBuf[:fixedObjW.midLen])
+			fixedLo = slices.Clone(fixedObjW.loBuf[:fixedObjW.loLen])
 		}
 	}
 
@@ -3457,10 +3491,7 @@ func (pc *cbcPrecond) addFixedObjOffset(val float64) float64 {
 		return math.NaN()
 	}
 	var w wideDotAcc
-	w.ensureInit()
-	w.hi = append(w.hi, pc.fixedHi...)
-	w.mid = append(w.mid, pc.fixedMid...)
-	w.lo = append(w.lo, pc.fixedLo...)
+	seedWideDotAcc(&w, pc.fixedHi, pc.fixedMid, pc.fixedLo)
 	w.addVal(val)
 	return w.finish(math.NaN())
 }
@@ -3474,10 +3505,7 @@ func (pc *cbcPrecond) totalMinShift(p *CompiledProblem) float64 {
 		return math.NaN()
 	}
 	var w wideDotAcc
-	w.ensureInit()
-	w.hi = append(w.hi, pc.fixedHi...)
-	w.mid = append(w.mid, pc.fixedMid...)
-	w.lo = append(w.lo, pc.fixedLo...)
+	seedWideDotAcc(&w, pc.fixedHi, pc.fixedMid, pc.fixedLo)
 	w.addVal(baseConst)
 	return w.finish(math.NaN())
 }
@@ -3493,10 +3521,7 @@ func (pc *cbcPrecond) userBoundFromReducedMin(p *CompiledProblem, redMin, clampF
 			return 0, false
 		}
 		var w wideDotAcc
-		w.ensureInit()
-		w.hi = append(w.hi, pc.fixedHi...)
-		w.mid = append(w.mid, pc.fixedMid...)
-		w.lo = append(w.lo, pc.fixedLo...)
+		seedWideDotAcc(&w, pc.fixedHi, pc.fixedMid, pc.fixedLo)
 		w.addVal(baseConst)
 		w.addVal(redMin)
 		fullMin = w.finish(math.NaN())

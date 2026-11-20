@@ -497,6 +497,7 @@ func tryPropagatedRounding(
 
 type epigraphRowTerm struct {
 	epiCol int
+	epiIdx int
 	c      float64
 	alpha  float64
 	beta   float64
@@ -688,11 +689,14 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64) ([]float6
 				return nil, 0, false
 			}
 		}
-		if !slices.Contains(comps[cIdx].epiCols, epiCol) {
+		epiIdx := slices.Index(comps[cIdx].epiCols, epiCol)
+		if epiIdx < 0 {
+			epiIdx = len(comps[cIdx].epiCols)
 			comps[cIdx].epiCols = append(comps[cIdx].epiCols, epiCol)
 		}
 		comps[cIdx].rows = append(comps[cIdx].rows, epigraphRowTerm{
 			epiCol: epiCol,
+			epiIdx: epiIdx,
 			c:      cTerm,
 			alpha:  alpha,
 			beta:   beta,
@@ -837,6 +841,7 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 	epiMax := make([]float64, len(comp.epiCols))
 	bestEpiVals := make([]float64, len(comp.epiCols))
 
+	var compObj wideDotAcc
 	for _, mv := range mCands {
 		for _, nv := range nCands {
 			for ei, ec := range comp.epiCols {
@@ -844,24 +849,30 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 			}
 			for _, r := range rows {
 				val := r.c + r.alpha*mv + r.beta*nv
-				for ei, ec := range comp.epiCols {
-					if ec == r.epiCol {
-						if val > epiMax[ei] {
-							epiMax[ei] = val
-						}
-						break
-					}
+				if val > epiMax[r.epiIdx] {
+					epiMax[r.epiIdx] = val
 				}
 			}
-			var compObj wideDotAcc
-			compObj.addProd(p.objMin[mCol], mv)
+			var acc dot2Acc
+			acc.addProd(p.objMin[mCol], mv)
 			if nCol != -1 {
-				compObj.addProd(p.objMin[nCol], nv)
+				acc.addProd(p.objMin[nCol], nv)
 			}
 			for ei, ec := range comp.epiCols {
-				compObj.addProd(p.objMin[ec], epiMax[ei])
+				acc.addProd(p.objMin[ec], epiMax[ei])
 			}
-			obj := compObj.finish(math.NaN())
+			obj, eb, ok := acc.result()
+			if !ok || eb > 0x1p-48*math.Abs(obj) {
+				compObj.reset()
+				compObj.addProd(p.objMin[mCol], mv)
+				if nCol != -1 {
+					compObj.addProd(p.objMin[nCol], nv)
+				}
+				for ei, ec := range comp.epiCols {
+					compObj.addProd(p.objMin[ec], epiMax[ei])
+				}
+				obj = compObj.finish(math.NaN())
+			}
 			if !math.IsNaN(obj) && !math.IsInf(obj, 0) && obj < bestCompObj {
 				bestCompObj = obj
 				bestM = mv
