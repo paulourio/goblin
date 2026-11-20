@@ -11,41 +11,42 @@ import (
 // incumbentTol is the largest bound, row, or integer residual allowed when a
 // rounded LP point becomes an incumbent.
 const (
-	incumbentTol            = 1e-6
-	nodeQueueCmpTol         = 1e-7
-	maxRootCutsCap          = 60
-	minRootCutsFloor        = 15
-	rootCutsRowDiv          = 3
-	minCutRoundImprov       = 1e-3
-	maxStagnantCutRound     = 2
-	zeroGainAbsTol          = 1e-6
-	zeroGainRelTol          = 1e-7
-	slackCutPurgeTol        = 0.05
-	minPseudoCostInit       = 1e-2
-	pseudoCostObjScale      = 0.1
-	minPseudoDist           = 1e-3
-	initNodeQueueCap        = 256
-	minPseudoScoreFloor     = 1e-4
-	pseudoTieScale          = 1e-6
-	strongBranchMaxDepth    = 2
-	strongBranchReliableCnt = 2
-	strongBranchCandCap     = 5
-	strongBranchInfeas      = 1e4
-	strongBranchMaxIter     = 25
-	intSnapTol              = 1e-4
-	postCutDiveVarMin       = 100
-	subMIPStagnantNodeCap   = 48
-	plungeQueuePeriod       = 8
-	largeModelHeurVarCap    = 200
-	heurShallowDepth        = 5
-	heurBaseStride          = 4
-	heurMedStride           = 16
-	heurSlowStride          = 64
-	heurMedMissCap          = 4
-	heurSlowMissCap         = 12
-	tightenObjPasses        = 3
-	nodeCompactStepCap      = 128
-	rootIterExpandMult      = 4
+	incumbentTol             = 1e-6
+	nodeQueueCmpTol          = 1e-7
+	maxRootCutsCap           = 60
+	minRootCutsFloor         = 15
+	rootCutsRowDiv           = 3
+	minCutRoundImprov        = 1e-3
+	maxStagnantCutRound      = 2
+	zeroGainAbsTol           = 1e-6
+	zeroGainRelTol           = 1e-7
+	slackCutPurgeTol         = 0.05
+	minPseudoCostInit        = 1e-2
+	pseudoCostObjScale       = 0.1
+	minPseudoDist            = 1e-3
+	initNodeQueueCap         = 256
+	minPseudoScoreFloor      = 1e-4
+	pseudoTieScale           = 1e-6
+	strongBranchMaxDepth     = 2
+	strongBranchReliableCnt  = 2
+	strongBranchCandCap      = 5
+	strongBranchInfeas       = 1e4
+	strongBranchMaxIter      = 25
+	intSnapTol               = 1e-4
+	postCutDiveVarMin        = 100
+	subMIPStagnantNodeCap    = 48
+	subMIPNoIncumbentNodeCap = 64
+	plungeQueuePeriod        = 8
+	largeModelHeurVarCap     = 200
+	heurShallowDepth         = 5
+	heurBaseStride           = 4
+	heurMedStride            = 16
+	heurSlowStride           = 64
+	heurMedMissCap           = 4
+	heurSlowMissCap          = 12
+	tightenObjPasses         = 3
+	nodeCompactStepCap       = 128
+	rootIterExpandMult       = 4
 )
 
 type boundDelta struct {
@@ -120,6 +121,13 @@ func (pc *pseudoCost) record(up bool, gain, dist float64) {
 	}
 }
 
+type branchCand struct {
+	col        int
+	val        float64
+	dEst, uEst float64
+	score      float64
+}
+
 // babEngine holds the orchestration state for a single Branch-and-Cut solve.
 type babEngine struct {
 	p                  *CompiledProblem
@@ -150,6 +158,21 @@ type babEngine struct {
 	pq                 nodeQueue
 	fixScratchLB       []float64
 	fixScratchUB       []float64
+	isContLinked       []bool
+	isContLinkedReady  bool
+	sbCands            []branchCand
+}
+
+func (b *babEngine) contLinkedIntCols() []bool {
+	if !b.isContLinkedReady {
+		b.isContLinked = findContLinkedIntCols(b.p)
+		b.isContLinkedReady = true
+	}
+	return b.isContLinked
+}
+
+func (b *babEngine) cutsEnabled() bool {
+	return b.opts.EnableCuts && b.opts.MaxCutPasses > 0
 }
 
 func (b *babEngine) ensureHeurSolver() *LPSolver {
@@ -482,39 +505,47 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 	}
 }
 
+func (b *babEngine) runRootSubMIP(primal []float64, hs *LPSolver, isContLinked []bool) bool {
+	remNodes := b.nodesLeft()
+	remIter := b.iterLeft()
+	if remNodes <= 0 || remIter <= 0 {
+		return false
+	}
+	var rootStatus []varBasisStatus
+	if b.lpSolver != nil && b.lpSolver.ws != nil && len(b.lpSolver.ws.status) >= b.p.numVars {
+		rootStatus = b.lpSolver.ws.status[:b.p.numVars]
+	}
+	sol, objMin, usedN, usedIt, ok := tryRootSubMIP(b.p, hs, rootStatus, primal, b.p.varLB, b.p.varUB, b.bestObjMin, b.deadline, b.opts.isSubMIP, remNodes, remIter, isContLinked)
+	b.nodesExplored += usedN
+	b.totalLPIters += usedIt
+	if b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter {
+		b.hitIterLimit = true
+	}
+	return ok && b.acceptIncumbent(sol, objMin)
+}
+
 func (b *babEngine) runPreCutHeuristics(rootPrimal []float64) {
 	p := b.p
+	isContLinked := b.contLinkedIntCols()
 	b.heurSolver.CopyRootBasisFrom(b.lpSolver)
 	if !b.timeExpired() {
-		if sol, objMin, ok := tryPropagatedRounding(p, rootPrimal, p.varLB, p.varUB, b.heurSolver); ok {
+		if sol, objMin, ok := tryPropagatedRounding(p, rootPrimal, p.varLB, p.varUB, b.heurSolver, isContLinked); ok {
+			b.acceptIncumbent(sol, objMin)
+		}
+	}
+	// Defer fractional diving and root sub-MIP until after root cuts when cutting is enabled.
+	if b.cutsEnabled() {
+		return
+	}
+	if !b.timeExpired() && !isGapClosed(b.rootLPMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+		b.heurSolver.CopyRootBasisFrom(b.lpSolver)
+		if sol, objMin, ok := tryFractionalDiving(p, rootPrimal, p.varLB, p.varUB, b.heurSolver, b.bestObjMin, true, isContLinked); ok {
 			b.acceptIncumbent(sol, objMin)
 		}
 	}
 	if !b.timeExpired() && !isGapClosed(b.rootLPMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 		b.heurSolver.CopyRootBasisFrom(b.lpSolver)
-		if sol, objMin, ok := tryFractionalDiving(p, rootPrimal, p.varLB, p.varUB, b.heurSolver, b.bestObjMin, true); ok {
-			b.acceptIncumbent(sol, objMin)
-		}
-	}
-	if !b.timeExpired() && !isGapClosed(b.rootLPMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
-		remNodes := b.nodesLeft()
-		remIter := b.iterLeft()
-		if remNodes > 0 && remIter > 0 {
-			b.heurSolver.CopyRootBasisFrom(b.lpSolver)
-			var rootStatus []varBasisStatus
-			if b.lpSolver != nil && b.lpSolver.ws != nil && len(b.lpSolver.ws.status) >= p.numVars {
-				rootStatus = b.lpSolver.ws.status[:p.numVars]
-			}
-			sol, objMin, usedN, usedIt, ok := tryRootSubMIP(p, b.heurSolver, rootStatus, rootPrimal, p.varLB, p.varUB, b.bestObjMin, b.deadline, b.opts.isSubMIP, remNodes, remIter)
-			b.nodesExplored += usedN
-			b.totalLPIters += usedIt
-			if b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter {
-				b.hitIterLimit = true
-			}
-			if ok {
-				b.acceptIncumbent(sol, objMin)
-			}
-		}
+		b.runRootSubMIP(rootPrimal, b.heurSolver, isContLinked)
 	}
 }
 
@@ -619,35 +650,35 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 
 func (b *babEngine) runPostCutHeuristics(cutPrimal []float64) {
 	p := b.p
-	cutsImproved := b.cutsAdded > 0 && b.rootCutMin-b.rootLPMin > max(zeroGainAbsTol, zeroGainRelTol*math.Abs(b.rootLPMin))
-	if !b.opts.EnableHeuristics || !cutsImproved || b.timeExpired() || isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+	if !b.opts.EnableHeuristics || !b.cutsEnabled() || b.timeExpired() || isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 		return
 	}
+	cutsImproved := b.cutsAdded > 0 && b.rootCutMin-b.rootLPMin > max(zeroGainAbsTol, zeroGainRelTol*math.Abs(b.rootLPMin))
 	hs := b.ensureHeurSolver()
-	remNodes := b.nodesLeft()
-	remIter := b.iterLeft()
-	if remNodes > 0 && remIter > 0 {
-		var rootStatus []varBasisStatus
-		if b.lpSolver != nil && b.lpSolver.ws != nil && len(b.lpSolver.ws.status) >= p.numVars {
-			rootStatus = b.lpSolver.ws.status[:p.numVars]
+	isContLinked := b.contLinkedIntCols()
+	if !cutsImproved {
+		// Cuts did not tighten the root relaxation, so run the deferred pre-cut diving
+		// before resorting to a root sub-MIP (preserving root closure on zero-cut models).
+		hs.CopyRootBasisFrom(b.lpSolver)
+		if sol, objMin, ok := tryFractionalDiving(p, cutPrimal, p.varLB, p.varUB, hs, b.bestObjMin, true, isContLinked); ok {
+			b.acceptIncumbent(sol, objMin)
 		}
-		sol, objMin, usedN, usedIt, ok := tryRootSubMIP(p, hs, rootStatus, cutPrimal, p.varLB, p.varUB, b.bestObjMin, b.deadline, b.opts.isSubMIP, remNodes, remIter)
-		b.nodesExplored += usedN
-		b.totalLPIters += usedIt
-		if b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter {
-			b.hitIterLimit = true
+		if !b.timeExpired() && !isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+			hs.CopyRootBasisFrom(b.lpSolver)
+			b.runRootSubMIP(cutPrimal, hs, isContLinked)
 		}
-		if ok && b.acceptIncumbent(sol, objMin) {
-			b.postCutSubMIPFound = true
-		}
+		return
+	}
+	if b.runRootSubMIP(cutPrimal, hs, isContLinked) {
+		b.postCutSubMIPFound = true
 	}
 	if !b.timeExpired() && !b.postCutSubMIPFound && !isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
-		if sol, objMin, ok := tryPropagatedRounding(p, cutPrimal, p.varLB, p.varUB, b.heurSolver); ok {
+		if sol, objMin, ok := tryPropagatedRounding(p, cutPrimal, p.varLB, p.varUB, hs, isContLinked); ok {
 			b.acceptIncumbent(sol, objMin)
 		}
 	}
 	if !b.timeExpired() && !b.postCutSubMIPFound && !isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
-		if sol, objMin, ok := tryFractionalDiving(p, cutPrimal, p.varLB, p.varUB, b.heurSolver, b.bestObjMin, p.numVars > postCutDiveVarMin); ok {
+		if sol, objMin, ok := tryFractionalDiving(p, cutPrimal, p.varLB, p.varUB, hs, b.bestObjMin, p.numVars > postCutDiveVarMin, isContLinked); ok {
 			b.acceptIncumbent(sol, objMin)
 		}
 	}
@@ -699,7 +730,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		return Result{}, false
 	}
 
-	brVar, brVal := selectBranchVar(p, b.lpSolver, curLPRes, curLB, curUB, pCosts, 0, &b.totalLPIters, b.iterLeft)
+	brVar, brVal := selectBranchVarWithBuf(p, b.lpSolver, curLPRes, curLB, curUB, pCosts, 0, &b.totalLPIters, b.iterLeft, &b.sbCands)
 	if brVar == -1 {
 		if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 			b.acceptIncumbent(cand, minObjective(p, cand))
@@ -736,6 +767,10 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 	lastIncumbentNode := 1
 	heurMisses := 0
+	var isContLinked []bool
+	if b.opts.EnableHeuristics {
+		isContLinked = b.contLinkedIntCols()
+	}
 	// Cap per-node pruning relative tolerance at 1.0 so upper - r*max(1,|upper|) remains
 	// monotonically non-decreasing when bestObjMin improves; when RelGapTol > 1.0, check the
 	// global bound against the full RelGapTol directly.
@@ -744,9 +779,15 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		if b.opts.RelGapTol > 1.0 && b.bestPrimal != nil && isGapClosed(b.currentGlobalBound(), b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 			break
 		}
-		if b.opts.isSubMIP && b.bestPrimal != nil && b.nodesExplored-lastIncumbentNode >= subMIPStagnantNodeCap {
-			b.hitNodeLimit = true
-			break
+		if b.opts.isSubMIP {
+			if b.bestPrimal != nil && b.nodesExplored-lastIncumbentNode >= subMIPStagnantNodeCap {
+				b.hitNodeLimit = true
+				break
+			}
+			if b.bestPrimal == nil && b.nodesExplored >= subMIPNoIncumbentNodeCap {
+				b.hitNodeLimit = true
+				break
+			}
 		}
 		if b.opts.MaxNodes > 0 && b.nodesExplored >= b.opts.MaxNodes {
 			b.hitNodeLimit = true
@@ -841,9 +882,10 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		}
 
 		stride := nodeHeurStride(n, heurMisses)
-		runHeur := (!b.postCutSubMIPFound && node.depth <= heurShallowDepth && (n <= largeModelHeurVarCap || node.depth <= 1)) || b.nodesExplored%stride == 0
+		shallowHeur := !b.postCutSubMIPFound && heurMisses < heurMedMissCap && node.depth <= heurShallowDepth && (n <= largeModelHeurVarCap || node.depth <= 1)
+		runHeur := shallowHeur || b.nodesExplored%stride == 0
 		if b.opts.EnableHeuristics && !b.timeExpired() && runHeur {
-			if sol, objMin, ok := tryPropagatedRounding(p, nodeRes.Primal, curLB, curUB, b.heurSolver); ok && b.acceptIncumbent(sol, objMin) {
+			if sol, objMin, ok := tryPropagatedRounding(p, nodeRes.Primal, curLB, curUB, b.heurSolver, isContLinked); ok && b.acceptIncumbent(sol, objMin) {
 				lastIncumbentNode = b.nodesExplored
 				heurMisses = 0
 				if nodeMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(nodeMin, b.bestObjMin, pruneRelTol, b.opts.AbsGapTol) {
@@ -855,7 +897,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			}
 		}
 
-		bVar, bVal := selectBranchVar(p, b.lpSolver, nodeRes, curLB, curUB, pCosts, node.depth, &b.totalLPIters, b.iterLeft)
+		bVar, bVal := selectBranchVarWithBuf(p, b.lpSolver, nodeRes, curLB, curUB, pCosts, node.depth, &b.totalLPIters, b.iterLeft, &b.sbCands)
 		if bVar == -1 {
 			// The LP point is integral within intFeasTol, yet its rounding violates the
 			// rows (typical with big-M constraints). Branch on the integer variable furthest
@@ -1155,43 +1197,73 @@ func selectBranchVar(
 	totalIters *int,
 	iterLeft func() int,
 ) (bestCol int, bestVal float64) {
+	return selectBranchVarWithBuf(p, lpSolver, lpRes, curLB, curUB, pCosts, depth, totalIters, iterLeft, nil)
+}
+
+func evalBranchCand(p *CompiledProblem, col int, xVal, lb, ub float64, pc pseudoCost) (branchCand, bool) {
+	if ub-lb < halfFracTarget {
+		return branchCand{}, false
+	}
+	v := min(max(xVal, lb), ub)
+	f := v - math.Floor(v)
+	if f <= intFeasTol || f >= 1.0-intFeasTol {
+		return branchCand{}, false
+	}
+	if math.Floor(v) >= ub || math.Ceil(v) <= lb {
+		return branchCand{}, false
+	}
+	dEst := f * pc.avgDown()
+	uEst := (1.0 - f) * pc.avgUp()
+	score := max(dEst, minPseudoScoreFloor) * max(uEst, minPseudoScoreFloor)
+	score += pseudoTieScale * (halfFracTarget - math.Abs(f-halfFracTarget)) * (1.0 + math.Abs(p.objMin[col]))
+	return branchCand{col: col, val: v, dEst: dEst, uEst: uEst, score: score}, true
+}
+
+func selectBranchVarWithBuf(
+	p *CompiledProblem,
+	lpSolver *LPSolver,
+	lpRes LPResult,
+	curLB, curUB []float64,
+	pCosts []pseudoCost,
+	depth int,
+	totalIters *int,
+	iterLeft func() int,
+	candsBuf *[]branchCand,
+) (bestCol int, bestVal float64) {
 	bestCol = -1
 	bestScore := -1.0
 
-	type cand struct {
-		col        int
-		val        float64
-		dEst, uEst float64
-		score      float64
+	if depth > strongBranchMaxDepth {
+		for _, col := range p.intCols {
+			if c, ok := evalBranchCand(p, col, lpRes.Primal[col], curLB[col], curUB[col], pCosts[col]); ok && c.score > bestScore {
+				bestScore = c.score
+				bestCol = c.col
+				bestVal = c.val
+			}
+		}
+		return bestCol, bestVal
 	}
-	var cands []cand
+
+	var cands []branchCand
+	if candsBuf != nil {
+		cands = (*candsBuf)[:0]
+	}
 
 	for _, col := range p.intCols {
-		if curUB[col]-curLB[col] < halfFracTarget {
-			continue
+		if c, ok := evalBranchCand(p, col, lpRes.Primal[col], curLB[col], curUB[col], pCosts[col]); ok {
+			cands = append(cands, c)
 		}
-		v := min(max(lpRes.Primal[col], curLB[col]), curUB[col])
-		f := v - math.Floor(v)
-		if f <= intFeasTol || f >= 1.0-intFeasTol {
-			continue
-		}
-		if math.Floor(v) >= curUB[col] || math.Ceil(v) <= curLB[col] {
-			continue
-		}
-		pc := pCosts[col]
-		dEst := f * pc.avgDown()
-		uEst := (1.0 - f) * pc.avgUp()
-		score := max(dEst, minPseudoScoreFloor) * max(uEst, minPseudoScoreFloor)
-		score += pseudoTieScale * (halfFracTarget - math.Abs(f-halfFracTarget)) * (1.0 + math.Abs(p.objMin[col]))
-		cands = append(cands, cand{col: col, val: v, dEst: dEst, uEst: uEst, score: score})
+	}
+	if candsBuf != nil {
+		*candsBuf = cands
 	}
 
 	if len(cands) == 0 {
 		return -1, 0
 	}
 
-	if depth <= strongBranchMaxDepth && len(cands) > 1 {
-		slices.SortFunc(cands, func(a, b cand) int {
+	if len(cands) > 1 {
+		slices.SortFunc(cands, func(a, b branchCand) int {
 			if c := cmp.Compare(b.score, a.score); c != 0 {
 				return c
 			}
