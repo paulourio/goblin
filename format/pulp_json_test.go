@@ -2,10 +2,14 @@ package format_test
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -384,5 +388,314 @@ func TestPuLPJSONEdgeCases(t *testing.T) {
 		if mRT.Sense() != gb.Minimize || mRT.Name() != "NoName" {
 			t.Fatalf("FromPuLPJSON zero-value round-trip Name=%q Sense=%v, want NoName Minimize", mRT.Name(), mRT.Sense())
 		}
+	}
+}
+
+func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
+	probName := p.Name()
+	objName := p.ObjName()
+	if objName == "" {
+		objName = "OBJ"
+	}
+	numRows := p.NumConstraints()
+	numVars := p.NumVars()
+	seenRows := make(map[string]struct{}, numRows)
+	for i := range numRows {
+		seenRows[p.RowName(i)] = struct{}{}
+	}
+	type conflictRow struct {
+		name string
+		rhs  float64
+	}
+	var conflictRows []conflictRow
+	conflictRowByCol := make(map[int]string)
+	for j := range numVars {
+		lb, ub := p.VarBounds(j)
+		if lb > ub {
+			rname := fmt.Sprintf("_INFEAS_UB_%d", j)
+			for idx := 0; ; idx++ {
+				if idx > 0 {
+					rname = fmt.Sprintf("_INFEAS_UB_%d_%d", j, idx)
+				}
+				if rname != objName {
+					if _, exists := seenRows[rname]; !exists {
+						break
+					}
+				}
+			}
+			seenRows[rname] = struct{}{}
+			rhs := ub
+			if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
+				rhs = 0
+			}
+			conflictRows = append(conflictRows, conflictRow{name: rname, rhs: rhs})
+			conflictRowByCol[j] = rname
+		}
+	}
+	fmtFloat := func(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
+	sense := p.Sense()
+	_, _ = fmt.Fprintf(w, "*SENSE:%s\n", sense.String())
+	_, _ = fmt.Fprintf(w, "NAME          %s\n", probName)
+	_, _ = io.WriteString(w, "ROWS\n")
+	_, _ = fmt.Fprintf(w, " N  %s\n", objName)
+	for i := range numRows {
+		senseChar := "E"
+		switch p.RowSense(i) {
+		case gb.LessEqual:
+			senseChar = "L"
+		case gb.GreaterEqual:
+			senseChar = "G"
+		}
+		_, _ = fmt.Fprintf(w, " %s  %s\n", senseChar, p.RowName(i))
+	}
+	for _, cr := range conflictRows {
+		_, _ = fmt.Fprintf(w, " L  %s\n", cr.name)
+	}
+	_, _ = io.WriteString(w, "COLUMNS\n")
+	inIntBlock := false
+	for j := range numVars {
+		isInt := p.VarCategory(j) != gb.Continuous
+		if isInt && !inIntBlock {
+			_, _ = io.WriteString(w, "    MARK      'MARKER'                 'INTORG'\n")
+			inIntBlock = true
+		} else if !isInt && inIntBlock {
+			_, _ = io.WriteString(w, "    MARKEND   'MARKER'                 'INTEND'\n")
+			inIntBlock = false
+		}
+		vname := p.VarName(j)
+		hasEntry := false
+		if objMin := p.ObjMinCoeff(j); objMin != 0 {
+			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, fmtFloat(objMin))
+			hasEntry = true
+		}
+		p.ForEachColTerm(j, func(r int, val float64) {
+			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, p.RowName(r), fmtFloat(val))
+			hasEntry = true
+		})
+		if crName, ok := conflictRowByCol[j]; ok {
+			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, crName, "1")
+			hasEntry = true
+		}
+		if !hasEntry {
+			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, "0")
+		}
+	}
+	if inIntBlock {
+		_, _ = io.WriteString(w, "    MARKEND   'MARKER'                 'INTEND'\n")
+	}
+	_, _ = io.WriteString(w, "RHS\n")
+	if objConst := p.ObjConstant(); objConst != 0 {
+		senseSign := 1.0
+		if sense == gb.Maximize {
+			senseSign = -1.0
+		}
+		_, _ = fmt.Fprintf(w, "    RHS       %-10s %15s\n", objName, fmtFloat(-senseSign*objConst))
+	}
+	for i := range numRows {
+		if rhs := p.RowRHS(i); rhs != 0 {
+			_, _ = fmt.Fprintf(w, "    RHS       %-10s %15s\n", p.RowName(i), fmtFloat(rhs))
+		}
+	}
+	for _, cr := range conflictRows {
+		if cr.rhs != 0 {
+			_, _ = fmt.Fprintf(w, "    RHS       %-10s %15s\n", cr.name, fmtFloat(cr.rhs))
+		}
+	}
+	_, _ = io.WriteString(w, "BOUNDS\n")
+	for j := range numVars {
+		vname := p.VarName(j)
+		lb, ub := p.VarBounds(j)
+		cat := p.VarCategory(j)
+		if _, isConflict := conflictRowByCol[j]; isConflict {
+			effLB := lb
+			if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
+				effLB = 1
+			}
+			bndType := "LO"
+			if cat != gb.Continuous {
+				bndType = "LI"
+			}
+			_, _ = fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, fmtFloat(effLB))
+			if cat != gb.Continuous {
+				_, _ = fmt.Fprintf(w, " PL BND       %-10s\n", vname)
+			}
+			continue
+		}
+		if cat == gb.Binary && lb == 0 && ub == 1 {
+			_, _ = fmt.Fprintf(w, " BV BND       %-10s\n", vname)
+			continue
+		}
+		if math.IsInf(lb, -1) && math.IsInf(ub, 1) {
+			_, _ = fmt.Fprintf(w, " FR BND       %-10s\n", vname)
+			continue
+		}
+		if lb == ub {
+			_, _ = fmt.Fprintf(w, " FX BND       %-10s %15s\n", vname, fmtFloat(lb))
+			continue
+		}
+		if math.IsInf(lb, -1) {
+			_, _ = fmt.Fprintf(w, " MI BND       %-10s\n", vname)
+		} else if lb != 0 || ub < 0 || cat != gb.Continuous {
+			bndType := "LO"
+			if cat != gb.Continuous {
+				bndType = "LI"
+			}
+			_, _ = fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, fmtFloat(lb))
+		}
+		if !math.IsInf(ub, 1) {
+			bndType := "UP"
+			if cat != gb.Continuous {
+				bndType = "UI"
+			}
+			_, _ = fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, fmtFloat(ub))
+		} else if cat != gb.Continuous {
+			_, _ = fmt.Fprintf(w, " PL BND       %-10s\n", vname)
+		}
+	}
+	_, _ = io.WriteString(w, "ENDATA\n")
+	return nil
+}
+
+type failingMPSWriter struct {
+	limit int
+	wrote int
+	err   error
+}
+
+func (f *failingMPSWriter) Write(p []byte) (int, error) {
+	if f.wrote+len(p) > f.limit {
+		return 0, f.err
+	}
+	f.wrote += len(p)
+	return len(p), nil
+}
+
+// TestWriteMPSByteForByteCompatibility confirms that buffered WriteMPS produces byte-for-byte
+// identical output to the reference fmt.Fprintf implementation across all corpus models,
+// every MPS bound type, conflicting bounds, long identifiers, and chunk flush boundaries.
+func TestWriteMPSByteForByteCompatibility(t *testing.T) {
+	verify := func(t *testing.T, label string, p *gb.CompiledProblem) {
+		t.Helper()
+		var got, want bytes.Buffer
+		if err := format.WriteMPS(p, &got); err != nil {
+			t.Fatalf("%s: WriteMPS failed: %v", label, err)
+		}
+		if err := referenceWriteMPS(p, &want); err != nil {
+			t.Fatalf("%s: referenceWriteMPS failed: %v", label, err)
+		}
+		if !bytes.Equal(got.Bytes(), want.Bytes()) {
+			t.Fatalf("%s: WriteMPS byte mismatch (got %d bytes, want %d bytes)", label, got.Len(), want.Len())
+		}
+	}
+
+	matches, err := filepath.Glob(filepath.Join("..", "testdata", "corpus", "*.json"))
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("expected corpus JSON files, got %d (err=%v)", len(matches), err)
+	}
+	for _, path := range matches {
+		f, oErr := os.Open(path)
+		if oErr != nil {
+			t.Fatalf("open %s: %v", path, oErr)
+		}
+		mdl, pErr := format.FromPuLPJSON(f)
+		_ = f.Close()
+		if pErr != nil {
+			t.Fatalf("FromPuLPJSON %s: %v", path, pErr)
+		}
+		verify(t, filepath.Base(path), mdl.Compile())
+	}
+
+	// Exercise every bound classification, marker transition, long name, and conflict row.
+	m := gb.NewModel("mps_all_bounds", gb.Maximize)
+	vFree := m.AddContVar("v_free", math.Inf(-1), math.Inf(1))
+	vFixed := m.AddContVar("v_fixed_long_name_01", 3.25, 3.25)
+	vNegInf := m.AddContVar("v_mi", math.Inf(-1), -2.5)
+	vNegUB := m.AddContVar("v_negub", 0, -4.0)
+	vBin := m.AddBinaryVar("b0")
+	vIntPL := m.AddIntVar("i_pl_unbounded", 2, math.Inf(1))
+	vIntBox := m.AddIntVar("i_box", -3, 9)
+	_ = m.AddContVar("unused_cont", 0, 10)
+	_ = m.AddIntVar("unused_int_trailing", 1, 5)
+	vConfSmall := m.AddContVar("c_conf_small", 5.0+1e-9, 5.0)
+	vConfInt := m.AddIntVar("i_conf_large", 8, 2)
+	m.SetObjectiveNamed("PROFIT_OBJ_LONG", gb.NewExpr(
+		gb.T(vFree, 1.0+7e-13),
+		gb.T(vBin, -1.25e-14),
+		gb.T(vIntPL, 2.5),
+		gb.T(vConfSmall, 1.0),
+		gb.T(vConfInt, -1.0),
+	).AddConstant(17.5))
+	m.AddConstraint("r_le_very_long_name", gb.Le(gb.NewExpr(gb.T(vFree, 1), gb.T(vFixed, 2)), 10))
+	m.AddConstraint("r_eq", gb.Eq(gb.NewExpr(gb.T(vNegInf, -1), gb.T(vNegUB, 1)), 0))
+	m.AddConstraint("r_ge", gb.Ge(gb.NewExpr(gb.T(vBin, 3), gb.T(vIntBox, -2)), -5))
+	m.AddConstraint("_INFEAS_UB_9", gb.Le(gb.VarExpr(vFree), 100))
+	verify(t, "all_bounds_and_conflicts", m.Compile())
+
+	// Verify writer errors propagate cleanly across chunk flushes.
+	wantErr := errors.New("mps write failure")
+	fw := &failingMPSWriter{limit: 32, err: wantErr}
+	if err := format.WriteMPS(m.Compile(), fw); !errors.Is(err, wantErr) {
+		t.Fatalf("WriteMPS error = %v, want %v", err, wantErr)
+	}
+}
+
+// TestCodecLowAllocations guards against allocation regressions in ParsePuLPJSON,
+// WriteMPS, ToPuLPJSON, and ToPuLPJSONCompact on a Tier 3 corpus model.
+func TestCodecLowAllocations(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "corpus", "t3_sched_1000.json"))
+	if err != nil {
+		t.Fatalf("read t3_sched_1000.json: %v", err)
+	}
+	doc, err := format.ParsePuLPJSON(raw)
+	if err != nil {
+		t.Fatalf("ParsePuLPJSON: %v", err)
+	}
+	mdl, err := format.BuildModelFromPuLPJSON(doc)
+	if err != nil {
+		t.Fatalf("BuildModelFromPuLPJSON: %v", err)
+	}
+	p := mdl.Compile()
+
+	parseAllocs := testing.AllocsPerRun(5, func() {
+		if _, pErr := format.ParsePuLPJSON(raw); pErr != nil {
+			t.Fatalf("ParsePuLPJSON: %v", pErr)
+		}
+	})
+	if parseAllocs > 30 {
+		t.Fatalf("ParsePuLPJSON allocs/run = %.1f, want <= 30", parseAllocs)
+	}
+
+	var mpsBuf bytes.Buffer
+	mpsBuf.Grow(512 * 1024)
+	mpsAllocs := testing.AllocsPerRun(5, func() {
+		mpsBuf.Reset()
+		if wErr := format.WriteMPS(p, &mpsBuf); wErr != nil {
+			t.Fatalf("WriteMPS: %v", wErr)
+		}
+	})
+	if mpsAllocs > 35 {
+		t.Fatalf("WriteMPS allocs/run = %.1f, want <= 35", mpsAllocs)
+	}
+
+	var jsonBuf bytes.Buffer
+	jsonBuf.Grow(512 * 1024)
+	compactAllocs := testing.AllocsPerRun(5, func() {
+		jsonBuf.Reset()
+		if wErr := format.ToPuLPJSONCompact(p, &jsonBuf); wErr != nil {
+			t.Fatalf("ToPuLPJSONCompact: %v", wErr)
+		}
+	})
+	if compactAllocs > 15 {
+		t.Fatalf("ToPuLPJSONCompact allocs/run = %.1f, want <= 15", compactAllocs)
+	}
+
+	prettyAllocs := testing.AllocsPerRun(5, func() {
+		jsonBuf.Reset()
+		if wErr := format.ToPuLPJSON(p, &jsonBuf); wErr != nil {
+			t.Fatalf("ToPuLPJSON: %v", wErr)
+		}
+	})
+	if prettyAllocs > 15 {
+		t.Fatalf("ToPuLPJSON allocs/run = %.1f, want <= 15", prettyAllocs)
 	}
 }

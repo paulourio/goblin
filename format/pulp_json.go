@@ -11,11 +11,44 @@ import (
 	"io"
 	"math"
 	"regexp"
+	"sync"
 
 	gb "github.com/paulourio/goblin"
 )
 
 var reIgnoredPythonNonFinite = regexp.MustCompile(`("(?:varValue|dj|pi)"\s*:\s*)(?:-?Infinity|NaN)\b`)
+
+var (
+	tokParameters   = jsontext.String("parameters")
+	tokName         = jsontext.String("name")
+	tokSense        = jsontext.String("sense")
+	tokStatus       = jsontext.String("status")
+	tokSolStatus    = jsontext.String("sol_status")
+	tokObjective    = jsontext.String("objective")
+	tokCoefficients = jsontext.String("coefficients")
+	tokValue        = jsontext.String("value")
+	tokConstant     = jsontext.String("constant")
+	tokVariables    = jsontext.String("variables")
+	tokCat          = jsontext.String("cat")
+	tokContinuous   = jsontext.String("Continuous")
+	tokInteger      = jsontext.String("Integer")
+	tokLowBound     = jsontext.String("lowBound")
+	tokUpBound      = jsontext.String("upBound")
+	tokVarValue     = jsontext.String("varValue")
+	tokDj           = jsontext.String("dj")
+	tokConstraints  = jsontext.String("constraints")
+	tokPi           = jsontext.String("pi")
+	tokSOS1         = jsontext.String("sos1")
+	tokSOS2         = jsontext.String("sos2")
+	tokZeroInt      = jsontext.Int(0)
+	pulpIndentOpt   = jsontext.WithIndent("  ")
+)
+
+var pulpEncPool = sync.Pool{
+	New: func() any {
+		return jsontext.NewEncoder(io.Discard)
+	},
+}
 
 // PuLPJSON represents the native JSON schema produced by PuLP's LpProblem.toJson / toDict
 // and consumed by LpProblem.fromJson / fromDict.
@@ -143,12 +176,12 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 	m := gb.NewModel(doc.Parameters.Name, sense)
 	m.Reserve(len(doc.Variables), len(doc.Constraints))
 
-	varMap := make(map[string]gb.Var, len(doc.Variables))
-	for _, v := range doc.Variables {
+	for i := range doc.Variables {
+		v := &doc.Variables[i]
 		if v.Name == "" {
 			return nil, errors.New("PuLP JSON contains variable with empty name")
 		}
-		if _, exists := varMap[v.Name]; exists {
+		if _, exists := m.VarByName(v.Name); exists {
 			return nil, fmt.Errorf("PuLP JSON contains duplicate variable name %q", v.Name)
 		}
 		lb := math.Inf(-1)
@@ -184,28 +217,38 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 		default:
 			return nil, fmt.Errorf("variable %q has invalid category %q", v.Name, v.Cat)
 		}
-		id := m.AddVar(v.Name, lb, ub, cat)
-		varMap[v.Name] = id
+		m.AddVar(v.Name, lb, ub, cat)
 	}
 
-	objTerms := make([]gb.Term, 0, len(doc.Objective.Coefficients))
+	maxTerms := len(doc.Objective.Coefficients)
+	for i := range doc.Constraints {
+		if n := len(doc.Constraints[i].Coefficients); n > maxTerms {
+			maxTerms = n
+		}
+	}
+	var terms []gb.Term
+	if maxTerms > 0 {
+		terms = make([]gb.Term, 0, maxTerms)
+	}
+
 	for _, c := range doc.Objective.Coefficients {
-		vid, ok := varMap[c.Name]
+		vid, ok := m.VarByName(c.Name)
 		if !ok {
 			return nil, fmt.Errorf("objective references unknown variable %q", c.Name)
 		}
-		objTerms = append(objTerms, gb.Term{Var: vid, Coeff: c.Value})
+		terms = append(terms, gb.Term{Var: vid, Coeff: c.Value})
 	}
 	objName := ""
 	if doc.Objective.Name != nil {
 		objName = *doc.Objective.Name
 	}
-	m.SetObjectiveNamed(objName, gb.Expr{Terms: objTerms, Constant: doc.Objective.Constant})
+	m.SetObjectiveNamed(objName, gb.Expr{Terms: terms, Constant: doc.Objective.Constant})
 
-	for _, c := range doc.Constraints {
-		terms := make([]gb.Term, 0, len(c.Coefficients))
+	for i := range doc.Constraints {
+		c := &doc.Constraints[i]
+		terms = terms[:0]
 		for _, coeff := range c.Coefficients {
-			vid, ok := varMap[coeff.Name]
+			vid, ok := m.VarByName(coeff.Name)
 			if !ok {
 				return nil, fmt.Errorf("constraint %q references unknown variable %q", c.Name, coeff.Name)
 			}
@@ -249,107 +292,201 @@ func FromPuLPJSON(r io.Reader) (*gb.Model, error) {
 	return BuildModelFromPuLPJSON(doc)
 }
 
-func toPuLPJSONDoc(p *gb.CompiledProblem) PuLPJSON {
-	numVars := p.NumVars()
-	numRows := p.NumConstraints()
-	doc := PuLPJSON{
-		Parameters: PuLPParameters{
-			Name:  p.Name(),
-			Sense: int(p.Sense()),
-		},
-		Variables:   make([]PuLPVariable, numVars),
-		Constraints: make([]PuLPConstraint, numRows),
-		SOS1:        []any{},
-		SOS2:        []any{},
-	}
-	if objName := p.ObjName(); objName != "" {
-		nameCopy := objName
-		doc.Objective.Name = &nameCopy
-	}
-	doc.Objective.Constant = p.ObjConstant()
-	doc.Objective.Coefficients = make([]PuLPCoefficient, 0, numVars)
-	for j := range numVars {
-		vname := p.VarName(j)
-		if c := p.ObjCoeff(j); c != 0 {
-			doc.Objective.Coefficients = append(doc.Objective.Coefficients, PuLPCoefficient{
-				Name:  vname,
-				Value: c,
-			})
-		}
-		lb, ub := p.VarBounds(j)
-		var lbPtr, ubPtr *float64
-		if !math.IsInf(lb, -1) {
-			v := lb
-			lbPtr = &v
-		}
-		if !math.IsInf(ub, 1) {
-			v := ub
-			ubPtr = &v
-		}
-		catStr := "Continuous"
-		cat := p.VarCategory(j)
-		if cat == gb.Integer || cat == gb.Binary {
-			// PuLP stores both Binary and Integer as "Integer" with [0, 1] bounds in toDict()
-			catStr = "Integer"
-		}
-		doc.Variables[j] = PuLPVariable{
-			Name:     vname,
-			Cat:      catStr,
-			LowBound: lbPtr,
-			UpBound:  ubPtr,
-		}
-	}
-
-	for i := range numRows {
-		coeffs := make([]PuLPCoefficient, 0, p.RowLen(i))
-		p.ForEachRowTerm(i, func(col int, val float64) {
-			coeffs = append(coeffs, PuLPCoefficient{
-				Name:  p.VarName(col),
-				Value: val,
-			})
-		})
-		doc.Constraints[i] = PuLPConstraint{
-			Name:         p.RowName(i),
-			Sense:        int(p.RowSense(i)),
-			Coefficients: coeffs,
-			Constant:     -p.RowRHS(i),
-		}
-	}
-	return doc
+type pulpTokenWriter struct {
+	enc *jsontext.Encoder
+	err error
 }
 
-var trailingNewline = [1]byte{'\n'}
+func (tw *pulpTokenWriter) tok(t jsontext.Token) {
+	if tw.err != nil {
+		return
+	}
+	tw.err = tw.enc.WriteToken(t)
+}
+
+func (tw *pulpTokenWriter) floatVal(v float64) {
+	if tw.err != nil {
+		return
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		tw.err = fmt.Errorf("cannot encode non-finite float %v in PuLP JSON", v)
+		return
+	}
+	tw.err = tw.enc.WriteToken(jsontext.Float(v))
+}
+
+func (tw *pulpTokenWriter) coeffObj(name string, val float64) {
+	if tw.err != nil {
+		return
+	}
+	tw.tok(jsontext.BeginObject)
+	tw.tok(tokName)
+	tw.tok(jsontext.String(name))
+	tw.tok(tokValue)
+	tw.floatVal(val)
+	tw.tok(jsontext.EndObject)
+}
+
+func writePuLPJSON(p *gb.CompiledProblem, w io.Writer, indent bool) (retErr error) {
+	if p == nil {
+		return gb.ErrNilProblem
+	}
+	if err := p.Err(); err != nil {
+		return err
+	}
+
+	enc, _ := pulpEncPool.Get().(*jsontext.Encoder)
+	if enc == nil {
+		enc = jsontext.NewEncoder(io.Discard)
+	}
+	if indent {
+		enc.Reset(w, pulpIndentOpt)
+	} else {
+		enc.Reset(w)
+	}
+	defer func() {
+		enc.Reset(io.Discard)
+		if retErr == nil {
+			pulpEncPool.Put(enc)
+		}
+	}()
+
+	tw := pulpTokenWriter{enc: enc}
+	numVars := p.NumVars()
+	numRows := p.NumConstraints()
+
+	tw.tok(jsontext.BeginObject)
+
+	// Write parameters section.
+	tw.tok(tokParameters)
+	tw.tok(jsontext.BeginObject)
+	tw.tok(tokName)
+	tw.tok(jsontext.String(p.Name()))
+	tw.tok(tokSense)
+	tw.tok(jsontext.Int(int64(p.Sense())))
+	tw.tok(tokStatus)
+	tw.tok(tokZeroInt)
+	tw.tok(tokSolStatus)
+	tw.tok(tokZeroInt)
+	tw.tok(jsontext.EndObject)
+
+	// Write objective section.
+	tw.tok(tokObjective)
+	tw.tok(jsontext.BeginObject)
+	tw.tok(tokName)
+	if objName := p.ObjName(); objName != "" {
+		tw.tok(jsontext.String(objName))
+	} else {
+		tw.tok(jsontext.Null)
+	}
+	tw.tok(tokCoefficients)
+	tw.tok(jsontext.BeginArray)
+	for j := range numVars {
+		if c := p.ObjCoeff(j); c != 0 {
+			tw.coeffObj(p.VarName(j), c)
+			if tw.err != nil {
+				return tw.err
+			}
+		}
+	}
+	tw.tok(jsontext.EndArray)
+	if objConst := p.ObjConstant(); objConst != 0 {
+		tw.tok(tokConstant)
+		tw.floatVal(objConst)
+	}
+	tw.tok(jsontext.EndObject)
+
+	// Write variables section.
+	tw.tok(tokVariables)
+	tw.tok(jsontext.BeginArray)
+	for j := range numVars {
+		tw.tok(jsontext.BeginObject)
+		tw.tok(tokName)
+		tw.tok(jsontext.String(p.VarName(j)))
+		tw.tok(tokCat)
+		if cat := p.VarCategory(j); cat == gb.Integer || cat == gb.Binary {
+			// PuLP stores both Binary and Integer as "Integer" with [0, 1] bounds in toDict().
+			tw.tok(tokInteger)
+		} else {
+			tw.tok(tokContinuous)
+		}
+		lb, ub := p.VarBounds(j)
+		tw.tok(tokLowBound)
+		if math.IsInf(lb, -1) {
+			tw.tok(jsontext.Null)
+		} else {
+			tw.floatVal(lb)
+		}
+		tw.tok(tokUpBound)
+		if math.IsInf(ub, 1) {
+			tw.tok(jsontext.Null)
+		} else {
+			tw.floatVal(ub)
+		}
+		tw.tok(tokVarValue)
+		tw.tok(jsontext.Null)
+		tw.tok(tokDj)
+		tw.tok(jsontext.Null)
+		tw.tok(jsontext.EndObject)
+		if tw.err != nil {
+			return tw.err
+		}
+	}
+	tw.tok(jsontext.EndArray)
+
+	// Write constraints section.
+	tw.tok(tokConstraints)
+	tw.tok(jsontext.BeginArray)
+	rowTermFn := func(col int, val float64) {
+		if tw.err != nil {
+			return
+		}
+		tw.coeffObj(p.VarName(col), val)
+	}
+	for i := range numRows {
+		tw.tok(jsontext.BeginObject)
+		tw.tok(tokName)
+		tw.tok(jsontext.String(p.RowName(i)))
+		tw.tok(tokSense)
+		tw.tok(jsontext.Int(int64(p.RowSense(i))))
+		tw.tok(tokCoefficients)
+		tw.tok(jsontext.BeginArray)
+		p.ForEachRowTerm(i, rowTermFn)
+		if tw.err != nil {
+			return tw.err
+		}
+		tw.tok(jsontext.EndArray)
+		tw.tok(tokPi)
+		tw.tok(jsontext.Null)
+		tw.tok(tokConstant)
+		tw.floatVal(-p.RowRHS(i))
+		tw.tok(jsontext.EndObject)
+		if tw.err != nil {
+			return tw.err
+		}
+	}
+	tw.tok(jsontext.EndArray)
+
+	// Write empty SOS1 and SOS2 sections.
+	tw.tok(tokSOS1)
+	tw.tok(jsontext.BeginArray)
+	tw.tok(jsontext.EndArray)
+	tw.tok(tokSOS2)
+	tw.tok(jsontext.BeginArray)
+	tw.tok(jsontext.EndArray)
+
+	tw.tok(jsontext.EndObject)
+	return tw.err
+}
 
 // ToPuLPJSON serializes a CompiledProblem into PuLP's JSON schema.
 // Nonzero objective offsets are emitted under objective.constant (a goblin extension
 // ignored by Python PuLP's LpProblem.fromJson).
 func ToPuLPJSON(p *gb.CompiledProblem, w io.Writer) error {
-	if p == nil {
-		return gb.ErrNilProblem
-	}
-	if err := p.Err(); err != nil {
-		return err
-	}
-	doc := toPuLPJSONDoc(p)
-	if err := json.MarshalWrite(w, &doc, jsontext.WithIndent("  ")); err != nil {
-		return err
-	}
-	_, err := w.Write(trailingNewline[:])
-	return err
+	return writePuLPJSON(p, w, true)
 }
 
 // ToPuLPJSONCompact serializes a CompiledProblem into a single-line compact PuLP JSON record.
 func ToPuLPJSONCompact(p *gb.CompiledProblem, w io.Writer) error {
-	if p == nil {
-		return gb.ErrNilProblem
-	}
-	if err := p.Err(); err != nil {
-		return err
-	}
-	doc := toPuLPJSONDoc(p)
-	if err := json.MarshalWrite(w, &doc); err != nil {
-		return err
-	}
-	_, err := w.Write(trailingNewline[:])
-	return err
+	return writePuLPJSON(p, w, false)
 }

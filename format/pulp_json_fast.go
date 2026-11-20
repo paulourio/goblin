@@ -1,31 +1,226 @@
 package format
 
 import (
+	"encoding/binary"
 	"math"
 	"strconv"
+	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
+const (
+	eightSpaces       = 0x2020202020202020
+	fourSpaces        = 0x20202020
+	maxExactFloatInt  = (1 << 53) - 1
+	maxPoolVarHashCap = 32 * 1024
+	maxPoolEndsCap    = 16 * 1024
+)
+
+var plainStrChar = func() [256]bool {
+	var t [256]bool
+	for c := 0x20; c < 0x80; c++ {
+		if c != '"' && c != '\\' {
+			t[c] = true
+		}
+	}
+	return t
+}()
+
+var pow10Table = [23]float64{
+	1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7,
+	1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+	1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+}
+
+type pulpFastScratch struct {
+	varHash []int32
+	ends    []int
+}
+
+var pulpScratchPool = sync.Pool{
+	New: func() any {
+		return &pulpFastScratch{}
+	},
+}
+
 type pulpScanner struct {
-	b   []byte
-	s   string
-	pos int
+	b        []byte
+	pos      int
+	indented bool
+	vars     []PuLPVariable
+	varHash  []int32
+	ends     []int
+}
+
+func detectIndented(data []byte) bool {
+	limit := min(len(data), 64)
+	for i := range limit {
+		if data[i] == '\n' {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneBytesToString(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	return string(raw)
+}
+
+func internVarCat(raw []byte) string {
+	switch string(raw) {
+	case "Continuous":
+		return "Continuous"
+	case "Integer":
+		return "Integer"
+	case "Binary":
+		return "Binary"
+	default:
+		return cloneBytesToString(raw)
+	}
+}
+
+func hashBytes(b []byte) int {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for _, c := range b {
+		h ^= uint32(c)
+		h *= prime32
+	}
+	return int(h & 0x7fffffff)
+}
+
+func hashString(s string) int {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := range len(s) {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return int(h & 0x7fffffff)
+}
+
+func buildVarHash(buf []int32, vars []PuLPVariable) []int32 {
+	if len(vars) == 0 || len(vars) >= math.MaxInt32/2 {
+		return nil
+	}
+	size := 16
+	target := len(vars) * 2
+	for size < target {
+		size <<= 1
+	}
+	var table []int32
+	if cap(buf) >= size {
+		table = buf[:size]
+		clear(table)
+	} else {
+		table = make([]int32, size)
+	}
+	mask := size - 1
+	for i := range vars {
+		name := vars[i].Name
+		if name == "" {
+			continue
+		}
+		slot := hashString(name) & mask
+		for {
+			cur := table[slot]
+			if cur == 0 {
+				table[slot] = int32(i + 1)
+				break
+			}
+			if vars[cur-1].Name == name {
+				break
+			}
+			slot = (slot + 1) & mask
+		}
+	}
+	return table
+}
+
+func (sc *pulpScanner) resetEnds(wantCap int) []int {
+	if cap(sc.ends) < wantCap {
+		sc.ends = make([]int, 0, wantCap)
+	}
+	return sc.ends[:0]
+}
+
+func (sc *pulpScanner) lookupVarName(raw []byte) (string, bool) {
+	if len(raw) == 0 {
+		return "", true
+	}
+	table := sc.varHash
+	if len(table) == 0 {
+		return "", false
+	}
+	vars := sc.vars
+	mask := len(table) - 1
+	slot := hashBytes(raw) & mask
+	for {
+		cur := table[slot]
+		if cur == 0 {
+			return "", false
+		}
+		name := vars[cur-1].Name
+		if name == string(raw) {
+			return name, true
+		}
+		slot = (slot + 1) & mask
+	}
 }
 
 func (sc *pulpScanner) skipWS() {
+	if sc.pos < len(sc.b) && sc.b[sc.pos] > ' ' {
+		return
+	}
+	sc.skipWSSlow()
+}
+
+func (sc *pulpScanner) skipWSSlow() {
 	b := sc.b
 	i := sc.pos
-	for i < len(b) {
+	n := len(b)
+	for i < n {
 		c := b[i]
 		if c != ' ' && c != '\n' && c != '\r' && c != '\t' {
 			break
 		}
 		i++
+		if i < n && b[i] > ' ' {
+			sc.pos = i
+			return
+		}
+		for i+8 <= n && binary.LittleEndian.Uint64(b[i:i+8]) == eightSpaces {
+			i += 8
+		}
+		if i+4 <= n && binary.LittleEndian.Uint32(b[i:i+4]) == fourSpaces {
+			i += 4
+		}
+		for i < n && b[i] == ' ' {
+			i++
+		}
+		if i < n && b[i] > ' ' {
+			sc.pos = i
+			return
+		}
 	}
 	sc.pos = i
 }
 
 func (sc *pulpScanner) consumeByte(want byte) bool {
+	if sc.pos < len(sc.b) && sc.b[sc.pos] == want {
+		sc.pos++
+		return true
+	}
 	sc.skipWS()
 	if sc.pos < len(sc.b) && sc.b[sc.pos] == want {
 		sc.pos++
@@ -45,48 +240,41 @@ func (sc *pulpScanner) consumeNull() bool {
 	return false
 }
 
-// readUnescapedString reads a JSON string containing no backslash escapes or control bytes.
-// Any escape sequence returns ok=false so the caller falls back to encoding/json/v2.
-func (sc *pulpScanner) readUnescapedString() (string, bool) {
+// readUnescapedBytes reads a JSON string containing no backslash escapes or control bytes.
+// Any escape sequence or invalid UTF-8 returns ok=false so the caller falls back to encoding/json/v2.
+func (sc *pulpScanner) readUnescapedBytes() ([]byte, bool) {
 	sc.skipWS()
 	b := sc.b
 	i := sc.pos
-	if i >= len(b) || b[i] != '"' {
-		return "", false
+	n := len(b)
+	if i >= n || b[i] != '"' {
+		return nil, false
 	}
 	i++
 	start := i
-	hasHighBit := false
-	for i < len(b) {
+	for i < n && plainStrChar[b[i]] {
+		i++
+	}
+	if i < n && b[i] == '"' {
+		sc.pos = i + 1
+		return b[start:i], true
+	}
+	for i < n {
 		c := b[i]
 		if c == '"' {
-			str := sc.s[start:i]
-			if hasHighBit && !utf8.ValidString(str) {
-				return "", false
+			raw := b[start:i]
+			if !utf8.Valid(raw) {
+				return nil, false
 			}
 			sc.pos = i + 1
-			return str, true
+			return raw, true
 		}
 		if c == '\\' || c < 0x20 {
-			return "", false
-		}
-		if c >= 0x80 {
-			hasHighBit = true
+			return nil, false
 		}
 		i++
 	}
-	return "", false
-}
-
-func (sc *pulpScanner) readOptString() (*string, bool) {
-	if sc.consumeNull() {
-		return nil, true
-	}
-	str, ok := sc.readUnescapedString()
-	if !ok {
-		return nil, false
-	}
-	return &str, true
+	return nil, false
 }
 
 func (sc *pulpScanner) readInt() (int, bool) {
@@ -158,6 +346,8 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 			return 0, false
 		}
 	}
+	var u uint64
+	exact := true
 	if b[i] == '0' {
 		i++
 		if i >= n || (b[i] != '.' && b[i] != 'e' && b[i] != 'E' && (b[i] < '0' || b[i] > '9')) {
@@ -171,16 +361,18 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 			return 0, false
 		}
 	} else if b[i] >= '1' && b[i] <= '9' {
-		var u uint64
-		digits := 0
 		for i < n && b[i] >= '0' && b[i] <= '9' {
-			if digits < 15 {
-				u = u*10 + uint64(b[i]-'0')
+			d := uint64(b[i] - '0')
+			if exact {
+				if u <= (maxExactFloatInt-d)/10 {
+					u = u*10 + d
+				} else {
+					exact = false
+				}
 			}
 			i++
-			digits++
 		}
-		if digits <= 15 && (i >= n || (b[i] != '.' && b[i] != 'e' && b[i] != 'E')) {
+		if exact && (i >= n || (b[i] != '.' && b[i] != 'e' && b[i] != 'E')) {
 			sc.pos = i
 			v := float64(u)
 			if neg {
@@ -197,8 +389,32 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 		if i >= n || b[i] < '0' || b[i] > '9' {
 			return 0, false
 		}
+		fracDigits := 0
 		for i < n && b[i] >= '0' && b[i] <= '9' {
+			d := uint64(b[i] - '0')
+			if exact {
+				if u <= (maxExactFloatInt-d)/10 {
+					u = u*10 + d
+				} else {
+					exact = false
+				}
+			}
+			fracDigits++
 			i++
+		}
+		if exact && fracDigits < len(pow10Table) && (i >= n || (b[i] != 'e' && b[i] != 'E')) {
+			sc.pos = i
+			if u == 0 {
+				if neg {
+					return math.Copysign(0, -1), true
+				}
+				return 0, true
+			}
+			v := float64(u) / pow10Table[fracDigits]
+			if neg {
+				return -v, true
+			}
+			return v, true
 		}
 	}
 	if i < n && (b[i] == 'e' || b[i] == 'E') {
@@ -213,7 +429,7 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 			i++
 		}
 	}
-	v, err := strconv.ParseFloat(sc.s[numStart:i], 64)
+	v, err := strconv.ParseFloat(string(b[numStart:i]), 64)
 	if err != nil {
 		return 0, false
 	}
@@ -224,7 +440,7 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 func allocFloatSlab(slab *[]float64, v float64) *float64 {
 	s := *slab
 	if len(s) == cap(s) {
-		s = make([]float64, 0, max(64, 2*cap(s)))
+		s = make([]float64, 0, max(16, 2*cap(s)))
 	}
 	s = append(s, v)
 	*slab = s
@@ -277,34 +493,40 @@ func (sc *pulpScanner) readIgnoredMetricFloat(slab *[]float64) (*float64, bool) 
 	return allocFloatSlab(slab, v), true
 }
 
-func (sc *pulpScanner) readCoefficients(arena *[]PuLPCoefficient) ([]PuLPCoefficient, bool) {
+func (sc *pulpScanner) readCoefficients(
+	arena *[]PuLPCoefficient,
+	fallbackSB *strings.Builder,
+	fallbackEnds *[]int,
+) ([]PuLPCoefficient, bool) {
 	if sc.consumeNull() {
 		return nil, true
 	}
 	if !sc.consumeByte('[') {
 		return nil, false
 	}
-	startIdx := len(*arena)
 	if sc.consumeByte(']') {
-		return (*arena)[startIdx:startIdx:startIdx], true
+		return []PuLPCoefficient{}, true
 	}
+	startIdx := len(*arena)
+	useVarHash := len(sc.varHash) > 0
 	for {
 		if !sc.consumeByte('{') {
 			return nil, false
 		}
 		var coeff PuLPCoefficient
+		var nameRaw []byte
 		var seen uint8
 		if !sc.consumeByte('}') {
 			for {
-				key, ok := sc.readUnescapedString()
+				key, ok := sc.readUnescapedBytes()
 				if !ok || !sc.consumeByte(':') {
 					return nil, false
 				}
 				var bit uint8
-				switch key {
+				switch string(key) {
 				case "name":
 					bit = 1 << 0
-					coeff.Name, ok = sc.readUnescapedString()
+					nameRaw, ok = sc.readUnescapedBytes()
 				case "value":
 					bit = 1 << 1
 					coeff.Value, ok = sc.readFloat()
@@ -323,6 +545,16 @@ func (sc *pulpScanner) readCoefficients(arena *[]PuLPCoefficient) ([]PuLPCoeffic
 				}
 				return nil, false
 			}
+		}
+		if useVarHash {
+			if interned, hit := sc.lookupVarName(nameRaw); hit {
+				coeff.Name = interned
+			} else {
+				coeff.Name = cloneBytesToString(nameRaw)
+			}
+		} else {
+			_, _ = fallbackSB.Write(nameRaw)
+			*fallbackEnds = append(*fallbackEnds, fallbackSB.Len())
 		}
 		*arena = append(*arena, coeff)
 		if sc.consumeByte(',') {
@@ -345,15 +577,19 @@ func (sc *pulpScanner) readParameters(dst *PuLPParameters) bool {
 	}
 	var seen uint8
 	for {
-		key, ok := sc.readUnescapedString()
+		key, ok := sc.readUnescapedBytes()
 		if !ok || !sc.consumeByte(':') {
 			return false
 		}
 		var bit uint8
-		switch key {
+		switch string(key) {
 		case "name":
 			bit = 1 << 0
-			dst.Name, ok = sc.readUnescapedString()
+			var raw []byte
+			raw, ok = sc.readUnescapedBytes()
+			if ok {
+				dst.Name = cloneBytesToString(raw)
+			}
 		case "sense":
 			bit = 1 << 1
 			dst.Sense, ok = sc.readInt()
@@ -377,27 +613,73 @@ func (sc *pulpScanner) readParameters(dst *PuLPParameters) bool {
 	}
 }
 
-func (sc *pulpScanner) readObjective(dst *PuLPObjective, arena *[]PuLPCoefficient) bool {
+func (sc *pulpScanner) readObjective(dst *PuLPObjective) bool {
 	if !sc.consumeByte('{') {
 		return false
 	}
 	if sc.consumeByte('}') {
 		return true
 	}
-	var seen uint8
+	var (
+		objSB        strings.Builder
+		hasObjName   bool
+		objNameStart int
+		objNameEnd   int
+		coeffBase    int
+		objCoeffEnds []int
+		seen         uint8
+	)
 	for {
-		key, ok := sc.readUnescapedString()
+		key, ok := sc.readUnescapedBytes()
 		if !ok || !sc.consumeByte(':') {
 			return false
 		}
 		var bit uint8
-		switch key {
+		switch string(key) {
 		case "name":
 			bit = 1 << 0
-			dst.Name, ok = sc.readOptString()
+			if sc.consumeNull() {
+				dst.Name = nil
+				ok = true
+			} else {
+				var raw []byte
+				raw, ok = sc.readUnescapedBytes()
+				if ok {
+					hasObjName = true
+					objNameStart = objSB.Len()
+					_, _ = objSB.Write(raw)
+					objNameEnd = objSB.Len()
+				}
+			}
 		case "coefficients":
 			bit = 1 << 1
-			dst.Coefficients, ok = sc.readCoefficients(arena)
+			coeffBase = objSB.Len()
+			var objCoeffs []PuLPCoefficient
+			if sc.consumeNull() {
+				dst.Coefficients = nil
+				ok = true
+			} else if sc.consumeByte('[') {
+				bracketPos := sc.pos - 1
+				if sc.consumeByte(']') {
+					dst.Coefficients = []PuLPCoefficient{}
+					ok = true
+				} else {
+					sc.pos = bracketPos
+					objDiv := 320
+					if !sc.indented {
+						objDiv = 160
+					}
+					estObj := max(8, min(len(sc.b)/objDiv, 1024))
+					objCoeffs = make([]PuLPCoefficient, 0, estObj)
+					if len(sc.varHash) == 0 {
+						objCoeffEnds = sc.resetEnds(estObj)
+						objSB.Grow(estObj * 7)
+					}
+					dst.Coefficients, ok = sc.readCoefficients(&objCoeffs, &objSB, &objCoeffEnds)
+				}
+			} else {
+				ok = false
+			}
 		case "constant":
 			bit = 1 << 2
 			dst.Constant, ok = sc.readFloat()
@@ -411,11 +693,32 @@ func (sc *pulpScanner) readObjective(dst *PuLPObjective, arena *[]PuLPCoefficien
 		if sc.consumeByte(',') {
 			continue
 		}
-		return sc.consumeByte('}')
+		if !sc.consumeByte('}') {
+			return false
+		}
+		break
 	}
+	if hasObjName || len(objCoeffEnds) > 0 {
+		all := objSB.String()
+		if hasObjName {
+			s := all[objNameStart:objNameEnd]
+			dst.Name = &s
+		}
+		if len(objCoeffEnds) > 0 {
+			off := coeffBase
+			for i, end := range objCoeffEnds {
+				dst.Coefficients[i].Name = all[off:end]
+				off = end
+			}
+		}
+	}
+	if cap(objCoeffEnds) > cap(sc.ends) {
+		sc.ends = objCoeffEnds[:0]
+	}
+	return true
 }
 
-func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
+func (sc *pulpScanner) readVariables(slab *[]float64, objCoeffHint int, hashBuf []int32) ([]PuLPVariable, bool) {
 	if sc.consumeNull() {
 		return nil, true
 	}
@@ -425,27 +728,49 @@ func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
 	if sc.consumeByte(']') {
 		return []PuLPVariable{}, true
 	}
-	vars := make([]PuLPVariable, 0, max(8, len(sc.b)/256))
+	rem := len(sc.b) - sc.pos
+	varDiv := 1024
+	minVarBytes := 80
+	if !sc.indented {
+		varDiv = 512
+		minVarBytes = 40
+	}
+	estVars := max(8, rem/varDiv)
+	if objHint := min(objCoeffHint, rem/minVarBytes); objHint > estVars {
+		estVars = objHint
+	}
+	vars := make([]PuLPVariable, 0, estVars)
+	if cap(*slab) == 0 {
+		*slab = make([]float64, 0, max(16, estVars*2))
+	}
+	var varSB strings.Builder
+	varSB.Grow(min(rem/4, estVars*8))
+	varEnds := sc.resetEnds(estVars)
 	for {
 		if !sc.consumeByte('{') {
 			return nil, false
 		}
 		var v PuLPVariable
+		var nameRaw []byte
 		var seen uint8
 		if !sc.consumeByte('}') {
 			for {
-				key, ok := sc.readUnescapedString()
+				key, ok := sc.readUnescapedBytes()
 				if !ok || !sc.consumeByte(':') {
 					return nil, false
 				}
 				var bit uint8
-				switch key {
+				switch string(key) {
 				case "name":
 					bit = 1 << 0
-					v.Name, ok = sc.readUnescapedString()
+					nameRaw, ok = sc.readUnescapedBytes()
 				case "cat":
 					bit = 1 << 1
-					v.Cat, ok = sc.readUnescapedString()
+					var raw []byte
+					raw, ok = sc.readUnescapedBytes()
+					if ok {
+						v.Cat = internVarCat(raw)
+					}
 				case "lowBound":
 					bit = 1 << 2
 					v.LowBound, ok = sc.readOptFloat(slab)
@@ -474,6 +799,8 @@ func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
 				return nil, false
 			}
 		}
+		_, _ = varSB.Write(nameRaw)
+		varEnds = append(varEnds, varSB.Len())
 		if seen&(1<<2) == 0 {
 			v.LowBound = allocFloatSlab(slab, 0)
 		}
@@ -482,13 +809,22 @@ func (sc *pulpScanner) readVariables(slab *[]float64) ([]PuLPVariable, bool) {
 			continue
 		}
 		if sc.consumeByte(']') {
+			varNames := varSB.String()
+			off := 0
+			for i, end := range varEnds {
+				vars[i].Name = varNames[off:end]
+				off = end
+			}
+			sc.ends = varEnds[:0]
+			sc.vars = vars
+			sc.varHash = buildVarHash(hashBuf, vars)
 			return vars, true
 		}
 		return nil, false
 	}
 }
 
-func (sc *pulpScanner) readConstraints(arena *[]PuLPCoefficient, slab *[]float64) ([]PuLPConstraint, bool) {
+func (sc *pulpScanner) readConstraints(slab *[]float64) ([]PuLPConstraint, bool) {
 	if sc.consumeNull() {
 		return nil, true
 	}
@@ -498,30 +834,46 @@ func (sc *pulpScanner) readConstraints(arena *[]PuLPCoefficient, slab *[]float64
 	if sc.consumeByte(']') {
 		return []PuLPConstraint{}, true
 	}
-	cons := make([]PuLPConstraint, 0, max(8, len(sc.b)/512))
+	rem := len(sc.b) - sc.pos
+	conDiv := 1536
+	coeffDiv := 76
+	if !sc.indented {
+		conDiv = 768
+		coeffDiv = 32
+	}
+	estCons := max(8, rem/conDiv)
+	estCoeffs := max(8, rem/coeffDiv)
+	cons := make([]PuLPConstraint, 0, estCons)
+	coeffArena := make([]PuLPCoefficient, 0, estCoeffs)
+	var conSB strings.Builder
+	conSB.Grow(min(rem/8, estCons*8))
+	conNameEnds := sc.resetEnds(estCons)
+	var conCoeffSB strings.Builder
+	var conCoeffEnds []int
 	for {
 		if !sc.consumeByte('{') {
 			return nil, false
 		}
 		var c PuLPConstraint
+		var nameRaw []byte
 		var seen uint8
 		if !sc.consumeByte('}') {
 			for {
-				key, ok := sc.readUnescapedString()
+				key, ok := sc.readUnescapedBytes()
 				if !ok || !sc.consumeByte(':') {
 					return nil, false
 				}
 				var bit uint8
-				switch key {
+				switch string(key) {
 				case "name":
 					bit = 1 << 0
-					c.Name, ok = sc.readUnescapedString()
+					nameRaw, ok = sc.readUnescapedBytes()
 				case "sense":
 					bit = 1 << 1
 					c.Sense, ok = sc.readInt()
 				case "coefficients":
 					bit = 1 << 2
-					c.Coefficients, ok = sc.readCoefficients(arena)
+					c.Coefficients, ok = sc.readCoefficients(&coeffArena, &conCoeffSB, &conCoeffEnds)
 				case "pi":
 					bit = 1 << 3
 					c.Pi, ok = sc.readIgnoredMetricFloat(slab)
@@ -544,11 +896,34 @@ func (sc *pulpScanner) readConstraints(arena *[]PuLPCoefficient, slab *[]float64
 				return nil, false
 			}
 		}
+		_, _ = conSB.Write(nameRaw)
+		conNameEnds = append(conNameEnds, conSB.Len())
 		cons = append(cons, c)
 		if sc.consumeByte(',') {
 			continue
 		}
 		if sc.consumeByte(']') {
+			conNames := conSB.String()
+			off := 0
+			for i, end := range conNameEnds {
+				cons[i].Name = conNames[off:end]
+				off = end
+			}
+			sc.ends = conNameEnds[:0]
+			if len(conCoeffEnds) > 0 {
+				allCoeffNames := conCoeffSB.String()
+				coeffOff := 0
+				idx := 0
+				for i := range cons {
+					coeffs := cons[i].Coefficients
+					for k := range coeffs {
+						end := conCoeffEnds[idx]
+						coeffs[k].Name = allCoeffNames[coeffOff:end]
+						coeffOff = end
+						idx++
+					}
+				}
+			}
 			return cons, true
 		}
 		return nil, false
@@ -568,42 +943,65 @@ func (sc *pulpScanner) readEmptyArray() ([]any, bool) {
 	return []any{}, true
 }
 
-// parsePuLPJSONFast decodes standard unescaped PuLP JSON payloads without reflection,
-// backing all coefficient slices and float pointers with two contiguous arenas.
+// parsePuLPJSONFast decodes standard unescaped PuLP JSON payloads without reflection
+// and without pinning the raw input slice in live heap memory. Surviving names are
+// packed into compact string arenas and variable categories are interned to constants.
 // Any escape sequence, unknown field, duplicate key, non-empty SOS list, or syntax error
 // returns ok=false so ParsePuLPJSON falls back to encoding/json/v2.
 func parsePuLPJSONFast(data []byte) (*PuLPJSON, bool) {
-	sc := pulpScanner{
-		b: data,
-		s: string(data),
+	scratch, _ := pulpScratchPool.Get().(*pulpFastScratch)
+	if scratch == nil {
+		scratch = &pulpFastScratch{}
 	}
+	sc := pulpScanner{
+		b:        data,
+		indented: detectIndented(data),
+		ends:     scratch.ends[:0],
+	}
+	hashBuf := scratch.varHash
+	defer func() {
+		if cap(sc.varHash) > cap(hashBuf) {
+			hashBuf = sc.varHash
+		}
+		if cap(hashBuf) <= maxPoolVarHashCap {
+			scratch.varHash = hashBuf[:0]
+		} else {
+			scratch.varHash = nil
+		}
+		if cap(sc.ends) <= maxPoolEndsCap {
+			scratch.ends = sc.ends[:0]
+		} else {
+			scratch.ends = nil
+		}
+		pulpScratchPool.Put(scratch)
+	}()
+
 	if !sc.consumeByte('{') {
 		return nil, false
 	}
 	var doc PuLPJSON
-	coeffArena := make([]PuLPCoefficient, 0, max(16, len(data)/28))
-	floatSlab := make([]float64, 0, max(32, len(data)/64))
+	var floatSlab []float64
 	var seen uint8
 	if !sc.consumeByte('}') {
 		for {
-			key, ok := sc.readUnescapedString()
+			key, ok := sc.readUnescapedBytes()
 			if !ok || !sc.consumeByte(':') {
 				return nil, false
 			}
 			var bit uint8
-			switch key {
+			switch string(key) {
 			case "parameters":
 				bit = 1 << 0
 				ok = sc.readParameters(&doc.Parameters)
 			case "objective":
 				bit = 1 << 1
-				ok = sc.readObjective(&doc.Objective, &coeffArena)
+				ok = sc.readObjective(&doc.Objective)
 			case "variables":
 				bit = 1 << 2
-				doc.Variables, ok = sc.readVariables(&floatSlab)
+				doc.Variables, ok = sc.readVariables(&floatSlab, len(doc.Objective.Coefficients), hashBuf)
 			case "constraints":
 				bit = 1 << 3
-				doc.Constraints, ok = sc.readConstraints(&coeffArena, &floatSlab)
+				doc.Constraints, ok = sc.readConstraints(&floatSlab)
 			case "sos1":
 				bit = 1 << 4
 				doc.SOS1, ok = sc.readEmptyArray()
