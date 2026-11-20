@@ -18,9 +18,17 @@ const (
 	rootCutsRowDiv           = 3
 	minCutRoundImprov        = 1e-3
 	maxStagnantCutRound      = 2
+	cutDimReturnMinExtraRows = 64
+	cutDimReturnImprov       = 1.5e-3
+	cutDimReturnMaxRounds    = 2
 	zeroGainAbsTol           = 1e-6
 	zeroGainRelTol           = 1e-7
 	slackCutPurgeTol         = 0.05
+	inTreeCutSlackTol        = 0.1
+	inTreeCutPurgePeriod     = 64
+	inTreeCutPurgeMinCuts    = 32
+	inTreeCutMinAge          = 16
+	inTreeCutMinAgedPurge    = 8
 	minPseudoCostInit        = 1e-2
 	pseudoCostObjScale       = 0.1
 	minPseudoDist            = 1e-3
@@ -32,6 +40,7 @@ const (
 	strongBranchCandCap      = 5
 	strongBranchInfeas       = 1e4
 	strongBranchMaxIter      = 25
+	maxSBDomainRedRounds     = 4
 	intSnapTol               = 1e-4
 	postCutDiveVarMin        = 100
 	subMIPStagnantNodeCap    = 48
@@ -45,6 +54,7 @@ const (
 	heurMedMissCap           = 4
 	heurSlowMissCap          = 12
 	tightenObjPasses         = 3
+	rootPropPasses           = 8
 	nodeCompactStepCap       = 128
 	rootIterExpandMult       = 4
 )
@@ -128,6 +138,13 @@ type branchCand struct {
 	score      float64
 }
 
+type sbOutcome struct {
+	bestCol     int
+	bestVal     float64
+	pruned      bool
+	fixedDeltas []boundDelta
+}
+
 // babEngine holds the orchestration state for a single Branch-and-Cut solve.
 type babEngine struct {
 	p                  *CompiledProblem
@@ -161,6 +178,12 @@ type babEngine struct {
 	isContLinked       []bool
 	isContLinkedReady  bool
 	sbCands            []branchCand
+	cutWS              cutGenWorkspace
+	cutAges            []int
+	nodesSincePurge    int
+	propQueue          []int
+	propInQueue        []bool
+	touchedCols        []int
 }
 
 func (b *babEngine) contLinkedIntCols() []bool {
@@ -169,6 +192,16 @@ func (b *babEngine) contLinkedIntCols() []bool {
 		b.isContLinkedReady = true
 	}
 	return b.isContLinked
+}
+
+func (b *babEngine) ensurePropBuffers() {
+	m := b.p.numConstraints
+	if len(b.propInQueue) < m {
+		b.propInQueue = make([]bool, m)
+	}
+	if cap(b.propQueue) < min(rowQueueCapMult*m, initNodeQueueCap) {
+		b.propQueue = make([]int, 0, min(rowQueueCapMult*m, initNodeQueueCap))
+	}
 }
 
 func (b *babEngine) cutsEnabled() bool {
@@ -181,6 +214,7 @@ func (b *babEngine) ensureHeurSolver() *LPSolver {
 		b.heurSolver.Deadline = b.deadline
 		b.heurSolver.Done = b.done
 		b.heurSolver.DisableSIMD = b.opts.DisableSIMD
+		b.heurSolver.SkipExactFarkas = true
 		if b.lpSolver != nil && b.lpSolver.dualValid {
 			b.heurSolver.CopyRootBasisFrom(b.lpSolver)
 		}
@@ -459,6 +493,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 	p := b.p
 	feasProb := *p
+	feasProb.lazy = nil
 	feasProb.objCoeffs = make([]float64, p.numVars)
 	feasProb.objMin = make([]float64, p.numVars)
 	feasProb.objConstant = 0
@@ -559,8 +594,10 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 	p := b.p
 	lpSolver := b.lpSolver
 	stagnantRounds := 0
+	dimReturnRounds := 0
 	maxCutsPerRound := min(maxRootCutsCap, max(minRootCutsFloor, p.numConstraints/rootCutsRowDiv))
-	anchorSnap := lpSolver.snapshot()
+	largePoolThresh := max(cutDimReturnMinExtraRows, p.numConstraints)
+	var anchorSnap lpSnapshot
 	anchorLPRes := curLPRes
 	anchorCuts := 0
 
@@ -572,7 +609,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		if curMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(curMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 			break
 		}
-		newCuts := generateCutRound(lpSolver, curLPRes.Primal, maxCutsPerRound)
+		newCuts := generateCutRound(lpSolver, curLPRes.Primal, maxCutsPerRound, &b.cutWS)
 		if len(newCuts) == 0 || b.timeExpired() {
 			break
 		}
@@ -581,7 +618,11 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			break
 		}
 		prevObj := curMin
-		snap := lpSolver.snapshot()
+		// Take one snapshot per round. Share immutable slices when still at anchor.
+		curSnap := lpSolver.snapshot()
+		if b.cutsAdded == anchorCuts {
+			anchorSnap = curSnap
+		}
 		rows := make([]dynamicRow, len(newCuts))
 		for k, c := range newCuts {
 			rows[k] = lpSolver.newCutRow(c.ColIdx, c.Val, c.RHS)
@@ -594,7 +635,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			// Valid cuts never make a feasible LP infeasible, and a failed re-solve
 			// leaves no usable basis. Roll the round back so branch-and-bound starts
 			// from the last optimal LP state.
-			lpSolver.restore(snap)
+			lpSolver.restore(curSnap)
 			switch {
 			case nextRes.Status == StatusTimeLimit:
 				b.hitTimeLimit = true
@@ -610,7 +651,6 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 				b.acceptIncumbent(cand, minObjective(p, cand))
 				if b.bestPrimal != nil && isGapClosed(nextMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
-					anchorSnap = lpSolver.snapshot()
 					anchorLPRes = curLPRes
 					anchorCuts = b.cutsAdded
 					break
@@ -620,7 +660,6 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 
 		zeroGainTol := max(zeroGainAbsTol, zeroGainRelTol*math.Abs(prevObj))
 		if nextMin-prevObj > zeroGainTol {
-			anchorSnap = lpSolver.snapshot()
 			anchorLPRes = curLPRes
 			anchorCuts = b.cutsAdded
 		}
@@ -633,6 +672,19 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			}
 		} else {
 			stagnantRounds = 0
+		}
+
+		// Stop early on basis bloat. Large cut pools need meaningful bound progress.
+		if len(lpSolver.extraRows) >= largePoolThresh {
+			relBoundImprov := (nextMin - prevObj) / max(1.0, math.Abs(nextMin))
+			if relBoundImprov < cutDimReturnImprov {
+				dimReturnRounds++
+				if dimReturnRounds >= cutDimReturnMaxRounds {
+					break
+				}
+			} else {
+				dimReturnRounds = 0
+			}
 		}
 	}
 	curEndMin := lpMinWithConst(p, curLPRes)
@@ -695,6 +747,62 @@ func nodeHeurStride(n, heurMisses int) int {
 	return stride
 }
 
+// updateCutAgesAndMaybePurge tracks consecutive optimal B&B nodes where each root cut
+// remains basic with strictly positive slack, periodically compacting aged-out cuts via
+// LPSolver.PurgeSlackCuts when not inside strong branching.
+func (b *babEngine) updateCutAgesAndMaybePurge(allowPurge bool) {
+	s := b.lpSolver
+	numExtra := len(s.extraRows)
+	if numExtra == 0 || !s.luValid || s.ws == nil {
+		return
+	}
+	if len(b.cutAges) != numExtra {
+		if cap(b.cutAges) >= numExtra {
+			b.cutAges = b.cutAges[:numExtra]
+			clear(b.cutAges)
+		} else {
+			b.cutAges = make([]int, numExtra)
+		}
+	}
+	n := b.p.numVars
+	baseM := b.p.numConstraints
+	m := baseM + numExtra
+	ws := s.ws
+	agedSlack := 0
+	freshSlack := 0
+	for e := range numExtra {
+		slackVar := n + baseM + e
+		isLoose := false
+		if ws.status[slackVar] == statusBasic {
+			bSlot := ws.basicRow[slackVar]
+			if bSlot >= 0 && bSlot < m && ws.basis[bSlot] == slackVar && ws.xb[bSlot] > inTreeCutSlackTol*s.rowScaleOf(baseM+e) {
+				isLoose = true
+			}
+		}
+		if isLoose {
+			b.cutAges[e]++
+			if b.cutAges[e] >= inTreeCutMinAge {
+				agedSlack++
+			} else {
+				freshSlack++
+			}
+		} else {
+			b.cutAges[e] = 0
+		}
+	}
+	b.nodesSincePurge++
+	if !allowPurge || numExtra <= inTreeCutPurgeMinCuts || b.nodesSincePurge < inTreeCutPurgePeriod {
+		return
+	}
+	if agedSlack >= max(inTreeCutMinAgedPurge, numExtra/4) && agedSlack >= freshSlack {
+		if purged := s.PurgeSlackCuts(inTreeCutSlackTol); purged > 0 {
+			b.cutAges = b.cutAges[:len(s.extraRows)]
+			clear(b.cutAges)
+		}
+		b.nodesSincePurge = 0
+	}
+}
+
 // exploreTree runs best-bound search interleaved with child plunging, returning early only if
 // the root relaxation after cuts rounds directly to a feasible optimum.
 func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
@@ -712,6 +820,17 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	baseLB := slices.Clone(p.varLB)
 	baseUB := slices.Clone(p.varUB)
 	tightenUnboundedIntCols(p, baseLB, baseUB, b.bestObjMin)
+
+	rootPropConv := false
+	if b.opts.EnablePresolve {
+		var rootFeas bool
+		rootFeas, rootPropConv = propagateBoundsChecked(p, baseLB, baseUB, rootPropPasses)
+		if !rootFeas {
+			return Result{}, false
+		}
+		b.ensurePropBuffers()
+	}
+
 	curLB := slices.Clone(baseLB)
 	curUB := slices.Clone(baseUB)
 
@@ -730,13 +849,114 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		return Result{}, false
 	}
 
-	brVar, brVal := selectBranchVarWithBuf(p, b.lpSolver, curLPRes, curLB, curUB, pCosts, 0, &b.totalLPIters, b.iterLeft, &b.sbCands)
+	rootNodeMin := b.rootCutMin
+	var brVar int
+	var brVal float64
+	rootSBRounds := 0
+	for {
+		sb := selectBranchVarDetailed(
+			p, b.lpSolver, curLPRes, curLB, curUB, pCosts, 0,
+			&b.totalLPIters, b.iterLeft, &b.sbCands,
+			rootSBRounds < maxSBDomainRedRounds,
+		)
+		if sb.pruned {
+			return Result{}, false
+		}
+		if len(sb.fixedDeltas) == 0 {
+			brVar, brVal = sb.bestCol, sb.bestVal
+			break
+		}
+		rootSBRounds++
+		b.touchedCols = b.touchedCols[:0]
+		for _, d := range sb.fixedDeltas {
+			if d.lb > baseLB[d.col] {
+				baseLB[d.col] = d.lb
+			}
+			if d.ub < baseUB[d.col] {
+				baseUB[d.col] = d.ub
+			}
+			curLB[d.col] = baseLB[d.col]
+			curUB[d.col] = baseUB[d.col]
+			b.touchedCols = append(b.touchedCols, d.col)
+		}
+		if b.opts.EnablePresolve {
+			var propOK bool
+			if rootPropConv {
+				if len(b.touchedCols) == 1 {
+					propOK = propagateFromCol(p, baseLB, baseUB, b.touchedCols[0], &b.propQueue, b.propInQueue)
+				} else {
+					propOK = propagateFromCols(p, baseLB, baseUB, b.touchedCols, &b.propQueue, b.propInQueue)
+				}
+			} else {
+				propOK = propagateBounds(p, baseLB, baseUB, nodePropPasses)
+			}
+			if !propOK {
+				return Result{}, false
+			}
+			copy(curLB, baseLB)
+			copy(curUB, baseUB)
+		}
+		reRes, stop := solveNodeLP(b.lpSolver, curLB, curUB, b.defaultLPIter, b.capLPIter, b.budgetBound, &b.totalLPIters)
+		if stop != StatusNotSolved {
+			if stop == StatusTimeLimit {
+				b.hitTimeLimit = true
+			} else {
+				b.hitIterLimit = true
+			}
+			b.unsolvedMinBound = rootNodeMin
+			return Result{}, false
+		}
+		if reRes.Status == StatusInfeasible {
+			return Result{}, false
+		}
+		if reRes.Status != StatusOptimal {
+			b.unsolvedMinBound = rootNodeMin
+			if b.hitLPLimitStatus == StatusNotSolved {
+				b.hitLPLimitStatus = reRes.Status
+			}
+			return Result{}, false
+		}
+		reMin := lpMinWithConst(p, reRes)
+		if math.IsNaN(reMin) || math.IsInf(reMin, 0) {
+			b.unsolvedMinBound = rootNodeMin
+			b.hitLPLimitStatus = StatusNumericalError
+			return Result{}, false
+		}
+		curLPRes = reRes
+		rootNodeMin = max(rootNodeMin, reMin)
+		if isIntegerFeasible(p, curLPRes.Primal) {
+			if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
+				b.acceptIncumbent(cand, minObjective(p, cand))
+			}
+		}
+		if b.bestPrimal != nil && isGapClosed(rootNodeMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+			boundMin := min(b.bestObjMin, rootNodeMin)
+			return b.optimalOrNumErr(Result{
+				modelID:      p.modelID,
+				Status:       StatusOptimal,
+				Objective:    p.EvaluateObjective(b.bestPrimal),
+				BestBound:    p.userObjFromShiftedMin(boundMin),
+				RootLPBound:  b.rootLPUser,
+				RootCutBound: b.rootCutUser,
+				Values:       b.bestPrimal,
+				Nodes:        b.nodesExplored,
+				Iterations:   b.totalLPIters,
+				CutsAdded:    b.cutsAdded,
+				SolveTime:    time.Since(b.startTime),
+			}), true
+		}
+		if rootNodeMin >= b.bestObjMin-b.opts.AbsGapTol {
+			b.prunedMinBound = min(b.prunedMinBound, rootNodeMin)
+			return Result{}, false
+		}
+	}
+
 	if brVar == -1 {
 		if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 			b.acceptIncumbent(cand, minObjective(p, cand))
-			if b.bestPrimal != nil && isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+			if b.bestPrimal != nil && isGapClosed(rootNodeMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 				obj := p.EvaluateObjective(b.bestPrimal)
-				boundMin := min(b.bestObjMin, b.rootCutMin)
+				boundMin := min(b.bestObjMin, rootNodeMin)
 				return b.optimalOrNumErr(Result{
 					modelID:      p.modelID,
 					Status:       StatusOptimal,
@@ -755,13 +975,13 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		brVar, brVal = selectNearIntegralBranchVar(p, curLPRes.Primal, curLB, curUB)
 	}
 	if brVar == -1 {
-		b.unsolvedMinBound = b.rootCutMin
+		b.unsolvedMinBound = rootNodeMin
 		b.hitLPLimitStatus = StatusNumericalError
 		return Result{}, false
 	}
 
 	nodeCounter := 1
-	downNode, upNode := createChildNodes(b.rootCutMin, 1, nil, brVar, brVal, curLB[brVar], curUB[brVar], pCosts[brVar], &nodeCounter)
+	downNode, upNode := createChildNodes(rootNodeMin, 1, nil, brVar, brVal, curLB[brVar], curUB[brVar], pCosts[brVar], &nodeCounter)
 	heap.Push(&b.pq, downNode)
 	heap.Push(&b.pq, upNode)
 
@@ -803,9 +1023,11 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		}
 
 		var node *searchNode
+		fromPlunge := false
 		if b.plungeNode != nil && (b.nodesExplored%plungeQueuePeriod != 0) {
 			node = b.plungeNode
 			b.plungeNode = nil
+			fromPlunge = true
 		} else {
 			if b.plungeNode != nil {
 				heap.Push(&b.pq, b.plungeNode)
@@ -821,12 +1043,53 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 		b.nodesExplored++
 
-		copy(curLB, baseLB)
-		copy(curUB, baseUB)
-		applyNodeBounds(node, curLB, curUB)
-
-		if b.opts.EnablePresolve && !propagateBounds(p, curLB, curUB, nodePropPasses) {
-			continue
+		if fromPlunge && node.hasDelta {
+			// Direct plunge from parent. Apply only the single branching delta.
+			d := node.delta
+			tightened := false
+			if d.lb > curLB[d.col] {
+				curLB[d.col] = d.lb
+				tightened = true
+			}
+			if d.ub < curUB[d.col] {
+				curUB[d.col] = d.ub
+				tightened = true
+			}
+			if curLB[d.col] > curUB[d.col]+intFeasTol {
+				continue
+			}
+			if b.opts.EnablePresolve && tightened {
+				if rootPropConv {
+					if !propagateFromCol(p, curLB, curUB, d.col, &b.propQueue, b.propInQueue) {
+						continue
+					}
+				} else if !propagateBounds(p, curLB, curUB, nodePropPasses) {
+					continue
+				}
+			}
+		} else {
+			copy(curLB, baseLB)
+			copy(curUB, baseUB)
+			var boundsFeas bool
+			b.touchedCols, boundsFeas = applyNodeBoundsTracked(node, curLB, curUB, b.touchedCols[:0])
+			if !boundsFeas {
+				continue
+			}
+			if b.opts.EnablePresolve && len(b.touchedCols) > 0 {
+				if rootPropConv {
+					var propOK bool
+					if len(b.touchedCols) == 1 {
+						propOK = propagateFromCol(p, curLB, curUB, b.touchedCols[0], &b.propQueue, b.propInQueue)
+					} else {
+						propOK = propagateFromCols(p, curLB, curUB, b.touchedCols, &b.propQueue, b.propInQueue)
+					}
+					if !propOK {
+						continue
+					}
+				} else if !propagateBounds(p, curLB, curUB, nodePropPasses) {
+					continue
+				}
+			}
 		}
 
 		nodeRes, stop := solveNodeLP(b.lpSolver, curLB, curUB, b.defaultLPIter, b.capLPIter, b.budgetBound, &b.totalLPIters)
@@ -859,9 +1122,14 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			continue
 		}
 		if nodeMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(nodeMin, b.bestObjMin, pruneRelTol, b.opts.AbsGapTol) {
+			b.updateCutAgesAndMaybePurge(true)
 			b.prunedMinBound = min(b.prunedMinBound, nodeMin)
 			continue
 		}
+
+		// Age inactive root cuts; only purge when not about to enter strong branching
+		// so the live LU factorization remains warm for depth <= strongBranchMaxDepth probes.
+		b.updateCutAgesAndMaybePurge(node.depth > strongBranchMaxDepth)
 
 		if node.hasDelta {
 			gain := max(0.0, nodeMin-node.lowerBound)
@@ -897,7 +1165,108 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			}
 		}
 
-		bVar, bVal := selectBranchVarWithBuf(p, b.lpSolver, nodeRes, curLB, curUB, pCosts, node.depth, &b.totalLPIters, b.iterLeft, &b.sbCands)
+		var bVar int
+		var bVal float64
+		prunedBySB := false
+		stoppedByLimit := false
+		sbRounds := 0
+		for {
+			sb := selectBranchVarDetailed(
+				p, b.lpSolver, nodeRes, curLB, curUB, pCosts, node.depth,
+				&b.totalLPIters, b.iterLeft, &b.sbCands,
+				sbRounds < maxSBDomainRedRounds,
+			)
+			if sb.pruned {
+				prunedBySB = true
+				break
+			}
+			if len(sb.fixedDeltas) == 0 {
+				bVar, bVal = sb.bestCol, sb.bestVal
+				break
+			}
+			sbRounds++
+			node.base = append(slices.Clip(node.base), sb.fixedDeltas...)
+			if b.opts.EnablePresolve {
+				b.touchedCols = b.touchedCols[:0]
+				for _, d := range sb.fixedDeltas {
+					b.touchedCols = append(b.touchedCols, d.col)
+				}
+				var propOK bool
+				if rootPropConv {
+					if len(b.touchedCols) == 1 {
+						propOK = propagateFromCol(p, curLB, curUB, b.touchedCols[0], &b.propQueue, b.propInQueue)
+					} else {
+						propOK = propagateFromCols(p, curLB, curUB, b.touchedCols, &b.propQueue, b.propInQueue)
+					}
+				} else {
+					propOK = propagateBounds(p, curLB, curUB, nodePropPasses)
+				}
+				if !propOK {
+					prunedBySB = true
+					break
+				}
+			}
+			reRes, stop := solveNodeLP(b.lpSolver, curLB, curUB, b.defaultLPIter, b.capLPIter, b.budgetBound, &b.totalLPIters)
+			if stop != StatusNotSolved {
+				node.lowerBound = max(node.lowerBound, nodeMin)
+				heap.Push(&b.pq, node)
+				if stop == StatusTimeLimit {
+					b.hitTimeLimit = true
+				} else {
+					b.hitIterLimit = true
+				}
+				stoppedByLimit = true
+				break
+			}
+			if reRes.Status == StatusInfeasible {
+				prunedBySB = true
+				break
+			}
+			if reRes.Status != StatusOptimal {
+				b.unsolvedMinBound = min(b.unsolvedMinBound, nodeMin)
+				if b.hitLPLimitStatus == StatusNotSolved {
+					b.hitLPLimitStatus = reRes.Status
+				}
+				prunedBySB = true
+				break
+			}
+			reMin := lpMinWithConst(p, reRes)
+			if math.IsNaN(reMin) || math.IsInf(reMin, 0) {
+				b.unsolvedMinBound = min(b.unsolvedMinBound, nodeMin)
+				if b.hitLPLimitStatus == StatusNotSolved {
+					b.hitLPLimitStatus = StatusNumericalError
+				}
+				prunedBySB = true
+				break
+			}
+			nodeRes = reRes
+			nodeMin = max(nodeMin, reMin)
+			if nodeMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(nodeMin, b.bestObjMin, pruneRelTol, b.opts.AbsGapTol) {
+				b.prunedMinBound = min(b.prunedMinBound, nodeMin)
+				prunedBySB = true
+				break
+			}
+			if isIntegerFeasible(p, nodeRes.Primal) {
+				if cand, ok := b.polishIncumbent(nodeRes.Primal); ok {
+					if b.acceptIncumbent(cand, minObjective(p, cand)) {
+						lastIncumbentNode = b.nodesExplored
+						heurMisses = 0
+					}
+					if nodeMin >= b.bestObjMin-b.opts.AbsGapTol || isGapClosed(nodeMin, b.bestObjMin, pruneRelTol, b.opts.AbsGapTol) {
+						b.prunedMinBound = min(b.prunedMinBound, nodeMin)
+						prunedBySB = true
+						break
+					}
+				}
+			}
+		}
+		if stoppedByLimit {
+			break
+		}
+		if prunedBySB {
+			continue
+		}
+
 		if bVar == -1 {
 			// The LP point is integral within intFeasTol, yet its rounding violates the
 			// rows (typical with big-M constraints). Branch on the integer variable furthest
@@ -935,6 +1304,67 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		}
 	}
 	return Result{}, false
+}
+
+// propagateBoundsChecked runs up to maxPasses full sweeps of propagateRow and reports
+// whether bounds remain feasible and whether a fixed point was reached before maxPasses.
+func propagateBoundsChecked(p *CompiledProblem, lb, ub []float64, maxPasses int) (feasible, converged bool) {
+	m := p.numConstraints
+	for range maxPasses {
+		anyChanged := false
+		for i := range m {
+			feas, chg := propagateRow(p, i, lb, ub, nil)
+			if !feas {
+				return false, false
+			}
+			if chg {
+				anyChanged = true
+			}
+		}
+		if !anyChanged {
+			return true, true
+		}
+	}
+	return true, false
+}
+
+// propagateFromCols propagates tightened bounds starting only from rows incident to startCols,
+// using reusable queue and membership scratch buffers.
+func propagateFromCols(p *CompiledProblem, lb, ub []float64, startCols []int, queue *[]int, inQueue []bool) bool {
+	q := (*queue)[:0]
+	pushCol := func(col int) {
+		for k := p.colPtr[col]; k < p.colPtr[col+1]; k++ {
+			r := p.rowIdx[k]
+			if !inQueue[r] {
+				inQueue[r] = true
+				q = append(q, r)
+			}
+		}
+	}
+	for _, col := range startCols {
+		pushCol(col)
+	}
+
+	head := 0
+	maxSteps := max(minPropSteps, propStepsPerRow*p.numConstraints)
+	for head < len(q) && head < maxSteps {
+		r := q[head]
+		head++
+		inQueue[r] = false
+		feas, _ := propagateRow(p, r, lb, ub, pushCol)
+		if !feas {
+			for ; head < len(q); head++ {
+				inQueue[q[head]] = false
+			}
+			*queue = q[:0]
+			return false
+		}
+	}
+	for ; head < len(q); head++ {
+		inQueue[q[head]] = false
+	}
+	*queue = q[:0]
+	return true
 }
 
 func (b *babEngine) limitStatus() Status {
@@ -1073,18 +1503,45 @@ func solveNodeLP(
 	return res, StatusNotSolved
 }
 
-func applyNodeBounds(node *searchNode, curLB, curUB []float64) {
+func applyNodeBoundsTracked(node *searchNode, curLB, curUB []float64, touched []int) ([]int, bool) {
 	for cur := node; cur != nil; cur = cur.parent {
 		if cur.hasDelta {
 			d := cur.delta
-			curLB[d.col] = max(curLB[d.col], d.lb)
-			curUB[d.col] = min(curUB[d.col], d.ub)
+			chg := false
+			if d.lb > curLB[d.col] {
+				curLB[d.col] = d.lb
+				chg = true
+			}
+			if d.ub < curUB[d.col] {
+				curUB[d.col] = d.ub
+				chg = true
+			}
+			if chg {
+				if curLB[d.col] > curUB[d.col]+intFeasTol {
+					return touched, false
+				}
+				touched = append(touched, d.col)
+			}
 		}
 		for _, d := range cur.base {
-			curLB[d.col] = max(curLB[d.col], d.lb)
-			curUB[d.col] = min(curUB[d.col], d.ub)
+			chg := false
+			if d.lb > curLB[d.col] {
+				curLB[d.col] = d.lb
+				chg = true
+			}
+			if d.ub < curUB[d.col] {
+				curUB[d.col] = d.ub
+				chg = true
+			}
+			if chg {
+				if curLB[d.col] > curUB[d.col]+intFeasTol {
+					return touched, false
+				}
+				touched = append(touched, d.col)
+			}
 		}
 	}
+	return touched, true
 }
 
 func compactAncestorDeltas(node *searchNode) []boundDelta {
@@ -1187,6 +1644,20 @@ func createChildNodes(
 	return downNode, upNode
 }
 
+// probeBranchBound evaluates one strong-branching probe in place.
+// It updates col via SetColBound and runs a zero-allocation SolveBoundOnly solve.
+func probeBranchBound(
+	lpSolver *LPSolver,
+	col int,
+	origL, origU, probeLB, probeUB float64,
+	maxIter int,
+) (Status, float64, int) {
+	lpSolver.SetColBound(col, probeLB, probeUB)
+	st, bound, iters := lpSolver.SolveBoundOnly(maxIter)
+	lpSolver.SetColBound(col, origL, origU)
+	return st, bound, iters
+}
+
 func selectBranchVar(
 	p *CompiledProblem,
 	lpSolver *LPSolver,
@@ -1230,7 +1701,24 @@ func selectBranchVarWithBuf(
 	iterLeft func() int,
 	candsBuf *[]branchCand,
 ) (bestCol int, bestVal float64) {
-	bestCol = -1
+	out := selectBranchVarDetailed(p, lpSolver, lpRes, curLB, curUB, pCosts, depth, totalIters, iterLeft, candsBuf, false)
+	return out.bestCol, out.bestVal
+}
+
+func selectBranchVarDetailed(
+	p *CompiledProblem,
+	lpSolver *LPSolver,
+	lpRes LPResult,
+	curLB, curUB []float64,
+	pCosts []pseudoCost,
+	depth int,
+	totalIters *int,
+	iterLeft func() int,
+	candsBuf *[]branchCand,
+	allowDomainRed bool,
+) sbOutcome {
+	bestCol := -1
+	bestVal := 0.0
 	bestScore := -1.0
 
 	if depth > strongBranchMaxDepth {
@@ -1241,7 +1729,7 @@ func selectBranchVarWithBuf(
 				bestVal = c.val
 			}
 		}
-		return bestCol, bestVal
+		return sbOutcome{bestCol: bestCol, bestVal: bestVal}
 	}
 
 	var cands []branchCand
@@ -1259,7 +1747,7 @@ func selectBranchVarWithBuf(
 	}
 
 	if len(cands) == 0 {
-		return -1, 0
+		return sbOutcome{bestCol: -1}
 	}
 
 	if len(cands) > 1 {
@@ -1271,18 +1759,32 @@ func selectBranchVarWithBuf(
 		})
 
 		sbLimit := min(strongBranchCandCap, len(cands))
-		savedMaxIter := lpSolver.MaxIter
+		var sbCP *lpCheckpoint
+		if lpSolver.ws != nil {
+			sbCP = &lpSolver.ws.sbCP
+		} else {
+			sbCP = &lpCheckpoint{}
+		}
+		hasSnap := false
 
-		// childGain scores one strong-branching child. Only optimal re-solves yield a valid
-		// objective (an iteration-limited LPResult carries no objective), so other outcomes
-		// fall back to the pseudocost estimate and never feed the pseudocost statistics.
-		baseMin := lpMinWithConst(p, lpRes)
-		childGain := func(res LPResult, est, dist float64, pc *pseudoCost, up bool) float64 {
-			switch res.Status {
+		// childGain scores one strong-branching child from its bound-only probe.
+		// Optimal solves update pseudocost statistics; dual-feasible iteration-limited
+		// probes contribute their verified dual lower bound to candidate scoring.
+		baseObjMin := lpRes.ObjectiveMin
+		childGain := func(st Status, bound, est, dist float64, pc *pseudoCost, up bool) float64 {
+			switch st {
 			case StatusOptimal:
-				g := max(minPseudoScoreFloor, lpMinWithConst(p, res)-baseMin)
+				if math.IsNaN(bound) {
+					return est
+				}
+				g := max(minPseudoScoreFloor, bound-baseObjMin)
 				pc.record(up, g, dist)
 				return g
+			case StatusIterationLimit:
+				if !math.IsNaN(bound) {
+					return max(minPseudoScoreFloor, bound-baseObjMin)
+				}
+				return est
 			case StatusInfeasible:
 				return strongBranchInfeas
 			default:
@@ -1308,31 +1810,68 @@ func selectBranchVarWithBuf(
 			if sbIter <= 0 {
 				break
 			}
-			lpSolver.MaxIter = sbIter
-			curUB[col] = fl
-			lpSolver.SetStructuralBounds(curLB, curUB)
-			resDown := lpSolver.Solve()
-			*totalIters += resDown.Iterations
-			curUB[col] = origU
+			if !hasSnap {
+				lpSolver.captureCheckpoint(sbCP)
+				hasSnap = true
+			}
+			downSt, downBound, downIters := probeBranchBound(lpSolver, col, origL, origU, origL, fl, sbIter)
+			*totalIters += downIters
 
-			sbIter = min(strongBranchMaxIter, iterLeft())
-			if sbIter <= 0 {
+			var upSt Status
+			upBound := math.NaN()
+			upProbed := false
+			if !lpSolver.timeExpired() {
+				sbIter = min(strongBranchMaxIter, iterLeft())
+				if sbIter > 0 {
+					var upIters int
+					upSt, upBound, upIters = probeBranchBound(lpSolver, col, origL, origU, cl, origU, sbIter)
+					*totalIters += upIters
+					upProbed = true
+				}
+			}
+
+			if allowDomainRed && cl == fl+1.0 {
+				downInfeas := downSt == StatusInfeasible
+				upInfeas := upProbed && upSt == StatusInfeasible
+				if downInfeas && upInfeas {
+					lpSolver.restoreCheckpoint(sbCP)
+					return sbOutcome{bestCol: -1, pruned: true}
+				}
+				if downInfeas {
+					curLB[col] = cl
+					lpSolver.restoreCheckpoint(sbCP)
+					if curLB[col] > curUB[col]+intFeasTol {
+						return sbOutcome{bestCol: -1, pruned: true}
+					}
+					return sbOutcome{
+						bestCol:     -1,
+						fixedDeltas: []boundDelta{{col: col, lb: cl, ub: origU}},
+					}
+				}
+				if upInfeas {
+					curUB[col] = fl
+					lpSolver.restoreCheckpoint(sbCP)
+					if curLB[col] > curUB[col]+intFeasTol {
+						return sbOutcome{bestCol: -1, pruned: true}
+					}
+					return sbOutcome{
+						bestCol:     -1,
+						fixedDeltas: []boundDelta{{col: col, lb: origL, ub: fl}},
+					}
+				}
+			}
+			if !upProbed {
 				break
 			}
-			lpSolver.MaxIter = sbIter
-			curLB[col] = cl
-			lpSolver.SetStructuralBounds(curLB, curUB)
-			resUp := lpSolver.Solve()
-			*totalIters += resUp.Iterations
-			curLB[col] = origL
 
-			dGain := childGain(resDown, c.dEst, v-fl, &pCosts[col], false)
-			uGain := childGain(resUp, c.uEst, cl-v, &pCosts[col], true)
+			dGain := childGain(downSt, downBound, c.dEst, v-fl, &pCosts[col], false)
+			uGain := childGain(upSt, upBound, c.uEst, cl-v, &pCosts[col], true)
 			c.score = max(dGain, minPseudoScoreFloor) * max(uGain, minPseudoScoreFloor)
 		}
 
-		lpSolver.MaxIter = savedMaxIter
-		lpSolver.SetStructuralBounds(curLB, curUB)
+		if hasSnap {
+			lpSolver.restoreCheckpoint(sbCP)
+		}
 	}
 
 	for _, c := range cands {
@@ -1342,7 +1881,7 @@ func selectBranchVarWithBuf(
 			bestVal = c.val
 		}
 	}
-	return bestCol, bestVal
+	return sbOutcome{bestCol: bestCol, bestVal: bestVal}
 }
 
 // selectNearIntegralBranchVar returns the non-fixed integer column whose LP value lies

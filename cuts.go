@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"math"
 	"slices"
-
-	"github.com/paulourio/goblin/internal/simd"
 )
 
 const (
@@ -29,6 +27,12 @@ const (
 	minMIRFrac       = 0.02
 	mirMaxRelSlack   = 0.05
 	defaultMaxCuts   = 15
+	cutMaxNNZSmallN  = 100
+	cutMaxNNZFloor   = 50
+	cutMaxNNZCap     = 100
+	cutMaxNNZVarDiv  = 4
+	cutDenseSoftNNZ  = 24
+	cutDensityPen    = 0.01
 )
 
 type cutPlane struct {
@@ -36,45 +40,418 @@ type cutPlane struct {
 	Val      []float64
 	RHS      float64
 	Efficacy float64
+	Norm     float64
+}
+
+type disaggVUBTerm struct {
+	col    int
+	binCol int
+	effUB  float64
+}
+
+type flowNode struct {
+	invIn   int
+	prodCol int
+	binCol  int
+	invOut  int
+	demand  float64
+}
+
+type coverItem struct {
+	col    int
+	weight float64
+	xVal   float64
+	comp   bool
+}
+
+type cutStaticCache struct {
+	prob       *CompiledProblem
+	disaggVUBs []disaggVUBTerm
+	flowChains [][]flowNode
+	coverRows  []int
+	mirRows    []int
+}
+
+// cutGenWorkspace holds reusable scratch buffers and static structural caches
+// across root cutting-plane rounds.
+type cutGenWorkspace struct {
+	staticCache cutStaticCache
+
+	// Generation-marked sparse column accumulator for finalizeSparseCut.
+	mark     []int
+	acc      []float64
+	gen      int
+	uniqCols []int
+
+	// Generation-marked compensated accumulator for GMI cut generation.
+	gmiMark []int
+	gmiAcc  []dot2Acc
+	gmiGen  int
+	gmiCols []int
+
+	// Reusable sparse (col, val) buffers shared by sparse separators.
+	tmpIdx []int
+	tmpVal []float64
+
+	// Reusable scratch slices for knapsack cover DP lifting.
+	coverItems   []coverItem
+	coverIn      []bool
+	coverWeights []float64
+	coverMinW    []float64
+}
+
+func (w *cutGenWorkspace) ensureVars(n int) {
+	if len(w.mark) < n {
+		w.mark = make([]int, n)
+		w.acc = make([]float64, n)
+		w.gen = 0
+	}
+}
+
+func (w *cutGenWorkspace) nextGen() int {
+	w.gen++
+	if w.gen <= 0 {
+		clear(w.mark)
+		w.gen = 1
+	}
+	return w.gen
+}
+
+func (w *cutGenWorkspace) ensureGMIVars(n int) {
+	if len(w.gmiMark) < n {
+		w.gmiMark = make([]int, n)
+		w.gmiAcc = make([]dot2Acc, n)
+		w.gmiGen = 0
+	}
+}
+
+func (w *cutGenWorkspace) nextGMIGen() int {
+	w.gmiGen++
+	if w.gmiGen <= 0 {
+		clear(w.gmiMark)
+		w.gmiGen = 1
+	}
+	return w.gmiGen
+}
+
+func (w *cutGenWorkspace) ensureStaticCache(p *CompiledProblem) *cutStaticCache {
+	if w.staticCache.prob != p {
+		w.staticCache = buildCutStaticCache(p)
+	}
+	return &w.staticCache
+}
+
+// buildCutStaticCache precomputes static problem structures used across cut rounds:
+// disaggregated VUB terms, lot-sizing flow chains, and candidate cover and MIR row indices.
+func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
+	cache := cutStaticCache{prob: p}
+	if p == nil {
+		return cache
+	}
+	n := p.numVars
+	m := p.numConstraints
+
+	vubBinCol := make([]int, n)
+	for j := range n {
+		vubBinCol[j] = -1
+	}
+
+	for i := range m {
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
+		nnz := e - s
+		sense := p.rowSense[i]
+
+		// Scan inequality rows for VUBs, knapsack covers, and MIR candidates in one pass.
+		if sense != Equal && nnz >= minPairNNZ {
+			// Check MIR eligibility: no doubly unbounded variable and at least one integer term.
+			mirValid := true
+			mirHasInt := false
+			// Check cover eligibility: at least 3 binary [0,1] items and finite non-binary relax bounds.
+			sign := 1.0
+			if sense == GreaterEqual {
+				sign = -1.0
+			}
+			coverValid := true
+			coverBinCnt := 0
+
+			for k := s; k < e; k++ {
+				col := p.colIdx[k]
+				rawV := p.rowVal[k]
+				lb, ub := p.varLB[col], p.varUB[col]
+				if math.IsInf(lb, -1) && math.IsInf(ub, 1) {
+					mirValid = false
+				}
+				if p.varCat[col] != Continuous && math.Abs(rawV) > cutCompareTol {
+					mirHasInt = true
+				}
+				if coverValid {
+					a := sign * rawV
+					if a != 0 {
+						if p.varCat[col] != Binary || lb != 0 || ub != 1 || math.Abs(a) <= cutCoeffZeroTol {
+							if a > 0 {
+								if math.IsInf(lb, -1) {
+									coverValid = false
+								}
+							} else if math.IsInf(ub, 1) {
+								coverValid = false
+							}
+						} else {
+							coverBinCnt++
+						}
+					}
+				}
+			}
+			if mirValid && mirHasInt {
+				cache.mirRows = append(cache.mirRows, i)
+			}
+			if coverValid && coverBinCnt >= 3 {
+				cache.coverRows = append(cache.coverRows, i)
+			}
+		}
+
+		// Detect VUB constraints (p - M*y <= 0) and disaggregated VUB constraints (sum_k a_k x_k - C*y <= 0).
+		if sense != LessEqual || p.rowRHS[i] > 0 || nnz < minPairNNZ {
+			continue
+		}
+		binCol := -1
+		capVal := 0.0
+		negCount := 0
+		allPosNonNeg := true
+
+		for k := s; k < e; k++ {
+			col := p.colIdx[k]
+			val := p.rowVal[k]
+			if val < 0 {
+				negCount++
+				if val < -cutCoeffZeroTol && p.varCat[col] == Binary && p.varLB[col] == 0 && p.varUB[col] == 1 {
+					binCol = col
+					capVal = -val
+				}
+			} else if val > 0 {
+				if p.varLB[col] < 0 {
+					allPosNonNeg = false
+				}
+			}
+		}
+
+		if negCount != 1 || binCol == -1 || !allPosNonNeg {
+			continue
+		}
+
+		if nnz == minPairNNZ {
+			for k := s; k < e; k++ {
+				col := p.colIdx[k]
+				val := p.rowVal[k]
+				if col != binCol && val == 1.0 {
+					vubBinCol[col] = binCol
+				}
+			}
+			continue
+		}
+
+		for k := s; k < e; k++ {
+			col := p.colIdx[k]
+			if col == binCol {
+				continue
+			}
+			ak := p.rowVal[k]
+			if ak <= cutCoeffZeroTol {
+				continue
+			}
+			effUB := min(p.varUB[col], capVal/ak)
+			if math.IsInf(effUB, 1) || effUB <= 0 {
+				continue
+			}
+			cache.disaggVUBs = append(cache.disaggVUBs, disaggVUBTerm{
+				col:    col,
+				binCol: binCol,
+				effUB:  effUB,
+			})
+		}
+	}
+
+	// Detect Barany-Van Roy-Wolsey (l, S) lot-sizing flow chains once for the static matrix.
+	var candNodes []flowNode
+	var invInCount map[int]int
+	var invOutCount map[int]int
+
+	for i := range m {
+		if p.rowSense[i] != Equal || p.rowRHS[i] <= unitCoeffTol {
+			continue
+		}
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
+		nnz := e - s
+		if nnz != 2 && nnz != 3 {
+			continue
+		}
+
+		prodCol := -1
+		invIn := -1
+		invOut := -1
+		valid := true
+
+		for k := s; k < e; k++ {
+			col := p.colIdx[k]
+			val := p.rowVal[k]
+			if val == 1.0 {
+				if vubBinCol[col] != -1 && p.varLB[col] >= 0 && prodCol == -1 {
+					prodCol = col
+				} else if p.varLB[col] >= 0 && invIn == -1 {
+					invIn = col
+				} else {
+					valid = false
+					break
+				}
+			} else if val == -1.0 && p.varLB[col] >= 0 && invOut == -1 {
+				invOut = col
+			} else {
+				valid = false
+				break
+			}
+		}
+
+		if !valid || prodCol == -1 || invOut == -1 {
+			continue
+		}
+		if nnz == 3 && invIn == -1 {
+			continue
+		}
+
+		if invOutCount == nil {
+			invInCount = make(map[int]int)
+			invOutCount = make(map[int]int)
+		}
+		fn := flowNode{
+			invIn:   invIn,
+			prodCol: prodCol,
+			binCol:  vubBinCol[prodCol],
+			invOut:  invOut,
+			demand:  p.rowRHS[i],
+		}
+		candNodes = append(candNodes, fn)
+		if invIn != -1 {
+			invInCount[invIn]++
+		}
+		invOutCount[invOut]++
+	}
+
+	if len(candNodes) == 0 {
+		return cache
+	}
+
+	nodeByInvIn := make(map[int]flowNode, len(candNodes))
+	for _, fn := range candNodes {
+		if fn.invIn != -1 && invInCount[fn.invIn] == 1 && invOutCount[fn.invIn] == 1 {
+			nodeByInvIn[fn.invIn] = fn
+		}
+	}
+
+	var startNodes []flowNode
+	for _, fn := range candNodes {
+		if fn.invIn == -1 || invOutCount[fn.invIn] != 1 || invInCount[fn.invIn] != 1 {
+			startNodes = append(startNodes, fn)
+		}
+	}
+
+	var chain []flowNode
+	for _, root := range startNodes {
+		chain = chain[:0]
+		cur := root
+		for {
+			chain = append(chain, cur)
+			if len(chain) >= maxFlowChainLen || invOutCount[cur.invOut] != 1 || invInCount[cur.invOut] != 1 {
+				break
+			}
+			next, ok := nodeByInvIn[cur.invOut]
+			if !ok {
+				break
+			}
+			collision := next.invOut == root.invIn || next.prodCol == root.invIn
+			if !collision {
+				for _, prev := range chain {
+					if next.invOut == prev.invOut || next.invOut == prev.prodCol ||
+						next.prodCol == prev.invOut || next.prodCol == prev.prodCol {
+						collision = true
+						break
+					}
+				}
+			}
+			if collision {
+				break
+			}
+			cur = next
+		}
+		cache.flowChains = append(cache.flowChains, slices.Clone(chain))
+	}
+
+	return cache
+}
+
+// maxCutNNZ returns the dynamic nonzero cap applied to GMI and MIR cuts to prevent
+// dense cuts from filling the sparse LU factors in branch-and-bound.
+func maxCutNNZ(n int) int {
+	if n <= cutMaxNNZSmallN {
+		return n
+	}
+	return max(cutMaxNNZFloor, min(cutMaxNNZCap, n/cutMaxNNZVarDiv))
+}
+
+func cutSelectionScore(c cutPlane, n int) float64 {
+	if n <= cutMaxNNZSmallN {
+		return c.Efficacy
+	}
+	excess := len(c.ColIdx) - cutDenseSoftNNZ
+	if excess <= 0 {
+		return c.Efficacy
+	}
+	return c.Efficacy / (1.0 + cutDensityPen*float64(excess))
 }
 
 // generateCutRound separates GMI, lifted knapsack cover, flow/VUB, and single-row MIR cuts,
-// returning up to maxCuts pairwise-orthogonal cuts ordered by descending efficacy.
-func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int) []cutPlane {
+// returning up to maxCuts pairwise-orthogonal cuts ordered by descending density-weighted efficacy.
+func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int, ws *cutGenWorkspace) []cutPlane {
 	if maxCuts <= 0 {
 		maxCuts = defaultMaxCuts
 	}
 	if solver.timeExpired() {
 		return nil
 	}
+	if ws == nil {
+		var localWS cutGenWorkspace
+		ws = &localWS
+	}
 	var candidates []cutPlane
 
-	gmiCuts := separateGMICuts(solver, lpPrimal)
+	gmiCuts := separateGMICuts(solver, lpPrimal, ws)
 	candidates = append(candidates, gmiCuts...)
 	if solver.timeExpired() {
 		return nil
 	}
 
-	coverCuts := separateKnapsackCoverCuts(solver.prob, lpPrimal)
+	coverCuts := separateKnapsackCoverCuts(solver.prob, lpPrimal, ws)
 	candidates = append(candidates, coverCuts...)
 	if solver.timeExpired() {
 		return nil
 	}
 
-	flowCuts := separateFlowAndVUBCuts(solver.prob, lpPrimal)
+	flowCuts := separateFlowAndVUBCuts(solver.prob, lpPrimal, ws)
 	candidates = append(candidates, flowCuts...)
 	if solver.timeExpired() {
 		return nil
 	}
 
-	mirCuts := separateRowMIRCuts(solver.prob, lpPrimal)
+	mirCuts := separateRowMIRCutsWithWS(solver.prob, lpPrimal, ws)
 	candidates = append(candidates, mirCuts...)
 
 	if len(candidates) == 0 {
 		return nil
 	}
 
+	nVars := solver.prob.numVars
 	slices.SortFunc(candidates, func(a, b cutPlane) int {
+		if c := cmp.Compare(cutSelectionScore(b, nVars), cutSelectionScore(a, nVars)); c != 0 {
+			return c
+		}
 		return cmp.Compare(b.Efficacy, a.Efficacy)
 	})
 
@@ -98,7 +475,11 @@ func generateCutRound(solver *LPSolver, lpPrimal []float64, maxCuts int) []cutPl
 }
 
 // separateGMICuts derives Gomory mixed-integer cuts from up to maxGMIFraqRows fractional basic integer rows.
-func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
+func separateGMICuts(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorkspace) []cutPlane {
+	if cutWS == nil {
+		var localWS cutGenWorkspace
+		cutWS = &localWS
+	}
 	p := solver.prob
 	ws := solver.ws
 	n := p.numVars
@@ -138,9 +519,9 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 		fracRows = fracRows[:maxGMIFraqRows]
 	}
 
+	cutWS.ensureGMIVars(n)
+	gmiMaxNNZ := maxCutNNZ(n)
 	var cuts []cutPlane
-	structCoeffs := make([]float64, n)
-	coeffAcc := make([]dot2Acc, n)
 
 	evalGMIInt := func(a float64, f0 float64) float64 {
 		fk := a - math.Floor(a)
@@ -162,7 +543,8 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			continue
 		}
 
-		clear(coeffAcc)
+		gen := cutWS.nextGMIGen()
+		gmiCols := cutWS.gmiCols[:0]
 		var rhsAcc dot2Acc
 		rhsAcc.addVal(1.0)
 		validRow := true
@@ -231,11 +613,16 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 			}
 
 			if k < n {
+				if cutWS.gmiMark[k] != gen {
+					cutWS.gmiMark[k] = gen
+					cutWS.gmiAcc[k] = dot2Acc{}
+					gmiCols = append(gmiCols, k)
+				}
 				if st == statusAtLower {
-					coeffAcc[k].addVal(gamma)
+					cutWS.gmiAcc[k].addVal(gamma)
 					rhsAcc.addProd(gamma, solver.unscaledBound(k, false))
 				} else {
-					coeffAcc[k].addVal(-gamma)
+					cutWS.gmiAcc[k].addVal(-gamma)
 					rhsAcc.addProd(-gamma, solver.unscaledBound(k, true))
 				}
 			} else {
@@ -243,28 +630,35 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				if st == statusAtLower {
 					rhsAcc.addProd(-gamma, solver.unscaledRowRHS(rowIdx))
 					rhsAcc.addProd(gamma, solver.unscaledBound(k, false))
-					addScaledRowAcc(p, solver.extraRows, rowIdx, -gamma, coeffAcc)
+					addScaledRowAccSparse(p, solver.extraRows, rowIdx, -gamma, cutWS, gen, &gmiCols)
 				} else {
 					rhsAcc.addProd(gamma, solver.unscaledRowRHS(rowIdx))
 					rhsAcc.addProd(-gamma, solver.unscaledBound(k, true))
-					addScaledRowAcc(p, solver.extraRows, rowIdx, +gamma, coeffAcc)
+					addScaledRowAccSparse(p, solver.extraRows, rowIdx, +gamma, cutWS, gen, &gmiCols)
 				}
 			}
 		}
 
+		cutWS.gmiCols = gmiCols
 		rhsVal, rhsErr, okRHS := rhsAcc.result()
-		if !validRow || !okRHS {
+		if !validRow || !okRHS || len(gmiCols) == 0 {
 			continue
 		}
 
+		slices.Sort(gmiCols)
 		extraLHSErr := 0.0
-		for j := range n {
-			cv, ce, okC := coeffAcc[j].result()
+		idxBuf := cutWS.tmpIdx[:0]
+		valBuf := cutWS.tmpVal[:0]
+		for _, j := range gmiCols {
+			cv, ce, okC := cutWS.gmiAcc[j].result()
 			if !okC {
 				validRow = false
 				break
 			}
-			structCoeffs[j] = cv
+			if cv != 0 {
+				idxBuf = append(idxBuf, j)
+				valBuf = append(valBuf, -cv)
+			}
 			if ce > 0 {
 				maxB := max(math.Abs(p.varLB[j]), math.Abs(p.varUB[j]))
 				if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
@@ -278,21 +672,18 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 				}
 			}
 		}
-		if !validRow {
+		cutWS.tmpIdx = idxBuf
+		cutWS.tmpVal = valBuf
+		if !validRow || len(idxBuf) == 0 {
 			continue
 		}
 
-		if solver.DisableSIMD {
-			simd.Scale64Scalar(structCoeffs, -1.0)
-		} else {
-			simd.Scale64(structCoeffs, -1.0)
-		}
 		cutRHS := (-rhsVal + rhsErr) + extraLHSErr
 		if rhsErr+extraLHSErr > 0 && !math.IsInf(cutRHS, 0) && !math.IsNaN(cutRHS) {
 			cutRHS = math.Nextafter(cutRHS, math.Inf(1))
 		}
 
-		if cut, ok := finalizeCut(p, structCoeffs, cutRHS, lpPrimal); ok {
+		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, gmiMaxNNZ, cutWS); ok {
 			cuts = append(cuts, cut)
 		}
 	}
@@ -300,10 +691,16 @@ func separateGMICuts(solver *LPSolver, lpPrimal []float64) []cutPlane {
 	return cuts
 }
 
-func addScaledRowAcc(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale float64, dst []dot2Acc) {
+func addScaledRowAccSparse(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale float64, cutWS *cutGenWorkspace, gen int, cols *[]int) {
 	if rowIdx < p.numConstraints {
 		for k := p.rowPtr[rowIdx]; k < p.rowPtr[rowIdx+1]; k++ {
-			dst[p.colIdx[k]].addProd(scale, p.rowVal[k])
+			col := p.colIdx[k]
+			if cutWS.gmiMark[col] != gen {
+				cutWS.gmiMark[col] = gen
+				cutWS.gmiAcc[col] = dot2Acc{}
+				*cols = append(*cols, col)
+			}
+			cutWS.gmiAcc[col].addProd(scale, p.rowVal[k])
 		}
 		return
 	}
@@ -313,29 +710,28 @@ func addScaledRowAcc(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale f
 		vals = dr.OrigVal
 	}
 	for k, col := range dr.ColIdx {
-		dst[col].addProd(scale, vals[k])
+		if cutWS.gmiMark[col] != gen {
+			cutWS.gmiMark[col] = gen
+			cutWS.gmiAcc[col] = dot2Acc{}
+			*cols = append(*cols, col)
+		}
+		cutWS.gmiAcc[col].addProd(scale, vals[k])
 	}
 }
 
 // separateKnapsackCoverCuts relaxes inequality rows to 0-1 knapsacks and sequentially lifts minimal covers via dynamic programming.
-func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
-	n := p.numVars
-	m := p.numConstraints
+func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWorkspace) []cutPlane {
+	if ws == nil {
+		var localWS cutGenWorkspace
+		ws = &localWS
+	}
+	cache := ws.ensureStaticCache(p)
+	if len(cache.coverRows) == 0 {
+		return nil
+	}
 	var cuts []cutPlane
 
-	type item struct {
-		col    int
-		weight float64
-		xVal   float64
-		comp   bool
-	}
-	var items []item
-	denseCut := make([]float64, n)
-
-	for i := range m {
-		if p.rowSense[i] == Equal {
-			continue
-		}
+	for _, i := range cache.coverRows {
 		sign := 1.0
 		if p.rowSense[i] == GreaterEqual {
 			sign = -1.0
@@ -344,7 +740,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 		rhsAcc.addVal(sign * p.rowRHS[i])
 
 		validRelax := true
-		items = items[:0]
+		items := ws.coverItems[:0]
 		minItemW := math.Inf(1)
 		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
 			col := p.colIdx[k]
@@ -370,7 +766,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 			}
 			if a > 0 {
 				minItemW = min(minItemW, a)
-				items = append(items, item{
+				items = append(items, coverItem{
 					col:    col,
 					weight: a,
 					xVal:   lpPrimal[col],
@@ -379,7 +775,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 			} else {
 				minItemW = min(minItemW, -a)
 				rhsAcc.addVal(-a)
-				items = append(items, item{
+				items = append(items, coverItem{
 					col:    col,
 					weight: -a,
 					xVal:   1.0 - lpPrimal[col],
@@ -387,6 +783,7 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 				})
 			}
 		}
+		ws.coverItems = items
 
 		rhsVal, rhsErr, okRHS := rhsAcc.result()
 		rhs := rhsVal + rhsErr
@@ -394,14 +791,19 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 			continue
 		}
 
-		slices.SortFunc(items, func(a, b item) int {
+		slices.SortFunc(items, func(a, b coverItem) int {
 			if math.Abs(a.xVal-b.xVal) > cutCompareTol {
 				return cmp.Compare(b.xVal, a.xVal)
 			}
 			return cmp.Compare(b.weight, a.weight)
 		})
 
-		inCover := make([]bool, len(items))
+		if len(ws.coverIn) < len(items) {
+			ws.coverIn = make([]bool, len(items))
+		}
+		inCover := ws.coverIn[:len(items)]
+		clear(inCover)
+
 		coverWeight := 0.0
 		coverSize := 0
 		coverMargin := func(cw float64) float64 {
@@ -439,23 +841,30 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 
 		// Initialize sequential DP up-lifting table over the minimal cover C:
 		// minWeight[v] = minimum knapsack weight required to reach cut LHS activity >= v.
-		coverWeights := make([]float64, 0, coverSize)
+		coverWeights := ws.coverWeights[:0]
 		for idx, it := range items {
 			if inCover[idx] {
 				coverWeights = append(coverWeights, it.weight)
 			}
 		}
+		ws.coverWeights = coverWeights
 		slices.Sort(coverWeights)
-		minWeight := make([]float64, coverSize)
+
+		if len(ws.coverMinW) < coverSize {
+			ws.coverMinW = make([]float64, coverSize)
+		}
+		minWeight := ws.coverMinW[:coverSize]
+		minWeight[0] = 0
 		for v := 1; v < coverSize; v++ {
 			s := minWeight[v-1] + coverWeights[v-1]
 			minWeight[v] = max(0.0, s-8.0*unitRoundoff64*s)
 		}
 
 		cutCap := float64(coverSize - 1)
-		clear(denseCut)
 		finalRHS := cutCap
 		lhsStar := 0.0
+		idxBuf := ws.tmpIdx[:0]
+		valBuf := ws.tmpVal[:0]
 
 		for idx, it := range items {
 			var alpha int
@@ -493,18 +902,21 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 			}
 			fAlpha := float64(alpha)
 			lhsStar += fAlpha * it.xVal
+			idxBuf = append(idxBuf, it.col)
 			if !it.comp {
-				denseCut[it.col] = fAlpha
+				valBuf = append(valBuf, fAlpha)
 			} else {
-				denseCut[it.col] = -fAlpha
+				valBuf = append(valBuf, -fAlpha)
 				finalRHS -= fAlpha
 			}
 		}
+		ws.tmpIdx = idxBuf
+		ws.tmpVal = valBuf
 		if lhsStar <= cutCap+minCutEfficacy {
 			continue
 		}
 
-		if cut, ok := finalizeCut(p, denseCut, finalRHS, lpPrimal); ok {
+		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, finalRHS, lpPrimal, 0, ws); ok {
 			cuts = append(cuts, cut)
 		}
 	}
@@ -513,203 +925,35 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64) []cutPlan
 }
 
 // separateFlowAndVUBCuts separates disaggregated variable-upper-bound inequalities and Barany-Van Roy-Wolsey (l, S) lot-sizing cuts.
-func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
-	n := p.numVars
-	m := p.numConstraints
+func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWorkspace) []cutPlane {
+	if ws == nil {
+		var localWS cutGenWorkspace
+		ws = &localWS
+	}
+	cache := ws.ensureStaticCache(p)
+	if len(cache.disaggVUBs) == 0 && len(cache.flowChains) == 0 {
+		return nil
+	}
 	var cuts []cutPlane
 
-	vubBinCol := make([]int, n)
-	for j := range n {
-		vubBinCol[j] = -1
-	}
-
-	denseCut := make([]float64, n)
-
-	// 1. Detect VUB constraints (p - M*y <= 0) and Disaggregated Implied VUB constraints (sum_k a_k x_k - C*y <= 0)
-	for i := range m {
-		if p.rowSense[i] != LessEqual || p.rowRHS[i] > 0 {
-			continue
-		}
-		s, e := p.rowPtr[i], p.rowPtr[i+1]
-		nnz := e - s
-		if nnz < minPairNNZ {
-			continue
-		}
-
-		binCol := -1
-		capVal := 0.0
-		negCount := 0
-		allPosNonNeg := true
-
-		for k := s; k < e; k++ {
-			col := p.colIdx[k]
-			val := p.rowVal[k]
-			if val < 0 {
-				negCount++
-				if val < -cutCoeffZeroTol && p.varCat[col] == Binary && p.varLB[col] == 0 && p.varUB[col] == 1 {
-					binCol = col
-					capVal = -val
-				}
-			} else if val > 0 {
-				if p.varLB[col] < 0 {
-					allPosNonNeg = false
-				}
-			}
-		}
-
-		if negCount != 1 || binCol == -1 || !allPosNonNeg {
-			continue
-		}
-
-		if nnz == minPairNNZ {
-			for k := s; k < e; k++ {
-				col := p.colIdx[k]
-				val := p.rowVal[k]
-				if col != binCol && val == 1.0 {
-					vubBinCol[col] = binCol
-				}
-			}
-			continue
-		}
-
-		// Disaggregated VUB cuts: for each x_k in sum_k a_k x_k - C*y <= 0, x_k - min(u_k, C/a_k)*y <= 0
-		yStar := lpPrimal[binCol]
-		for k := s; k < e; k++ {
-			col := p.colIdx[k]
-			if col == binCol {
-				continue
-			}
-			ak := p.rowVal[k]
-			if ak <= cutCoeffZeroTol {
-				continue
-			}
-			effUB := min(p.varUB[col], capVal/ak)
-			if math.IsInf(effUB, 1) || effUB <= 0 {
-				continue
-			}
-			if lpPrimal[col]-effUB*yStar > minCutEfficacy {
-				clear(denseCut)
-				denseCut[col] = 1.0
-				denseCut[binCol] = -effUB
-				if cut, ok := finalizeCut(p, denseCut, 0, lpPrimal); ok {
-					cuts = append(cuts, cut)
-				}
+	// 1. Disaggregated VUB cuts: for each x_k in sum_k a_k x_k - C*y <= 0, x_k - min(u_k, C/a_k)*y <= 0.
+	var vubIdx [2]int
+	var vubVal [2]float64
+	for _, term := range cache.disaggVUBs {
+		if lpPrimal[term.col]-term.effUB*lpPrimal[term.binCol] > minCutEfficacy {
+			vubIdx[0], vubIdx[1] = term.col, term.binCol
+			vubVal[0], vubVal[1] = 1.0, -term.effUB
+			if cut, ok := finalizeSparseCut(p, vubIdx[:], vubVal[:], 0, lpPrimal, 0, ws); ok {
+				cuts = append(cuts, cut)
 			}
 		}
 	}
 
-	// 2. Barany-Van Roy-Wolsey (l, S) Lot-Sizing / Flow-Conservation cuts
-	type flowNode struct {
-		invIn   int
-		prodCol int
-		binCol  int
-		invOut  int
-		demand  float64
-	}
-	var candNodes []flowNode
-	invInCount := make(map[int]int)
-	invOutCount := make(map[int]int)
-
-	for i := range m {
-		if p.rowSense[i] != Equal || p.rowRHS[i] <= unitCoeffTol {
-			continue
-		}
-		s, e := p.rowPtr[i], p.rowPtr[i+1]
-		nnz := e - s
-		if nnz != 2 && nnz != 3 {
-			continue
-		}
-
-		prodCol := -1
-		invIn := -1
-		invOut := -1
-		valid := true
-
-		for k := s; k < e; k++ {
-			col := p.colIdx[k]
-			val := p.rowVal[k]
-			if val == 1.0 {
-				if vubBinCol[col] != -1 && p.varLB[col] >= 0 && prodCol == -1 {
-					prodCol = col
-				} else if p.varLB[col] >= 0 && invIn == -1 {
-					invIn = col
-				} else {
-					valid = false
-					break
-				}
-			} else if val == -1.0 && p.varLB[col] >= 0 && invOut == -1 {
-				invOut = col
-			} else {
-				valid = false
-				break
-			}
-		}
-
-		if !valid || prodCol == -1 || invOut == -1 {
-			continue
-		}
-		if nnz == 3 && invIn == -1 {
-			continue
-		}
-
-		fn := flowNode{
-			invIn:   invIn,
-			prodCol: prodCol,
-			binCol:  vubBinCol[prodCol],
-			invOut:  invOut,
-			demand:  p.rowRHS[i],
-		}
-		candNodes = append(candNodes, fn)
-		if invIn != -1 {
-			invInCount[invIn]++
-		}
-		invOutCount[invOut]++
-	}
-
-	nodeByInvIn := make(map[int]flowNode, len(candNodes))
-	for _, fn := range candNodes {
-		if fn.invIn != -1 && invInCount[fn.invIn] == 1 && invOutCount[fn.invIn] == 1 {
-			nodeByInvIn[fn.invIn] = fn
-		}
-	}
-
-	var startNodes []flowNode
-	for _, fn := range candNodes {
-		if fn.invIn == -1 || invOutCount[fn.invIn] != 1 || invInCount[fn.invIn] != 1 {
-			startNodes = append(startNodes, fn)
-		}
-	}
-
-	var chain []flowNode
+	// 2. Barany-Van Roy-Wolsey (l, S) lot-sizing / flow-conservation cuts over cached chains.
 	var seenBins [maxFlowLookahead + 1]int
-	for _, root := range startNodes {
-		chain = chain[:0]
-		cur := root
-		for {
-			chain = append(chain, cur)
-			if len(chain) >= maxFlowChainLen || invOutCount[cur.invOut] != 1 || invInCount[cur.invOut] != 1 {
-				break
-			}
-			next, ok := nodeByInvIn[cur.invOut]
-			if !ok {
-				break
-			}
-			collision := next.invOut == root.invIn || next.prodCol == root.invIn
-			if !collision {
-				for _, prev := range chain {
-					if next.invOut == prev.invOut || next.invOut == prev.prodCol ||
-						next.prodCol == prev.invOut || next.prodCol == prev.prodCol {
-						collision = true
-						break
-					}
-				}
-			}
-			if collision {
-				break
-			}
-			cur = next
-		}
-
+	var flowIdx [maxFlowLookahead + 2]int
+	var flowVal [maxFlowLookahead + 2]float64
+	for _, chain := range cache.flowChains {
 		T := len(chain)
 		for t := range T {
 			maxQ := min(T-1, t+maxFlowLookahead)
@@ -756,9 +1000,11 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					continue
 				}
 
-				clear(denseCut)
+				nf := 0
 				if chain[t].invIn != -1 {
-					denseCut[chain[t].invIn] -= 1.0
+					flowIdx[nf] = chain[t].invIn
+					flowVal[nf] = -1.0
+					nf++
 				}
 				remDem = cumDem
 				numSeen = 0
@@ -780,14 +1026,18 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 					if yTerm < pTerm-cutCompareTol {
 						seenBins[numSeen] = nd.binCol
 						numSeen++
-						denseCut[nd.binCol] -= remDem
+						flowIdx[nf] = nd.binCol
+						flowVal[nf] = -remDem
+						nf++
 					} else {
-						denseCut[nd.prodCol] -= 1.0
+						flowIdx[nf] = nd.prodCol
+						flowVal[nf] = -1.0
+						nf++
 					}
 					remDem -= nd.demand
 				}
 
-				if cut, ok := finalizeCut(p, denseCut, -cumDem, lpPrimal); ok {
+				if cut, ok := finalizeSparseCut(p, flowIdx[:nf], flowVal[:nf], -cumDem, lpPrimal, 0, ws); ok {
 					cuts = append(cuts, cut)
 				}
 			}
@@ -809,42 +1059,41 @@ func mirUseLower(x, l, u float64) bool {
 
 // separateRowMIRCuts separates single-row Marchand-Wolsey complemented Mixed-Integer Rounding cuts over bounded and one-sided rows.
 func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
-	n := p.numVars
-	m := p.numConstraints
-	var cuts []cutPlane
-	denseCut := make([]float64, n)
+	var localWS cutGenWorkspace
+	return separateRowMIRCutsWithWS(p, lpPrimal, &localWS)
+}
 
-	for i := range m {
-		if p.rowSense[i] == Equal {
-			continue
-		}
+func separateRowMIRCutsWithWS(p *CompiledProblem, lpPrimal []float64, ws *cutGenWorkspace) []cutPlane {
+	cache := ws.ensureStaticCache(p)
+	if len(cache.mirRows) == 0 {
+		return nil
+	}
+	mirMaxNNZ := maxCutNNZ(p.numVars)
+	var cuts []cutPlane
+
+	for _, i := range cache.mirRows {
 		sign := 1.0
 		if p.rowSense[i] == GreaterEqual {
 			sign = -1.0
 		}
 		rhs := sign * p.rowRHS[i]
 		s, e := p.rowPtr[i], p.rowPtr[i+1]
-		if e-s < minPairNNZ {
-			continue
-		}
 
-		// Only separate on rows with small slack in the LP relaxation
+		// Only separate on rows with small slack in the LP relaxation.
 		act := 0.0
-		validBounds := true
 		for k := s; k < e; k++ {
-			col := p.colIdx[k]
-			act += sign * p.rowVal[k] * lpPrimal[col]
-			if math.IsInf(p.varLB[col], -1) && math.IsInf(p.varUB[col], 1) {
-				validBounds = false
-				break
-			}
+			act += sign * p.rowVal[k] * lpPrimal[p.colIdx[k]]
 		}
-		if !validBounds || rhs-act > 1.0+mirMaxRelSlack*math.Abs(rhs) {
+		if rhs-act > 1.0+mirMaxRelSlack*math.Abs(rhs) {
 			continue
 		}
 
-		// Try Marchand-Wolsey c-MIR scaling with divisor delta = |a_k| for fractional integer variables
+		// Try Marchand-Wolsey c-MIR scaling with divisor delta = |a_k| for fractional integer variables.
+		// Hoist shifted-RHS betaAcc out of the kDiv loop since it does not depend on delta.
 		triedDivs := 0
+		betaComputed := false
+		var betaVal, betaErr float64
+		var okBeta bool
 		for kDiv := s; kDiv < e && triedDivs < maxMIRDivisors; kDiv++ {
 			divCol := p.colIdx[kDiv]
 			if p.varCat[divCol] == Continuous {
@@ -861,21 +1110,26 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			}
 			triedDivs++
 
-			// Shift variables to closer finite bound using compensated summation.
-			var betaAcc dot2Acc
-			betaAcc.addVal(rhs)
-			for k := s; k < e; k++ {
-				col := p.colIdx[k]
-				a := sign * p.rowVal[k]
-				l, u := p.varLB[col], p.varUB[col]
-				if mirUseLower(lpPrimal[col], l, u) {
-					betaAcc.addProd(-a, l)
-				} else {
-					betaAcc.addProd(-a, u)
+			if !betaComputed {
+				var betaAcc dot2Acc
+				betaAcc.addVal(rhs)
+				for k := s; k < e; k++ {
+					col := p.colIdx[k]
+					a := sign * p.rowVal[k]
+					l, u := p.varLB[col], p.varUB[col]
+					if mirUseLower(lpPrimal[col], l, u) {
+						betaAcc.addProd(-a, l)
+					} else {
+						betaAcc.addProd(-a, u)
+					}
 				}
+				betaVal, betaErr, okBeta = betaAcc.result()
+				betaComputed = true
 			}
-			betaVal, betaErr, okBeta := betaAcc.result()
-			if !okBeta || betaErr > 1e-4*delta {
+			if !okBeta {
+				break
+			}
+			if betaErr > 1e-4*delta {
 				continue
 			}
 
@@ -890,7 +1144,8 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				continue
 			}
 
-			clear(denseCut)
+			idxBuf := ws.tmpIdx[:0]
+			valBuf := ws.tmpVal[:0]
 			var cutRHSAcc dot2Acc
 			cutRHSAcc.addVal(b0)
 			contDenLo := math.Nextafter(delta*math.Nextafter(1.0-f0, math.Inf(-1)), math.Inf(-1))
@@ -910,21 +1165,23 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 				if p.varCat[col] == Continuous {
 					if a > 0 {
 						if atLower {
-							// Relax a*(x - l) >= 0 from LHS: coefficient 0
 							continue
 						}
-						// x = u - s (s >= 0) => -a*s on LHS => -g*(u - x) in MIR; rounding g up relaxes the cut.
 						g := math.Nextafter(a/contDenLo, math.Inf(1))
-						denseCut[col] = g
+						if g != 0 {
+							idxBuf = append(idxBuf, col)
+							valBuf = append(valBuf, g)
+						}
 						cutRHSAcc.addProd(g, u)
 					} else if a < 0 {
 						if !atLower {
-							// Relax a*(x - u) = |a|*(u - x) >= 0 from LHS: coefficient 0
 							continue
 						}
-						// x = l + s (s >= 0) => -|a|*s on LHS => -g*(x - l) in MIR; rounding g up relaxes the cut.
 						g := math.Nextafter((-a)/contDenLo, math.Inf(1))
-						denseCut[col] = -g
+						if g != 0 {
+							idxBuf = append(idxBuf, col)
+							valBuf = append(valBuf, -g)
+						}
 						cutRHSAcc.addProd(-g, l)
 					}
 				} else {
@@ -950,13 +1207,24 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 						}
 					}
 					if !comp {
-						denseCut[col] = coeff
+						if coeff != 0 {
+							idxBuf = append(idxBuf, col)
+							valBuf = append(valBuf, coeff)
+						}
 						cutRHSAcc.addProd(coeff, l)
 					} else {
-						denseCut[col] = -coeff
+						if coeff != 0 {
+							idxBuf = append(idxBuf, col)
+							valBuf = append(valBuf, -coeff)
+						}
 						cutRHSAcc.addProd(-coeff, u)
 					}
 				}
+			}
+			ws.tmpIdx = idxBuf
+			ws.tmpVal = valBuf
+			if len(idxBuf) == 0 {
+				continue
 			}
 			cutRHSVal, cutRHSErr, okCutRHS := cutRHSAcc.result()
 			if !okCutRHS {
@@ -966,13 +1234,167 @@ func separateRowMIRCuts(p *CompiledProblem, lpPrimal []float64) []cutPlane {
 			if cutRHSErr > 0 && !math.IsInf(cutRHS, 0) && !math.IsNaN(cutRHS) {
 				cutRHS = math.Nextafter(cutRHS, math.Inf(1))
 			}
-			if cut, ok := finalizeCut(p, denseCut, cutRHS, lpPrimal); ok {
+			if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, mirMaxNNZ, ws); ok {
 				cuts = append(cuts, cut)
 			}
 		}
 	}
 
 	return cuts
+}
+
+// finalizeSparseCut converts a sparse cut sum_k val[k]*x[idx[k]] <= rhs into a power-of-two
+// normalized sparse cut row in O(nnz) time without scanning all variables. Duplicate column
+// entries are summed and output columns are ordered ascending. When maxNNZ > 0, cuts whose
+// surviving nonzero count exceeds maxNNZ are rejected before output slice allocation.
+func finalizeSparseCut(
+	p *CompiledProblem,
+	idx []int,
+	val []float64,
+	rhs float64,
+	lpPrimal []float64,
+	maxNNZ int,
+	ws *cutGenWorkspace,
+) (cutPlane, bool) {
+	if math.IsNaN(rhs) || math.IsInf(rhs, 0) || len(idx) == 0 || len(idx) != len(val) {
+		return cutPlane{}, false
+	}
+	if ws == nil {
+		var localWS cutGenWorkspace
+		ws = &localWS
+	}
+	n := p.numVars
+	ws.ensureVars(n)
+	gen := ws.nextGen()
+	uniq := ws.uniqCols[:0]
+	sorted := true
+	prevCol := -1
+
+	for k, col := range idx {
+		v := val[k]
+		if col < 0 || col >= n || math.IsNaN(v) || math.IsInf(v, 0) {
+			return cutPlane{}, false
+		}
+		if ws.mark[col] != gen {
+			ws.mark[col] = gen
+			ws.acc[col] = v
+			if col < prevCol {
+				sorted = false
+			}
+			prevCol = col
+			uniq = append(uniq, col)
+		} else {
+			ws.acc[col] += v
+			if math.IsNaN(ws.acc[col]) || math.IsInf(ws.acc[col], 0) {
+				return cutPlane{}, false
+			}
+		}
+	}
+	ws.uniqCols = uniq
+	if !sorted {
+		if len(uniq) == 2 {
+			uniq[0], uniq[1] = uniq[1], uniq[0]
+		} else {
+			slices.Sort(uniq)
+		}
+	}
+
+	maxAbs := 0.0
+	minAbs := math.Inf(1)
+	nnz := 0
+	for _, j := range uniq {
+		v := ws.acc[j]
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return cutPlane{}, false
+		}
+		av := math.Abs(v)
+		if av > cutDropTol {
+			maxAbs = max(maxAbs, av)
+			minAbs = min(minAbs, av)
+			uniq[nnz] = j
+			nnz++
+		} else if v != 0 {
+			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
+			p1 := math.Nextafter(v*p.varLB[j], math.Inf(-1))
+			p2 := math.Nextafter(v*p.varUB[j], math.Inf(-1))
+			lo := min(p1, p2)
+			if math.IsInf(lo, 0) || math.IsNaN(lo) {
+				return cutPlane{}, false
+			}
+			rhs = math.Nextafter(rhs-lo, math.Inf(1))
+			if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
+				return cutPlane{}, false
+			}
+		}
+	}
+	if nnz == 0 || maxAbs == 0 || maxAbs/minAbs > maxCutDynamism {
+		return cutPlane{}, false
+	}
+	if maxNNZ > 0 && nnz > maxNNZ {
+		return cutPlane{}, false
+	}
+	kept := uniq[:nnz]
+
+	scaledNorm2 := 0.0
+	for _, j := range kept {
+		r := ws.acc[j] / maxAbs
+		scaledNorm2 += r * r
+	}
+	norm := maxAbs * math.Sqrt(scaledNorm2)
+	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return cutPlane{}, false
+	}
+	_, rawExp := math.Frexp(norm)
+	normExp := rawExp - 1
+	scaledNorm := math.Ldexp(norm, -normExp)
+	if !(scaledNorm > 0) || math.IsNaN(scaledNorm) || math.IsInf(scaledNorm, 0) {
+		return cutPlane{}, false
+	}
+
+	act := 0.0
+	subScaleErr := 0.0
+	for _, j := range kept {
+		v := ws.acc[j]
+		sv := math.Ldexp(v, -normExp)
+		if sv == 0 || math.IsNaN(sv) || math.IsInf(sv, 0) {
+			return cutPlane{}, false
+		}
+		if math.Ldexp(sv, normExp) != v {
+			maxB := max(math.Abs(p.varLB[j]), math.Abs(p.varUB[j]))
+			if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
+				return cutPlane{}, false
+			}
+			subScaleErr += math.Nextafter(math.SmallestNonzeroFloat64*maxB, math.Inf(1))
+		}
+		ws.acc[j] = sv
+		act += sv * lpPrimal[j]
+	}
+	rawRHS := math.Ldexp(rhs, -normExp)
+	if rhs != 0 && math.Ldexp(rawRHS, normExp) != rhs {
+		rawRHS = math.Nextafter(rawRHS, math.Inf(1))
+	}
+	scaledRHS := (rawRHS + subScaleErr) + rhsSafetyMargin*scaledNorm
+	if math.IsNaN(scaledRHS) || math.IsInf(scaledRHS, 0) || math.IsNaN(act) || math.IsInf(act, 0) {
+		return cutPlane{}, false
+	}
+	efficacy := (act - scaledRHS) / scaledNorm
+	if !(efficacy >= minCutEfficacy) {
+		return cutPlane{}, false
+	}
+
+	colIdx := make([]int, nnz)
+	outVal := make([]float64, nnz)
+	for k, j := range kept {
+		colIdx[k] = j
+		outVal[k] = ws.acc[j]
+	}
+	return cutPlane{
+		ColIdx:   colIdx,
+		Val:      outVal,
+		RHS:      scaledRHS,
+		Efficacy: efficacy,
+		Norm:     scaledNorm,
+	}, true
 }
 
 // finalizeCut converts the dense cut dense*x <= rhs into a power-of-two normalized sparse cut row.
@@ -1072,18 +1494,23 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 		Val:      val,
 		RHS:      scaledRHS,
 		Efficacy: efficacy,
+		Norm:     scaledNorm,
 	}, true
 }
 
+func cutPlaneNorm(c cutPlane) float64 {
+	if c.Norm > 0 {
+		return c.Norm
+	}
+	var norm2 float64
+	for _, v := range c.Val {
+		norm2 += v * v
+	}
+	return math.Sqrt(norm2)
+}
+
 func cosineSimilarity(a, b cutPlane) float64 {
-	var norm2A, norm2B float64
-	for _, va := range a.Val {
-		norm2A += va * va
-	}
-	for _, vb := range b.Val {
-		norm2B += vb * vb
-	}
-	denom := math.Sqrt(norm2A * norm2B)
+	denom := cutPlaneNorm(a) * cutPlaneNorm(b)
 	if !(denom > 0) || math.IsNaN(denom) || math.IsInf(denom, 0) {
 		return 0
 	}
