@@ -1812,3 +1812,342 @@ func TestAssignPotentialCancellationPermutations(t *testing.T) {
 		t.Fatalf("assign lo after hi+mid cancel = (%g, %v), want %g", resLo.Objective, err, wantLo)
 	}
 }
+
+func TestSolveIntoContinuousIEEE754ZeroAlloc(t *testing.T) {
+	bgCtx := context.Background()
+	cases := []struct {
+		name       string
+		rows, cols int
+		sense      assign.Sense
+		seed       uint64
+	}{
+		{"sq_10_min", 10, 10, assign.Minimize, 1010},
+		{"sq_64_min", 64, 64, assign.Minimize, 1064},
+		{"sq_100_min", 100, 100, assign.Minimize, 1100},
+		{"sq_100_max", 100, 100, assign.Maximize, 2100},
+		{"sq_256_min", 256, 256, assign.Minimize, 1256},
+		{"wide_50x200_min", 50, 200, assign.Minimize, 50200},
+		{"tall_200x50_min", 200, 50, assign.Minimize, 200050},
+		{"tall_200x50_max", 200, 50, assign.Maximize, 200051},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rng := rand.New(rand.NewPCG(tc.seed, tc.seed^0x9e3779b97f4a7c15))
+			cost := make([]float64, tc.rows*tc.cols)
+			for i := range cost {
+				cost[i] = rng.Float64() * 10000.0
+			}
+			k := min(tc.rows, tc.cols)
+			rowInd := make([]int, k)
+			colInd := make([]int, k)
+			ws := assign.AcquireWorkspace(tc.rows, tc.cols)
+			defer assign.ReleaseWorkspace(ws)
+
+			refRes, err := assign.LinearSumFlat(bgCtx, tc.rows, tc.cols, cost, tc.sense)
+			if err != nil {
+				t.Fatalf("LinearSumFlat failed: %v", err)
+			}
+			verifyOptimalityCertificate(t, tc.name+"/ref", tc.rows, tc.cols, cost, tc.sense, refRes)
+
+			// Warm up the workspace buffers before checking zero-allocation execution.
+			warmObj, err := assign.SolveInto(bgCtx, tc.rows, tc.cols, cost, tc.sense, rowInd, colInd, ws)
+			if err != nil {
+				t.Fatalf("SolveInto warmup failed: %v", err)
+			}
+			if math.Abs(warmObj-refRes.Objective) > 1e-11*max(1.0, math.Abs(refRes.Objective)) {
+				t.Fatalf("SolveInto obj=%.15g != LinearSumFlat obj=%.15g", warmObj, refRes.Objective)
+			}
+
+			allocs := testing.AllocsPerRun(5, func() {
+				if _, sErr := assign.SolveInto(bgCtx, tc.rows, tc.cols, cost, tc.sense, rowInd, colInd, ws); sErr != nil {
+					t.Fatal(sErr)
+				}
+			})
+			if allocs != 0 {
+				t.Fatalf("expected 0 allocs/op in warm SolveInto, got %v", allocs)
+			}
+
+			noSIMD := assign.WithoutSIMD()
+			allocsScalar := testing.AllocsPerRun(5, func() {
+				if _, sErr := assign.SolveInto(bgCtx, tc.rows, tc.cols, cost, tc.sense, rowInd, colInd, ws, noSIMD); sErr != nil {
+					t.Fatal(sErr)
+				}
+			})
+			if allocsScalar != 0 {
+				t.Fatalf("expected 0 allocs/op in warm scalar SolveInto, got %v", allocsScalar)
+			}
+		})
+	}
+}
+
+func TestCancellationAndSubnormalPreservation(t *testing.T) {
+	ctx := t.Context()
+
+	// Verify Stage-2 refinement still resolves severe potential cancellation when opposite-sign
+	// duals of magnitude 1e18 cancel to an O(1) objective.
+	matCancel := [][]float64{
+		{1e18, 0, 2e18, 2e18},
+		{2e18, 3.5, 0, 2e18},
+		{2e18, 2e18, -1e18, 0},
+		{12.25, 2e18, 2e18, 0},
+	}
+	flatCancel := make([]float64, 0, 16)
+	for _, r := range matCancel {
+		flatCancel = append(flatCancel, r...)
+	}
+	for _, mode := range []struct {
+		tag string
+		opt assign.Option
+	}{
+		{"simd", assign.WithSIMD(true)},
+		{"scalar", assign.WithoutSIMD()},
+	} {
+		res, err := assign.LinearSum(ctx, matCancel, assign.Minimize, mode.opt)
+		if err != nil {
+			t.Fatalf("cancel %s failed: %v", mode.tag, err)
+		}
+		if res.Objective != 3.5 {
+			t.Fatalf("cancel %s obj=%.17g, want 3.5 (cols=%v)", mode.tag, res.Objective, res.ColInd)
+		}
+		verifyOptimalityCertificate(t, "cancel_"+mode.tag, 4, 4, flatCancel, assign.Minimize, res)
+	}
+
+	// Verify extreme-exponent matched costs outside [1e-150, 1e150] fall back cleanly
+	// from the Neumaier fast path to exact wide accumulation.
+	tinyNorm := 1e-200
+	matExtremeRange := [][]float64{
+		{1e200, 1e201, 1e201},
+		{1e201, -1e200, 1e201},
+		{1e201, 1e201, tinyNorm},
+	}
+	resRange, err := assign.LinearSum(ctx, matExtremeRange, assign.Minimize)
+	if err != nil {
+		t.Fatalf("extreme range failed: %v", err)
+	}
+	if resRange.Objective != tinyNorm {
+		t.Fatalf("extreme range obj=%.17g, want %.17g", resRange.Objective, tinyNorm)
+	}
+
+	// Verify exact cancellation of +-1e16 plus small fractional residual within [1e-150, 1e150].
+	matMidCancel := [][]float64{
+		{1e16, 1e17, 1e17},
+		{1e17, -1e16, 1e17},
+		{1e17, 1e17, 3.25},
+	}
+	resMid, err := assign.LinearSum(ctx, matMidCancel, assign.Minimize)
+	if err != nil {
+		t.Fatalf("mid-range cancel failed: %v", err)
+	}
+	if resMid.Objective != 3.25 {
+		t.Fatalf("mid-range cancel obj=%.17g, want 3.25", resMid.Objective)
+	}
+
+	// Verify tall 3x2 subnormal tie-breaking survives transpose and downscaling.
+	tiny := math.SmallestNonzeroFloat64
+	sub16 := tiny * 16
+	tallSub := [][]float64{
+		{sub16, 1e308},
+		{tiny, 1e308},
+		{1e308, 0},
+	}
+	resTallSub, err := assign.LinearSum(ctx, tallSub, assign.Minimize)
+	if err != nil {
+		t.Fatalf("tall subnormal+1e308 failed: %v", err)
+	}
+	if resTallSub.Objective != tiny || !slices.Equal(resTallSub.RowInd, []int{1, 2}) || !slices.Equal(resTallSub.ColInd, []int{0, 1}) {
+		t.Fatalf("tall subnormal+1e308 = (obj=%g rows=%v cols=%v), want (%g, [1 2], [0 1])",
+			resTallSub.Objective, resTallSub.RowInd, resTallSub.ColInd, tiny)
+	}
+}
+
+func TestMaximizePositiveZeroPreservation(t *testing.T) {
+	ctx := t.Context()
+	negZero := math.Copysign(0, -1)
+
+	// Exercise scalar and AVX2 paths across square, wide, and tall shapes with signed zeros.
+	shapes := [][2]int{{4, 4}, {35, 35}, {64, 64}, {17, 40}, {40, 17}, {68, 20}}
+	for _, sh := range shapes {
+		rows, cols := sh[0], sh[1]
+		flat := make([]float64, rows*cols)
+		mat := make([][]float64, rows)
+		for r := range rows {
+			mat[r] = make([]float64, cols)
+			for c := range cols {
+				v := negZero
+				if (r+c)%2 == 0 {
+					v = 0.0
+				}
+				flat[r*cols+c] = v
+				mat[r][c] = v
+			}
+		}
+
+		for _, mode := range []struct {
+			tag string
+			opt assign.Option
+		}{
+			{"simd", assign.WithSIMD(true)},
+			{"scalar", assign.WithoutSIMD()},
+		} {
+			resFlat, err := assign.LinearSumFlat(ctx, rows, cols, flat, assign.Maximize, mode.opt)
+			if err != nil {
+				t.Fatalf("%dx%d %s flat Maximize failed: %v", rows, cols, mode.tag, err)
+			}
+			if math.Float64bits(resFlat.Objective) != 0 {
+				t.Fatalf("%dx%d %s flat Maximize signed zero: bits=%x, want +0.0", rows, cols, mode.tag, math.Float64bits(resFlat.Objective))
+			}
+			verifyOptimalityCertificate(t, fmt.Sprintf("max_zero_flat_%dx%d_%s", rows, cols, mode.tag), rows, cols, flat, assign.Maximize, resFlat)
+
+			res2D, err := assign.LinearSum(ctx, mat, assign.Maximize, mode.opt)
+			if err != nil {
+				t.Fatalf("%dx%d %s 2D Maximize failed: %v", rows, cols, mode.tag, err)
+			}
+			if math.Float64bits(res2D.Objective) != 0 {
+				t.Fatalf("%dx%d %s 2D Maximize signed zero: bits=%x, want +0.0", rows, cols, mode.tag, math.Float64bits(res2D.Objective))
+			}
+		}
+	}
+
+	// Verify in-place LinearSum Maximize slow path with -Inf forbidden edges and invalid +Inf.
+	ninf := math.Inf(-1)
+	matForbid := make([][]float64, 36)
+	for i := range 36 {
+		matForbid[i] = make([]float64, 36)
+		for j := range 36 {
+			if i == j {
+				matForbid[i][j] = negZero
+			} else {
+				matForbid[i][j] = ninf
+			}
+		}
+	}
+	resForbid, err := assign.LinearSum(ctx, matForbid, assign.Maximize)
+	if err != nil {
+		t.Fatalf("2D Maximize with -Inf and -0.0 failed: %v", err)
+	}
+	if math.Float64bits(resForbid.Objective) != 0 {
+		t.Fatalf("2D Maximize with -Inf and -0.0: obj bits=%x, want +0.0", math.Float64bits(resForbid.Objective))
+	}
+
+	matForbid[18][19] = math.Inf(1)
+	if _, err := assign.LinearSum(ctx, matForbid, assign.Maximize); !errors.Is(err, assign.ErrInvalidCost) {
+		t.Fatalf("2D Maximize with +Inf: expected ErrInvalidCost, got %v", err)
+	}
+}
+
+func TestTallTransposeAndSIMDParity(t *testing.T) {
+	ctx := t.Context()
+	rng := rand.New(rand.NewPCG(20261120, 314159265))
+
+	// Cover AVX2 4x4 transpose borders and square chunk boundaries across Minimize and Maximize.
+	shapes := [][2]int{
+		{9, 8}, {17, 15}, {33, 17}, {65, 33}, {131, 37}, {260, 64},
+		{31, 31}, {32, 32}, {33, 33}, {64, 64}, {65, 65}, {131, 131}, {259, 259},
+	}
+	for idx, sh := range shapes {
+		rows, cols := sh[0], sh[1]
+		sense := assign.Minimize
+		if idx%2 == 1 {
+			sense = assign.Maximize
+		}
+		flat := make([]float64, rows*cols)
+		mat := make([][]float64, rows)
+		for r := range rows {
+			mat[r] = make([]float64, cols)
+			for c := range cols {
+				v := (rng.Float64() - 0.5) * 1000.0
+				flat[r*cols+c] = v
+				mat[r][c] = v
+			}
+		}
+
+		resSIMD, err := assign.LinearSumFlat(ctx, rows, cols, flat, sense, assign.WithSIMD(true))
+		if err != nil {
+			t.Fatalf("%dx%d %s SIMD failed: %v", rows, cols, sense, err)
+		}
+		resScal, err := assign.LinearSumFlat(ctx, rows, cols, flat, sense, assign.WithoutSIMD())
+		if err != nil {
+			t.Fatalf("%dx%d %s Scalar failed: %v", rows, cols, sense, err)
+		}
+		res2D, err := assign.LinearSum(ctx, mat, sense, assign.WithSIMD(true))
+		if err != nil {
+			t.Fatalf("%dx%d %s 2D SIMD failed: %v", rows, cols, sense, err)
+		}
+
+		label := fmt.Sprintf("parity_%dx%d_%s", rows, cols, sense)
+		verifyOptimalityCertificate(t, label+"/simd", rows, cols, flat, sense, resSIMD)
+		verifyOptimalityCertificate(t, label+"/scalar", rows, cols, flat, sense, resScal)
+		verifyOptimalityCertificate(t, label+"/2d", rows, cols, flat, sense, res2D)
+
+		tol := 1e-10 * max(1.0, math.Abs(resScal.Objective))
+		if math.Abs(resSIMD.Objective-resScal.Objective) > tol || math.Abs(res2D.Objective-resScal.Objective) > tol {
+			t.Fatalf("%s obj mismatch: simd=%.15g 2d=%.15g scalar=%.15g", label, resSIMD.Objective, res2D.Objective, resScal.Objective)
+		}
+
+		// Verify transpose symmetry against the transposed matrix.
+		trans := make([]float64, rows*cols)
+		for r := range rows {
+			for c := range cols {
+				trans[c*rows+r] = flat[r*cols+c]
+			}
+		}
+		resT, err := assign.LinearSumFlat(ctx, cols, rows, trans, sense, assign.WithSIMD(true))
+		if err != nil {
+			t.Fatalf("%s transposed failed: %v", label, err)
+		}
+		if math.Abs(resT.Objective-resSIMD.Objective) > tol {
+			t.Fatalf("%s transpose symmetry mismatch: got %.15g, want %.15g", label, resT.Objective, resSIMD.Objective)
+		}
+	}
+
+	// Exercise the n >= 1000 progress-gated adaptive ARR path on a 1000x1000 square instance
+	// and a 1000x250 tall instance, verifying SIMD vs. Scalar parity and zero-alloc SolveInto.
+	if !testing.Short() {
+		for _, tc := range []struct {
+			name       string
+			rows, cols int
+			seed       uint64
+		}{
+			{"adaptive_arr_1000x1000", 1000, 1000, 991000},
+			{"tall_1000x250", 1000, 250, 991250},
+		} {
+			rGen := rand.New(rand.NewPCG(tc.seed, tc.seed^0x9e3779b97f4a7c15))
+			cost := make([]float64, tc.rows*tc.cols)
+			for i := range cost {
+				cost[i] = rGen.Float64() * 10000.0
+			}
+			resSIMD, err := assign.LinearSumFlat(ctx, tc.rows, tc.cols, cost, assign.Minimize, assign.WithSIMD(true))
+			if err != nil {
+				t.Fatalf("%s SIMD failed: %v", tc.name, err)
+			}
+			resScal, err := assign.LinearSumFlat(ctx, tc.rows, tc.cols, cost, assign.Minimize, assign.WithoutSIMD())
+			if err != nil {
+				t.Fatalf("%s Scalar failed: %v", tc.name, err)
+			}
+			tol := 1e-9 * max(1.0, math.Abs(resScal.Objective))
+			if math.Abs(resSIMD.Objective-resScal.Objective) > tol {
+				t.Fatalf("%s SIMD=%.15g != Scalar=%.15g", tc.name, resSIMD.Objective, resScal.Objective)
+			}
+			verifyOptimalityCertificate(t, tc.name, tc.rows, tc.cols, cost, assign.Minimize, resSIMD)
+
+			k := min(tc.rows, tc.cols)
+			rowInd := make([]int, k)
+			colInd := make([]int, k)
+			ws := assign.AcquireWorkspace(tc.rows, tc.cols)
+			defer assign.ReleaseWorkspace(ws)
+			bgCtx := context.Background()
+			if _, err := assign.SolveInto(bgCtx, tc.rows, tc.cols, cost, assign.Minimize, rowInd, colInd, ws); err != nil {
+				t.Fatalf("%s SolveInto warmup failed: %v", tc.name, err)
+			}
+			allocs := testing.AllocsPerRun(2, func() {
+				if _, sErr := assign.SolveInto(bgCtx, tc.rows, tc.cols, cost, assign.Minimize, rowInd, colInd, ws); sErr != nil {
+					t.Fatal(sErr)
+				}
+			})
+			if allocs != 0 {
+				t.Fatalf("%s expected 0 allocs/op in warm SolveInto, got %v", tc.name, allocs)
+			}
+		}
+	}
+}

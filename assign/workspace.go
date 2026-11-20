@@ -18,6 +18,7 @@ type Workspace struct {
 	u         []float64
 	v         []float64
 	d         []float64
+	dQueue    []float64
 	pred      []int
 	col4row   []int
 	row4col   []int
@@ -35,6 +36,7 @@ var workspacePool = sync.Pool{
 			u:         make([]float64, 0, defaultDimCap),
 			v:         make([]float64, 0, defaultDimCap),
 			d:         make([]float64, 0, defaultDimCap),
+			dQueue:    make([]float64, 0, defaultDimCap),
 			pred:      make([]int, 0, defaultDimCap),
 			col4row:   make([]int, 0, defaultDimCap),
 			row4col:   make([]int, 0, defaultDimCap),
@@ -76,6 +78,7 @@ func (ws *Workspace) ensure(m, n int) {
 	ws.u = growFloat64(ws.u, m)
 	ws.v = growFloat64(ws.v, n)
 	ws.d = growFloat64(ws.d, n)
+	ws.dQueue = growFloat64(ws.dQueue, n)
 	ws.pred = growInt(ws.pred, n)
 	ws.col4row = growInt(ws.col4row, m)
 	ws.row4col = growInt(ws.row4col, n)

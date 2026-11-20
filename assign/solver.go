@@ -428,7 +428,55 @@ func (w *assignWideAcc) finish() float64 {
 	return val
 }
 
-func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int) bool {
+//go:noinline
+func computeMatchedObjectiveWide(m, n int, cost []float64, col4row []int) float64 {
+	var acc assignWideAcc
+	for i := range m {
+		j := col4row[i]
+		if uint(j) < uint(n) {
+			acc.addVal(cost[i*n+j])
+		}
+	}
+	return acc.finish()
+}
+
+func computeMatchedObjective(m, n int, cost []float64, col4row []int, allowFast bool) float64 {
+	if allowFast {
+		sum := 0.0
+		comp := 0.0
+		sumAbs := 0.0
+		needWide := false
+		for i := range m {
+			j := col4row[i]
+			if uint(j) >= uint(n) {
+				continue
+			}
+			c := cost[i*n+j]
+			ac := math.Abs(c)
+			if !(ac <= 1e150) || (ac != 0 && ac < 1e-150) {
+				needWide = true
+				break
+			}
+			sumAbs += ac
+			t := sum + c
+			if math.Abs(sum) >= ac {
+				comp += (sum - t) + c
+			} else {
+				comp += (c - t) + sum
+			}
+			sum = t
+		}
+		if !needWide {
+			res := sum + comp
+			if !math.IsNaN(res) && !math.IsInf(res, 0) && math.Abs(res) >= 0.01*sumAbs {
+				return res
+			}
+		}
+	}
+	return computeMatchedObjectiveWide(m, n, cost, col4row)
+}
+
+func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int, obj float64) bool {
 	if m <= 1 {
 		return false
 	}
@@ -469,25 +517,34 @@ func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int)
 	if maxPot == 0 {
 		return false
 	}
-	var objAcc assignWideAcc
-	suspect := minNonZeroPot <= 0x1p-20*maxPot
-	for i := range m {
-		j := col4row[i]
-		if uint(j) >= uint(n) {
-			continue
-		}
-		c := normCost[i*n+j]
-		objAcc.addVal(c)
-		s1, e1 := twoSumAssign(c, -u[i])
-		s2, e2 := twoSumAssign(s1, -v[j])
-		if math.Abs(s2+(e1+e2)) > 8.0*0x1p-53*math.Abs(c) {
+	suspect := minNonZeroPot <= 0x1p-30*maxPot
+	if !suspect {
+		oppSign := (maxU > 0 && minV < 0) || (minU < 0 && maxV > 0)
+		if oppSign && math.Abs(obj) <= 0x1p-12*maxPot {
 			suspect = true
 		}
 	}
 	if !suspect {
-		oppSign := (maxU > 0 && minV < 0) || (minU < 0 && maxV > 0)
-		if oppSign && math.Abs(objAcc.finish()) <= 0.25*maxPot {
-			suspect = true
+		for i := range m {
+			j := col4row[i]
+			if uint(j) >= uint(n) {
+				continue
+			}
+			c := normCost[i*n+j]
+			ui := u[i]
+			vj := v[j]
+			ac := math.Abs(c)
+			auv := math.Abs(ui) + math.Abs(vj)
+			if ac > 0 && auv > 0x1p20*ac {
+				suspect = true
+				break
+			}
+			s1, e1 := twoSumAssign(c, -ui)
+			s2, e2 := twoSumAssign(s1, -vj)
+			if math.Abs(s2+(e1+e2)) > 64.0*0x1p-53*(ac+auv) {
+				suspect = true
+				break
+			}
 		}
 	}
 	if !suspect {
@@ -495,20 +552,32 @@ func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int)
 	}
 	for i := range m {
 		ui := u[i]
+		aui := math.Abs(ui)
 		rowSlice := normCost[i*n : (i+1)*n]
 		mj := col4row[i]
 		for j, c := range rowSlice {
 			if math.IsInf(c, 1) {
 				continue
 			}
+			vj := v[j]
 			s1, e1 := twoSumAssign(c, -ui)
-			s2, e2 := twoSumAssign(s1, -v[j])
+			s2, e2 := twoSumAssign(s1, -vj)
 			rc := s2 + (e1 + e2)
-			if j == mj && rc > 0 {
-				return true
-			}
-			if rc < 0 {
-				return true
+			ac := math.Abs(c)
+			avj := math.Abs(vj)
+			auv := aui + avj
+			severeCancel := auv > 0x1p20*ac ||
+				(avj > 0 && ac+aui > 0x1p20*avj) ||
+				(aui > 0 && ac+avj > 0x1p20*aui)
+			if severeCancel {
+				if (j == mj && rc > 0) || rc < 0 {
+					return true
+				}
+			} else {
+				tol := 16.0 * 0x1p-53 * (ac + auv)
+				if (j == mj && rc > tol) || rc < -tol {
+					return true
+				}
 			}
 		}
 	}
@@ -569,7 +638,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 	maxAbsFinite := 0.0
 
 	if !transposed && !negate {
-		if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD || len(cost) < 256) {
+		if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD) {
 			return m, n, cost, cost, false, false, 0, nil
 		}
 		for _, c := range cost {
@@ -607,21 +676,19 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		} else {
 			dst = ws.ensureWorkCost(rows * cols)
 		}
-		for idx, c := range cost {
-			if !(math.Abs(c) <= hugeCostThreshold) {
-				if math.IsNaN(c) || math.IsInf(c, 1) {
+		if simd.ValidateAndNegate64With(dst, cost, hugeCostThreshold, disableSIMD) {
+			return m, n, dst, dst, false, false, 0, nil
+		}
+		for _, nc := range dst {
+			if !(math.Abs(nc) <= hugeCostThreshold) {
+				if math.IsNaN(nc) || math.IsInf(nc, -1) {
 					return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
 				}
-				if !math.IsInf(c, -1) {
-					if ac := math.Abs(c); ac > maxAbsFinite {
+				if !math.IsInf(nc, 1) {
+					if ac := math.Abs(nc); ac > maxAbsFinite {
 						maxAbsFinite = ac
 					}
 				}
-			}
-			if c == 0 {
-				dst[idx] = 0
-			} else {
-				dst[idx] = -c
 			}
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
@@ -650,7 +717,12 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		dst = ws.ensureWorkCost(total)
 	}
 
-	const tile = 32
+	if simd.AllAbsLE64With(src, hugeCostThreshold, disableSIMD) {
+		simd.Transpose64With(dst, src, rows, cols, negate, disableSIMD)
+		return m, n, dst, dst, true, false, 0, nil
+	}
+
+	const tile = 16
 	if negate {
 		for r0 := 0; r0 < rows; r0 += tile {
 			rLim := min(rows, r0+tile)
@@ -670,11 +742,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 								}
 							}
 						}
-						if val == 0 {
-							dst[c*rows+r] = 0
-						} else {
-							dst[c*rows+r] = -val
-						}
+						dst[c*rows+r] = 0.0 - val
 					}
 				}
 			}
@@ -747,18 +815,39 @@ func solveIntoPreallocated(ctx context.Context, rows, cols int, cost []float64, 
 	return obj, err
 }
 
-func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD bool, done <-chan struct{}) error {
+func colReduceValidateSquare(n int, cost, v []float64, row4col []int, disableSIMD bool, done <-chan struct{}) (bool, error) {
+	if done == nil || n <= 256 {
+		return simd.ColReduceValidateRows64With(n, 0, n, cost, v, row4col, hugeCostThreshold, disableSIMD), nil
+	}
+	for r0 := 0; r0 < n; r0 += 256 {
+		if r0 > 0 {
+			select {
+			case <-done:
+				return false, errContextCanceled
+			default:
+			}
+		}
+		if !simd.ColReduceValidateRows64With(n, r0, min(n, r0+256), cost, v, row4col, hugeCostThreshold, disableSIMD) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD, colReduced bool, done <-chan struct{}) error {
 	for i := range m {
 		col4row[i] = -1
 	}
-	for j := range n {
-		row4col[j] = -1
+	if !colReduced {
+		for j := range n {
+			row4col[j] = -1
+		}
 	}
 
 	var numFree int
 	var errPre error
 	if m == n {
-		numFree, errPre = preprocessSquareJV(n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], disableSIMD, done)
+		numFree, errPre = preprocessSquareJV(n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], disableSIMD, colReduced, done)
 	} else {
 		numFree, errPre = preprocessRectangularBV(m, n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], disableSIMD, done)
 	}
@@ -772,12 +861,22 @@ func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, 
 	if numFree > 0 {
 		remaining := ws.remaining[:n]
 		d := ws.d[:n]
+		dQueue := ws.dQueue[:n]
 		pred := ws.pred[:n]
 		freeRows := ws.freeRows[:numFree]
+		useSIMD := !disableSIMD && simd.UsingHardwareSIMD() && n >= 32
 		if done == nil {
-			for _, curRow := range freeRows {
-				if err := augmentRow(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, disableSIMD, nil); err != nil {
-					return err
+			if useSIMD {
+				for _, curRow := range freeRows {
+					if err := augmentRowSIMD(curRow, n, normCost, u, v, d, dQueue, pred, col4row, row4col, remaining, nil); err != nil {
+						return err
+					}
+				}
+			} else {
+				for _, curRow := range freeRows {
+					if err := augmentRowScalar(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, nil); err != nil {
+						return err
+					}
 				}
 			}
 		} else {
@@ -789,7 +888,13 @@ func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, 
 					default:
 					}
 				}
-				if err := augmentRow(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, disableSIMD, done); err != nil {
+				var err error
+				if useSIMD {
+					err = augmentRowSIMD(curRow, n, normCost, u, v, d, dQueue, pred, col4row, row4col, remaining, done)
+				} else {
+					err = augmentRowScalar(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, done)
+				}
+				if err != nil {
 					if errors.Is(err, errContextCanceled) {
 						return ctx.Err()
 					}
@@ -814,12 +919,44 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		}
 	}
 
-	m, n, normCost, unscaledCost, transposed, lostSubnormal, scaleExp, err := validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
-	if err != nil {
-		return 0, false, err
+	var (
+		m, n                   int
+		normCost, unscaledCost []float64
+		transposed             bool
+		lostSubnormal          bool
+		scaleExp               int
+		colReduced             bool
+		err                    error
+	)
+
+	if rows == cols && rows > 1 && sense == Minimize {
+		m, n = rows, cols
+		ws.ensure(m, n)
+		ok, crErr := colReduceValidateSquare(n, cost, ws.v[:n], ws.row4col[:n], cfg.DisableSIMD, done)
+		if crErr != nil {
+			if errors.Is(crErr, errContextCanceled) {
+				return 0, false, ctx.Err()
+			}
+			return 0, false, crErr
+		}
+		if ok {
+			normCost = cost
+			unscaledCost = cost
+			colReduced = true
+		} else {
+			m, n, normCost, unscaledCost, transposed, lostSubnormal, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+			if err != nil {
+				return 0, false, err
+			}
+		}
+	} else {
+		m, n, normCost, unscaledCost, transposed, lostSubnormal, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+		if err != nil {
+			return 0, false, err
+		}
+		ws.ensure(m, n)
 	}
 
-	ws.ensure(m, n)
 	u := ws.u[:m]
 	v := ws.v[:n]
 	col4row := ws.col4row[:m]
@@ -857,12 +994,20 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		return obj, transposed, nil
 	}
 
-	if err := runNormalizedLSAP(ctx, m, n, normCost, u, v, col4row, row4col, ws, cfg.DisableSIMD, done); err != nil {
+	if err := runNormalizedLSAP(ctx, m, n, normCost, u, v, col4row, row4col, ws, cfg.DisableSIMD, colReduced, done); err != nil {
 		return 0, transposed, err
 	}
 
-	var uSubOrig, vSubOrig []float64
-	hasPotCancel := !lostSubnormal && hasPotentialCancellation(m, n, normCost, u, v, col4row)
+	var (
+		uSubOrig, vSubOrig []float64
+		normObj            float64
+		hasPotCancel       bool
+		stage2Accepted     bool
+	)
+	if !lostSubnormal {
+		normObj = computeMatchedObjective(m, n, normCost, col4row, scaleExp == 0)
+		hasPotCancel = hasPotentialCancellation(m, n, normCost, u, v, col4row, normObj)
+	}
 	if lostSubnormal || hasPotCancel {
 		hasDeepSub := false
 		if lostSubnormal {
@@ -1058,13 +1203,14 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 					}
 				}
 			}
-			if err2 := runNormalizedLSAP(ctx, m, n, resCost, u2, v2, c4r2, r4c2, ws, cfg.DisableSIMD, done); err2 != nil {
+			if err2 := runNormalizedLSAP(ctx, m, n, resCost, u2, v2, c4r2, r4c2, ws, cfg.DisableSIMD, false, done); err2 != nil {
 				if errors.Is(err2, context.Canceled) || errors.Is(err2, context.DeadlineExceeded) {
 					return 0, transposed, err2
 				}
 				break
 			}
 			if !isAssignmentStrictlyWorse(m, n, c4r2, col4row, unscaledCost) {
+				stage2Accepted = true
 				copy(col4row, c4r2)
 				copy(row4col, r4c2)
 				copy(u, uBase)
@@ -1088,14 +1234,11 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		}
 	}
 
-	// Extract primal assignment in ascending row order and compute exact objective on input scale.
-	var totalAcc assignWideAcc
+	// Extract primal assignment in ascending row order and reuse Stage-1 objective when valid.
 	if !transposed {
 		for i := range m {
-			j := col4row[i]
 			rowInd[i] = i
-			colInd[i] = j
-			totalAcc.addVal(unscaledCost[i*n+j])
+			colInd[i] = col4row[i]
 		}
 	} else {
 		outIdx := 0
@@ -1104,12 +1247,16 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 			if origCol >= 0 {
 				rowInd[outIdx] = origRow
 				colInd[outIdx] = origCol
-				totalAcc.addVal(unscaledCost[origCol*n+origRow])
 				outIdx++
 			}
 		}
 	}
-	totalMin := totalAcc.finish()
+	var totalMin float64
+	if !lostSubnormal && scaleExp == 0 && !stage2Accepted {
+		totalMin = normObj
+	} else {
+		totalMin = computeMatchedObjective(m, n, unscaledCost, col4row, scaleExp == 0)
+	}
 
 	if scaleExp > 0 || uSubOrig != nil {
 		shift := 0.0
@@ -1330,13 +1477,10 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 	}
 }
 
-func minReducedSlice(rowCost, v []float64, disableSIMD bool) float64 {
-	return simd.MinReducedSlice64With(rowCost, v, disableSIMD)
-}
-
 // preprocessSquareJV executes Jonker-Volgenant (1987) Column Reduction (in row-major order),
 // Reduction Transfer, and 2-pass Augmenting Row Reduction for square n x n instances.
-func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
+// When colReduced is true, v and row4col already hold the column minima and argmin rows.
+func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD, colReduced bool, done <-chan struct{}) (int, error) {
 	if n <= 0 || len(u) < n || len(v) < n || len(col4row) < n || len(row4col) < n || len(freeRows) < n || len(auxRows) < n {
 		return 0, nil
 	}
@@ -1348,55 +1492,20 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 	auxRows = auxRows[:n]
 	clear(u)
 
-	// 1. Row-major scan to find minimum cost and argmin row for every column j.
-	copy(v, cost[:n])
-	for j := range row4col {
-		row4col[j] = 0
-	}
-	for i := 1; i < n; i++ {
-		if done != nil && n > 256 && i&255 == 0 {
-			select {
-			case <-done:
-				return 0, errContextCanceled
-			default:
-			}
-		}
-		rSlice := cost[i*n:][:n]
-		vSlice := v
-		r4cSlice := row4col
-		for len(rSlice) >= 4 && len(vSlice) >= 4 && len(r4cSlice) >= 4 {
-			c0, c1, c2, c3 := rSlice[0], rSlice[1], rSlice[2], rSlice[3]
-			v0, v1, v2, v3 := vSlice[0], vSlice[1], vSlice[2], vSlice[3]
-			if c0 < v0 || c1 < v1 || c2 < v2 || c3 < v3 {
-				if c0 < v0 {
-					vSlice[0] = c0
-					r4cSlice[0] = i
+	// Perform row-major column reduction unless fused validation already populated v and row4col.
+	if !colReduced {
+		if done == nil || n <= 256 {
+			simd.ColReduceRows64With(n, 0, n, cost, v, row4col, disableSIMD)
+		} else {
+			for r0 := 0; r0 < n; r0 += 256 {
+				if r0 > 0 {
+					select {
+					case <-done:
+						return 0, errContextCanceled
+					default:
+					}
 				}
-				if c1 < v1 {
-					vSlice[1] = c1
-					r4cSlice[1] = i
-				}
-				if c2 < v2 {
-					vSlice[2] = c2
-					r4cSlice[2] = i
-				}
-				if c3 < v3 {
-					vSlice[3] = c3
-					r4cSlice[3] = i
-				}
-			}
-			rSlice = rSlice[4:]
-			vSlice = vSlice[4:]
-			r4cSlice = r4cSlice[4:]
-		}
-		if len(rSlice) > 0 {
-			vSlice = vSlice[:len(rSlice)]
-			r4cSlice = r4cSlice[:len(rSlice)]
-			for k, c := range rSlice {
-				if c < vSlice[k] {
-					vSlice[k] = c
-					r4cSlice[k] = i
-				}
+				simd.ColReduceRows64With(n, r0, min(n, r0+256), cost, v, row4col, disableSIMD)
 			}
 		}
 	}
@@ -1422,7 +1531,7 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 		}
 	}
 
-	// 2. Reduction Transfer on uniquely matched rows; collect unassigned rows into freeRows.
+	// Apply Reduction Transfer on uniquely matched rows and collect unassigned rows into freeRows.
 	numFree := 0
 	for i, c := range col4row {
 		if done != nil && n > 256 && i&255 == 0 {
@@ -1439,12 +1548,9 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 			// Contended row: restore original matched column; u[i] stays 0.
 			col4row[i] = -2 - c
 		} else if uint(c) < uint(n) {
-			// Uniquely matched row i -> column c: transfer dual slack from second-best column.
+			// Uniquely matched row i to column c: transfer dual slack from second-best column.
 			rowCost := cost[i*n:][:n]
-			minRed := min(
-				minReducedSlice(rowCost[:c], v[:c], disableSIMD),
-				minReducedSlice(rowCost[c+1:], v[c+1:], disableSIMD),
-			)
+			minRed := simd.MinReducedSkip64With(rowCost, v, c, disableSIMD)
 			if !math.IsInf(minRed, 1) {
 				u[i] = minRed
 				v[c] = rowCost[c] - minRed
@@ -1612,14 +1718,7 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 				col4row[i] = -2 - c
 			} else {
 				rowCost := cost[i*n : (i+1)*n]
-				minRed := math.Inf(1)
-				for j, val := range rowCost {
-					if j != c {
-						if r := val - v[j]; r < minRed {
-							minRed = r
-						}
-					}
-				}
+				minRed := simd.MinReducedSkip64With(rowCost, v, c, disableSIMD)
 				if !math.IsInf(minRed, 1) {
 					u[i] = minRed
 					v[c] = rowCost[c] - minRed
@@ -1723,13 +1822,19 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 	}
 	v = v[:n]
 	row4col = row4col[:n]
+	maxRowHops := 16
 	maxTransfers := 2 * n
+	if n >= 1000 {
+		maxRowHops = 64
+		maxTransfers = 6 * n
+	}
 	for range 2 {
 		if numFree == 0 {
 			break
 		}
 		nextFree := 0
 		transfers := 0
+		transfersSinceLastMatch := 0
 		for rowIdx, i := range freeRows[:numFree] {
 			if done != nil && n > 256 && rowIdx&127 == 0 {
 				select {
@@ -1739,7 +1844,6 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 				}
 			}
 			rowHops := 0
-			const maxRowHops = 16
 			for {
 				rowCost := cost[i*n:][:n]
 				u1, u2, j1, j2 := simd.Min2ReducedRow64With(rowCost, v, disableSIMD)
@@ -1756,6 +1860,7 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 					if row4col[j1] == -1 {
 						col4row[i] = j1
 						row4col[j1] = i
+						transfersSinceLastMatch = 0
 					} else {
 						auxRows[nextFree] = i
 						nextFree++
@@ -1775,6 +1880,7 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 					}
 					col4row[i] = j1
 					row4col[j1] = i
+					transfersSinceLastMatch = 0
 					break
 				}
 
@@ -1782,10 +1888,11 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 					u[i] = u1
 					col4row[i] = j2
 					row4col[j2] = i
+					transfersSinceLastMatch = 0
 					break
 				}
 
-				if u1 < u2 && rowHops < maxRowHops && transfers < maxTransfers {
+				if u1 < u2 && rowHops < maxRowHops && transfers < maxTransfers && transfersSinceLastMatch <= n {
 					newVj1 := rowCost[j1] - u2
 					if newVj1 < v[j1] {
 						u[i] = u2
@@ -1796,6 +1903,7 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 						i = i0
 						rowHops++
 						transfers++
+						transfersSinceLastMatch++
 						if done != nil && n > 256 && transfers&255 == 0 {
 							select {
 							case <-done:
@@ -1819,157 +1927,165 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 	return numFree, nil
 }
 
-// augmentRow finds a shortest augmenting path from unassigned row curRow to an unassigned
-// column using Jonker-Volgenant's three-way partitioned Dijkstra queue (remaining[0:low],
-// remaining[low:up], remaining[up:n]), maintaining d[0:n] in lockstep with remaining[0:n]
-// for contiguous memory access, updates duals u and v in O(low), and augments
-// the primal matching along pred.
-func augmentRow(curRow, n int, cost, u, v, d []float64, pred, col4row, row4col, remaining []int, disableSIMD bool, done <-chan struct{}) error {
-	if n <= 0 || len(v) < n || len(d) < n || len(pred) < n || len(row4col) < n || len(remaining) < n {
-		return nil
-	}
-	v = v[:n]
-	d = d[:n]
-	pred = pred[:n]
-	row4col = row4col[:n]
-	remaining = remaining[:n]
-
-	rowCost := cost[curRow*n : curRow*n+n]
+// initAugmentRowSIMD initializes contiguous column distances d[0:n] for curRow, marks
+// tight columns at minVal as queued with NaN sentinels in d, and returns matched=true
+// immediately if an unassigned column achieves minVal in one hop.
+func initAugmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, col4row, row4col, remaining []int) (minVal float64, up int, matched bool, err error) {
+	rowCost := cost[curRow*n:][:n]
 	ui := u[curRow]
 
-	minVal := simd.InitReducedRow64With(d, rowCost, v, ui, disableSIMD)
-	if math.IsInf(minVal, 1) {
-		return ErrInfeasible
+	minVal = simd.InitReducedRow64With(d, rowCost, v, ui, false)
+	if !(minVal < math.Inf(1)) {
+		return 0, 0, false, ErrInfeasible
 	}
 
-	// Initialize pred and remaining, partitioning columns at minVal into [0:up]
-	// and keeping d[k] aligned with remaining[k].
-	// If any column achieving minVal is already free, match immediately in 1 hop.
-	low, up := 0, 0
+	nan := math.NaN()
 	for j, dj := range d {
 		pred[j] = curRow
-		remaining[j] = j
 		if dj <= minVal {
 			if row4col[j] == -1 {
 				u[curRow] += dj
 				col4row[curRow] = j
 				row4col[j] = curRow
-				return nil
+				return minVal, 0, true, nil
 			}
-			if uint(up) < uint(n) {
-				remaining[j] = remaining[up]
-				remaining[up] = j
-				d[j] = d[up]
-				d[up] = dj
-				up++
+			remaining[up] = j
+			dQueue[up] = minVal
+			d[j] = nan
+			up++
+		}
+	}
+	return minVal, up, false, nil
+}
+
+// refillQueueContigSIMD finds the next minimum finite non-NaN distance in d[0:n], enqueues
+// all achieving columns with NaN sentinels, and returns sink >= 0 if any achieving
+// column is unassigned.
+func refillQueueContigSIMD(d, dQueue []float64, row4col, remaining []int, up int) (minVal float64, newUp, sink int, err error) {
+	nan := math.NaN()
+	minVal = simd.MinNoNaN64(d)
+	if !(minVal < math.Inf(1)) {
+		return 0, up, -1, ErrInfeasible
+	}
+	dS := d
+	j := 0
+	for len(dS) >= 4 {
+		if dS[0] <= minVal || dS[1] <= minVal || dS[2] <= minVal || dS[3] <= minVal {
+			for k := range 4 {
+				if dS[k] <= minVal {
+					jj := j + k
+					if row4col[jj] == -1 {
+						return minVal, up, jj, nil
+					}
+					remaining[up] = jj
+					dQueue[up] = minVal
+					d[jj] = nan
+					up++
+				}
+			}
+		}
+		dS = dS[4:]
+		j += 4
+	}
+	for k, dj := range dS {
+		if dj <= minVal {
+			jj := j + k
+			if row4col[jj] == -1 {
+				return minVal, up, jj, nil
+			}
+			remaining[up] = jj
+			dQueue[up] = minVal
+			d[jj] = nan
+			up++
+		}
+	}
+	return minVal, up, -1, nil
+}
+
+// relaxRowContigSIMD relaxes contiguous d[0:n] from row rowI using the 4-wide AVX2
+// branchless kernel, enqueuing tight columns and returning sink >= 0 on an unassigned hit.
+func relaxRowContigSIMD(rCost, v, d, dQueue []float64, pred, row4col, remaining []int, n, rowI, up int, ui, minVal float64) (newUp, sink int) {
+	nan := math.NaN()
+	for j := 0; j < n; {
+		j = simd.RelaxRow64(rCost, v, d, pred, j, rowI, ui, minVal)
+		if j >= n {
+			break
+		}
+		lim := min(j+4, n)
+		for ; j < lim; j++ {
+			r := minVal + ((rCost[j] - v[j]) - ui)
+			if r < d[j] {
+				pred[j] = rowI
+				if r <= minVal {
+					if row4col[j] == -1 {
+						return up, j
+					}
+					remaining[up] = j
+					dQueue[up] = minVal
+					d[j] = nan
+					up++
+				} else {
+					d[j] = r
+				}
 			}
 		}
 	}
+	return up, -1
+}
 
+// finishAugmentPath applies dual potential shifts over expanded columns remaining[:low]
+// using saved distances in dQueue[:low], then augments the primal matching along pred.
+func finishAugmentPath(curRow, sink, low int, u, v, dQueue []float64, pred, col4row, row4col, remaining []int, minVal float64) {
+	u[curRow] += minVal
+	remLow := remaining[:low]
+	dLow := dQueue[:low]
+	for k, j := range remLow {
+		delta := dLow[k] - minVal
+		v[j] += delta
+		u[row4col[j]] -= delta
+	}
+	for j := sink; ; {
+		r := pred[j]
+		row4col[j] = r
+		j, col4row[r] = col4row[r], j
+		if r == curRow {
+			break
+		}
+	}
+}
+
+// augmentRowSIMD finds a shortest augmenting path from curRow to an unassigned column
+// using contiguous column-indexed distances d[0:n] with NaN sentinels and AVX2 relaxation.
+func augmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, col4row, row4col, remaining []int, done <-chan struct{}) error {
+	if n <= 0 || len(v) < n || len(d) < n || len(dQueue) < n || len(pred) < n || len(row4col) < n || len(remaining) < n {
+		return nil
+	}
+	v = v[:n]
+	d = d[:n]
+	dQueue = dQueue[:n]
+	pred = pred[:n]
+	row4col = row4col[:n]
+	remaining = remaining[:n]
+
+	minVal, up, matched, err := initAugmentRowSIMD(curRow, n, cost, u, v, d, dQueue, pred, col4row, row4col, remaining)
+	if err != nil || matched {
+		return err
+	}
+
+	low := 0
 	var sink int
 	for {
 		if low == up {
-			if uint(up) >= uint(n) {
-				return ErrInfeasible
+			var rErr error
+			minVal, up, sink, rErr = refillQueueContigSIMD(d, dQueue, row4col, remaining, up)
+			if rErr != nil {
+				return rErr
 			}
-			minVal = d[up]
-			minK := up
-			hasTies := false
-			k := up + 1
-			dRem := d[k:n]
-			for len(dRem) >= 4 {
-				v0, v1, v2, v3 := dRem[0], dRem[1], dRem[2], dRem[3]
-				if v0 <= minVal || v1 <= minVal || v2 <= minVal || v3 <= minVal {
-					if v0 <= minVal {
-						if v0 < minVal {
-							minVal = v0
-							minK = k
-							hasTies = false
-						} else {
-							hasTies = true
-						}
-					}
-					if v1 <= minVal {
-						if v1 < minVal {
-							minVal = v1
-							minK = k + 1
-							hasTies = false
-						} else {
-							hasTies = true
-						}
-					}
-					if v2 <= minVal {
-						if v2 < minVal {
-							minVal = v2
-							minK = k + 2
-							hasTies = false
-						} else {
-							hasTies = true
-						}
-					}
-					if v3 <= minVal {
-						if v3 < minVal {
-							minVal = v3
-							minK = k + 3
-							hasTies = false
-						} else {
-							hasTies = true
-						}
-					}
-				}
-				dRem = dRem[4:]
-				k += 4
-			}
-			for idx, v := range dRem {
-				if v <= minVal {
-					if v < minVal {
-						minVal = v
-						minK = k + idx
-						hasTies = false
-					} else {
-						hasTies = true
-					}
-				}
-			}
-			if math.IsInf(minVal, 1) {
-				return ErrInfeasible
-			}
-			if !hasTies {
-				if uint(minK) < uint(n) && uint(up) < uint(n) {
-					j := remaining[minK]
-					if uint(j) < uint(n) && row4col[j] == -1 {
-						sink = j
-						goto foundSink
-					}
-					remaining[minK] = remaining[up]
-					remaining[up] = j
-					d[minK] = d[up]
-					d[up] = minVal
-					up++
-				}
-			} else {
-				for k := minK; k < n; k++ {
-					if dk := d[k]; dk <= minVal {
-						j := remaining[k]
-						if uint(j) < uint(n) && row4col[j] == -1 {
-							sink = j
-							goto foundSink
-						}
-						if uint(up) < uint(n) {
-							remaining[k] = remaining[up]
-							remaining[up] = j
-							d[k] = d[up]
-							d[up] = dk
-							up++
-						}
-					}
-				}
+			if sink >= 0 {
+				break
 			}
 		}
 
-		if uint(low) >= uint(n) {
-			return ErrInfeasible
-		}
 		col := remaining[low]
 		low++
 		if done != nil && low&127 == 0 {
@@ -1979,64 +2095,207 @@ func augmentRow(curRow, n int, cost, u, v, d []float64, pred, col4row, row4col, 
 			default:
 			}
 		}
-		if uint(col) >= uint(n) {
-			continue
+		i := row4col[col]
+		rCost := cost[i*n:][:n]
+		ui := u[i]
+		up, sink = relaxRowContigSIMD(rCost, v, d, dQueue, pred, row4col, remaining, n, i, up, ui, minVal)
+		if sink >= 0 {
+			break
+		}
+	}
+
+	finishAugmentPath(curRow, sink, low, u, v, dQueue, pred, col4row, row4col, remaining, minVal)
+	return nil
+}
+
+// relaxRowIndirectScalar relaxes unscanned columns remaining[up:n] in scalar mode,
+// kept separate from augmentRowScalar so register pressure never spills cancellation state.
+func relaxRowIndirectScalar(rCost, v, d []float64, pred, row4col, remaining []int, n, rowI, up int, ui, minVal float64) (newUp, sink int) {
+	rCost = rCost[:n]
+	v = v[:n]
+	d = d[:n]
+	pred = pred[:n]
+	row4col = row4col[:n]
+	remaining = remaining[:n]
+
+	for k := up; k < n; k++ {
+		j := remaining[k]
+		r := minVal + ((rCost[j] - v[j]) - ui)
+		if r < d[k] {
+			pred[j] = rowI
+			if r <= minVal {
+				if row4col[j] == -1 {
+					return up, j
+				}
+				remaining[k] = remaining[up]
+				remaining[up] = j
+				d[k] = d[up]
+				d[up] = minVal
+				up++
+			} else {
+				d[k] = r
+			}
+		}
+	}
+	return up, -1
+}
+
+// refillQueueIndirectScalar finds the next minimum finite distance in d[up:n], swaps all
+// achieving columns into remaining[up:], and returns sink >= 0 on an unassigned column.
+func refillQueueIndirectScalar(d []float64, row4col, remaining []int, n, up int) (minVal float64, newUp, sink int, err error) {
+	if uint(up) >= uint(n) {
+		return 0, up, -1, ErrInfeasible
+	}
+	minVal = d[up]
+	minK := up
+	hasTies := false
+	k := up + 1
+	dRem := d[k:n]
+	for len(dRem) >= 4 {
+		v0, v1, v2, v3 := dRem[0], dRem[1], dRem[2], dRem[3]
+		if v0 <= minVal || v1 <= minVal || v2 <= minVal || v3 <= minVal {
+			if v0 <= minVal {
+				if v0 < minVal {
+					minVal, minK, hasTies = v0, k, false
+				} else {
+					hasTies = true
+				}
+			}
+			if v1 <= minVal {
+				if v1 < minVal {
+					minVal, minK, hasTies = v1, k+1, false
+				} else {
+					hasTies = true
+				}
+			}
+			if v2 <= minVal {
+				if v2 < minVal {
+					minVal, minK, hasTies = v2, k+2, false
+				} else {
+					hasTies = true
+				}
+			}
+			if v3 <= minVal {
+				if v3 < minVal {
+					minVal, minK, hasTies = v3, k+3, false
+				} else {
+					hasTies = true
+				}
+			}
+		}
+		dRem = dRem[4:]
+		k += 4
+	}
+	for idx, val := range dRem {
+		if val <= minVal {
+			if val < minVal {
+				minVal, minK, hasTies = val, k+idx, false
+			} else {
+				hasTies = true
+			}
+		}
+	}
+	if math.IsInf(minVal, 1) {
+		return 0, up, -1, ErrInfeasible
+	}
+	if !hasTies {
+		j := remaining[minK]
+		if row4col[j] == -1 {
+			return minVal, up, j, nil
+		}
+		remaining[minK] = remaining[up]
+		remaining[up] = j
+		d[minK] = d[up]
+		d[up] = minVal
+		return minVal, up + 1, -1, nil
+	}
+	for k := minK; k < n; k++ {
+		if dk := d[k]; dk <= minVal {
+			j := remaining[k]
+			if row4col[j] == -1 {
+				return minVal, up, j, nil
+			}
+			remaining[k] = remaining[up]
+			remaining[up] = j
+			d[k] = d[up]
+			d[up] = dk
+			up++
+		}
+	}
+	return minVal, up, -1, nil
+}
+
+// augmentRowScalar finds a shortest augmenting path from curRow in scalar mode using
+// compact remaining[up:n] indexing so already-queued columns are never rescanned.
+func augmentRowScalar(curRow, n int, cost, u, v, d []float64, pred, col4row, row4col, remaining []int, done <-chan struct{}) error {
+	if n <= 0 || len(v) < n || len(d) < n || len(pred) < n || len(row4col) < n || len(remaining) < n {
+		return nil
+	}
+	v = v[:n]
+	d = d[:n]
+	pred = pred[:n]
+	row4col = row4col[:n]
+	remaining = remaining[:n]
+
+	rowCost := cost[curRow*n:][:n]
+	ui := u[curRow]
+
+	minVal := simd.InitReducedRow64Scalar(d, rowCost, v, ui)
+	if !(minVal < math.Inf(1)) {
+		return ErrInfeasible
+	}
+
+	up := 0
+	for j, dj := range d {
+		remaining[j] = j
+		pred[j] = curRow
+		if dj <= minVal {
+			if row4col[j] == -1 {
+				u[curRow] += dj
+				col4row[curRow] = j
+				row4col[j] = curRow
+				return nil
+			}
+			remaining[j] = remaining[up]
+			remaining[up] = j
+			d[j] = d[up]
+			d[up] = dj
+			up++
+		}
+	}
+
+	low := 0
+	var sink int
+	for {
+		if low == up {
+			var rErr error
+			minVal, up, sink, rErr = refillQueueIndirectScalar(d, row4col, remaining, n, up)
+			if rErr != nil {
+				return rErr
+			}
+			if sink >= 0 {
+				break
+			}
+		}
+
+		col := remaining[low]
+		low++
+		if done != nil && low&127 == 0 {
+			select {
+			case <-done:
+				return errContextCanceled
+			default:
+			}
 		}
 		i := row4col[col]
 		rCost := cost[i*n:][:n]
 		ui := u[i]
-
-		for k := max(0, up); k < n; k++ {
-			j := remaining[k]
-			if uint(j) >= uint(n) {
-				continue
-			}
-			r := minVal + ((rCost[j] - v[j]) - ui)
-			if r < d[k] {
-				if r <= minVal {
-					r = minVal
-					d[k] = r
-					pred[j] = i
-					if row4col[j] == -1 {
-						sink = j
-						goto foundSink
-					}
-					if uint(up) < uint(n) {
-						remaining[k] = remaining[up]
-						remaining[up] = j
-						d[k] = d[up]
-						d[up] = r
-						up++
-					}
-				} else {
-					d[k] = r
-					pred[j] = i
-				}
-			}
-		}
-	}
-
-foundSink:
-	// Dual update over expanded columns remaining[:low] with d[k] < minVal.
-	u[curRow] += minVal
-	remLow := remaining[:low]
-	dLow := d[:low]
-	for k, j := range remLow {
-		delta := dLow[k] - minVal
-		if uint(j) < uint(n) {
-			v[j] += delta
-			u[row4col[j]] -= delta
-		}
-	}
-
-	// Augment primal matching along pred from sink back to curRow.
-	for j := sink; ; {
-		r := pred[j]
-		row4col[j] = r
-		j, col4row[r] = col4row[r], j
-		if r == curRow {
+		up, sink = relaxRowIndirectScalar(rCost, v, d, pred, row4col, remaining, n, i, up, ui, minVal)
+		if sink >= 0 {
 			break
 		}
 	}
+
+	finishAugmentPath(curRow, sink, low, u, v, d, pred, col4row, row4col, remaining, minVal)
 	return nil
 }
