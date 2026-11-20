@@ -36,23 +36,19 @@ func Dot64(a, b []float64) float64 {
 		return 0
 	}
 	a = a[:n]
-	b = b[:n]
+	b = b[:len(a)]
 
 	var s0, s1, s2, s3 float64
-	for len(a) >= 4 && len(b) >= 4 {
-		s0 += a[0] * b[0]
-		s1 += a[1] * b[1]
-		s2 += a[2] * b[2]
-		s3 += a[3] * b[3]
-		a = a[4:]
-		b = b[4:]
+	i := 0
+	for ; i <= len(a)-4; i += 4 {
+		s0 += a[i] * b[i]
+		s1 += a[i+1] * b[i+1]
+		s2 += a[i+2] * b[i+2]
+		s3 += a[i+3] * b[i+3]
 	}
 	sum := (s0 + s1) + (s2 + s3)
-	if len(a) > 0 {
-		b = b[:len(a)]
-		for i, ai := range a {
-			sum += ai * b[i]
-		}
+	for ; i < len(a); i++ {
+		sum += a[i] * b[i]
 	}
 	return sum
 }
@@ -72,21 +68,17 @@ func Axpy64(dst, src []float64, alpha float64) {
 		return
 	}
 	dst = dst[:n]
-	src = src[:n]
+	src = src[:len(dst)]
 
-	for len(dst) >= 4 && len(src) >= 4 {
-		dst[0] += float64(alpha * src[0])
-		dst[1] += float64(alpha * src[1])
-		dst[2] += float64(alpha * src[2])
-		dst[3] += float64(alpha * src[3])
-		dst = dst[4:]
-		src = src[4:]
+	i := 0
+	for ; i <= len(dst)-4; i += 4 {
+		dst[i] += float64(alpha * src[i])
+		dst[i+1] += float64(alpha * src[i+1])
+		dst[i+2] += float64(alpha * src[i+2])
+		dst[i+3] += float64(alpha * src[i+3])
 	}
-	if len(dst) > 0 {
-		src = src[:len(dst)]
-		for i, sv := range src {
-			dst[i] += float64(alpha * sv)
-		}
+	for ; i < len(dst); i++ {
+		dst[i] += float64(alpha * src[i])
 	}
 }
 
@@ -100,52 +92,60 @@ func Scale64(dst []float64, alpha float64) {
 	if len(dst) == 0 || alpha == 1 {
 		return
 	}
-	for len(dst) >= 4 {
-		dst[0] *= alpha
-		dst[1] *= alpha
-		dst[2] *= alpha
-		dst[3] *= alpha
-		dst = dst[4:]
+	i := 0
+	for ; i <= len(dst)-4; i += 4 {
+		dst[i] *= alpha
+		dst[i+1] *= alpha
+		dst[i+2] *= alpha
+		dst[i+3] *= alpha
 	}
-	for i := range dst {
+	for ; i < len(dst); i++ {
 		dst[i] *= alpha
 	}
 }
 
-// AbsMax64Scalar returns max_i |x[i]| using a scalar loop.
+// AbsMax64Scalar returns max_i |x[i]| using 4-way scalar loop unrolling.
 func AbsMax64Scalar(x []float64) float64 {
 	return AbsMax64(x)
 }
 
 // AbsMax64 returns max_i |x[i]|.
 func AbsMax64(x []float64) float64 {
-	var res float64
-	for _, v := range x {
-		res = max(res, math.Abs(v))
+	var m0, m1, m2, m3 float64
+	i := 0
+	for ; i <= len(x)-4; i += 4 {
+		m0 = max(m0, math.Abs(x[i]))
+		m1 = max(m1, math.Abs(x[i+1]))
+		m2 = max(m2, math.Abs(x[i+2]))
+		m3 = max(m3, math.Abs(x[i+3]))
+	}
+	res := max(max(m0, m1), max(m2, m3))
+	for ; i < len(x); i++ {
+		res = max(res, math.Abs(x[i]))
 	}
 	return res
 }
 
-// AllAbsLE64Scalar reports whether every element x[i] is finite with |x[i]| <= limit.
+// AllAbsLE64Scalar reports whether every element x[i] satisfies |x[i]| <= limit.
 func AllAbsLE64Scalar(x []float64, limit float64) bool {
-	for len(x) >= 4 {
-		if !(math.Abs(x[0]) <= limit &&
-			math.Abs(x[1]) <= limit &&
-			math.Abs(x[2]) <= limit &&
-			math.Abs(x[3]) <= limit) {
+	i := 0
+	for ; i <= len(x)-4; i += 4 {
+		if !(math.Abs(x[i]) <= limit &&
+			math.Abs(x[i+1]) <= limit &&
+			math.Abs(x[i+2]) <= limit &&
+			math.Abs(x[i+3]) <= limit) {
 			return false
 		}
-		x = x[4:]
 	}
-	for _, v := range x {
-		if !(math.Abs(v) <= limit) {
+	for ; i < len(x); i++ {
+		if !(math.Abs(x[i]) <= limit) {
 			return false
 		}
 	}
 	return true
 }
 
-// AllAbsLE64With reports whether every element x[i] is finite with |x[i]| <= limit.
+// AllAbsLE64With reports whether every element x[i] satisfies |x[i]| <= limit.
 func AllAbsLE64With(x []float64, limit float64, _ bool) bool {
 	return AllAbsLE64Scalar(x, limit)
 }
@@ -177,26 +177,26 @@ func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
 // MinReducedSlice64Scalar returns min_j (rowCost[j] - v[j]) over 0 <= j < min(len(rowCost), len(v)).
 func MinReducedSlice64Scalar(rowCost, v []float64) float64 {
 	n := min(len(rowCost), len(v))
-	minRed := math.Inf(1)
+	inf := math.Inf(1)
 	if n == 0 {
-		return minRed
+		return inf
 	}
 	cSlice := rowCost[:n]
-	vSlice := v[:n]
-	for len(cSlice) >= 4 && len(vSlice) >= 4 {
-		r0 := float64(cSlice[0] - vSlice[0])
-		r1 := float64(cSlice[1] - vSlice[1])
-		r2 := float64(cSlice[2] - vSlice[2])
-		r3 := float64(cSlice[3] - vSlice[3])
-		minRed = min(minRed, min(min(r0, r1), min(r2, r3)))
-		cSlice = cSlice[4:]
-		vSlice = vSlice[4:]
+	vSlice := v[:len(cSlice)]
+	m0, m1, m2, m3 := inf, inf, inf, inf
+	j := 0
+	for ; j <= len(cSlice)-4; j += 4 {
+		m0 = min(m0, float64(cSlice[j]-vSlice[j]))
+		m1 = min(m1, float64(cSlice[j+1]-vSlice[j+1]))
+		m2 = min(m2, float64(cSlice[j+2]-vSlice[j+2]))
+		m3 = min(m3, float64(cSlice[j+3]-vSlice[j+3]))
 	}
-	if len(cSlice) > 0 {
-		vSlice = vSlice[:len(cSlice)]
-		for j, cj := range cSlice {
-			minRed = min(minRed, float64(cj-vSlice[j]))
-		}
+	minRed := min(min(m0, m1), min(m2, m3))
+	for ; j < len(cSlice); j++ {
+		minRed = min(minRed, float64(cSlice[j]-vSlice[j]))
+	}
+	if minRed == 0 {
+		minRed = 0
 	}
 	return minRed
 }
@@ -224,37 +224,31 @@ func InitReducedRow64(dst, costRow, v []float64, ui float64) float64 {
 		return math.Inf(1)
 	}
 	dSlice := dst[:n]
-	cSlice := costRow[:n]
-	vSlice := v[:n]
+	cSlice := costRow[:len(dSlice)]
+	vSlice := v[:len(dSlice)]
 
 	inf := math.Inf(1)
 	m0, m1, m2, m3 := inf, inf, inf, inf
-	for len(dSlice) >= 4 && len(cSlice) >= 4 && len(vSlice) >= 4 {
-		d0 := (cSlice[0] - vSlice[0]) - ui
-		d1 := (cSlice[1] - vSlice[1]) - ui
-		d2 := (cSlice[2] - vSlice[2]) - ui
-		d3 := (cSlice[3] - vSlice[3]) - ui
-		dSlice[0] = d0
-		dSlice[1] = d1
-		dSlice[2] = d2
-		dSlice[3] = d3
+	i := 0
+	for ; i <= len(dSlice)-4; i += 4 {
+		d0 := (cSlice[i] - vSlice[i]) - ui
+		d1 := (cSlice[i+1] - vSlice[i+1]) - ui
+		d2 := (cSlice[i+2] - vSlice[i+2]) - ui
+		d3 := (cSlice[i+3] - vSlice[i+3]) - ui
+		dSlice[i] = d0
+		dSlice[i+1] = d1
+		dSlice[i+2] = d2
+		dSlice[i+3] = d3
 		m0 = min(m0, d0)
 		m1 = min(m1, d1)
 		m2 = min(m2, d2)
 		m3 = min(m3, d3)
-		dSlice = dSlice[4:]
-		cSlice = cSlice[4:]
-		vSlice = vSlice[4:]
 	}
 	minVal := min(min(m0, m1), min(m2, m3))
-	if len(dSlice) > 0 {
-		cSlice = cSlice[:len(dSlice)]
-		vSlice = vSlice[:len(dSlice)]
-		for i, ci := range cSlice {
-			d := (ci - vSlice[i]) - ui
-			dSlice[i] = d
-			minVal = min(minVal, d)
-		}
+	for ; i < len(dSlice); i++ {
+		d := (cSlice[i] - vSlice[i]) - ui
+		dSlice[i] = d
+		minVal = min(minVal, d)
 	}
 	if minVal == 0 {
 		minVal = 0
@@ -284,14 +278,14 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		return u1, u2, j1, j2
 	}
 	cSlice := costRow[:n]
-	vSlice := v[:n]
+	vSlice := v[:len(cSlice)]
 
 	j := 0
-	for len(cSlice) >= 4 && len(vSlice) >= 4 {
-		r0 := cSlice[0] - vSlice[0]
-		r1 := cSlice[1] - vSlice[1]
-		r2 := cSlice[2] - vSlice[2]
-		r3 := cSlice[3] - vSlice[3]
+	for ; j <= len(cSlice)-4; j += 4 {
+		r0 := cSlice[j] - vSlice[j]
+		r1 := cSlice[j+1] - vSlice[j+1]
+		r2 := cSlice[j+2] - vSlice[j+2]
+		r3 := cSlice[j+3] - vSlice[j+3]
 		if !(r0 >= u2 && r1 >= u2 && r2 >= u2 && r3 >= u2) {
 			if !(r0 >= u2) {
 				if math.IsNaN(r0) {
@@ -338,25 +332,18 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 				}
 			}
 		}
-		cSlice = cSlice[4:]
-		vSlice = vSlice[4:]
-		j += 4
 	}
-	if len(cSlice) > 0 {
-		vSlice = vSlice[:len(cSlice)]
-		for k, ck := range cSlice {
-			r := ck - vSlice[k]
-			if !(r >= u2) {
-				idx := j + k
-				if math.IsNaN(r) {
-					return r, r, idx, -1
-				}
-				if r < u1 {
-					u2, j2 = u1, j1
-					u1, j1 = r, idx
-				} else {
-					u2, j2 = r, idx
-				}
+	for ; j < len(cSlice); j++ {
+		r := cSlice[j] - vSlice[j]
+		if !(r >= u2) {
+			if math.IsNaN(r) {
+				return r, r, j, -1
+			}
+			if r < u1 {
+				u2, j2 = u1, j1
+				u1, j1 = r, j
+			} else {
+				u2, j2 = r, j
 			}
 		}
 	}
