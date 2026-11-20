@@ -169,29 +169,32 @@ type varDef struct {
 }
 
 // constraintDef holds the internal specification of a linear constraint.
+// Its terms reside in Model.conTerms[termStart:termEnd].
 type constraintDef struct {
-	name  string
-	terms []Term
-	sense ConstraintSense
-	rhs   float64
+	name      string
+	rhs       float64
+	termStart int
+	termEnd   int
+	sense     ConstraintSense
 }
 
 // Model represents an algebraic LP or MILP optimization problem.
 type Model struct {
-	id          uint64
-	varTag      uint32
 	name        string
-	sense       Sense
+	objName     string
+	err         error
 	vars        []varDef
 	varByName   map[string]Var
 	autoVarName map[string]int
 	constraints []constraintDef
+	conTerms    []Term
 	conByName   map[string]int
 	autoConName map[string]int
 	objTerms    []Term
+	id          uint64
 	objConst    float64
-	objName     string
-	err         error
+	varTag      uint32
+	sense       Sense
 }
 
 // NewModel creates a new optimization Model with the given name and objective sense.
@@ -286,6 +289,12 @@ func (m *Model) Reserve(numVars, numConstraints int) {
 		m.constraints = cons
 		if len(m.conByName) == 0 {
 			m.conByName = make(map[string]int, numConstraints)
+		}
+		if len(m.conTerms) == 0 {
+			termCap := min(numConstraints*4, 65536)
+			if termCap > cap(m.conTerms) {
+				m.conTerms = make([]Term, 0, termCap)
+			}
 		}
 	}
 }
@@ -490,13 +499,15 @@ func (m *Model) AddConstraint(name string, c Constraint) {
 	}
 	// Shift Expr.Constant to the right-hand side so Terms (<=, =, >=) RHS - Expr.Constant.
 	rhs := c.RHS - c.Expr.Constant
-	termsCopy := make([]Term, len(c.Expr.Terms))
-	copy(termsCopy, c.Expr.Terms)
+	termStart := len(m.conTerms)
+	m.conTerms = append(m.conTerms, c.Expr.Terms...)
+	termEnd := len(m.conTerms)
 	m.constraints = append(m.constraints, constraintDef{
-		name:  name,
-		terms: termsCopy,
-		sense: c.Sense,
-		rhs:   rhs,
+		name:      name,
+		rhs:       rhs,
+		termStart: termStart,
+		termEnd:   termEnd,
+		sense:     c.Sense,
 	})
 	m.conByName[name] = cIdx
 }
@@ -531,7 +542,6 @@ func (m *Model) Validate() error {
 	if math.IsNaN(m.objConst) || math.IsInf(m.objConst, 0) {
 		return fmt.Errorf("objective constant is non-finite (%v)", m.objConst)
 	}
-	acc := make([]float64, len(m.vars))
 	counts := make([]uint8, len(m.vars))
 	touched := make([]int, 0, min(len(m.vars), defaultModelCap))
 	objHasDup := false
@@ -546,7 +556,6 @@ func (m *Model) Validate() error {
 		if counts[col] == 0 {
 			counts[col] = 1
 			touched = append(touched, col)
-			acc[col] = t.Coeff
 		} else {
 			counts[col] = 2
 			objHasDup = true
@@ -576,7 +585,6 @@ func (m *Model) Validate() error {
 		}
 	}
 	for _, col := range touched {
-		acc[col] = 0
 		counts[col] = 0
 	}
 	for _, c := range m.constraints {
@@ -588,7 +596,8 @@ func (m *Model) Validate() error {
 		}
 		touched = touched[:0]
 		rowHasDup := false
-		for _, t := range c.terms {
+		cTerms := m.conTerms[c.termStart:c.termEnd]
+		for _, t := range cTerms {
 			col, ok := m.validVar(t.Var)
 			if !ok {
 				return fmt.Errorf("constraint %q references invalid or foreign Var handle %v", c.name, t.Var)
@@ -599,7 +608,6 @@ func (m *Model) Validate() error {
 			if counts[col] == 0 {
 				counts[col] = 1
 				touched = append(touched, col)
-				acc[col] = t.Coeff
 			} else {
 				counts[col] = 2
 				rowHasDup = true
@@ -612,7 +620,7 @@ func (m *Model) Validate() error {
 					wideMap[col] = &wideDotAcc{}
 				}
 			}
-			for _, t := range c.terms {
+			for _, t := range cTerms {
 				if col, ok := m.validVar(t.Var); ok {
 					if w, exists := wideMap[col]; exists {
 						w.addVal(t.Coeff)
@@ -629,7 +637,6 @@ func (m *Model) Validate() error {
 			}
 		}
 		for _, col := range touched {
-			acc[col] = 0
 			counts[col] = 0
 		}
 	}

@@ -209,7 +209,12 @@ void configure_silent_clp(OsiClpSolverInterface &solver) {
     solver.setSolveOptions(solveOpts);
 }
 
-bool has_clp_tiny_row_sum_within(
+struct TinyCoeffScanResult {
+    bool dropped_tiny;
+    bool presolve_tiny;
+};
+
+TinyCoeffScanResult scan_clp_tiny_coeffs(
     int num_cols,
     int num_rows,
     const int *col_ptr,
@@ -217,13 +222,46 @@ bool has_clp_tiny_row_sum_within(
     const double *col_val,
     const double *col_lb,
     const double *col_ub,
-    double max_tiny,
-    double row_sum_tol
+    bool need_dropped,
+    bool need_presolve
 ) {
-    if (num_cols <= 0 || num_rows <= 0 || !col_ptr || !col_val) {
-        return false;
+    TinyCoeffScanResult res{false, false};
+    if (num_cols <= 0 || num_rows <= 0 || !col_ptr || !col_val || (!need_dropped && !need_presolve)) {
+        return res;
     }
-    std::vector<double> rowSum(static_cast<size_t>(num_rows), 0.0);
+    const double max_check = need_presolve ? 1e-9 : 1e-18;
+    double droppedStack[128];
+    double presolveStack[128];
+    std::vector<double> droppedHeap;
+    std::vector<double> presolveHeap;
+    double *droppedSum = nullptr;
+    double *presolveSum = nullptr;
+
+    auto ensure_dropped = [&]() -> double * {
+        if (!droppedSum) {
+            if (num_rows <= 128) {
+                std::memset(droppedStack, 0, sizeof(double) * static_cast<size_t>(num_rows));
+                droppedSum = droppedStack;
+            } else {
+                droppedHeap.assign(static_cast<size_t>(num_rows), 0.0);
+                droppedSum = droppedHeap.data();
+            }
+        }
+        return droppedSum;
+    };
+    auto ensure_presolve = [&]() -> double * {
+        if (!presolveSum) {
+            if (num_rows <= 128) {
+                std::memset(presolveStack, 0, sizeof(double) * static_cast<size_t>(num_rows));
+                presolveSum = presolveStack;
+            } else {
+                presolveHeap.assign(static_cast<size_t>(num_rows), 0.0);
+                presolveSum = presolveHeap.data();
+            }
+        }
+        return presolveSum;
+    };
+
     for (int j = 0; j < num_cols; ++j) {
         double lb = col_lb ? col_lb[j] : 0.0;
         double ub = col_ub ? col_ub[j] : 0.0;
@@ -236,49 +274,41 @@ bool has_clp_tiny_row_sum_within(
         int end = col_ptr[j + 1];
         for (int k = start; k < end; ++k) {
             double av = std::fabs(col_val[k]);
-            if (av > 0.0 && av <= max_tiny) {
+            if (av <= 0.0 || av > max_check) {
+                continue;
+            }
+            int r = row_idx ? row_idx[k] : 0;
+            if (need_dropped && !res.dropped_tiny && av <= 1e-18) {
                 if (infB) {
-                    return true;
-                }
-                int r = row_idx ? row_idx[k] : 0;
-                if (r >= 0 && r < num_rows) {
-                    rowSum[static_cast<size_t>(r)] += av * maxB;
-                    if (rowSum[static_cast<size_t>(r)] >= row_sum_tol || !std::isfinite(rowSum[static_cast<size_t>(r)])) {
-                        return true;
+                    res.dropped_tiny = true;
+                } else if (r >= 0 && r < num_rows) {
+                    double *ds = ensure_dropped();
+                    ds[r] += av * maxB;
+                    if (ds[r] >= 1e-8 || !std::isfinite(ds[r])) {
+                        res.dropped_tiny = true;
                     }
                 }
             }
+            if (need_presolve && !res.presolve_tiny && av <= 1e-9) {
+                if (infB) {
+                    res.presolve_tiny = true;
+                } else if (r >= 0 && r < num_rows) {
+                    double *ps = ensure_presolve();
+                    ps[r] += av * maxB;
+                    if (ps[r] >= 1e-7 || !std::isfinite(ps[r])) {
+                        res.presolve_tiny = true;
+                    }
+                }
+            }
+            if ((!need_dropped || res.dropped_tiny) && (!need_presolve || res.presolve_tiny)) {
+                return res;
+            }
         }
     }
-    return false;
+    return res;
 }
 
-bool has_clp_dropped_tiny_coeff(
-    int num_cols,
-    int num_rows,
-    const int *col_ptr,
-    const int *row_idx,
-    const double *col_val,
-    const double *col_lb,
-    const double *col_ub
-) {
-    return has_clp_tiny_row_sum_within(num_cols, num_rows, col_ptr, row_idx, col_val, col_lb, col_ub, 1e-18, 1e-8);
-}
-
-bool has_clp_presolve_tiny_coeff(
-    int num_cols,
-    int num_rows,
-    const int *col_ptr,
-    const int *row_idx,
-    const double *col_val,
-    const double *col_lb,
-    const double *col_ub
-) {
-    return has_clp_tiny_row_sum_within(num_cols, num_rows, col_ptr, row_idx, col_val, col_lb, col_ub, 1e-9, 1e-7);
-}
-
-void raise_clp_large_value_if_needed(
-    OsiClpSolverInterface &solver,
+double compute_clp_large_value(
     int num_cols,
     const double *col_lb,
     const double *col_ub,
@@ -286,10 +316,6 @@ void raise_clp_large_value_if_needed(
     const double *row_lb,
     const double *row_ub
 ) {
-    ClpSimplex *clp = solver.getModelPtr();
-    if (!clp) {
-        return;
-    }
     double maxFin = 0.0;
     for (int j = 0; j < num_cols; ++j) {
         if (col_lb) {
@@ -312,11 +338,31 @@ void raise_clp_large_value_if_needed(
         }
     }
     if (maxFin >= 1e18) {
-        double wantLarge = std::min(1e30, 100.0 * maxFin);
-        if (wantLarge > clp->largeValue()) {
-            clp->setLargeValue(wantLarge);
-        }
+        return std::min(1e30, 100.0 * maxFin);
     }
+    return 0.0;
+}
+
+void apply_clp_large_value(OsiClpSolverInterface &solver, double wantLarge) {
+    if (wantLarge <= 0.0) {
+        return;
+    }
+    ClpSimplex *clp = solver.getModelPtr();
+    if (clp && wantLarge > clp->largeValue()) {
+        clp->setLargeValue(wantLarge);
+    }
+}
+
+void raise_clp_large_value_if_needed(
+    OsiClpSolverInterface &solver,
+    int num_cols,
+    const double *col_lb,
+    const double *col_ub,
+    int num_rows,
+    const double *row_lb,
+    const double *row_ub
+) {
+    apply_clp_large_value(solver, compute_clp_large_value(num_cols, col_lb, col_ub, num_rows, row_lb, row_ub));
 }
 
 bool has_unrepresentable_clp_finite_bound(
@@ -410,7 +456,84 @@ void scan_clp_tiny_obj(
     }
 }
 
-bool grow_expansion(std::vector<double> &e, double b) {
+template <size_t InlineCap = 64>
+class SmallDoubleVec {
+public:
+    SmallDoubleVec() : data_(inline_buf_), size_(0), cap_(InlineCap) {}
+    SmallDoubleVec(const SmallDoubleVec &other) : data_(inline_buf_), size_(0), cap_(InlineCap) {
+        assign_from(other.data_, other.size_);
+    }
+    SmallDoubleVec &operator=(const SmallDoubleVec &other) {
+        if (this != &other) {
+            assign_from(other.data_, other.size_);
+        }
+        return *this;
+    }
+    ~SmallDoubleVec() {
+        if (data_ != inline_buf_) {
+            delete[] data_;
+        }
+    }
+
+    bool empty() const { return size_ == 0; }
+    size_t size() const { return size_; }
+    double &operator[](size_t i) { return data_[i]; }
+    double operator[](size_t i) const { return data_[i]; }
+    double front() const { return data_[0]; }
+    double back() const { return data_[size_ - 1]; }
+    const double *begin() const { return data_; }
+    const double *end() const { return data_ + size_; }
+
+    void resize(size_t n) {
+        if (n > cap_) {
+            grow(n);
+        }
+        size_ = n;
+    }
+
+    void push_back(double v) {
+        if (size_ == cap_) {
+            grow(cap_ * 2);
+        }
+        data_[size_++] = v;
+    }
+
+private:
+    void grow(size_t min_cap) {
+        size_t new_cap = cap_ * 2;
+        if (new_cap < min_cap) {
+            new_cap = min_cap;
+        }
+        double *nb = new double[new_cap];
+        if (size_ > 0) {
+            std::memcpy(nb, data_, sizeof(double) * size_);
+        }
+        if (data_ != inline_buf_) {
+            delete[] data_;
+        }
+        data_ = nb;
+        cap_ = new_cap;
+    }
+
+    void assign_from(const double *src, size_t n) {
+        if (n > cap_) {
+            grow(n);
+        }
+        if (n > 0) {
+            std::memcpy(data_, src, sizeof(double) * n);
+        }
+        size_ = n;
+    }
+
+    double *data_;
+    size_t size_;
+    size_t cap_;
+    double inline_buf_[InlineCap];
+};
+
+using WideExpansion = SmallDoubleVec<64>;
+
+bool grow_expansion(WideExpansion &e, double b) {
     if (b == 0.0) {
         return true;
     }
@@ -440,7 +563,7 @@ bool grow_expansion(std::vector<double> &e, double b) {
     return true;
 }
 
-void compress_expansion(std::vector<double> &e) {
+void compress_expansion(WideExpansion &e) {
     if (e.empty()) {
         return;
     }
@@ -476,7 +599,7 @@ void compress_expansion(std::vector<double> &e) {
     e.resize(static_cast<size_t>(w));
 }
 
-void expansion_top_rem(const std::vector<double> &comp, double &top, double &rem) {
+void expansion_top_rem(const WideExpansion &comp, double &top, double &rem) {
     top = 0.0;
     rem = 0.0;
     if (comp.empty()) {
@@ -514,10 +637,7 @@ double round_to_odd_sticky(double top, double rem) {
 double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
     constexpr int kWideHalf = 528;
     constexpr int kWideCut = 960;
-    std::vector<double> hi, mid, lo;
-    hi.reserve(16);
-    mid.reserve(16);
-    lo.reserve(8);
+    WideExpansion hi, mid, lo;
     for (int j = 0; j < n; ++j) {
         double xj = a_vec[j];
         double cj = b_vec[j];
@@ -558,11 +678,17 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
             }
         }
     }
-    compress_expansion(hi);
     compress_expansion(mid);
+    if (hi.empty() && lo.empty()) {
+        double top = 0.0, rem = 0.0;
+        expansion_top_rem(mid, top, rem);
+        double comb = top + rem;
+        return std::isnan(comb) ? top : comb;
+    }
+    compress_expansion(hi);
     compress_expansion(lo);
 
-    std::vector<double> midMerged;
+    WideExpansion midMerged;
     if (hi.empty()) {
         midMerged = mid;
     } else {
@@ -572,8 +698,7 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
         if (eHi + 2 * kWideHalf > 1026) {
             return std::copysign(std::numeric_limits<double>::infinity(), hiTop);
         }
-        std::vector<double> half;
-        half.reserve(hi.size() + mid.size());
+        WideExpansion half;
         for (double h : hi) {
             grow_expansion(half, std::ldexp(h, kWideHalf));
         }
@@ -587,8 +712,7 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
             int eHalf = 0;
             std::frexp(std::fabs(half.back()), &eHalf);
             if (eHalf + kWideHalf > 1024) {
-                std::vector<double> sc4;
-                sc4.reserve(half.size() + mid.size());
+                WideExpansion sc4;
                 for (double m : mid) {
                     if (std::fabs(m) < 0x1p-400 && std::fabs(m) >= 0x1p-1018) {
                         grow_expansion(sc4, std::ldexp(m, -4));
@@ -611,7 +735,6 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
                 return std::isnan(comb) ? res : comb;
             }
         }
-        midMerged.reserve(half.size() + mid.size());
         for (double m : mid) {
             if (std::fabs(m) < 0x1p-400) {
                 grow_expansion(midMerged, m);
@@ -630,7 +753,7 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
         return std::isnan(comb) ? top : comb;
     }
 
-    std::vector<double> loSmall;
+    WideExpansion loSmall;
     bool addedLoNorm = false;
     for (double l : lo) {
         if (std::fabs(l) >= 0x1p34) {
@@ -661,7 +784,7 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
     }
 
     if (std::fabs(midMerged.front()) < 0x1p-960) {
-        std::vector<double> up, topKeep;
+        WideExpansion up, topKeep;
         for (double m : midMerged) {
             if (std::fabs(m) < 0x1p400) {
                 grow_expansion(up, std::ldexp(m, kWideHalf));
@@ -687,7 +810,7 @@ double recompute_wide_dot(int n, const double *a_vec, const double *b_vec) {
             double adj = round_to_odd_sticky(uTop, uRem);
             return std::ldexp(adj, -kWideHalf);
         }
-        std::vector<double> rebuilt;
+        WideExpansion rebuilt;
         for (double u : up) {
             if (std::fabs(u) >= 0x1p-494) {
                 grow_expansion(rebuilt, std::ldexp(u, -kWideHalf));
@@ -867,9 +990,12 @@ void goblin_solve_lp(
     double minSigObj = std::numeric_limits<double>::infinity();
     scan_clp_tiny_obj(num_cols, col_lb, col_ub, obj_min, obj_min, droppedObj, minSigObj);
     const bool forceTightDual = (enable_presolve < 0);
-    const bool droppedTiny = droppedObj || has_clp_dropped_tiny_coeff(num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub);
-    const bool effPresolve = (enable_presolve > 0) && !std::isfinite(minSigObj) &&
-                             !has_clp_presolve_tiny_coeff(num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub);
+    const bool wantPresolve = (enable_presolve > 0) && !std::isfinite(minSigObj);
+    const TinyCoeffScanResult tinyScan = scan_clp_tiny_coeffs(
+        num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub, !droppedObj, wantPresolve
+    );
+    const bool droppedTiny = droppedObj || tinyScan.dropped_tiny;
+    const bool effPresolve = wantPresolve && !tinyScan.presolve_tiny;
 
     solver.loadProblem(
         num_cols,
@@ -1088,9 +1214,13 @@ void goblin_solve_mip(
     bool droppedObj = false;
     double minSigObj = std::numeric_limits<double>::infinity();
     scan_clp_tiny_obj(num_cols, col_lb, col_ub, mipObjPtr, obj_min, droppedObj, minSigObj);
-    const bool droppedTiny = droppedObj || has_clp_dropped_tiny_coeff(num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub);
-    const bool effPresolve = (enable_presolve > 0) && !std::isfinite(minSigObj) &&
-                             !has_clp_presolve_tiny_coeff(num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub);
+    const bool wantPresolve = (enable_presolve > 0) && !std::isfinite(minSigObj);
+    const TinyCoeffScanResult tinyScan = scan_clp_tiny_coeffs(
+        num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub, !droppedObj, wantPresolve
+    );
+    const bool droppedTiny = droppedObj || tinyScan.dropped_tiny;
+    const bool effPresolve = wantPresolve && !tinyScan.presolve_tiny;
+    const double wantLargeVal = compute_clp_large_value(num_cols, col_lb, col_ub, num_rows, row_lb, row_ub);
     const double customDualTol = std::isfinite(minSigObj)
                                      ? std::max(1e-19, std::min(1e-9, 0.01 * minSigObj))
                                      : 0.0;
@@ -1108,7 +1238,7 @@ void goblin_solve_mip(
         row_ub
     );
     solver.setObjSense(1.0);
-    raise_clp_large_value_if_needed(solver, num_cols, col_lb, col_ub, num_rows, row_lb, row_ub);
+    apply_clp_large_value(solver, wantLargeVal);
     if (customDualTol > 0.0) {
         solver.setDblParam(OsiDualTolerance, customDualTol);
         if (solver.getModelPtr()) {
@@ -1152,7 +1282,7 @@ void goblin_solve_mip(
                 cbcClp->setIntParam(OsiMaxNumIteration, max_iter);
             }
             if (cbcClp->getModelPtr()) {
-                raise_clp_large_value_if_needed(*cbcClp, num_cols, col_lb, col_ub, num_rows, row_lb, row_ub);
+                apply_clp_large_value(*cbcClp, wantLargeVal);
                 if (customDualTol > 0.0) {
                     cbcClp->getModelPtr()->setDualTolerance(customDualTol);
                 }
@@ -1482,7 +1612,7 @@ GoblinLPSolver* goblin_lp_new(
 
         static const int dummy_ptr[1] = {0};
         const int *c_ptr = col_ptr ? col_ptr : dummy_ptr;
-        bool hasPresolveTiny = has_clp_presolve_tiny_coeff(num_cols, num_rows, c_ptr, row_idx, col_val, col_lb, col_ub);
+        bool hasPresolveTiny = false;
         if (num_cols > 0 && col_ptr && col_val) {
             for (int j = 0; j < num_cols; ++j) {
                 int start = col_ptr[j];

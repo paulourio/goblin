@@ -119,51 +119,19 @@ func clampCInt(v int) C.int {
 	return C.int(v)
 }
 
-func validateCompiledForCBC(p *CompiledProblem) bool {
+func validateCompiledForCBC(p *CompiledProblem) (*cbcMatrixData, bool) {
 	if p == nil || p.invalidErr != nil {
-		return false
+		return nil, false
 	}
 	n := p.numVars
-	m := p.numConstraints
-	if n < 0 || m < 0 || n > math.MaxInt32 || m > math.MaxInt32 {
-		return false
+	if n < 0 || len(p.objMin) != n || len(p.objCoeffs) != n {
+		return nil, false
 	}
-	if len(p.varLB) != n || len(p.varUB) != n || len(p.varCat) != n ||
-		len(p.colLBClp) != n || len(p.colUBClp) != n ||
-		len(p.objMin) != n || len(p.objCoeffs) != n {
-		return false
+	c := p.ensureCBCData()
+	if c == nil || !c.valid {
+		return nil, false
 	}
-	if len(p.rowLB) != m || len(p.rowUB) != m ||
-		len(p.rowLBClp) != m || len(p.rowUBClp) != m {
-		return false
-	}
-	if len(p.colPtr32) != n+1 || p.colPtr32[0] != 0 {
-		return false
-	}
-	for j := range n {
-		if p.colPtr32[j] > p.colPtr32[j+1] {
-			return false
-		}
-	}
-	nnz := int(p.colPtr32[n])
-	if nnz < 0 || nnz > math.MaxInt32 || len(p.rowIdx32) != nnz || len(p.colVal) != nnz {
-		return false
-	}
-	for k := range nnz {
-		r := p.rowIdx32[k]
-		if r < 0 || int(r) >= m {
-			return false
-		}
-	}
-	if len(p.intCols32) > n {
-		return false
-	}
-	for _, col := range p.intCols32 {
-		if col < 0 || int(col) >= n {
-			return false
-		}
-	}
-	return true
+	return c, true
 }
 
 // CBCAvailable reports whether the optional C++ COIN-OR CBC/CLP backend (-tags cbc with cgo enabled) is compiled in.
@@ -251,7 +219,8 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		return solveUnconstrainedCBC(p, start)
 	}
 
-	if !validateCompiledForCBC(p) || hasUnrepresentableCBCFiniteBound(p.varLB, p.varUB, p.rowLB, p.rowUB, nil) {
+	cbc, validCBC := validateCompiledForCBC(p)
+	if !validCBC || hasUnrepresentableCBCFiniteBound(p.varLB, p.varUB, p.rowLB, p.rowUB, nil) {
 		return Result{
 			modelID:   p.modelID,
 			Backend:   BackendCBC,
@@ -295,14 +264,14 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			}
 		}
 
-		colPtr32 := p.colPtr32
-		rowIdx32 := p.rowIdx32
+		colPtr32 := cbc.colPtr32
+		rowIdx32 := cbc.rowIdx32
 		colVal := p.colVal
-		colLBClp := p.colLBClp
-		colUBClp := p.colUBClp
+		colLBClp := cbc.colLBClp
+		colUBClp := cbc.colUBClp
 		objMinClp := p.objMin
-		rowLBClp := p.rowLBClp
-		rowUBClp := p.rowUBClp
+		rowLBClp := cbc.rowLBClp
+		rowUBClp := cbc.rowUBClp
 		if pc.active {
 			colPtr32 = pc.colPtr32
 			rowIdx32 = pc.rowIdx32
@@ -553,14 +522,14 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		}
 	}
 
-	colPtr32 := p.colPtr32
-	rowIdx32 := p.rowIdx32
+	colPtr32 := cbc.colPtr32
+	rowIdx32 := cbc.rowIdx32
 	colVal := p.colVal
-	colLBClp := p.colLBClp
-	colUBClp := p.colUBClp
+	colLBClp := cbc.colLBClp
+	colUBClp := cbc.colUBClp
 	objMinClp := p.objMin
-	rowLBClp := p.rowLBClp
-	rowUBClp := p.rowUBClp
+	rowLBClp := cbc.rowLBClp
+	rowUBClp := cbc.rowUBClp
 	effRelGap := clampCBCGapTol(opt.RelGapTol)
 	if pc.active {
 		colPtr32 = pc.colPtr32
@@ -643,8 +612,8 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			cFloat64Ptr(objMinClp),
 			cFloat64Ptr(rowLBClp),
 			cFloat64Ptr(rowUBClp),
-			C.int(len(p.intCols32)),
-			cInt32Ptr(p.intCols32),
+			C.int(len(cbc.intCols32)),
+			cInt32Ptr(cbc.intCols32),
 			boolToCInt(opt.EnablePresolve),
 			boolToCInt(opt.EnableCuts),
 			boolToCInt(opt.EnableHeuristics),
@@ -682,8 +651,9 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	if status == StatusUnbounded && !hasAnyInfiniteBound(p.varLB, p.varUB, n) {
 		status = StatusNumericalError
 	}
-	if status == StatusUnbounded && len(p.intCols32) > 0 {
+	if status == StatusUnbounded && len(cbc.intCols32) > 0 {
 		feasProb := *p
+		feasProb.lazy = nil
 		feasProb.objCoeffs = make([]float64, n)
 		feasProb.objMin = make([]float64, n)
 		feasProb.objConstant = 0
@@ -937,23 +907,32 @@ func cleanupCBCLPHandle(h *cbcLPHandle) {
 	}
 }
 
+type cbcCutTermPair struct {
+	col int
+	val float64
+}
+
 // CBCLPSolver wraps a persistent C++ OsiClpSolverInterface instance that can be
 // solved from scratch and repeatedly warm-started with modified bounds or added
 // cutting planes. A single CBCLPSolver instance is not safe for concurrent use
 // by multiple goroutines without external synchronization.
 type CBCLPSolver struct {
-	prob          *CompiledProblem
-	handle        *cbcLPHandle
-	cleanup       runtime.Cleanup
-	curLB         []float64
-	curUB         []float64
-	cutCols       [][]int
-	cutVals       [][]float64
-	cutRHS        []float64
-	numCut        int
-	invalidBounds bool
-	invalidCut    bool
-	infeasibleCut bool
+	prob            *CompiledProblem
+	handle          *cbcLPHandle
+	cleanup         runtime.Cleanup
+	curLB           []float64
+	curUB           []float64
+	scratchLBClp    []float64
+	scratchUBClp    []float64
+	scratchCols32   []int32
+	scratchCutPairs []cbcCutTermPair
+	cutCols         [][]int
+	cutVals         [][]float64
+	cutRHS          []float64
+	numCut          int
+	invalidBounds   bool
+	invalidCut      bool
+	infeasibleCut   bool
 }
 
 // NewCBCLPSolver creates a C++ OsiClpSolverInterface LP solver for p.
@@ -962,23 +941,25 @@ func NewCBCLPSolver(p *CompiledProblem) *CBCLPSolver {
 		return &CBCLPSolver{}
 	}
 	var h *cbcLPHandle
-	if p.numVars > 0 && validateCompiledForCBC(p) {
-		cbcSem <- struct{}{}
-		raw := C.goblin_lp_new(
-			C.int(p.numVars),
-			C.int(p.numConstraints),
-			cInt32Ptr(p.colPtr32),
-			cInt32Ptr(p.rowIdx32),
-			cFloat64Ptr(p.colVal),
-			cFloat64Ptr(p.colLBClp),
-			cFloat64Ptr(p.colUBClp),
-			cFloat64Ptr(p.objMin),
-			cFloat64Ptr(p.rowLBClp),
-			cFloat64Ptr(p.rowUBClp),
-		)
-		releaseCBCSlot()
-		if raw != nil {
-			h = &cbcLPHandle{ptr: raw}
+	if p.numVars > 0 {
+		if cbc, ok := validateCompiledForCBC(p); ok {
+			cbcSem <- struct{}{}
+			raw := C.goblin_lp_new(
+				C.int(p.numVars),
+				C.int(p.numConstraints),
+				cInt32Ptr(cbc.colPtr32),
+				cInt32Ptr(cbc.rowIdx32),
+				cFloat64Ptr(p.colVal),
+				cFloat64Ptr(cbc.colLBClp),
+				cFloat64Ptr(cbc.colUBClp),
+				cFloat64Ptr(p.objMin),
+				cFloat64Ptr(cbc.rowLBClp),
+				cFloat64Ptr(cbc.rowUBClp),
+			)
+			releaseCBCSlot()
+			if raw != nil {
+				h = &cbcLPHandle{ptr: raw}
+			}
 		}
 	}
 	s := &CBCLPSolver{
@@ -1044,8 +1025,12 @@ func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 		}
 	}
 	s.invalidBounds = false
-	lbClp := make([]float64, n)
-	ubClp := make([]float64, n)
+	if cap(s.scratchLBClp) < n {
+		s.scratchLBClp = make([]float64, n)
+		s.scratchUBClp = make([]float64, n)
+	}
+	lbClp := s.scratchLBClp[:n]
+	ubClp := s.scratchUBClp[:n]
 	for j := range n {
 		s.curLB[j] = lb[j]
 		s.curUB[j] = ub[j]
@@ -1102,21 +1087,18 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 	if s.handle == nil {
 		return
 	}
-	type termPair struct {
-		col int
-		val float64
-	}
-	pairs := make([]termPair, 0, kLim)
+	pairs := s.scratchCutPairs[:0]
 	for k := range kLim {
 		c := colIdx[k]
 		v := val[k]
 		if c < 0 || c >= n || v == 0 {
 			continue
 		}
-		pairs = append(pairs, termPair{col: c, val: v})
+		pairs = append(pairs, cbcCutTermPair{col: c, val: v})
 	}
-	slices.SortFunc(pairs, func(a, b termPair) int { return cmp.Compare(a.col, b.col) })
-	cols32 := make([]int32, 0, len(pairs))
+	s.scratchCutPairs = pairs
+	slices.SortFunc(pairs, func(a, b cbcCutTermPair) int { return cmp.Compare(a.col, b.col) })
+	cols32 := s.scratchCols32[:0]
 	vals := make([]float64, 0, len(pairs))
 	for i := 0; i < len(pairs); {
 		start := i
@@ -1142,6 +1124,7 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 		cols32 = append(cols32, int32(c))
 		vals = append(vals, sum)
 	}
+	s.scratchCols32 = cols32
 	if len(cols32) > math.MaxInt32 {
 		return
 	}

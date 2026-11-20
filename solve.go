@@ -36,16 +36,6 @@ func (b Backend) String() string {
 // Callers may configure Solve / SolveCompiled via functional constructors (such as
 // WithBackend, WithCBC, WithSIMD, WithTimeLimit) or pass a bulk struct in a single call.
 type Options struct {
-	// Backend selects the solver engine (BackendGo by default, or BackendCBC).
-	Backend Backend
-	// DisableSIMD forces the pure-Go scalar kernels even when compiled with GOEXPERIMENT=simd.
-	DisableSIMD bool
-	// EnablePresolve runs MIP presolve and node-level bound tightening.
-	EnablePresolve bool
-	// EnableCuts runs root cutting-plane rounds (GMI, lifted covers, flow/VUB, MIR).
-	EnableCuts bool
-	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
-	EnableHeuristics bool
 	// MaxNodes limits the number of explored branch-and-bound nodes, including any root
 	// sub-MIP nodes (default 50000; 0 = unlimited). Exceeding it returns StatusNodeLimit
 	// with a valid global bound.
@@ -65,8 +55,20 @@ type Options struct {
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
 
+	cutoffMin float64
+
+	// Backend selects the solver engine (BackendGo by default, or BackendCBC).
+	Backend Backend
+	// DisableSIMD forces the pure-Go scalar kernels even when compiled with GOEXPERIMENT=simd.
+	DisableSIMD bool
+	// EnablePresolve runs MIP presolve and node-level bound tightening.
+	EnablePresolve bool
+	// EnableCuts runs root cutting-plane rounds (GMI, lifted covers, flow/VUB, MIR).
+	EnableCuts bool
+	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
+	EnableHeuristics bool
+
 	hasCutoff            bool
-	cutoffMin            float64
 	isSubMIP             bool
 	defaultMaxNodesUsed  bool
 	defaultCutPassesUsed bool
@@ -217,20 +219,20 @@ func stopRequested(deadline time.Time, done <-chan struct{}) bool {
 // Result holds the terminal status, objective value, primal and dual vectors,
 // and search counters returned by Solve and SolveCompiled.
 type Result struct {
+	Values       []float64
+	Duals        []float64
+	ReducedCosts []float64
 	modelID      uint64
-	Backend      Backend
-	Status       Status
 	Objective    float64
 	BestBound    float64
 	RootLPBound  float64
 	RootCutBound float64
-	Values       []float64
-	Duals        []float64
-	ReducedCosts []float64
 	Nodes        int
 	Iterations   int
 	CutsAdded    int
 	SolveTime    time.Duration
+	Backend      Backend
+	Status       Status
 }
 
 // Lookup returns the primal value of variable v in the incumbent vector and reports

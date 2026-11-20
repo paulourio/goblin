@@ -10,28 +10,43 @@ import (
 )
 
 const (
-	presolveFeasTol        = 1e-6
-	presolveIntTol         = 1e-7
-	presolveBoundChangeTol = 1e-9
-	presolveGCDIntTol      = 1e-8
-	presolveGCDMaxRowErr   = 1e-9
-	presolveGCDMaxCoeff    = 1e9
-	presolveRelScaleTol    = 1e-12
-	presolveZeroTol        = 1e-12
-	maxOrbitGroupSize      = 64
-	maxOrbitSeedTrials     = 64
-	orbitUnassigned        = -1
-	rowStateUnvisited      = -1
-	rowStateInvariant      = -2
+	presolveFeasTol             = 1e-6
+	presolveIntTol              = 1e-7
+	presolveBoundChangeTol      = 1e-9
+	presolveGCDIntTol           = 1e-8
+	presolveGCDMaxRowErr        = 1e-9
+	presolveGCDMaxCoeff         = 1e9
+	presolveRelScaleTol         = 1e-12
+	presolveZeroTol             = 1e-12
+	presolveFastMaxAbs          = 1e12
+	presolveFastMinAbs          = 1e-12
+	presolveFastMaxRowLen       = 4096
+	presolveFastRelMargin       = 1e-11
+	presolveSlackGuardRelMargin = 0x1p-30
+	maxOrbitGroupSize           = 64
+	maxOrbitSeedTrials          = 64
+	orbitUnassigned             = -1
+	rowStateUnvisited           = -1
+	rowStateInvariant           = -2
 )
 
 type presolveWorkRow struct {
 	name   string
-	sense  ConstraintSense
-	rhs    float64
 	cols   []int
 	vals   []float64
+	rhs    float64
+	sense  ConstraintSense
 	active bool
+	shared bool
+}
+
+func (r *presolveWorkRow) ensureOwned() {
+	if !r.shared {
+		return
+	}
+	r.cols = slices.Clone(r.cols)
+	r.vals = slices.Clone(r.vals)
+	r.shared = false
 }
 
 // PresolveResult holds the reduced CompiledProblem or an immediate infeasible status flag.
@@ -106,11 +121,12 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 		s, e := orig.rowPtr[i], orig.rowPtr[i+1]
 		rows[i] = presolveWorkRow{
 			name:   orig.rowNames[i],
-			sense:  orig.rowSense[i],
+			cols:   orig.colIdx[s:e:e],
+			vals:   orig.rowVal[s:e:e],
 			rhs:    orig.rowRHS[i],
-			cols:   slices.Clone(orig.colIdx[s:e]),
-			vals:   slices.Clone(orig.rowVal[s:e]),
+			sense:  orig.rowSense[i],
 			active: true,
+			shared: true,
 		}
 	}
 
@@ -166,6 +182,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					}
 				}
 				if math.Abs(r.rhs) <= 0x1p52 {
+					r.ensureOwned()
 					fg := float64(g)
 					for k := range r.vals {
 						r.vals[k] = math.Round(r.vals[k]) / fg
@@ -190,6 +207,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 				}
 			} else if allInt && g == 1 && math.Abs(r.rhs) <= 0x1p52 {
 				if maxRoundErr > 0 {
+					r.ensureOwned()
 					for k := range r.vals {
 						r.vals[k] = math.Round(r.vals[k])
 					}
@@ -278,6 +296,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 							newRHS := r.rhs - delta
 							tol := 1e-12 * max(1.0, math.Abs(delta))
 							if delta > 0 && math.Abs((a-newVal)-delta) <= tol && math.Abs((r.rhs-newRHS)-delta) <= tol {
+								r.ensureOwned()
 								r.vals[k] = newVal
 								r.rhs = newRHS
 								strengthened++
@@ -287,6 +306,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 							newVal := a + delta
 							tol := 1e-12 * max(1.0, math.Abs(delta))
 							if delta > 0 && math.Abs((newVal-a)-delta) <= tol {
+								r.ensureOwned()
 								r.vals[k] = newVal
 								strengthened++
 							}
@@ -301,65 +321,407 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 		return PresolveResult{Reduced: orig}
 	}
 
-	mod := NewModel(orig.name, orig.sense)
-	vars := make([]Var, n)
-	var objTerms []Term
-	for j := range n {
-		vars[j] = mod.AddVar(orig.varNames[j], lb[j], ub[j], orig.varCat[j])
-		if orig.objCoeffs[j] != 0 {
-			objTerms = append(objTerms, T(vars[j], orig.objCoeffs[j]))
-		}
+	red, droppedEmpty, infeas := buildCompiledDirect(orig, rows, lb, ub)
+	if infeas {
+		return PresolveResult{Infeasible: true}
 	}
-	mod.SetObjectiveNamed(orig.objName, Expr{
-		Terms:    objTerms,
-		Constant: orig.objConstant,
-	})
-
-	for i := range m {
-		r := &rows[i]
-		if !r.active {
-			continue
-		}
-		terms := make([]Term, 0, len(r.cols))
-		for k, col := range r.cols {
-			if lb[col] == 0 && ub[col] == 0 {
-				continue
-			}
-			terms = append(terms, T(vars[col], r.vals[k]))
-		}
-		if len(terms) == 0 {
-			switch r.sense {
-			case LessEqual:
-				if 0 > r.rhs+presolveFeasTol {
-					return PresolveResult{Infeasible: true}
-				}
-			case GreaterEqual:
-				if 0 < r.rhs-presolveFeasTol {
-					return PresolveResult{Infeasible: true}
-				}
-			case Equal:
-				if math.Abs(r.rhs) > presolveFeasTol {
-					return PresolveResult{Infeasible: true}
-				}
-			}
-			removedRows++
-			continue
-		}
-		mod.AddConstraint(r.name, Constraint{
-			Expr:  Expr{Terms: terms},
-			Sense: r.sense,
-			RHS:   r.rhs,
-		})
-	}
-
-	red := mod.Compile()
-	red.modelID = orig.modelID
+	removedRows += droppedEmpty
 	return PresolveResult{
 		Reduced:          red,
 		TightenedBounds:  tightened,
 		RemovedRows:      removedRows,
 		StrengthenedRows: strengthened,
 	}
+}
+
+// buildCompiledDirect constructs a canonical CompiledProblem directly from presolved
+// rows and variable bounds, bypassing symbolic Model construction, map lookups,
+// validation, and redundant sorting.
+func buildCompiledDirect(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64) (red *CompiledProblem, droppedEmpty int, infeas bool) {
+	n := orig.numVars
+	mc := 0
+	totalNNZ := 0
+	for i := range rows {
+		r := &rows[i]
+		if !r.active {
+			continue
+		}
+		keptTerms := 0
+		rowNNZ := 0
+		for k, col := range r.cols {
+			if lb[col] == 0 && ub[col] == 0 {
+				continue
+			}
+			keptTerms++
+			if r.vals[k] != 0 {
+				rowNNZ++
+			}
+		}
+		if keptTerms == 0 {
+			switch r.sense {
+			case LessEqual:
+				if 0 > r.rhs+presolveFeasTol {
+					return nil, 0, true
+				}
+			case GreaterEqual:
+				if 0 < r.rhs-presolveFeasTol {
+					return nil, 0, true
+				}
+			case Equal:
+				if math.Abs(r.rhs) > presolveFeasTol {
+					return nil, 0, true
+				}
+			}
+			r.active = false
+			droppedEmpty++
+			continue
+		}
+		mc++
+		totalNNZ += rowNNZ
+	}
+
+	sense := orig.Sense()
+	constMinVal := orig.objConstant
+	if sense == Maximize && constMinVal != 0 {
+		constMinVal = -constMinVal
+	}
+
+	red = newCompiledProblem()
+	red.name = orig.Name()
+	red.sense = sense
+	red.modelID = orig.modelID
+	red.numVars = n
+	red.numConstraints = mc
+	red.objName = orig.objName
+	red.objConstant = orig.objConstant
+	red.objConstMinVal = constMinVal
+
+	if len(orig.varNames) == n {
+		red.varNames = orig.varNames
+	} else {
+		red.varNames = make([]string, n)
+	}
+	if len(orig.objCoeffs) == n && len(orig.objMin) == n {
+		red.objCoeffs = orig.objCoeffs
+		red.objMin = orig.objMin
+	} else {
+		red.objCoeffs = make([]float64, n)
+		if sense == Maximize {
+			red.objMin = make([]float64, n)
+		} else {
+			red.objMin = red.objCoeffs
+		}
+	}
+
+	red.rowNames = make([]string, mc)
+	red.rowSense = make([]ConstraintSense, mc)
+	red.rowRHS = make([]float64, mc)
+	red.rowLB = make([]float64, mc)
+	red.rowUB = make([]float64, mc)
+	red.rowPtr = make([]int, mc+1)
+	red.colIdx = make([]int, 0, totalNNZ)
+	red.rowVal = make([]float64, 0, totalNNZ)
+
+	rowOut := 0
+	for i := range rows {
+		r := &rows[i]
+		if !r.active {
+			continue
+		}
+		red.rowNames[rowOut] = r.name
+		red.rowSense[rowOut] = r.sense
+		red.rowRHS[rowOut] = r.rhs
+		switch r.sense {
+		case LessEqual:
+			red.rowLB[rowOut] = math.Inf(-1)
+			red.rowUB[rowOut] = r.rhs
+		case GreaterEqual:
+			red.rowLB[rowOut] = r.rhs
+			red.rowUB[rowOut] = math.Inf(1)
+		case Equal:
+			red.rowLB[rowOut] = r.rhs
+			red.rowUB[rowOut] = r.rhs
+		}
+
+		rowStart := len(red.colIdx)
+		red.rowPtr[rowOut] = rowStart
+		prevCol := -1
+		strictAsc := true
+		for k, col := range r.cols {
+			if lb[col] == 0 && ub[col] == 0 {
+				continue
+			}
+			val := r.vals[k]
+			if val == 0 {
+				continue
+			}
+			if col <= prevCol {
+				strictAsc = false
+			}
+			prevCol = col
+			red.colIdx = append(red.colIdx, col)
+			red.rowVal = append(red.rowVal, val)
+		}
+		if !strictAsc {
+			canonicalizeCSRRow(&red.colIdx, &red.rowVal, rowStart)
+		}
+		rowOut++
+	}
+	red.rowPtr[mc] = len(red.colIdx)
+
+	stride := denseRowStride(n, mc, len(red.colIdx))
+	if stride > 0 {
+		red.rowStride = stride
+		red.denseRows = make([]float64, mc*stride)
+		for i := range mc {
+			denseRow := red.denseRows[i*stride : (i+1)*stride]
+			for k := red.rowPtr[i]; k < red.rowPtr[i+1]; k++ {
+				denseRow[red.colIdx[k]] = red.rowVal[k]
+			}
+		}
+	} else if n > 0 && mc > 0 {
+		red.rowStride = sparseNoDenseStride
+	}
+
+	buildCSCFromCSR(red)
+
+	numInt := 0
+	for j := range n {
+		if orig.varCat[j] != Continuous {
+			numInt++
+		}
+	}
+	numWords := (n + wordBitMask) / bitsPerWord
+	red.varLB = lb
+	red.varUB = ub
+	red.varCat = make([]VarCategory, n)
+	red.binaryMask = make([]uint64, numWords)
+	if numInt > 0 {
+		red.isMIP = true
+		red.intCols = make([]int, 0, numInt)
+	}
+	for j := range n {
+		cat := orig.varCat[j]
+		rlb, rub := roundBoundsForCategory(lb[j], ub[j], cat)
+		lb[j] = rlb
+		ub[j] = rub
+		if cat == Integer && rlb >= 0 && rub <= 1 && rlb <= rub {
+			cat = Binary
+		}
+		red.varCat[j] = cat
+		if cat != Continuous {
+			red.intCols = append(red.intCols, j)
+			if cat == Binary {
+				red.binaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
+			}
+		}
+	}
+
+	return red, droppedEmpty, false
+}
+
+// canonicalizeCSRRow sorts the newly appended CSR row slice [rowStart:] by ascending
+// column index, sums duplicate columns via wideDotAcc, and drops resulting zero entries.
+func canonicalizeCSRRow(colIdx *[]int, rowVal *[]float64, rowStart int) {
+	cols := (*colIdx)[rowStart:]
+	vals := (*rowVal)[rowStart:]
+	k := len(cols)
+	if k <= 1 {
+		return
+	}
+	if k == 2 && cols[0] != cols[1] {
+		if cols[0] > cols[1] {
+			cols[0], cols[1] = cols[1], cols[0]
+			vals[0], vals[1] = vals[1], vals[0]
+		}
+		return
+	}
+	type colValPair struct {
+		col int
+		val float64
+	}
+	pairs := make([]colValPair, k)
+	for i := range k {
+		pairs[i] = colValPair{col: cols[i], val: vals[i]}
+	}
+	slices.SortFunc(pairs, func(a, b colValPair) int {
+		return cmp.Compare(a.col, b.col)
+	})
+	w := 0
+	for i := 0; i < k; {
+		start := i
+		c := pairs[i].col
+		sum := pairs[i].val
+		for i++; i < k && pairs[i].col == c; i++ {
+			sum += pairs[i].val
+		}
+		if i-start > 1 {
+			var acc wideDotAcc
+			for p := start; p < i; p++ {
+				acc.addVal(pairs[p].val)
+			}
+			sum = acc.finish(math.NaN())
+		}
+		if sum == 0 {
+			continue
+		}
+		cols[w] = c
+		vals[w] = sum
+		w++
+	}
+	*colIdx = (*colIdx)[:rowStart+w]
+	*rowVal = (*rowVal)[:rowStart+w]
+}
+
+// fastRowCanSkip performs an O(rowLen) float64 pre-check with conservative ULP and
+// feasibility margins to skip exact dot2Acc/wideDotAcc activity evaluation when a row
+// can neither prove infeasibility, be dropped as redundant, nor tighten any variable bound.
+// Extreme-scale rows (|a| > 1e12, 0 < |a| < 1e-12, |term| > 1e12, or |rhs| > 1e12)
+// always fall back to exact activity evaluation.
+func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64) bool {
+	if len(r.cols) > presolveFastMaxRowLen {
+		return false
+	}
+	absRHS := math.Abs(r.rhs)
+	if math.IsNaN(absRHS) || absRHS > presolveFastMaxAbs {
+		return false
+	}
+	minAct, maxAct := 0.0, 0.0
+	absSum := absRHS
+	minInf, maxInf := 0, 0
+	maxSpan := 0.0
+	hasInfSpan := false
+	hasFracInt := false
+	for k, col := range r.cols {
+		a := r.vals[k]
+		absA := math.Abs(a)
+		if absA == 0 {
+			continue
+		}
+		if math.IsNaN(absA) || absA > presolveFastMaxAbs || absA < presolveFastMinAbs {
+			return false
+		}
+		l, u := lb[col], ub[col]
+		if math.IsNaN(l) || math.IsNaN(u) {
+			return false
+		}
+		if orig.varCat[col] != Continuous {
+			if (!math.IsInf(l, 0) && l != math.Trunc(l)) || (!math.IsInf(u, 0) && u != math.Trunc(u)) {
+				hasFracInt = true
+			}
+		}
+		if a > 0 {
+			if math.IsInf(l, -1) {
+				minInf++
+			} else {
+				p := a * l
+				ap := math.Abs(p)
+				if ap > presolveFastMaxAbs {
+					return false
+				}
+				minAct += p
+				absSum += ap
+			}
+			if math.IsInf(u, 1) {
+				maxInf++
+			} else {
+				p := a * u
+				ap := math.Abs(p)
+				if ap > presolveFastMaxAbs {
+					return false
+				}
+				maxAct += p
+				absSum += ap
+			}
+		} else {
+			if math.IsInf(u, 1) {
+				minInf++
+			} else {
+				p := a * u
+				ap := math.Abs(p)
+				if ap > presolveFastMaxAbs {
+					return false
+				}
+				minAct += p
+				absSum += ap
+			}
+			if math.IsInf(l, -1) {
+				maxInf++
+			} else {
+				p := a * l
+				ap := math.Abs(p)
+				if ap > presolveFastMaxAbs {
+					return false
+				}
+				maxAct += p
+				absSum += ap
+			}
+		}
+		span := u - l
+		if math.IsInf(span, 0) || math.IsNaN(span) {
+			hasInfSpan = true
+		} else if span > 0 {
+			sProd := absA * span
+			if sProd > maxSpan {
+				maxSpan = sProd
+			}
+		}
+	}
+	if absSum > presolveFastMaxAbs || math.IsNaN(absSum) || math.IsNaN(minAct) || math.IsNaN(maxAct) {
+		return false
+	}
+	margin := presolveFastRelMargin*max(1.0, absSum) + 2.0*presolveFeasTol
+	slackFast := r.rhs - minAct
+	deficitFast := r.rhs - maxAct
+	hasUpper := r.sense == LessEqual || r.sense == Equal
+	hasLower := r.sense == GreaterEqual || r.sense == Equal
+	if hasUpper && minInf == 0 && slackFast < margin {
+		return false
+	}
+	if hasLower && maxInf == 0 && deficitFast > -margin {
+		return false
+	}
+	if r.sense == LessEqual && maxInf == 0 && deficitFast >= -margin {
+		return false
+	}
+	if r.sense == GreaterEqual && minInf == 0 && slackFast <= margin {
+		return false
+	}
+	if r.sense == Equal && minInf == 0 && maxInf == 0 && slackFast <= margin && deficitFast >= -margin {
+		return false
+	}
+	if hasUpper && minInf <= 1 {
+		if minInf == 1 || hasInfSpan || hasFracInt || slackFast <= maxSpan+margin {
+			return false
+		}
+	}
+	if hasLower && maxInf <= 1 {
+		if maxInf == 1 || hasInfSpan || hasFracInt || -deficitFast <= maxSpan+margin {
+			return false
+		}
+	}
+	return true
+}
+
+// presolveCanSkipTerm reports whether slackLo (a certified lower bound on row slack)
+// strictly exceeds absA*(u-l) with a conservative relative margin so residualQuotient
+// cannot tighten targetBound.
+func presolveCanSkipTerm(slackLo, absA, l, u, targetBound float64, isInt bool) bool {
+	if slackLo <= 0 || math.IsInf(targetBound, 0) {
+		return false
+	}
+	if isInt && targetBound != math.Trunc(targetBound) {
+		return false
+	}
+	span := u - l
+	if span < 0 || math.IsNaN(span) || math.IsInf(span, 0) {
+		return false
+	}
+	prod := absA * span
+	if math.IsNaN(prod) || math.IsInf(prod, 0) {
+		return false
+	}
+	return slackLo > prod+presolveSlackGuardRelMargin*prod
 }
 
 // runActivityTightening executes up to maxPasses rounds of Savelsbergh row-activity bound tightening and drops redundant rows.
@@ -384,6 +746,9 @@ func runActivityTightening(
 			}
 			r := &rows[i]
 			if !r.active {
+				continue
+			}
+			if fastRowCanSkip(orig, r, lb, ub) {
 				continue
 			}
 
@@ -510,14 +875,20 @@ func runActivityTightening(
 
 			upperTightenedRow := false
 			if hasUpper && s.minInfCount <= 1 {
+				canGuardUB := s.minInfCount == 0 && !s.useWideSlack
+				ubSlackLo := s.slackLo
 				for k, col := range r.cols {
 					a := r.vals[k]
 					if math.Abs(a) <= presolveZeroTol {
 						continue
 					}
 					l, u := lb[col], ub[col]
+					isInt := orig.varCat[col] != Continuous
 					if a > 0 {
 						if s.minInfCount == 1 && !math.IsInf(l, -1) {
+							continue
+						}
+						if canGuardUB && presolveCanSkipTerm(ubSlackLo, a, l, u, u, isInt) {
 							continue
 						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
@@ -526,7 +897,7 @@ func runActivityTightening(
 						}
 						newUB := qVal + qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
-						if orig.varCat[col] != Continuous {
+						if isInt {
 							newUB = math.Floor(newUB + bTol)
 						} else {
 							newUB += rowFeasTol / a
@@ -550,14 +921,17 @@ func runActivityTightening(
 						if s.minInfCount == 1 && !math.IsInf(u, 1) {
 							continue
 						}
+						absA := -a
+						if canGuardUB && presolveCanSkipTerm(ubSlackLo, absA, l, u, l, isInt) {
+							continue
+						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
 						if !qOK {
 							continue
 						}
-						absA := -a
 						newLB := qVal - qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
-						if orig.varCat[col] != Continuous {
+						if isInt {
 							newLB = math.Ceil(newLB - bTol)
 						} else {
 							newLB -= rowFeasTol / absA
@@ -594,14 +968,20 @@ func runActivityTightening(
 			}
 
 			if hasLower && s.maxInfCount <= 1 {
+				canGuardLB := s.maxInfCount == 0 && !s.useWideDeficit
+				lbSlackLo := -s.deficitHi
 				for k, col := range r.cols {
 					a := r.vals[k]
 					if math.Abs(a) <= presolveZeroTol {
 						continue
 					}
 					l, u := lb[col], ub[col]
+					isInt := orig.varCat[col] != Continuous
 					if a > 0 {
 						if s.maxInfCount == 1 && !math.IsInf(u, 1) {
+							continue
+						}
+						if canGuardLB && presolveCanSkipTerm(lbSlackLo, a, l, u, l, isInt) {
 							continue
 						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
@@ -610,7 +990,7 @@ func runActivityTightening(
 						}
 						newLB := qVal - qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
-						if orig.varCat[col] != Continuous {
+						if isInt {
 							newLB = math.Ceil(newLB - bTol)
 						} else {
 							newLB -= rowFeasTol / a
@@ -633,14 +1013,17 @@ func runActivityTightening(
 						if s.maxInfCount == 1 && !math.IsInf(l, -1) {
 							continue
 						}
+						absA := -a
+						if canGuardLB && presolveCanSkipTerm(lbSlackLo, absA, l, u, u, isInt) {
+							continue
+						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
 						if !qOK {
 							continue
 						}
-						absA := -a
 						newUB := qVal + qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
-						if orig.varCat[col] != Continuous {
+						if isInt {
 							newUB = math.Floor(newUB + bTol)
 						} else {
 							newUB += rowFeasTol / absA
@@ -893,9 +1276,54 @@ func (s *rowActivitySummary) residualQuotient(
 	return divDDByFloat(top, rem, a, 0)
 }
 
-type presolveColEntry struct {
-	row int
-	val float64
+type orbitTrialScratch struct {
+	colOrbit      []int
+	colGroup      []int
+	rowState      []int
+	touchedRows   []int
+	orderBuf      []int
+	seedCols      []int
+	orbits        []int // flat: numOrbits * gCount
+	rowTuples     []int // flat: numTuples * gCount
+	expectedStamp []int
+	expectedVal   []float64
+	orbSeen       []int
+	orbCount      []int
+	orbVal        []float64
+	stamp         int
+	invStamp      int
+}
+
+func newOrbitTrialScratch(n, m int) orbitTrialScratch {
+	colOrbit := make([]int, n)
+	colGroup := make([]int, n)
+	for j := range n {
+		colOrbit[j] = orbitUnassigned
+		colGroup[j] = orbitUnassigned
+	}
+	rowState := make([]int, m)
+	for i := range m {
+		rowState[i] = rowStateUnvisited
+	}
+	return orbitTrialScratch{
+		colOrbit: colOrbit,
+		colGroup: colGroup,
+		rowState: rowState,
+		seedCols: make([]int, 0, maxOrbitGroupSize),
+	}
+}
+
+func (sc *orbitTrialScratch) reset() {
+	for _, c := range sc.orbits {
+		sc.colOrbit[c] = orbitUnassigned
+		sc.colGroup[c] = orbitUnassigned
+	}
+	for _, r := range sc.touchedRows {
+		sc.rowState[r] = rowStateUnvisited
+	}
+	sc.orbits = sc.orbits[:0]
+	sc.rowTuples = sc.rowTuples[:0]
+	sc.touchedRows = sc.touchedRows[:0]
 }
 
 func presolveSplitmix64(x uint64) uint64 {
@@ -964,27 +1392,66 @@ func applyOrbitSymmetryBreaking(
 		return 0, nil, true
 	}
 
-	colRows := make([][]presolveColEntry, n)
-	for i := range m {
-		r := &rows[i]
-		if !r.active {
-			continue
+	// Reuse orig's CSC directly when every row is still active and unmodified;
+	// otherwise build a flat two-pass CSC over active rows.
+	reuseOrigCSC := m == orig.numConstraints && len(orig.colPtr) == n+1
+	if reuseOrigCSC {
+		for i := range m {
+			if !rows[i].active || !rows[i].shared {
+				reuseOrigCSC = false
+				break
+			}
 		}
-		for k, col := range r.cols {
-			colRows[col] = append(colRows[col], presolveColEntry{row: i, val: r.vals[k]})
+	}
+	var colPtr, colRow []int
+	var colVal []float64
+	if reuseOrigCSC {
+		colPtr = orig.colPtr
+		colRow = orig.rowIdx
+		colVal = orig.colVal
+	} else {
+		colPtr = make([]int, n+1)
+		for i := range m {
+			r := &rows[i]
+			if !r.active {
+				continue
+			}
+			for _, col := range r.cols {
+				colPtr[col+1]++
+			}
 		}
+		for j := range n {
+			colPtr[j+1] += colPtr[j]
+		}
+		nnz := colPtr[n]
+		colRow = make([]int, nnz)
+		colVal = make([]float64, nnz)
+		for i := range m {
+			r := &rows[i]
+			if !r.active {
+				continue
+			}
+			for k, col := range r.cols {
+				pos := colPtr[col]
+				colRow[pos] = i
+				colVal[pos] = r.vals[k]
+				colPtr[col] = pos + 1
+			}
+		}
+		copy(colPtr[1:], colPtr[:n])
+		colPtr[0] = 0
 	}
 
 	filteredSeeds := seedRows[:0]
 	for _, sr := range seedRows {
 		cols := rows[sr].cols
-		deg0 := len(colRows[cols[0]])
+		deg0 := colPtr[cols[0]+1] - colPtr[cols[0]]
 		if deg0 < 2 {
 			continue
 		}
 		sameDeg := true
 		for _, c := range cols[1:] {
-			if len(colRows[c]) != deg0 {
+			if colPtr[c+1]-colPtr[c] != deg0 {
 				sameDeg = false
 				break
 			}
@@ -1022,28 +1489,32 @@ func applyOrbitSymmetryBreaking(
 			th ^= presolveSplitmix64(uint64(orig.varCat[col]) + 0x100)
 			th ^= presolveSplitmix64(canonicalFloatBits(lb[col]) + 0x200)
 			th ^= presolveSplitmix64(canonicalFloatBits(ub[col]) + 0x300)
-			th ^= presolveSplitmix64(uint64(len(colRows[col])) + 0x400)
+			th ^= presolveSplitmix64(uint64(colPtr[col+1]-colPtr[col]) + 0x400)
 			sumH += th
 			xorH ^= bits.RotateLeft64(th, 17)
 		}
 		rowHash[i] = h ^ sumH ^ xorH
 	}
 
+	sc := newOrbitTrialScratch(n, m)
 	maxTrials := min(len(seedRows), maxOrbitSeedTrials)
 	for sIdx := range maxTrials {
 		if stopRequested(deadline, done) {
 			return 0, nil, true
 		}
-		orbits, colOrbit, rowTuples, ok, to := proposeAndVerifyOrbits(
-			orig, rows, lb, ub, colRows, rowHash, seedRows[sIdx], deadline, done,
+		if sIdx > 0 {
+			sc.reset()
+		}
+		gCount, ok, to := proposeAndVerifyOrbits(
+			orig, rows, lb, ub, colPtr, colRow, colVal, rowHash, seedRows[sIdx], &sc, deadline, done,
 		)
 		if to {
 			return 0, nil, true
 		}
-		if !ok || len(orbits) == 0 {
+		if !ok || len(sc.orbits) == 0 {
 			continue
 		}
-		t, add := reduceVerifiedOrbits(orig, rows, lb, ub, orbits, colOrbit, rowTuples)
+		t, add := reduceVerifiedOrbits(orig, rows, lb, ub, sc.orbits, gCount, sc.colOrbit, sc.rowTuples)
 		if t > 0 || len(add) > 0 {
 			return t, add, false
 		}
@@ -1060,75 +1531,76 @@ func proposeAndVerifyOrbits(
 	orig *CompiledProblem,
 	rows []presolveWorkRow,
 	lb, ub []float64,
-	colRows [][]presolveColEntry,
+	colPtr, colRow []int,
+	colVal []float64,
 	rowHash []uint64,
 	seedIdx int,
+	sc *orbitTrialScratch,
 	deadline time.Time,
 	done <-chan struct{},
-) (orbits [][]int, colOrbit []int, rowTuples [][]int, ok, timedOut bool) {
-	n := orig.numVars
-	m := len(rows)
-	seedCols := slices.Clone(rows[seedIdx].cols)
-	slices.Sort(seedCols)
-	gCount := len(seedCols)
+) (gCount int, ok, timedOut bool) {
+	sc.seedCols = append(sc.seedCols[:0], rows[seedIdx].cols...)
+	slices.Sort(sc.seedCols)
+	gCount = len(sc.seedCols)
 	for g := 1; g < gCount; g++ {
-		if seedCols[g] == seedCols[g-1] {
-			return nil, nil, nil, false, false
+		if sc.seedCols[g] == sc.seedCols[g-1] {
+			return 0, false, false
 		}
 	}
 
-	colOrbit = make([]int, n)
-	colGroup := make([]int, n)
-	for j := range n {
-		colOrbit[j] = orbitUnassigned
-		colGroup[j] = orbitUnassigned
-	}
-	orbits = [][]int{seedCols}
-	for g, c := range seedCols {
+	colOrbit := sc.colOrbit
+	colGroup := sc.colGroup
+	rowState := sc.rowState
+
+	sc.orbits = append(sc.orbits, sc.seedCols...)
+	for g, c := range sc.seedCols {
 		colOrbit[c] = 0
 		colGroup[c] = g
 	}
 
-	rowState := make([]int, m)
-	for i := range m {
-		rowState[i] = rowStateUnvisited
-	}
 	rowState[seedIdx] = rowStateInvariant
+	sc.touchedRows = append(sc.touchedRows, seedIdx)
 
-	orders := make([][]int, gCount)
-	for q := 0; q < len(orbits); q++ {
+	var orbBuf [maxOrbitGroupSize]int
+	var tuple [maxOrbitGroupSize]int
+	var newOrb [maxOrbitGroupSize]int
+
+	for q := 0; q*gCount < len(sc.orbits); q++ {
 		if (q&31 == 0) && stopRequested(deadline, done) {
-			return nil, nil, nil, false, true
+			return 0, false, true
 		}
-		orb := orbits[q]
-		for _, ce := range colRows[orb[0]] {
-			r0 := ce.row
-			a0 := ce.val
+		orb := orbBuf[:gCount]
+		copy(orb, sc.orbits[q*gCount:(q+1)*gCount])
+		cStart, cEnd := colPtr[orb[0]], colPtr[orb[0]+1]
+		for p := cStart; p < cEnd; p++ {
+			r0 := colRow[p]
+			a0 := colVal[p]
 			if rowState[r0] != rowStateUnvisited {
 				continue
 			}
 			rr0 := &rows[r0]
 			if isRowInvariantOnOrbit(rr0, orb, a0) {
 				rowState[r0] = rowStateInvariant
+				sc.touchedRows = append(sc.touchedRows, r0)
 				continue
 			}
 			for _, c := range rr0.cols {
 				if colGroup[c] > 0 {
-					return nil, nil, nil, false, false
+					return 0, false, false
 				}
 			}
 
-			tuple := make([]int, gCount)
 			tuple[0] = r0
 			for g := 1; g < gCount; g++ {
 				vg := orb[g]
 				matched := -1
-				for _, ceG := range colRows[vg] {
-					rg := ceG.row
+				vgStart, vgEnd := colPtr[vg], colPtr[vg+1]
+				for pg := vgStart; pg < vgEnd; pg++ {
+					rg := colRow[pg]
 					if rowState[rg] != rowStateUnvisited || rg == r0 || rowHash[rg] != rowHash[r0] {
 						continue
 					}
-					if ceG.val != a0 {
+					if colVal[pg] != a0 {
 						continue
 					}
 					rrg := &rows[rg]
@@ -1148,24 +1620,27 @@ func proposeAndVerifyOrbits(
 					}
 				}
 				if matched == -1 {
-					return nil, nil, nil, false, false
+					return 0, false, false
 				}
 				tuple[g] = matched
 			}
-			for g, rg := range tuple {
+			for g := range gCount {
+				rg := tuple[g]
 				rowState[rg] = g
+				sc.touchedRows = append(sc.touchedRows, rg)
 			}
-			rowTuples = append(rowTuples, tuple)
+			sc.rowTuples = append(sc.rowTuples, tuple[:gCount]...)
 
 			rowLen := len(rr0.cols)
+			needOrd := gCount * rowLen
+			if cap(sc.orderBuf) < needOrd {
+				sc.orderBuf = make([]int, needOrd)
+			} else {
+				sc.orderBuf = sc.orderBuf[:needOrd]
+			}
 			for g := range gCount {
 				rg := &rows[tuple[g]]
-				ord := orders[g]
-				if cap(ord) < rowLen {
-					ord = make([]int, rowLen)
-				} else {
-					ord = ord[:rowLen]
-				}
+				ord := sc.orderBuf[g*rowLen : (g+1)*rowLen]
 				for idx := range rowLen {
 					ord[idx] = idx
 				}
@@ -1194,24 +1669,25 @@ func proposeAndVerifyOrbits(
 					if c := cmp.Compare(ub[ca], ub[cb]); c != 0 {
 						return c
 					}
-					if c := cmp.Compare(len(colRows[ca]), len(colRows[cb])); c != 0 {
+					if c := cmp.Compare(colPtr[ca+1]-colPtr[ca], colPtr[cb+1]-colPtr[cb]); c != 0 {
 						return c
 					}
 					return cmp.Compare(ca, cb)
 				})
-				orders[g] = ord
 			}
 
+			ord0 := sc.orderBuf[:rowLen]
 			for pos := range rowLen {
-				c0 := rr0.cols[orders[0][pos]]
-				v0 := rr0.vals[orders[0][pos]]
+				c0 := rr0.cols[ord0[pos]]
+				v0 := rr0.vals[ord0[pos]]
 				allSameCol := true
 				for g := 1; g < gCount; g++ {
 					rg := &rows[tuple[g]]
-					cg := rg.cols[orders[g][pos]]
-					vg := rg.vals[orders[g][pos]]
+					idxG := sc.orderBuf[g*rowLen+pos]
+					cg := rg.cols[idxG]
+					vg := rg.vals[idxG]
 					if vg != v0 {
-						return nil, nil, nil, false, false
+						return 0, false, false
 					}
 					if cg != c0 {
 						allSameCol = false
@@ -1219,54 +1695,55 @@ func proposeAndVerifyOrbits(
 				}
 				if allSameCol {
 					if colOrbit[c0] != orbitUnassigned {
-						return nil, nil, nil, false, false
+						return 0, false, false
 					}
 					continue
 				}
 				if colOrbit[c0] >= 0 {
 					orbID := colOrbit[c0]
 					if colGroup[c0] != 0 {
-						return nil, nil, nil, false, false
+						return 0, false, false
 					}
 					for g := 1; g < gCount; g++ {
-						cg := rows[tuple[g]].cols[orders[g][pos]]
+						cg := rows[tuple[g]].cols[sc.orderBuf[g*rowLen+pos]]
 						if colOrbit[cg] != orbID || colGroup[cg] != g {
-							return nil, nil, nil, false, false
+							return 0, false, false
 						}
 					}
 					continue
 				}
-				newOrb := make([]int, gCount)
 				newOrb[0] = c0
+				degC0 := colPtr[c0+1] - colPtr[c0]
 				for g := 1; g < gCount; g++ {
-					cg := rows[tuple[g]].cols[orders[g][pos]]
+					cg := rows[tuple[g]].cols[sc.orderBuf[g*rowLen+pos]]
 					if colOrbit[cg] != orbitUnassigned {
-						return nil, nil, nil, false, false
+						return 0, false, false
 					}
-					if orig.varCat[cg] != orig.varCat[c0] || !samePresolveBound(lb[cg], lb[c0]) || !samePresolveBound(ub[cg], ub[c0]) || len(colRows[cg]) != len(colRows[c0]) {
-						return nil, nil, nil, false, false
+					if orig.varCat[cg] != orig.varCat[c0] || !samePresolveBound(lb[cg], lb[c0]) || !samePresolveBound(ub[cg], ub[c0]) || colPtr[cg+1]-colPtr[cg] != degC0 {
+						return 0, false, false
 					}
 					for prev := range g {
 						if newOrb[prev] == cg {
-							return nil, nil, nil, false, false
+							return 0, false, false
 						}
 					}
 					newOrb[g] = cg
 				}
-				orbID := len(orbits)
-				for g, cg := range newOrb {
+				orbID := len(sc.orbits) / gCount
+				for g := range gCount {
+					cg := newOrb[g]
 					colOrbit[cg] = orbID
 					colGroup[cg] = g
 				}
-				orbits = append(orbits, newOrb)
+				sc.orbits = append(sc.orbits, newOrb[:gCount]...)
 			}
 		}
 	}
 
-	if !verifyOrbitSymmetry(orig, rows, lb, ub, orbits, colOrbit, colGroup, rowState, rowTuples) {
-		return nil, nil, nil, false, false
+	if !verifyOrbitSymmetry(orig, rows, lb, ub, gCount, sc) {
+		return 0, false, false
 	}
-	return orbits, colOrbit, rowTuples, true, false
+	return gCount, true, false
 }
 
 func isRowInvariantOnOrbit(r *presolveWorkRow, orb []int, targetVal float64) bool {
@@ -1291,22 +1768,26 @@ func verifyOrbitSymmetry(
 	orig *CompiledProblem,
 	rows []presolveWorkRow,
 	lb, ub []float64,
-	orbits [][]int,
-	colOrbit, colGroup, rowState []int,
-	rowTuples [][]int,
+	gCount int,
+	sc *orbitTrialScratch,
 ) bool {
-	if len(orbits) == 0 {
+	orbits := sc.orbits
+	rowTuples := sc.rowTuples
+	colOrbit := sc.colOrbit
+	colGroup := sc.colGroup
+	rowState := sc.rowState
+	if gCount == 0 || len(orbits) == 0 || len(orbits)%gCount != 0 || len(rowTuples)%gCount != 0 {
 		return false
 	}
-	gCount := len(orbits[0])
+	numOrbits := len(orbits) / gCount
+	numTuples := len(rowTuples) / gCount
 	n := orig.numVars
 
-	for orbID, orb := range orbits {
-		if len(orb) != gCount {
-			return false
-		}
-		c0 := orb[0]
-		for g, cg := range orb {
+	for orbID := range numOrbits {
+		base := orbID * gCount
+		c0 := orbits[base]
+		for g := range gCount {
+			cg := orbits[base+g]
 			if colOrbit[cg] != orbID || colGroup[cg] != g {
 				return false
 			}
@@ -1318,16 +1799,19 @@ func verifyOrbitSymmetry(
 		}
 	}
 
-	expectedStamp := make([]int, n)
-	expectedVal := make([]float64, n)
-	stamp := 0
+	if len(sc.expectedStamp) < n {
+		sc.expectedStamp = make([]int, n)
+		sc.expectedVal = make([]float64, n)
+		sc.stamp = 0
+	}
+	expectedStamp := sc.expectedStamp
+	expectedVal := sc.expectedVal
 
-	for _, tuple := range rowTuples {
-		if len(tuple) != gCount {
-			return false
-		}
-		r0 := &rows[tuple[0]]
-		if !r0.active || rowState[tuple[0]] != 0 {
+	for tIdx := range numTuples {
+		tBase := tIdx * gCount
+		r0Idx := rowTuples[tBase]
+		r0 := &rows[r0Idx]
+		if !r0.active || rowState[r0Idx] != 0 {
 			return false
 		}
 		for _, c0 := range r0.cols {
@@ -1336,15 +1820,21 @@ func verifyOrbitSymmetry(
 			}
 		}
 		for g := 1; g < gCount; g++ {
-			rg := &rows[tuple[g]]
-			if !rg.active || rowState[tuple[g]] != g || rg.sense != r0.sense || len(rg.cols) != len(r0.cols) || rg.rhs != r0.rhs {
+			rgIdx := rowTuples[tBase+g]
+			rg := &rows[rgIdx]
+			if !rg.active || rowState[rgIdx] != g || rg.sense != r0.sense || len(rg.cols) != len(r0.cols) || rg.rhs != r0.rhs {
 				return false
 			}
-			stamp++
+			if sc.stamp == math.MaxInt {
+				clear(expectedStamp)
+				sc.stamp = 0
+			}
+			sc.stamp++
+			stamp := sc.stamp
 			for k, c0 := range r0.cols {
 				cg := c0
 				if orb := colOrbit[c0]; orb >= 0 {
-					cg = orbits[orb][g]
+					cg = orbits[orb*gCount+g]
 				}
 				expectedStamp[cg] = stamp
 				expectedVal[cg] = r0.vals[k]
@@ -1358,18 +1848,27 @@ func verifyOrbitSymmetry(
 		}
 	}
 
-	numOrbits := len(orbits)
-	orbSeen := make([]int, numOrbits)
-	orbCount := make([]int, numOrbits)
-	orbVal := make([]float64, numOrbits)
-	invStamp := 0
+	if len(sc.orbSeen) < numOrbits {
+		sc.orbSeen = make([]int, numOrbits)
+		sc.orbCount = make([]int, numOrbits)
+		sc.orbVal = make([]float64, numOrbits)
+		sc.invStamp = 0
+	}
+	orbSeen := sc.orbSeen
+	orbCount := sc.orbCount
+	orbVal := sc.orbVal
 
 	for i := range rows {
 		r := &rows[i]
 		if !r.active || rowState[i] >= 0 {
 			continue
 		}
-		invStamp++
+		if sc.invStamp == math.MaxInt {
+			clear(orbSeen)
+			sc.invStamp = 0
+		}
+		sc.invStamp++
+		invStamp := sc.invStamp
 		for k, c := range r.cols {
 			orb := colOrbit[c]
 			if orb < 0 {
@@ -1401,26 +1900,28 @@ func reduceVerifiedOrbits(
 	orig *CompiledProblem,
 	rows []presolveWorkRow,
 	lb, ub []float64,
-	orbits [][]int,
+	orbits []int,
+	gCount int,
 	colOrbit []int,
-	rowTuples [][]int,
+	rowTuples []int,
 ) (tightened int, addedRows []presolveWorkRow) {
-	gCount := len(orbits[0])
-	numOrbits := len(orbits)
+	numOrbits := len(orbits) / gCount
+	numTuples := len(rowTuples) / gCount
 
 	exactObj := true
 	monotoneNonNeg := true
-	for _, orb := range orbits {
-		if lb[orb[0]] < 0 {
+	for orbID := range numOrbits {
+		base := orbID * gCount
+		if lb[orbits[base]] < 0 {
 			monotoneNonNeg = false
 		}
-		c0 := orig.objMin[orb[0]]
+		c0 := orig.objMin[orbits[base]]
 		for g := 1; g < gCount; g++ {
-			cg := orig.objMin[orb[g]]
+			cg := orig.objMin[orbits[base+g]]
 			if cg != c0 {
 				exactObj = false
 			}
-			if orig.objMin[orb[g-1]] > cg {
+			if orig.objMin[orbits[base+g-1]] > cg {
 				monotoneNonNeg = false
 			}
 		}
@@ -1439,7 +1940,7 @@ func reduceVerifiedOrbits(
 				continue
 			}
 			orb := colOrbit[r.cols[0]]
-			if orb < 0 || orig.varCat[orbits[orb][0]] != Binary || lb[orbits[orb][0]] != 0 || ub[orbits[orb][0]] != 1 {
+			if orb < 0 || orig.varCat[orbits[orb*gCount]] != Binary || lb[orbits[orb*gCount]] != 0 || ub[orbits[orb*gCount]] != 1 {
 				continue
 			}
 			valid := true
@@ -1463,8 +1964,8 @@ func reduceVerifiedOrbits(
 		}
 
 		// Subcase A1: Bijective designated subset (G x G permutation subarray -> identity matrix)
-		for _, tuple := range rowTuples {
-			r0 := &rows[tuple[0]]
+		for tIdx := range numTuples {
+			r0 := &rows[rowTuples[tIdx*gCount]]
 			if !r0.active || r0.sense != Equal || len(r0.cols) != gCount || r0.rhs != 1.0 {
 				continue
 			}
@@ -1485,8 +1986,9 @@ func reduceVerifiedOrbits(
 			if validBij && len(dOrbs) == gCount {
 				slices.Sort(dOrbs)
 				for d, orb := range dOrbs {
+					base := orb * gCount
 					for g := range gCount {
-						col := orbits[orb][g]
+						col := orbits[base+g]
 						if g == d {
 							if lb[col] < 1 {
 								lb[col] = 1
@@ -1510,7 +2012,7 @@ func reduceVerifiedOrbits(
 		partOrbs = append(partOrbs, lePartOrbits...)
 		if len(partOrbs) > 0 {
 			if isEqualPartOrb[partOrbs[0]] {
-				c00 := orbits[partOrbs[0]][0]
+				c00 := orbits[partOrbs[0]*gCount]
 				if lb[c00] < 1 {
 					lb[c00] = 1
 					tightened++
@@ -1518,9 +2020,9 @@ func reduceVerifiedOrbits(
 			}
 			limit := min(len(partOrbs), gCount-1)
 			for rIdx := range limit {
-				orb := partOrbs[rIdx]
+				base := partOrbs[rIdx] * gCount
 				for g := rIdx + 1; g < gCount; g++ {
-					col := orbits[orb][g]
+					col := orbits[base+g]
 					if ub[col] > 0 {
 						ub[col] = 0
 						tightened++
@@ -1539,14 +2041,15 @@ func reduceVerifiedOrbits(
 	// Rule B: Monotone cost-dominated empty-block ordering (y_0 >= y_1 >= ... >= y_{G-1})
 	forcedZero := make([]bool, numOrbits)
 	for openOrb := range numOrbits {
-		cOpen0 := orbits[openOrb][0]
+		openBase := openOrb * gCount
+		cOpen0 := orbits[openBase]
 		if orig.varCat[cOpen0] != Binary || lb[cOpen0] != 0 || ub[cOpen0] != 1 {
 			continue
 		}
 		clear(forcedZero)
 		forcedZero[openOrb] = true
-		for _, tuple := range rowTuples {
-			r0 := &rows[tuple[0]]
+		for tIdx := range numTuples {
+			r0 := &rows[rowTuples[tIdx*gCount]]
 			if !r0.active || (r0.sense != LessEqual && r0.sense != GreaterEqual) {
 				continue
 			}
@@ -1584,7 +2087,8 @@ func reduceVerifiedOrbits(
 
 		dominatesAll := true
 		for orb := range numOrbits {
-			if orig.objMin[orbits[orb][gCount-1]] != orig.objMin[orbits[orb][0]] && !forcedZero[orb] {
+			base := orb * gCount
+			if orig.objMin[orbits[base+gCount-1]] != orig.objMin[orbits[base]] && !forcedZero[orb] {
 				dominatesAll = false
 				break
 			}
@@ -1606,10 +2110,10 @@ func reduceVerifiedOrbits(
 				usedNames[name] = struct{}{}
 				addedRows = append(addedRows, presolveWorkRow{
 					name:   name,
-					sense:  GreaterEqual,
-					rhs:    0,
-					cols:   []int{orbits[openOrb][g], orbits[openOrb][g+1]},
+					cols:   []int{orbits[openBase+g], orbits[openBase+g+1]},
 					vals:   []float64{1.0, -1.0},
+					rhs:    0,
+					sense:  GreaterEqual,
 					active: true,
 				})
 			}

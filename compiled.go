@@ -1,8 +1,10 @@
 package goblin
 
 import (
+	"fmt"
 	"math"
-	"sort"
+	"slices"
+	"sync"
 )
 
 // DenseThreshold is the maximum number of variables for which CompiledProblem
@@ -10,14 +12,15 @@ import (
 const DenseThreshold = 256
 
 const (
-	bitsPerWord        = 64
-	wordBitMask        = bitsPerWord - 1
-	simdRowAlign       = 8
-	simdRowAlignMask   = simdRowAlign - 1
-	defaultTouchedCap  = 64
-	maxDenseRowFloats  = 1 << 20
-	minDenseRowCheckMC = 256
-	denseSparsityMult  = 16
+	bitsPerWord         = 64
+	wordBitMask         = bitsPerWord - 1
+	simdRowAlign        = 8
+	simdRowAlignMask    = simdRowAlign - 1
+	defaultTouchedCap   = 64
+	maxDenseRowFloats   = 1 << 20
+	minDenseRowCheckMC  = 32
+	denseSparsityMult   = 5
+	sparseNoDenseStride = -1
 )
 
 // cbcInfinity matches COIN_DBL_MAX (DBL_MAX) used by COIN-OR Clp and Cbc for unbounded sides.
@@ -33,18 +36,63 @@ func clampCBCBound(v float64) float64 {
 	return v
 }
 
+// cbcMatrixData holds lazily constructed 32-bit CSC indices, clamped bounds,
+// and cached matrix validation for zero-copy C++ OsiClpSolverInterface::loadProblem calls.
+type cbcMatrixData struct {
+	colPtr32  []int32
+	rowIdx32  []int32
+	colLBClp  []float64
+	colUBClp  []float64
+	rowLBClp  []float64
+	rowUBClp  []float64
+	intCols32 []int32
+	valid     bool
+}
+
+// compiledLazyCache holds concurrency-safe lazy state shared by a CompiledProblem.
+// Storing it behind a pointer keeps CompiledProblem free of embedded locks so
+// shallow copies (such as zero-objective feasibility probes) never copy sync.Once.
+// scaledLPData stores immutable Ruiz equilibration and column-tolerance metadata
+// computed once per CompiledProblem.
+type scaledLPData struct {
+	mat         *CompiledProblem
+	rowScale    []float64
+	colScale    []float64
+	invColScale []float64
+	colTol      []float64
+	slackTol    []float64
+	colExp      []int
+	colHasEq    []bool
+	objScale    float64
+	scaled      bool
+}
+
+type compiledLazyCache struct {
+	cbc        *cbcMatrixData
+	scaled     *scaledLPData
+	cbcOnce    sync.Once
+	scaledOnce sync.Once
+}
+
+type compiledProblemAlloc struct {
+	lazy compiledLazyCache
+	p    CompiledProblem
+}
+
+func newCompiledProblem() *CompiledProblem {
+	alloc := new(compiledProblemAlloc)
+	alloc.p.lazy = &alloc.lazy
+	return &alloc.p
+}
+
 // CompiledProblem is an immutable, flat matrix layout of an LP or MILP model
 // built for cache locality, SIMD row sweeps, pooled solver workspaces,
 // and zero-copy C++ COIN-OR CBC / OsiClpSolverInterface calls.
 type CompiledProblem struct {
-	name       string
-	sense      Sense
+	lazy       *compiledLazyCache
 	invalidErr error
-	modelID    uint64
-
-	numVars        int
-	numConstraints int
-	isMIP          bool
+	name       string
+	objName    string
 
 	// Variable metadata (length = NumVars)
 	varNames []string
@@ -52,19 +100,14 @@ type CompiledProblem struct {
 	varUB    []float64
 	varCat   []VarCategory
 
-	// Bitmasks for fast integer/binary checks (each uint64 covers 64 variables).
-	binaryMask  []uint64
-	integerMask []uint64
-	intCols     []int   // Indices of all Binary or Integer variables
-	intCols32   []int32 // 32-bit indices for direct C++ CBC setInteger calls
+	// Binary bitmask (each uint64 covers 64 variables) and integer column indices.
+	binaryMask []uint64
+	intCols    []int
 
 	// Normalized objective: the internal solver always minimizes ObjMin[j]*x[j].
 	// Original objective value = Sense * (sum_j ObjMin[j]*x[j]) + ObjConstant.
-	objName        string
-	objCoeffs      []float64 // Original objective coefficients as specified
-	objMin         []float64 // Objective coefficients normalized for minimizing
-	objConstant    float64
-	objConstMinVal float64
+	objCoeffs []float64 // Original objective coefficients as specified
+	objMin    []float64 // Objective coefficients normalized for minimizing
 
 	// Constraint metadata (length = NumConstraints)
 	rowNames []string
@@ -83,26 +126,156 @@ type CompiledProblem struct {
 	rowIdx []int
 	colVal []float64
 
-	// Pre-clamped and 32-bit-indexed CSC arrays for zero-copy C++ OsiClpSolverInterface::loadProblem
-	colPtr32 []int32
-	rowIdx32 []int32
-	colLBClp []float64
-	colUBClp []float64
-	rowLBClp []float64
-	rowUBClp []float64
-
-	// Contiguous SIMD-padded dense rows when NumVars <= DenseThreshold.
-	// RowStride is NumVars rounded up to a multiple of 8 float64s (64 bytes).
-	rowStride int
+	// Contiguous SIMD-padded dense rows when NumVars <= DenseThreshold and density thresholds hold.
 	denseRows []float64
+
+	// Scalar metadata packed at the tail to minimize GC pointer scan span.
+	modelID        uint64
+	objConstant    float64
+	objConstMinVal float64
+	numVars        int
+	numConstraints int
+	rowStride      int
+	sense          Sense
+	isMIP          bool
+}
+
+func denseRowStride(n, mc, nnz int) int {
+	if n <= 0 || n > DenseThreshold || mc <= 0 {
+		return 0
+	}
+	stride := (n + simdRowAlignMask) &^ simdRowAlignMask
+	if mc > maxDenseRowFloats/stride {
+		return 0
+	}
+	if mc > minDenseRowCheckMC && nnz*denseSparsityMult < mc*n {
+		return 0
+	}
+	return stride
+}
+
+func buildCSCFromCSR(p *CompiledProblem) {
+	n := p.numVars
+	mc := p.numConstraints
+	nnz := len(p.colIdx)
+	p.colPtr = make([]int, n+1)
+	p.rowIdx = make([]int, nnz)
+	p.colVal = make([]float64, nnz)
+	if nnz == 0 {
+		return
+	}
+	for _, col := range p.colIdx {
+		p.colPtr[col+1]++
+	}
+	for j := range n {
+		p.colPtr[j+1] += p.colPtr[j]
+	}
+	for i := range mc {
+		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
+			col := p.colIdx[k]
+			pos := p.colPtr[col]
+			p.rowIdx[pos] = i
+			p.colVal[pos] = p.rowVal[k]
+			p.colPtr[col] = pos + 1
+		}
+	}
+	copy(p.colPtr[1:], p.colPtr[:n])
+	p.colPtr[0] = 0
+}
+
+func (p *CompiledProblem) ensureCBCData() *cbcMatrixData {
+	if p == nil {
+		return nil
+	}
+	if p.lazy == nil {
+		return buildCBCMatrixData(p)
+	}
+	p.lazy.cbcOnce.Do(func() {
+		p.lazy.cbc = buildCBCMatrixData(p)
+	})
+	return p.lazy.cbc
+}
+
+func buildCBCMatrixData(p *CompiledProblem) *cbcMatrixData {
+	n := p.numVars
+	m := p.numConstraints
+	if n < 0 || m < 0 || n > math.MaxInt32 || m > math.MaxInt32 {
+		return &cbcMatrixData{}
+	}
+	if len(p.varLB) != n || len(p.varUB) != n || len(p.varCat) != n {
+		return &cbcMatrixData{}
+	}
+	if len(p.rowLB) != m || len(p.rowUB) != m {
+		return &cbcMatrixData{}
+	}
+	if len(p.colPtr) != n+1 || p.colPtr[0] != 0 {
+		return &cbcMatrixData{}
+	}
+	for j := range n {
+		if p.colPtr[j] > p.colPtr[j+1] {
+			return &cbcMatrixData{}
+		}
+	}
+	nnz := p.colPtr[n]
+	if nnz < 0 || nnz > math.MaxInt32 || len(p.rowIdx) != nnz || len(p.colVal) != nnz {
+		return &cbcMatrixData{}
+	}
+	if len(p.intCols) > n {
+		return &cbcMatrixData{}
+	}
+
+	colPtr32 := make([]int32, n+1)
+	for j := range n + 1 {
+		colPtr32[j] = int32(p.colPtr[j])
+	}
+	rowIdx32 := make([]int32, nnz)
+	for k := range nnz {
+		r := p.rowIdx[k]
+		if r < 0 || r >= m {
+			return &cbcMatrixData{}
+		}
+		rowIdx32[k] = int32(r)
+	}
+	colLBClp := make([]float64, n)
+	colUBClp := make([]float64, n)
+	for j := range n {
+		colLBClp[j] = clampCBCBound(p.varLB[j])
+		colUBClp[j] = clampCBCBound(p.varUB[j])
+	}
+	rowLBClp := make([]float64, m)
+	rowUBClp := make([]float64, m)
+	for i := range m {
+		rowLBClp[i] = clampCBCBound(p.rowLB[i])
+		rowUBClp[i] = clampCBCBound(p.rowUB[i])
+	}
+	var intCols32 []int32
+	if len(p.intCols) > 0 {
+		intCols32 = make([]int32, len(p.intCols))
+		for k, col := range p.intCols {
+			if col < 0 || col >= n {
+				return &cbcMatrixData{}
+			}
+			intCols32[k] = int32(col)
+		}
+	}
+	return &cbcMatrixData{
+		colPtr32:  colPtr32,
+		rowIdx32:  rowIdx32,
+		colLBClp:  colLBClp,
+		colUBClp:  colUBClp,
+		rowLBClp:  rowLBClp,
+		rowUBClp:  rowUBClp,
+		intCols32: intCols32,
+		valid:     true,
+	}
 }
 
 // CompileChecked validates the Model and returns a CompiledProblem or the first check error.
 func (m *Model) CompileChecked() (*CompiledProblem, error) {
-	if err := m.Validate(); err != nil {
-		return nil, err
+	if m == nil {
+		return nil, ErrNilModel
 	}
-	return m.compile(nil), nil
+	return m.compile(true)
 }
 
 // Compile transforms a symbolic Model into a flat, canonical CompiledProblem.
@@ -112,12 +285,39 @@ func (m *Model) Compile() *CompiledProblem {
 	if m == nil {
 		return nil
 	}
-	return m.compile(m.Validate())
+	p, _ := m.compile(false)
+	return p
 }
 
-func (m *Model) compile(validatedErr error) *CompiledProblem {
+func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
+	firstErr := m.err
+	if abortOnErr && firstErr != nil {
+		return nil, firstErr
+	}
+
 	n := len(m.vars)
 	mc := len(m.constraints)
+	numInt := 0
+	for j := range n {
+		v := &m.vars[j]
+		if firstErr == nil {
+			if !v.cat.valid() {
+				firstErr = fmt.Errorf("variable %q has invalid category %d", v.name, uint8(v.cat))
+			} else if math.IsNaN(v.lb) || math.IsNaN(v.ub) || math.IsInf(v.lb, 1) || math.IsInf(v.ub, -1) {
+				firstErr = fmt.Errorf("variable %q has invalid bounds [%v, %v]", v.name, v.lb, v.ub)
+			}
+		}
+		if v.cat != Continuous {
+			numInt++
+		}
+	}
+	if firstErr == nil && (math.IsNaN(m.objConst) || math.IsInf(m.objConst, 0)) {
+		firstErr = fmt.Errorf("objective constant is non-finite (%v)", m.objConst)
+	}
+	if abortOnErr && firstErr != nil {
+		return nil, firstErr
+	}
+
 	modelID := m.id
 	if modelID == 0 {
 		modelID = nextModelID.Add(1)
@@ -130,37 +330,34 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 	}
 
 	numWords := (n + wordBitMask) / bitsPerWord
-	p := &CompiledProblem{
-		name:           m.Name(),
-		sense:          sense,
-		invalidErr:     validatedErr,
-		modelID:        modelID,
-		numVars:        n,
-		numConstraints: mc,
-		varNames:       make([]string, n),
-		varLB:          make([]float64, n),
-		varUB:          make([]float64, n),
-		varCat:         make([]VarCategory, n),
-		binaryMask:     make([]uint64, numWords),
-		integerMask:    make([]uint64, numWords),
-		objName:        m.objName,
-		objCoeffs:      make([]float64, n),
-		objMin:         make([]float64, n),
-		objConstant:    m.objConst,
-		objConstMinVal: constMinVal,
-		rowNames:       make([]string, mc),
-		rowSense:       make([]ConstraintSense, mc),
-		rowRHS:         make([]float64, mc),
-		rowLB:          make([]float64, mc),
-		rowUB:          make([]float64, mc),
-		rowPtr:         make([]int, mc+1),
-		colLBClp:       make([]float64, n),
-		colUBClp:       make([]float64, n),
-		rowLBClp:       make([]float64, mc),
-		rowUBClp:       make([]float64, mc),
+	p := newCompiledProblem()
+	p.name = m.Name()
+	p.sense = sense
+	p.modelID = modelID
+	p.numVars = n
+	p.numConstraints = mc
+	p.varNames = make([]string, n)
+	p.varLB = make([]float64, n)
+	p.varUB = make([]float64, n)
+	p.varCat = make([]VarCategory, n)
+	p.binaryMask = make([]uint64, numWords)
+	if numInt > 0 {
+		p.isMIP = true
+		p.intCols = make([]int, 0, numInt)
 	}
+	p.objName = m.objName
+	p.objCoeffs = make([]float64, n)
+	p.objConstant = m.objConst
+	p.objConstMinVal = constMinVal
+	p.rowNames = make([]string, mc)
+	p.rowSense = make([]ConstraintSense, mc)
+	p.rowRHS = make([]float64, mc)
+	p.rowLB = make([]float64, mc)
+	p.rowUB = make([]float64, mc)
+	p.rowPtr = make([]int, mc+1)
 
-	for j, v := range m.vars {
+	for j := range n {
+		v := &m.vars[j]
 		cat := v.cat
 		if cat == Integer && v.lb >= 0 && v.ub <= 1 && v.lb <= v.ub {
 			cat = Binary
@@ -169,78 +366,130 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 		p.varLB[j] = v.lb
 		p.varUB[j] = v.ub
 		p.varCat[j] = cat
-		p.colLBClp[j] = clampCBCBound(v.lb)
-		p.colUBClp[j] = clampCBCBound(v.ub)
 		if cat != Continuous {
-			p.isMIP = true
-			p.integerMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			p.intCols = append(p.intCols, j)
-			if j <= math.MaxInt32 {
-				p.intCols32 = append(p.intCols32, int32(j))
-			}
 			if cat == Binary {
 				p.binaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			}
 		}
 	}
 
-	// Accumulate objective terms, routing any duplicate variable columns through wideDotAcc.
-	objCounts := make([]uint8, n)
-	var objDupCols []int
+	// Accumulate and validate objective terms in a single pass, routing duplicate columns through wideDotAcc.
+	inTouched := make([]uint8, n)
+	touched := make([]int, 0, min(n, defaultTouchedCap))
+	objHasDup := false
 	for _, t := range m.objTerms {
-		if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
-			switch objCounts[col] {
-			case 0:
-				objCounts[col] = 1
-				p.objCoeffs[col] = t.Coeff
-			case 1:
-				objCounts[col] = 2
-				objDupCols = append(objDupCols, col)
+		col, ok := m.validVar(t.Var)
+		if !ok {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("objective references invalid or foreign Var handle %v", t.Var)
+				if abortOnErr {
+					return nil, firstErr
+				}
 			}
+			continue
+		}
+		if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("objective has non-finite coefficient %v", t.Coeff)
+				if abortOnErr {
+					return nil, firstErr
+				}
+			}
+			continue
+		}
+		if t.Coeff == 0 {
+			continue
+		}
+		if inTouched[col] == 0 {
+			inTouched[col] = 1
+			touched = append(touched, col)
+			p.objCoeffs[col] = t.Coeff
+		} else {
+			inTouched[col] = 2
+			objHasDup = true
 		}
 	}
-	for _, col := range objDupCols {
-		var w wideDotAcc
+	if objHasDup {
+		wideMap := make(map[int]*wideDotAcc)
+		for _, col := range touched {
+			if inTouched[col] > 1 {
+				wideMap[col] = &wideDotAcc{}
+			}
+		}
 		for _, t := range m.objTerms {
-			if c, ok := m.validVar(t.Var); ok && c == col && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) {
-				w.addVal(t.Coeff)
+			if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
+				if w, exists := wideMap[col]; exists {
+					w.addVal(t.Coeff)
+				}
 			}
 		}
-		p.objCoeffs[col] = w.finish(math.NaN())
-	}
-	senseSign := 1.0
-	if m.sense == Maximize {
-		senseSign = -1.0
-	}
-	for j := range n {
-		if p.objCoeffs[j] != 0 {
-			p.objMin[j] = senseSign * p.objCoeffs[j]
+		for _, col := range touched {
+			if w, exists := wideMap[col]; exists {
+				val := w.finish(math.NaN())
+				if math.IsNaN(val) || math.IsInf(val, 0) {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
+						if abortOnErr {
+							return nil, firstErr
+						}
+					}
+				}
+				if val == 0 {
+					val = 0
+				}
+				p.objCoeffs[col] = val
+			}
 		}
 	}
-
-	totalNNZ := 0
-	for i := range mc {
-		totalNNZ += len(m.constraints[i].terms)
+	for _, col := range touched {
+		inTouched[col] = 0
 	}
 
-	// If n <= DenseThreshold and total dense footprint stays bounded, allocate SIMD-aligned dense rows.
-	stride := (n + simdRowAlignMask) &^ simdRowAlignMask
-	useDense := n > 0 && n <= DenseThreshold && mc*stride <= maxDenseRowFloats &&
-		(mc <= minDenseRowCheckMC || totalNNZ*denseSparsityMult >= mc*n)
+	if sense == Maximize {
+		p.objMin = make([]float64, n)
+		for j := range n {
+			if c := p.objCoeffs[j]; c != 0 {
+				p.objMin[j] = -c
+			}
+		}
+	} else {
+		p.objMin = p.objCoeffs
+	}
+
+	totalNNZ := len(m.conTerms)
+
+	// Allocate SIMD-aligned dense rows only when dimensions and matrix density justify it.
+	stride := denseRowStride(n, mc, totalNNZ)
+	useDense := stride > 0
 	if useDense {
 		p.rowStride = stride
-		p.denseRows = make([]float64, mc*p.rowStride)
+		p.denseRows = make([]float64, mc*stride)
+	} else if n > 0 && mc > 0 {
+		// Negative sentinel prevents sparse-only matrices from matching len(denseRows)==baseM*rowStride.
+		p.rowStride = sparseNoDenseStride
 	}
 
-	// Scratch buffers for deduplicating terms in each constraint row
+	// Scratch buffers for deduplicating terms in each constraint row.
 	rowAcc := make([]float64, n)
-	touched := make([]int, 0, min(n, defaultTouchedCap))
-	inTouched := make([]uint8, n)
-
 	p.colIdx = make([]int, 0, totalNNZ)
 	p.rowVal = make([]float64, 0, totalNNZ)
 
-	for i, c := range m.constraints {
+	for i := range mc {
+		c := &m.constraints[i]
+		if firstErr == nil {
+			if !c.sense.valid() {
+				firstErr = fmt.Errorf("constraint %q has invalid sense %d", c.name, int8(c.sense))
+				if abortOnErr {
+					return nil, firstErr
+				}
+			} else if math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) {
+				firstErr = fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
+				if abortOnErr {
+					return nil, firstErr
+				}
+			}
+		}
 		p.rowNames[i] = c.name
 		p.rowSense[i] = c.sense
 		p.rowRHS[i] = c.rhs
@@ -256,18 +505,41 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 			p.rowLB[i] = c.rhs
 			p.rowUB[i] = c.rhs
 		}
-		p.rowLBClp[i] = clampCBCBound(p.rowLB[i])
-		p.rowUBClp[i] = clampCBCBound(p.rowUB[i])
 
 		touched = touched[:0]
 		rowHasDup := false
-		for _, t := range c.terms {
+		sorted := true
+		prevCol := -1
+		cTerms := m.conTerms[c.termStart:c.termEnd]
+		for _, t := range cTerms {
 			col, ok := m.validVar(t.Var)
-			if !ok || t.Coeff == 0 || math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+			if !ok {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("constraint %q references invalid or foreign Var handle %v", c.name, t.Var)
+					if abortOnErr {
+						return nil, firstErr
+					}
+				}
+				continue
+			}
+			if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("constraint %q has non-finite coefficient %v", c.name, t.Coeff)
+					if abortOnErr {
+						return nil, firstErr
+					}
+				}
+				continue
+			}
+			if t.Coeff == 0 {
 				continue
 			}
 			if inTouched[col] == 0 {
 				inTouched[col] = 1
+				if col < prevCol {
+					sorted = false
+				}
+				prevCol = col
 				touched = append(touched, col)
 				rowAcc[col] = t.Coeff
 			} else {
@@ -276,19 +548,37 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 			}
 		}
 		if rowHasDup {
+			wideMap := make(map[int]*wideDotAcc)
 			for _, col := range touched {
 				if inTouched[col] > 1 {
-					var w wideDotAcc
-					for _, t := range c.terms {
-						if tc, ok := m.validVar(t.Var); ok && tc == col && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) {
-							w.addVal(t.Coeff)
+					wideMap[col] = &wideDotAcc{}
+				}
+			}
+			for _, t := range cTerms {
+				if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
+					if w, exists := wideMap[col]; exists {
+						w.addVal(t.Coeff)
+					}
+				}
+			}
+			for _, col := range touched {
+				if w, exists := wideMap[col]; exists {
+					val := w.finish(math.NaN())
+					if math.IsNaN(val) || math.IsInf(val, 0) {
+						if firstErr == nil {
+							firstErr = fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
+							if abortOnErr {
+								return nil, firstErr
+							}
 						}
 					}
-					rowAcc[col] = w.finish(math.NaN())
+					rowAcc[col] = val
 				}
 			}
 		}
-		sort.Ints(touched)
+		if !sorted {
+			slices.Sort(touched)
+		}
 
 		p.rowPtr[i] = len(p.colIdx)
 		var denseRow []float64
@@ -310,43 +600,11 @@ func (m *Model) compile(validatedErr error) *CompiledProblem {
 		}
 	}
 	p.rowPtr[mc] = len(p.colIdx)
+	p.invalidErr = firstErr
 
-	// Build CSC (Compressed Sparse Column) transpose from CSR
-	nnz := len(p.colIdx)
-	fit32 := n <= math.MaxInt32 && mc <= math.MaxInt32 && nnz <= math.MaxInt32
-	p.colPtr = make([]int, n+1)
-	p.rowIdx = make([]int, nnz)
-	p.colVal = make([]float64, nnz)
-	if fit32 {
-		p.colPtr32 = make([]int32, n+1)
-		p.rowIdx32 = make([]int32, nnz)
-	}
+	buildCSCFromCSR(p)
 
-	for _, col := range p.colIdx {
-		p.colPtr[col+1]++
-	}
-	for j := range n {
-		p.colPtr[j+1] += p.colPtr[j]
-		if fit32 {
-			p.colPtr32[j+1] = int32(p.colPtr[j+1])
-		}
-	}
-	writePos := make([]int, n)
-	copy(writePos, p.colPtr[:n])
-	for i := range mc {
-		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
-			col := p.colIdx[k]
-			pos := writePos[col]
-			p.rowIdx[pos] = i
-			if fit32 {
-				p.rowIdx32[pos] = int32(i)
-			}
-			p.colVal[pos] = p.rowVal[k]
-			writePos[col]++
-		}
-	}
-
-	return p
+	return p, firstErr
 }
 
 // ObjectiveFromMin converts an internal minimized objective value back to the
@@ -1431,7 +1689,7 @@ func (p *CompiledProblem) ForEachColTerm(j int, fn func(row int, val float64)) {
 
 // RowStride returns the SIMD row stride in float64 elements when dense rows are prebuilt, or 0 otherwise.
 func (p *CompiledProblem) RowStride() int {
-	if p == nil {
+	if p == nil || len(p.denseRows) == 0 {
 		return 0
 	}
 	return p.rowStride
