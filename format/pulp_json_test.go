@@ -3,6 +3,9 @@ package format_test
 import (
 	"bytes"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -233,6 +236,68 @@ func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 	}
 	if !strings.Contains(unusedMPS, "LO BND       infeas_neg_ub") {
 		t.Fatalf("expected explicit LO BND 0 for lb=0, ub=-1:\n%s", unusedMPS)
+	}
+
+	// Reserved 'MARKER' token must be rejected as a variable or row identifier.
+	mMarkerVar := gb.NewModel("mps_marker_var", gb.Minimize)
+	mv := mMarkerVar.AddIntVar("'MARKER'", 0, 1)
+	mMarkerVar.SetObjective(gb.VarExpr(mv))
+	if err := format.WriteMPS(mMarkerVar.Compile(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected WriteMPS error on reserved 'MARKER' variable name")
+	}
+	mMarkerRow := gb.NewModel("mps_marker_row", gb.Minimize)
+	mr := mMarkerRow.AddContVar("x", 0, 1)
+	mMarkerRow.SetObjective(gb.VarExpr(mr))
+	mMarkerRow.AddConstraint("'MARKER'", gb.VarExpr(mr).Le(1))
+	if err := format.WriteMPS(mMarkerRow.Compile(), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected WriteMPS error on reserved 'MARKER' row name")
+	}
+
+	// Conflicting integer bounds (lb > ub) must lower cleanly without emitting invalid UI < LI BOUNDS.
+	mConfInt := gb.NewModel("mps_conf_int", gb.Minimize)
+	xConf := mConfInt.AddIntVar("x_conf", 5, 3)
+	mConfInt.SetObjective(gb.VarExpr(xConf))
+	var confBuf bytes.Buffer
+	if err := format.WriteMPS(mConfInt.Compile(), &confBuf); err != nil {
+		t.Fatalf("WriteMPS conflicting integer bounds failed: %v", err)
+	}
+	if strings.Contains(confBuf.String(), "UI BND       x_conf") {
+		t.Fatalf("WriteMPS emitted invalid UI < LI bound:\n%s", confBuf.String())
+	}
+	cbcBin := filepath.Join("..", "third_party", "Cbc", "dist", "bin", "cbc")
+	if _, err := os.Stat(cbcBin); err == nil {
+		mpsFile := filepath.Join(t.TempDir(), "conf_int.mps")
+		if err := os.WriteFile(mpsFile, confBuf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write temp MPS: %v", err)
+		}
+		out, err := exec.CommandContext(t.Context(), cbcBin, mpsFile, "-solve").CombinedOutput()
+		if err != nil {
+			t.Fatalf("cbc failed on conflicting-bound MPS: %v\n%s", err, string(out))
+		}
+		lowerOut := strings.ToLower(string(out))
+		if strings.Contains(lowerOut, "errors on input") || !strings.Contains(lowerOut, "infeasible") {
+			t.Fatalf("expected clean Infeasible from cbc on conflicting-bound MPS, got:\n%s", string(out))
+		}
+
+		mConfBig := gb.NewModel("mps_conf_big", gb.Minimize)
+		xConfBig := mConfBig.AddContVar("x_big", 1e305, 1e304)
+		mConfBig.SetObjective(gb.VarExpr(xConfBig))
+		var confBigBuf bytes.Buffer
+		if err := format.WriteMPS(mConfBig.Compile(), &confBigBuf); err != nil {
+			t.Fatalf("WriteMPS conflicting 1e305 > 1e304 bounds failed: %v", err)
+		}
+		mpsBigFile := filepath.Join(t.TempDir(), "conf_big.mps")
+		if err := os.WriteFile(mpsBigFile, confBigBuf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write temp big MPS: %v", err)
+		}
+		outBig, err := exec.CommandContext(t.Context(), cbcBin, mpsBigFile, "-solve", "-quit").CombinedOutput()
+		if err != nil {
+			t.Fatalf("cbc failed on conflicting 1e305 > 1e304 MPS: %v\n%s", err, string(outBig))
+		}
+		lowerBig := strings.ToLower(string(outBig))
+		if strings.Contains(lowerBig, "errors on input") || !strings.Contains(lowerBig, "infeasible") {
+			t.Fatalf("expected clean Infeasible from cbc on conflicting 1e305 > 1e304 MPS, got:\n%s", string(outBig))
+		}
 	}
 }
 

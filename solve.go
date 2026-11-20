@@ -342,29 +342,37 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 		return res, nil
 	}
 
+	res := solveCompensatedEngine(ctx, p, opt, BackendGo, start, deadline, done)
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+	}
+	return res, nil
+}
+
+func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options, backend Backend, start, deadline time.Time, done <-chan struct{}) Result {
 	workProb := p
 	if opt.EnablePresolve && p.isMIP {
 		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				return Result{}, err
-			}
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
 		}
 		if preRes.TimedOut {
 			return Result{
 				modelID:   p.modelID,
-				Backend:   BackendGo,
+				Backend:   backend,
 				Status:    StatusTimeLimit,
 				SolveTime: time.Since(start),
-			}, nil
+			}
 		}
 		if preRes.Infeasible {
 			return Result{
 				modelID:   p.modelID,
-				Backend:   BackendGo,
+				Backend:   backend,
 				Status:    StatusInfeasible,
 				SolveTime: time.Since(start),
-			}, nil
+			}
 		}
 		if preRes.Reduced != nil && preRes.Reduced.invalidErr == nil {
 			workProb = preRes.Reduced
@@ -372,10 +380,8 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 	}
 
 	res := solveBranchAndCutWithDone(workProb, opt, start, deadline, done)
-	if ctx != nil {
-		if err := ctx.Err(); err != nil {
-			return Result{}, err
-		}
+	if ctx != nil && ctx.Err() != nil {
+		return Result{}
 	}
 	if workProb != p && len(res.Values) == p.numVars {
 		bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
@@ -387,12 +393,12 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 				if rem <= 0 {
 					return Result{
 						modelID:    p.modelID,
-						Backend:    BackendGo,
+						Backend:    backend,
 						Status:     StatusIterationLimit,
 						Nodes:      res.Nodes,
 						Iterations: res.Iterations,
 						SolveTime:  time.Since(start),
-					}, nil
+					}
 				}
 				fallbackOpt.MaxIter = rem
 			}
@@ -401,28 +407,37 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 				if remNodes <= 0 {
 					return Result{
 						modelID:    p.modelID,
-						Backend:    BackendGo,
+						Backend:    backend,
 						Status:     StatusNodeLimit,
 						Nodes:      res.Nodes,
 						Iterations: res.Iterations,
 						SolveTime:  time.Since(start),
-					}, nil
+					}
 				}
 				fallbackOpt.MaxNodes = remNodes
 			}
 			fbRes := solveBranchAndCutWithDone(p, fallbackOpt, start, deadline, done)
-			if ctx != nil {
-				if err := ctx.Err(); err != nil {
-					return Result{}, err
-				}
+			if ctx != nil && ctx.Err() != nil {
+				return Result{}
 			}
 			fbRes.Nodes += res.Nodes
 			fbRes.Iterations += res.Iterations
-			fbRes.Backend = BackendGo
-			return fbRes, nil
+			fbRes.Backend = backend
+			return fbRes
 		}
 		res.Objective = p.EvaluateObjective(res.Values)
+		if res.Status == StatusOptimal && (math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) || math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0)) {
+			return Result{
+				modelID:    p.modelID,
+				Backend:    backend,
+				Status:     StatusNumericalError,
+				Nodes:      res.Nodes,
+				Iterations: res.Iterations,
+				CutsAdded:  res.CutsAdded,
+				SolveTime:  time.Since(start),
+			}
+		}
 	}
-	res.Backend = BackendGo
-	return res, nil
+	res.Backend = backend
+	return res
 }

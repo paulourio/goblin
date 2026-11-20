@@ -532,9 +532,9 @@ func (m *Model) Validate() error {
 		return fmt.Errorf("objective constant is non-finite (%v)", m.objConst)
 	}
 	acc := make([]float64, len(m.vars))
+	counts := make([]uint8, len(m.vars))
 	touched := make([]int, 0, min(len(m.vars), defaultModelCap))
-	inTouched := make([]bool, len(m.vars))
-	objOverflow := false
+	objHasDup := false
 	for _, t := range m.objTerms {
 		col, ok := m.validVar(t.Var)
 		if !ok {
@@ -543,19 +543,19 @@ func (m *Model) Validate() error {
 		if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
 			return fmt.Errorf("objective has non-finite coefficient %v", t.Coeff)
 		}
-		if !inTouched[col] {
-			inTouched[col] = true
+		if counts[col] == 0 {
+			counts[col] = 1
 			touched = append(touched, col)
-		}
-		acc[col] += t.Coeff
-		if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
-			objOverflow = true
+			acc[col] = t.Coeff
+		} else {
+			counts[col] = 2
+			objHasDup = true
 		}
 	}
-	if objOverflow {
+	if objHasDup {
 		wideMap := make(map[int]*wideDotAcc)
 		for _, col := range touched {
-			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+			if counts[col] > 1 {
 				wideMap[col] = &wideDotAcc{}
 			}
 		}
@@ -568,7 +568,7 @@ func (m *Model) Validate() error {
 		}
 		for _, col := range touched {
 			if w, exists := wideMap[col]; exists {
-				v := w.finish(acc[col])
+				v := w.finish(math.NaN())
 				if math.IsNaN(v) || math.IsInf(v, 0) {
 					return fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
 				}
@@ -577,7 +577,7 @@ func (m *Model) Validate() error {
 	}
 	for _, col := range touched {
 		acc[col] = 0
-		inTouched[col] = false
+		counts[col] = 0
 	}
 	for _, c := range m.constraints {
 		if !c.sense.valid() {
@@ -587,7 +587,7 @@ func (m *Model) Validate() error {
 			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
 		}
 		touched = touched[:0]
-		rowOverflow := false
+		rowHasDup := false
 		for _, t := range c.terms {
 			col, ok := m.validVar(t.Var)
 			if !ok {
@@ -596,19 +596,19 @@ func (m *Model) Validate() error {
 			if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
 				return fmt.Errorf("constraint %q has non-finite coefficient %v", c.name, t.Coeff)
 			}
-			if !inTouched[col] {
-				inTouched[col] = true
+			if counts[col] == 0 {
+				counts[col] = 1
 				touched = append(touched, col)
-			}
-			acc[col] += t.Coeff
-			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
-				rowOverflow = true
+				acc[col] = t.Coeff
+			} else {
+				counts[col] = 2
+				rowHasDup = true
 			}
 		}
-		if rowOverflow {
+		if rowHasDup {
 			wideMap := make(map[int]*wideDotAcc)
 			for _, col := range touched {
-				if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+				if counts[col] > 1 {
 					wideMap[col] = &wideDotAcc{}
 				}
 			}
@@ -621,7 +621,7 @@ func (m *Model) Validate() error {
 			}
 			for _, col := range touched {
 				if w, exists := wideMap[col]; exists {
-					v := w.finish(acc[col])
+					v := w.finish(math.NaN())
 					if math.IsNaN(v) || math.IsInf(v, 0) {
 						return fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
 					}
@@ -630,7 +630,7 @@ func (m *Model) Validate() error {
 		}
 		for _, col := range touched {
 			acc[col] = 0
-			inTouched[col] = false
+			counts[col] = 0
 		}
 	}
 	return nil

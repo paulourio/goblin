@@ -1,5 +1,7 @@
 package goblin
 
+import "math"
+
 // Term represents a single linear term (Coeff * Var).
 type Term struct {
 	Var   Var
@@ -42,10 +44,44 @@ func ConstExpr(c float64) Expr {
 // Sum concatenates all terms and sums the constants of exprs into a single Expr.
 func Sum(exprs ...Expr) Expr {
 	totalTerms := 0
-	constant := 0.0
+	var acc dot2Acc
 	for i := range exprs {
 		totalTerms += len(exprs[i].Terms)
-		constant += exprs[i].Constant
+		acc.addVal(exprs[i].Constant)
+	}
+	var constant float64
+	if val, eb, ok := acc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
+		constant = val
+	} else {
+		hasNaN := false
+		hasPosInf := false
+		hasNegInf := false
+		for i := range exprs {
+			c := exprs[i].Constant
+			if math.IsNaN(c) {
+				hasNaN = true
+				break
+			}
+			if math.IsInf(c, 1) {
+				hasPosInf = true
+			} else if math.IsInf(c, -1) {
+				hasNegInf = true
+			}
+		}
+		switch {
+		case hasNaN || (hasPosInf && hasNegInf):
+			constant = math.NaN()
+		case hasPosInf:
+			constant = math.Inf(1)
+		case hasNegInf:
+			constant = math.Inf(-1)
+		default:
+			var w wideDotAcc
+			for i := range exprs {
+				w.addVal(exprs[i].Constant)
+			}
+			constant = w.finish(math.NaN())
+		}
 	}
 	terms := make([]Term, 0, totalTerms)
 	for i := range exprs {

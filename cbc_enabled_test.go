@@ -3,8 +3,10 @@
 package goblin_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -585,6 +587,774 @@ func TestCBCPeerReviewRegressions(t *testing.T) {
 		}
 		if resTinyMIP.Status == gb.StatusOptimal && (math.Abs(resTinyMIP.Objective - -1e10) > 1e-2 || resTinyMIP.BestBound > -1e10+1e-2) {
 			t.Fatalf("cbc_mip_tiny_obj_1e20 suboptimal: obj=%g bestBound=%g, want -1e10", resTinyMIP.Objective, resTinyMIP.BestBound)
+		}
+	})
+}
+
+// TestCBCPeerReviewV2Regressions covers the v1.0.0 peer-review findings on BackendCBC and CBCLPSolver.
+func TestCBCPeerReviewV2Regressions(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("c1_and_m6_wide_dot_and_bound_non_inversion", func(t *testing.T) {
+		m := gb.NewModel("cbc_wide_dot_1e17", gb.Minimize)
+		x0 := m.AddContVar("x0", 1, 1)
+		x1 := m.AddContVar("x1", 1, 1)
+		z := m.AddIntVar("z", 3, 5)
+		m.SetObjective(gb.NewExpr(x0.T(1e17), x1.T(-1e17), z.T(1)))
+		m.AddConstraint("c", gb.VarExpr(z).Ge(3))
+		p := m.Compile()
+
+		resMIP, err := gb.SolveCompiled(ctx, p, gb.WithCBC())
+		if err != nil || resMIP.Status != gb.StatusOptimal || math.Abs(resMIP.Objective-3.0) > 1e-9 {
+			t.Fatalf("CBC MIP +-1e17 cancel: status=%v obj=%.17g err=%v, want Optimal 3",
+				resMIP.Status, resMIP.Objective, err)
+		}
+		if resMIP.RootLPBound > resMIP.Objective+1e-9 || resMIP.RootCutBound > resMIP.Objective+1e-9 {
+			t.Fatalf("CBC MIP root bounds inverted: rootLP=%.17g rootCut=%.17g > obj=%.17g",
+				resMIP.RootLPBound, resMIP.RootCutBound, resMIP.Objective)
+		}
+
+		clp := gb.NewCBCLPSolver(p)
+		clp.AddCut([]int{2, 2, 2}, []float64{1e17, -1, -1e17}, -4)
+		rClp := clp.Solve()
+		clp.Close()
+		if rClp.Status != gb.StatusOptimal || math.Abs(rClp.Objective-4.0) > 1e-9 {
+			t.Fatalf("CBCLPSolver +-1e17 + dup cut: status=%v obj=%.17g, want Optimal 4",
+				rClp.Status, rClp.Objective)
+		}
+	})
+
+	t.Run("c3_mad_lp_relaxations_optimal_without_false_numerr", func(t *testing.T) {
+		for _, id := range []string{"t2_mad_g3_i9", "t2_mad_g4_i12", "t3_mad_g10_i100"} {
+			rawLines, err := os.ReadFile(filepath.Join("testdata", "corpus", "trials", id+".jsonl"))
+			if err != nil {
+				t.Fatalf("read %s.jsonl: %v", id, err)
+			}
+			for trialIdx, line := range bytes.Split(bytes.TrimSpace(rawLines), []byte("\n")) {
+				doc, err := format.ParsePuLPJSON(line)
+				if err != nil {
+					t.Fatalf("%s trial %d parse: %v", id, trialIdx, err)
+				}
+				mMIP, err := format.BuildModelFromPuLPJSON(doc)
+				if err != nil {
+					t.Fatalf("%s trial %d build MIP: %v", id, trialIdx, err)
+				}
+				pMIP := mMIP.Compile()
+				clp := gb.NewCBCLPSolver(pMIP)
+				rClp := clp.Solve()
+				clp.Close()
+				if rClp.Status != gb.StatusOptimal {
+					t.Fatalf("%s trial %d CBCLPSolver: status=%v, want Optimal", id, trialIdx, rClp.Status)
+				}
+
+				for i := range doc.Variables {
+					doc.Variables[i].Cat = "Continuous"
+				}
+				mLP, err := format.BuildModelFromPuLPJSON(doc)
+				if err != nil {
+					t.Fatalf("%s trial %d build LP: %v", id, trialIdx, err)
+				}
+				resLP, err := gb.SolveCompiled(ctx, mLP.Compile(), gb.WithCBC())
+				if err != nil || resLP.Status != gb.StatusOptimal {
+					t.Fatalf("%s trial %d SolveCompiled(LP, CBC): status=%v err=%v, want Optimal",
+						id, trialIdx, resLP.Status, err)
+				}
+			}
+		}
+	})
+
+	t.Run("c5_verify_cbc_mip_respects_bounded_domain_and_max_iter", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join("testdata", "corpus", "t3_mad_g10_i100.json"))
+		if err != nil {
+			t.Fatalf("read t3_mad_g10_i100.json: %v", err)
+		}
+		doc, err := format.ParsePuLPJSON(raw)
+		if err != nil {
+			t.Fatalf("parse t3_mad_g10_i100.json: %v", err)
+		}
+		m, err := format.BuildModelFromPuLPJSON(doc)
+		if err != nil {
+			t.Fatalf("build t3_mad_g10_i100: %v", err)
+		}
+		// Pure-Go unpresolved Root LP on t3_mad_g10_i100 requires >1000 pivots; CBC finishes
+		// in <500 simplex iterations and must not run an unbudgeted pure-Go LP on this bounded MIP.
+		res, err := gb.SolveCompiled(ctx, m.Compile(), gb.WithCBC(), gb.WithMaxIter(500))
+		if err != nil {
+			t.Fatalf("t3_mad_g10_i100 CBC WithMaxIter(500) err: %v", err)
+		}
+		if res.Status != gb.StatusOptimal || res.Iterations > 500 {
+			t.Fatalf("t3_mad_g10_i100 CBC WithMaxIter(500): status=%v iters=%d, want Optimal <=500",
+				res.Status, res.Iterations)
+		}
+	})
+
+	t.Run("c6_multirow_tiny_coeff_aggregate_drift", func(t *testing.T) {
+		// 20 columns with |a_ij| = 1e-19 at x_j = 1e10 each contribute 1e-9 (< 1e-8 individually),
+		// but sum to 2e-8 (>= 1e-8 aggregate row violation when Clp drops |a| <= 1e-18).
+		m := gb.NewModel("cbc_tiny_row_sum", gb.Minimize)
+		y := m.AddContVar("y", 0, 10)
+		row := gb.NewExpr(y.T(1))
+		for k := range 20 {
+			xk := m.AddContVar(fmt.Sprintf("x_%d", k), 1e10, 1e10)
+			row = row.AddTerm(xk, -1e-19)
+		}
+		m.SetObjective(gb.VarExpr(y))
+		m.AddConstraint("sum_tiny", row.Ge(1.0))
+		p := m.Compile()
+
+		res, err := gb.SolveCompiled(ctx, p, gb.WithCBC())
+		if err != nil || res.Status != gb.StatusNumericalError {
+			t.Fatalf("SolveCompiled multi-col tiny row sum: status=%v err=%v, want NumericalError", res.Status, err)
+		}
+		clp := gb.NewCBCLPSolver(p)
+		rClp := clp.Solve()
+		clp.Close()
+		if rClp.Status != gb.StatusNumericalError {
+			t.Fatalf("CBCLPSolver multi-col tiny row sum: status=%v, want NumericalError", rClp.Status)
+		}
+	})
+
+	t.Run("c7_multiscale_and_negative_extreme_mip_objectives", func(t *testing.T) {
+		// Multi-scale objective (1e60 + 1e-295) cannot be rescaled without Clp cutoff overflow or underflow.
+		mMulti := gb.NewModel("cbc_multiscale_mip", gb.Minimize)
+		xBig := mMulti.AddBinaryVar("x_big")
+		xTiny := mMulti.AddBinaryVar("x_tiny")
+		mMulti.SetObjective(gb.NewExpr(xBig.T(1e60), xTiny.T(1e-295)))
+		mMulti.AddConstraint("c", gb.NewExpr(xBig.T(1), xTiny.T(1)).Ge(1))
+		resMulti, err := mMulti.Solve(ctx, gb.WithCBC())
+		if err != nil || resMulti.Status != gb.StatusNumericalError {
+			t.Fatalf("multiscale MIP: status=%v err=%v, want NumericalError", resMulti.Status, err)
+		}
+
+		// Maximize 1e54*x (internal Minimize -1e54*x) must not return false StatusInfeasible.
+		mNeg := gb.NewModel("cbc_max_1e54_mip", gb.Maximize)
+		xNeg := mNeg.AddIntVar("x", 0, 2)
+		mNeg.SetObjective(gb.NewExpr(xNeg.T(1e54)))
+		mNeg.AddConstraint("c", gb.VarExpr(xNeg).Le(2))
+		resNeg, err := mNeg.Solve(ctx, gb.WithCBC())
+		if err != nil {
+			t.Fatalf("max 1e54 MIP err: %v", err)
+		}
+		if resNeg.Status != gb.StatusOptimal && resNeg.Status != gb.StatusNumericalError {
+			t.Fatalf("max 1e54 MIP: status=%v, want Optimal or NumericalError (never Infeasible)", resNeg.Status)
+		}
+		if resNeg.Status == gb.StatusOptimal && math.Abs(resNeg.Objective-2e54) > 1e42 {
+			t.Fatalf("max 1e54 MIP: obj=%g, want 2e54", resNeg.Objective)
+		}
+	})
+
+	t.Run("m2_cbc_objective_overflow_and_unconstrained_mip_nil_duals", func(t *testing.T) {
+		mConst := gb.NewModel("cbc_const_overflow", gb.Minimize)
+		xc := mConst.AddIntVar("x", 1, 1)
+		mConst.SetObjective(gb.NewExpr(xc.T(1e308)).AddConstant(1e308))
+		mConst.AddConstraint("c", gb.VarExpr(xc).Ge(1))
+		resConst, err := mConst.Solve(ctx, gb.WithCBC())
+		if err != nil || resConst.Status != gb.StatusNumericalError {
+			t.Fatalf("CBC ObjConstant overflow: status=%v obj=%v err=%v, want NumericalError",
+				resConst.Status, resConst.Objective, err)
+		}
+
+		mUnc := gb.NewModel("cbc_unc_mip_overflow", gb.Minimize)
+		xu := mUnc.AddIntVar("x", 1e200, 1e200)
+		mUnc.SetObjective(gb.NewExpr(xu.T(-1e200)))
+		resUnc, err := mUnc.Solve(ctx, gb.WithCBC())
+		if err != nil || resUnc.Status != gb.StatusNumericalError {
+			t.Fatalf("CBC unconstrained MIP overflow: status=%v err=%v, want NumericalError", resUnc.Status, err)
+		}
+		if resUnc.Duals != nil || resUnc.ReducedCosts != nil {
+			t.Fatalf("CBC unconstrained MIP returned non-nil Duals=%v ReducedCosts=%v",
+				resUnc.Duals, resUnc.ReducedCosts)
+		}
+	})
+
+	t.Run("cbc_residual_fixed_tiny_obj_and_extreme_finite_bounds", func(t *testing.T) {
+		wantLo := math.Ldexp(1, -970)
+		mLo := gb.NewModel("cbc_lo_after_hi_mid_cancel", gb.Minimize)
+		lx0 := mLo.AddContVar("x0", 1, 1)
+		lx1 := mLo.AddContVar("x1", 1, 1)
+		lx2 := mLo.AddContVar("x2", 1, 1)
+		lx3 := mLo.AddContVar("x3", 1, 1)
+		lx4 := mLo.AddContVar("x4", 1, 1)
+		lx5 := mLo.AddContVar("x5", math.Ldexp(1, -485), math.Ldexp(1, -485))
+		mLo.SetObjective(gb.NewExpr(
+			lx0.T(math.Ldexp(1, 960)),
+			lx1.T(-math.Ldexp(1, 958)),
+			lx2.T(-math.Ldexp(1, 958)),
+			lx3.T(-math.Ldexp(1, 958)),
+			lx4.T(-math.Ldexp(1, 958)),
+			lx5.T(math.Ldexp(1, -485)),
+		))
+		mLo.AddConstraint("r", gb.VarExpr(lx1).Ge(1))
+		resLo, err := mLo.Solve(ctx, gb.WithCBC())
+		if err != nil || resLo.Status != gb.StatusOptimal || resLo.Objective != wantLo {
+			t.Fatalf("cbc_lo_after_hi_mid_cancel: status=%v obj=%g err=%v, want Optimal %g",
+				resLo.Status, resLo.Objective, err, wantLo)
+		}
+
+		mRHS := gb.NewModel("cbc_rhs_cancel_1e17", gb.Maximize)
+		rx0 := mRHS.AddContVar("x0", 1e17, 1e17)
+		rz := mRHS.AddBinaryVar("z")
+		mRHS.SetObjective(gb.VarExpr(rz))
+		mRHS.AddConstraint("c", gb.NewExpr(rx0.T(1), rz.T(7)).Le(1e17))
+		resRHS, err := mRHS.Solve(ctx, gb.WithCBC(), gb.WithPresolve(false))
+		if err != nil || (resRHS.Status != gb.StatusNumericalError && (resRHS.Status != gb.StatusOptimal || math.Abs(resRHS.Objective) > 1e-9)) {
+			t.Fatalf("cbc_rhs_cancel_1e17: status=%v obj=%g err=%v, want NumericalError or Optimal 0",
+				resRHS.Status, resRHS.Objective, err)
+		}
+
+		mFixedTiny := gb.NewModel("cbc_tiny_obj_fixed_col", gb.Minimize)
+		fx0 := mFixedTiny.AddContVar("x0", 1e25, 1e25)
+		fb0 := mFixedTiny.AddBinaryVar("b0")
+		fb1 := mFixedTiny.AddBinaryVar("b1")
+		fb2 := mFixedTiny.AddBinaryVar("b2")
+		mFixedTiny.SetObjective(gb.NewExpr(fx0.T(1e-20), fb0.T(10), fb1.T(10), fb2.T(10)))
+		mFixedTiny.AddConstraint("c", gb.NewExpr(fb0.T(1), fb1.T(1), fb2.T(1)).Ge(2))
+		resFT, err := mFixedTiny.Solve(ctx, gb.WithCBC())
+		if err != nil || resFT.Status != gb.StatusNumericalError {
+			t.Fatalf("cbc_tiny_obj_fixed_col: status=%v obj=%g bound=%g err=%v, want NumericalError",
+				resFT.Status, resFT.Objective, resFT.BestBound, err)
+		}
+
+		mExt := gb.NewModel("cbc_finite_bnd_1e35", gb.Minimize)
+		ex := mExt.AddContVar("x", 1e35, 2e35)
+		ey := mExt.AddBinaryVar("y")
+		mExt.SetObjective(gb.VarExpr(ey))
+		mExt.AddConstraint("c", gb.NewExpr(ex.T(1), ey.T(1)).Ge(1e35))
+		pExt := mExt.Compile()
+		resExt, err := gb.SolveCompiled(ctx, pExt, gb.WithCBC())
+		if err != nil || resExt.Status != gb.StatusNumericalError {
+			t.Fatalf("cbc_finite_bnd_1e35: status=%v err=%v, want NumericalError", resExt.Status, err)
+		}
+		clpExt := gb.NewCBCLPSolver(pExt)
+		rClpExt := clpExt.Solve()
+		clpExt.Close()
+		if rClpExt.Status != gb.StatusNumericalError {
+			t.Fatalf("CBCLPSolver finite_bnd_1e35: status=%v, want NumericalError", rClpExt.Status)
+		}
+
+		mIntTiny := gb.NewModel("cbc_inf_int_tiny_coupled", gb.Minimize)
+		ix1 := mIntTiny.AddIntVar("x1", 0, math.Inf(1))
+		ix2 := mIntTiny.AddIntVar("x2", 0, math.Inf(1))
+		ib1 := mIntTiny.AddBinaryVar("b1")
+		iz := mIntTiny.AddBinaryVar("z")
+		mIntTiny.SetObjective(gb.NewExpr(iz.T(1000)))
+		mIntTiny.AddConstraint("c1", gb.NewExpr(iz.T(1), ib1.T(1)).Ge(1))
+		mIntTiny.AddConstraint("c2", gb.NewExpr(ib1.T(1), ix1.T(-1.5e-16), ix2.T(-1e-16)).Le(0))
+		mIntTiny.AddConstraint("c3", gb.NewExpr(ix1.T(1), ix2.T(-1)).Eq(0))
+		resIT, err := mIntTiny.Solve(ctx, gb.WithCBC(), gb.WithPresolve(false))
+		if err != nil || (resIT.Status != gb.StatusNumericalError && (resIT.Status != gb.StatusOptimal || math.Abs(resIT.Objective) > 1e-6)) {
+			t.Fatalf("cbc_inf_int_tiny_coupled: status=%v obj=%g bound=%g err=%v, want NumericalError or Optimal 0",
+				resIT.Status, resIT.Objective, resIT.BestBound, err)
+		}
+	})
+
+	t.Run("c1_cbc_row_and_objective_cancellation_models", func(t *testing.T) {
+		cbcVariants := []struct {
+			name string
+			opts []gb.Option
+		}{
+			{"default", []gb.Option{gb.WithCBC()}},
+			{"no-presolve", []gb.Option{gb.WithCBC(), gb.WithPresolve(false)}},
+			{"bare-no-presolve", []gb.Option{gb.WithCBC(), gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false)}},
+		}
+		checkCBCOptimal := func(t *testing.T, label string, p *gb.CompiledProblem, res gb.Result, want float64) {
+			t.Helper()
+			if res.Backend != gb.BackendCBC {
+				t.Fatalf("%s: backend=%v, want BackendCBC", label, res.Backend)
+			}
+			if res.Status != gb.StatusOptimal {
+				t.Fatalf("%s: status=%v (obj=%.6f bound=%.6f), want Optimal %.6f",
+					label, res.Status, res.Objective, res.BestBound, want)
+			}
+			if rel := math.Abs(res.Objective-want) / max(1.0, math.Abs(want)); rel > 1e-6 {
+				t.Fatalf("%s: objective=%.8f, want %.8f (rel=%.2e)", label, res.Objective, want, rel)
+			}
+			bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
+			if bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
+				t.Fatalf("%s: violation bound=%.2e row=%.2e int=%.2e", label, bV, rV, iV)
+			}
+			boundTol := 1e-6 * max(1.0, math.Abs(res.Objective))
+			if (p.Sense() == gb.Minimize && res.BestBound > res.Objective+boundTol) ||
+				(p.Sense() == gb.Maximize && res.BestBound < res.Objective-boundTol) {
+				t.Fatalf("%s: BestBound %.8f violates objective %.8f", label, res.BestBound, res.Objective)
+			}
+		}
+
+		// 1. c1_false_infeas (MIP and LP + CBCLPSolver) plus infeasible negative control.
+		for _, isMIP := range []bool{true, false} {
+			m := gb.NewModel("c1_false_infeas", gb.Minimize)
+			sp := m.AddContVar("s_pos", 1e17, 1e17)
+			sm := m.AddContVar("s_mid", 9, 9)
+			sn := m.AddContVar("s_neg", 1e17, 1e17)
+			var z gb.Var
+			if isMIP {
+				z = m.AddBinaryVar("z")
+			} else {
+				z = m.AddContVar("z", 0, 1)
+			}
+			m.SetObjective(gb.VarExpr(z))
+			m.AddConstraint("eq", gb.NewExpr(sp.T(1), sm.T(1), sn.T(-1)).Eq(9))
+			p := m.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_false_infeas(mip=%v)/%s err: %v", isMIP, v.name, err)
+				}
+				checkCBCOptimal(t, fmt.Sprintf("c1_false_infeas(mip=%v)/%s", isMIP, v.name), p, res, 0.0)
+			}
+			clp := gb.NewCBCLPSolver(p)
+			rClp := clp.Solve()
+			clp.Close()
+			if rClp.Status != gb.StatusOptimal || math.Abs(rClp.Objective) > 1e-9 {
+				t.Fatalf("c1_false_infeas(mip=%v) CBCLPSolver: status=%v obj=%g, want Optimal 0",
+					isMIP, rClp.Status, rClp.Objective)
+			}
+
+			// Negative control: exact LHS = 9 != RHS = 10 must return StatusInfeasible.
+			mInf := gb.NewModel("c1_true_infeas_ctrl", gb.Minimize)
+			isp := mInf.AddContVar("s_pos", 1e17, 1e17)
+			ism := mInf.AddContVar("s_mid", 9, 9)
+			isn := mInf.AddContVar("s_neg", 1e17, 1e17)
+			var iz gb.Var
+			if isMIP {
+				iz = mInf.AddBinaryVar("z")
+			} else {
+				iz = mInf.AddContVar("z", 0, 1)
+			}
+			mInf.SetObjective(gb.VarExpr(iz))
+			mInf.AddConstraint("eq", gb.NewExpr(isp.T(1), ism.T(1), isn.T(-1)).Eq(10))
+			pInf := mInf.Compile()
+			for _, v := range cbcVariants {
+				resInf, err := gb.SolveCompiled(ctx, pInf, v.opts...)
+				if err != nil || resInf.Status != gb.StatusInfeasible {
+					t.Fatalf("c1_true_infeas_ctrl(mip=%v)/%s: status=%v err=%v, want Infeasible",
+						isMIP, v.name, resInf.Status, err)
+				}
+			}
+			clpInf := gb.NewCBCLPSolver(pInf)
+			rInf := clpInf.Solve()
+			clpInf.Close()
+			if rInf.Status != gb.StatusInfeasible {
+				t.Fatalf("c1_true_infeas_ctrl(mip=%v) CBCLPSolver: status=%v, want Infeasible", isMIP, rInf.Status)
+			}
+		}
+
+		// 2. crit2b_sparse_row (2^57*x0 + x1 - 2^57*x2 + y <= 20, exact 17 + y <= 20 -> 0).
+		{
+			c57 := math.Ldexp(1, 57)
+			m := gb.NewModel("crit2b_sparse_row", gb.Minimize)
+			x0 := m.AddContVar("x0", 1, 1)
+			x1 := m.AddContVar("x1", 17, 17)
+			x2 := m.AddContVar("x2", 1, 1)
+			y := m.AddBinaryVar("y")
+			m.SetObjective(gb.VarExpr(y))
+			m.AddConstraint("le", gb.NewExpr(x0.T(c57), x1.T(1), x2.T(-c57), y.T(1)).Le(20))
+			p := m.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p, v.opts...)
+				if err != nil {
+					t.Fatalf("crit2b_sparse_row/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "crit2b_sparse_row/"+v.name, p, res, 0.0)
+			}
+			clp := gb.NewCBCLPSolver(p)
+			rClp := clp.Solve()
+			clp.Close()
+			if rClp.Status != gb.StatusOptimal || math.Abs(rClp.Objective) > 1e-9 {
+				t.Fatalf("crit2b_sparse_row CBCLPSolver: status=%v obj=%g, want Optimal 0", rClp.Status, rClp.Objective)
+			}
+		}
+
+		// 3. c1_false_opt across all column declaration orders (s_pos + 7*z - s_neg <= 0 -> 0).
+		for _, ord := range []string{"sp_z_sn", "z_sp_sn", "sn_z_sp", "sp_sn_z"} {
+			m := gb.NewModel("c1_false_opt_"+ord, gb.Maximize)
+			var sp, sn, z gb.Var
+			switch ord {
+			case "sp_z_sn":
+				sp = m.AddContVar("s_pos", 1e17, 1e17)
+				z = m.AddBinaryVar("z")
+				sn = m.AddContVar("s_neg", 1e17, 1e17)
+			case "z_sp_sn":
+				z = m.AddBinaryVar("z")
+				sp = m.AddContVar("s_pos", 1e17, 1e17)
+				sn = m.AddContVar("s_neg", 1e17, 1e17)
+			case "sn_z_sp":
+				sn = m.AddContVar("s_neg", 1e17, 1e17)
+				z = m.AddBinaryVar("z")
+				sp = m.AddContVar("s_pos", 1e17, 1e17)
+			case "sp_sn_z":
+				sp = m.AddContVar("s_pos", 1e17, 1e17)
+				sn = m.AddContVar("s_neg", 1e17, 1e17)
+				z = m.AddBinaryVar("z")
+			}
+			m.SetObjective(gb.VarExpr(z))
+			m.AddConstraint("le", gb.NewExpr(sp.T(1), z.T(7), sn.T(-1)).Le(0))
+			p := m.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_false_opt_%s/%s err: %v", ord, v.name, err)
+				}
+				checkCBCOptimal(t, "c1_false_opt_"+ord+"/"+v.name, p, res, 0.0)
+			}
+			clp := gb.NewCBCLPSolver(p)
+			rClp := clp.Solve()
+			clp.Close()
+			if rClp.Status != gb.StatusOptimal || math.Abs(rClp.Objective) > 1e-9 {
+				t.Fatalf("c1_false_opt_%s CBCLPSolver: status=%v obj=%g, want Optimal 0",
+					ord, rClp.Status, rClp.Objective)
+			}
+		}
+
+		// 4. c1_bin_cancel (unique global optimum y=1, w=0, Objective=-23, BestBound=-23, RootLPBound=-33.8).
+		{
+			c57 := math.Ldexp(1, 57)
+			m := gb.NewModel("c1_bin_cancel", gb.Minimize)
+			x0 := m.AddContVar("x0", 1, 2)
+			x1 := m.AddContVar("x1", 0, 17)
+			x2 := m.AddContVar("x2", 1, 2)
+			u := m.AddContVar("u", 0, 3)
+			y := m.AddBinaryVar("y")
+			w := m.AddBinaryVar("w")
+			m.SetObjective(gb.NewExpr(x0.T(c57), x1.T(1), x2.T(-c57), u.T(100), y.T(-40), w.T(-20)))
+			m.AddConstraint("eq_x", gb.NewExpr(x0.T(1), x2.T(-1)).Eq(0))
+			m.AddConstraint("ub_x0", gb.VarExpr(x0).Le(1))
+			m.AddConstraint("eq_x1", gb.NewExpr(x1.T(1), y.T(-17)).Eq(0))
+			m.AddConstraint("cap", gb.NewExpr(y.T(5), w.T(2), u.T(1)).Le(5))
+			p := m.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_bin_cancel/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_bin_cancel/"+v.name, p, res, -23.0)
+				if math.Abs(res.BestBound - -23.0) > 1e-6 {
+					t.Fatalf("c1_bin_cancel/%s BestBound=%.6f, want -23.0", v.name, res.BestBound)
+				}
+				if math.Abs(res.RootLPBound - -33.8) > 1e-5 {
+					t.Fatalf("c1_bin_cancel/%s RootLPBound=%.6f, want -33.8", v.name, res.RootLPBound)
+				}
+				if math.Abs(res.Value(y)-1.0) > 1e-6 || math.Abs(res.Value(w)) > 1e-6 {
+					t.Fatalf("c1_bin_cancel/%s got y=%g w=%g, want y=1 w=0", v.name, res.Value(y), res.Value(w))
+				}
+			}
+		}
+
+		// 5. Semi-infinite integer + non-unit equality + conditional inequality + CBCLPSolver warm resolves.
+		{
+			mKT := gb.NewModel("c1_killer_tighten", gb.Minimize)
+			sp := mKT.AddContVar("s_pos", 1e17, 1e17)
+			c9 := mKT.AddContVar("c9", 9, 9)
+			sn := mKT.AddContVar("s_neg", 1e17, 1e17)
+			z := mKT.AddBinaryVar("z")
+			x := mKT.AddIntVar("x", 0, math.Inf(1))
+			mKT.SetObjective(gb.NewExpr(sp.T(1), c9.T(1), sn.T(-1), z.T(7), x.T(2)))
+			mKT.AddConstraint("dem", gb.NewExpr(x.T(1), z.T(5)).Ge(5))
+			pKT := mKT.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pKT, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_killer_tighten/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_killer_tighten/"+v.name, pKT, res, 16.0)
+				if math.Abs(res.BestBound-16.0) > 1e-6 {
+					t.Fatalf("c1_killer_tighten/%s BestBound=%.6f, want 16.0", v.name, res.BestBound)
+				}
+			}
+
+			k55 := math.Ldexp(1, 55)
+			mNU := gb.NewModel("c1_nonunit_eq_obj", gb.Minimize)
+			nx0 := mNU.AddIntVar("x0", 2, 4)
+			nx1 := mNU.AddContVar("x1", 0, 17)
+			nx2 := mNU.AddIntVar("x2", 1, 5)
+			nx3 := mNU.AddIntVar("x3", 1, 5)
+			nu := mNU.AddContVar("u", 0, 3)
+			ny := mNU.AddBinaryVar("y")
+			nw := mNU.AddBinaryVar("w")
+			mNU.SetObjective(gb.NewExpr(nx0.T(3*k55), nx1.T(1), nx2.T(-2*k55), nx3.T(-4*k55), nu.T(100), ny.T(-40), nw.T(-20)))
+			mNU.AddConstraint("eq_x", gb.NewExpr(nx0.T(3), nx2.T(-2), nx3.T(-4)).Eq(0))
+			mNU.AddConstraint("eq_x1", gb.NewExpr(nx1.T(1), ny.T(-17)).Eq(0))
+			mNU.AddConstraint("cap", gb.NewExpr(ny.T(5), nw.T(2), nu.T(1)).Le(5))
+			pNU := mNU.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pNU, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_nonunit_eq_obj/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_nonunit_eq_obj/"+v.name, pNU, res, -23.0)
+				if math.Abs(res.BestBound - -23.0) > 1e-6 {
+					t.Fatalf("c1_nonunit_eq_obj/%s BestBound=%.6f, want -23.0", v.name, res.BestBound)
+				}
+			}
+
+			c57 := math.Ldexp(1, 57)
+			mCond := gb.NewModel("c1_cond_ineq_cancel", gb.Minimize)
+			cx0 := mCond.AddContVar("x0", 1, 2)
+			cx1 := mCond.AddContVar("x1", 0, 17)
+			cx2 := mCond.AddContVar("x2", 1, 2)
+			cz0 := mCond.AddBinaryVar("z0")
+			cu := mCond.AddContVar("u", 0, 3)
+			cy := mCond.AddBinaryVar("y")
+			cw := mCond.AddBinaryVar("w")
+			mCond.SetObjective(gb.NewExpr(cx0.T(c57), cx1.T(1), cx2.T(-c57), cz0.T(1000), cu.T(100), cy.T(-40), cw.T(-20)))
+			mCond.AddConstraint("ge_x0", gb.NewExpr(cx2.T(1), cx0.T(-1)).Le(0))
+			mCond.AddConstraint("le_diff", gb.NewExpr(cx0.T(1), cx2.T(-1), cz0.T(-1)).Le(0))
+			mCond.AddConstraint("sum_z0", gb.NewExpr(cx0.T(1), cx2.T(1), cz0.T(-2)).Le(2))
+			mCond.AddConstraint("eq_x1", gb.NewExpr(cx1.T(1), cy.T(-17)).Eq(0))
+			mCond.AddConstraint("cap", gb.NewExpr(cy.T(5), cw.T(2), cu.T(1)).Le(5))
+			pCond := mCond.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pCond, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_cond_ineq_cancel/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_cond_ineq_cancel/"+v.name, pCond, res, -23.0)
+			}
+
+			mDyn := gb.NewModel("c1_cbc_lp_dynamic_bounds", gb.Minimize)
+			dsp := mDyn.AddContVar("s_pos", 0, 2e17)
+			dsm := mDyn.AddContVar("s_mid", 0, 20)
+			dsn := mDyn.AddContVar("s_neg", 0, 2e17)
+			dz := mDyn.AddContVar("z", 0, 10)
+			mDyn.SetObjective(gb.VarExpr(dz))
+			mDyn.AddConstraint("eq", gb.NewExpr(dsp.T(1), dsm.T(1), dsn.T(-1)).Eq(9))
+			clpDyn := gb.NewCBCLPSolver(mDyn.Compile())
+			defer clpDyn.Close()
+			if r0 := clpDyn.Solve(); r0.Status != gb.StatusOptimal || math.Abs(r0.Objective) > 1e-9 {
+				t.Fatalf("c1_cbc_lp_dynamic_bounds initial: status=%v obj=%g, want Optimal 0", r0.Status, r0.Objective)
+			}
+			clpDyn.SetStructuralBounds([]float64{1e17, 9, 1e17, 0}, []float64{1e17, 9, 1e17, 10})
+			if r1 := clpDyn.Solve(); r1.Status != gb.StatusOptimal || math.Abs(r1.Objective) > 1e-9 {
+				t.Fatalf("c1_cbc_lp_dynamic_bounds fixed 1e17: status=%v obj=%g, want Optimal 0", r1.Status, r1.Objective)
+			}
+			clpDyn.AddCut([]int{0, 2, 3}, []float64{1, -1, -1}, -3)
+			if r2 := clpDyn.Solve(); r2.Status != gb.StatusOptimal || math.Abs(r2.Objective-3.0) > 1e-9 {
+				t.Fatalf("c1_cbc_lp_dynamic_bounds after cut: status=%v obj=%g, want Optimal 3", r2.Status, r2.Objective)
+			}
+			clpDyn.SetStructuralBounds([]float64{0, 0, 0, 0}, []float64{10, 20, 10, 10})
+			if r3 := clpDyn.Solve(); r3.Status != gb.StatusOptimal || math.Abs(r3.Objective) > 1e-9 {
+				t.Fatalf("c1_cbc_lp_dynamic_bounds unfixed: status=%v obj=%g, want Optimal 0", r3.Status, r3.Objective)
+			}
+		}
+
+		// 6. Implied [0, +Inf) scale cancellation, ObjConstant cancellation, multi-hop and >16-col RREF equalities.
+		{
+			for _, isMIP := range []bool{true, false} {
+				mInf := gb.NewModel("c1_inf_implied_row_cancel", gb.Minimize)
+				sp := mInf.AddContVar("s_pos", 0, math.Inf(1))
+				sm := mInf.AddContVar("s_mid", 9, 9)
+				sn := mInf.AddContVar("s_neg", 0, math.Inf(1))
+				var z gb.Var
+				if isMIP {
+					z = mInf.AddBinaryVar("z")
+				} else {
+					z = mInf.AddContVar("z", 0, 1)
+				}
+				mInf.SetObjective(gb.VarExpr(z))
+				mInf.AddConstraint("c_sp", gb.VarExpr(sp).Eq(1e17))
+				mInf.AddConstraint("c_sn", gb.VarExpr(sn).Eq(1e17))
+				mInf.AddConstraint("eq", gb.NewExpr(sp.T(1), sm.T(1), sn.T(-1)).Eq(9))
+				pInf := mInf.Compile()
+				for _, v := range cbcVariants {
+					res, err := gb.SolveCompiled(ctx, pInf, v.opts...)
+					if err != nil {
+						t.Fatalf("c1_inf_implied_row_cancel(mip=%v)/%s err: %v", isMIP, v.name, err)
+					}
+					checkCBCOptimal(t, fmt.Sprintf("c1_inf_implied_row_cancel(mip=%v)/%s", isMIP, v.name), pInf, res, 0.0)
+				}
+				clp := gb.NewCBCLPSolver(pInf)
+				rClp := clp.Solve()
+				clp.Close()
+				if rClp.Status != gb.StatusOptimal || math.Abs(rClp.Objective) > 1e-9 {
+					t.Fatalf("c1_inf_implied_row_cancel(mip=%v) CBCLPSolver: status=%v obj=%g, want Optimal 0",
+						isMIP, rClp.Status, rClp.Objective)
+				}
+			}
+
+			c57 := math.Ldexp(1, 57)
+			mInfObj := gb.NewModel("c1_inf_implied_obj_cancel", gb.Minimize)
+			ix0 := mInfObj.AddContVar("x0", 0, math.Inf(1))
+			ix1 := mInfObj.AddContVar("x1", 0, 17)
+			ix2 := mInfObj.AddContVar("x2", 0, math.Inf(1))
+			iu := mInfObj.AddContVar("u", 0, 3)
+			iy := mInfObj.AddBinaryVar("y")
+			iw := mInfObj.AddBinaryVar("w")
+			mInfObj.SetObjective(gb.NewExpr(ix0.T(1), ix1.T(1), ix2.T(-1), iu.T(100), iy.T(-40), iw.T(-20)))
+			mInfObj.AddConstraint("lb_x0", gb.VarExpr(ix0).Ge(c57))
+			mInfObj.AddConstraint("ub_x0", gb.VarExpr(ix0).Le(c57))
+			mInfObj.AddConstraint("eq_x", gb.NewExpr(ix0.T(1), ix2.T(-1)).Eq(0))
+			mInfObj.AddConstraint("eq_x1", gb.NewExpr(ix1.T(1), iy.T(-17)).Eq(0))
+			mInfObj.AddConstraint("cap", gb.NewExpr(iy.T(5), iw.T(2), iu.T(1)).Le(5))
+			pInfObj := mInfObj.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pInfObj, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_inf_implied_obj_cancel/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_inf_implied_obj_cancel/"+v.name, pInfObj, res, -23.0)
+			}
+
+			mLPRHS := gb.NewModel("c1_lp_rhs_nonfixed_bound", gb.Maximize)
+			rx0 := mLPRHS.AddContVar("x0", 1e17, 2e17)
+			rz := mLPRHS.AddContVar("z", 0, 1)
+			mLPRHS.SetObjective(gb.VarExpr(rz))
+			mLPRHS.AddConstraint("le", gb.NewExpr(rx0.T(1), rz.T(7)).Le(1e17))
+			pLPRHS := mLPRHS.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pLPRHS, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_lp_rhs_nonfixed_bound/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_lp_rhs_nonfixed_bound/"+v.name, pLPRHS, res, 0.0)
+			}
+			clpRHS := gb.NewCBCLPSolver(pLPRHS)
+			rRHS := clpRHS.Solve()
+			clpRHS.Close()
+			if rRHS.Status != gb.StatusOptimal || math.Abs(rRHS.Objective) > 1e-9 {
+				t.Fatalf("c1_lp_rhs_nonfixed_bound CBCLPSolver: status=%v obj=%g, want Optimal 0", rRHS.Status, rRHS.Objective)
+			}
+
+			mLPBox := gb.NewModel("c1_lp_box_blocked", gb.Maximize)
+			bsp := mLPBox.AddContVar("s_pos", 1e17, 2e17)
+			bz := mLPBox.AddContVar("z", 0, 1)
+			bsn := mLPBox.AddContVar("s_neg", 0, 1e17)
+			mLPBox.SetObjective(gb.VarExpr(bz))
+			mLPBox.AddConstraint("le", gb.NewExpr(bsp.T(1), bz.T(7), bsn.T(-1)).Le(0))
+			pLPBox := mLPBox.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pLPBox, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_lp_box_blocked/%s err: %v", v.name, err)
+				}
+				if res.Status == gb.StatusOptimal {
+					checkCBCOptimal(t, "c1_lp_box_blocked/"+v.name, pLPBox, res, 0.0)
+				} else if res.Status != gb.StatusNumericalError {
+					t.Fatalf("c1_lp_box_blocked/%s: status=%v, want Optimal 0 or NumericalError", v.name, res.Status)
+				}
+			}
+
+			mConstMax := gb.NewModel("c1_obj_const_max_cancel", gb.Maximize)
+			cs := mConstMax.AddContVar("s", 1, 1)
+			cz := mConstMax.AddBinaryVar("z")
+			mConstMax.SetObjective(gb.NewExpr(cs.T(1e17), cz.T(7)).AddConstant(-1e17))
+			mConstMax.AddConstraint("c", gb.VarExpr(cz).Ge(1))
+			pConstMax := mConstMax.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pConstMax, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_obj_const_max_cancel/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_obj_const_max_cancel/"+v.name, pConstMax, res, 7.0)
+				if math.Abs(res.BestBound-7.0) > 1e-6 || math.Abs(res.RootLPBound-7.0) > 1e-6 {
+					t.Fatalf("c1_obj_const_max_cancel/%s BestBound=%g RootLPBound=%g, want 7",
+						v.name, res.BestBound, res.RootLPBound)
+				}
+			}
+			clpConst := gb.NewCBCLPSolver(pConstMax)
+			rClpConst := clpConst.Solve()
+			clpConst.Close()
+			if rClpConst.Status != gb.StatusOptimal || math.Abs(rClpConst.Objective-7.0) > 1e-9 {
+				t.Fatalf("c1_obj_const_max_cancel CBCLPSolver: status=%v obj=%g, want Optimal 7",
+					rClpConst.Status, rClpConst.Objective)
+			}
+
+			mConstBin := gb.NewModel("c1_obj_const_bin_cancel", gb.Minimize)
+			cbx0 := mConstBin.AddContVar("x0", 1, 2)
+			cbx1 := mConstBin.AddContVar("x1", 0, 17)
+			cbu := mConstBin.AddContVar("u", 0, 3)
+			cby := mConstBin.AddBinaryVar("y")
+			cbw := mConstBin.AddBinaryVar("w")
+			mConstBin.SetObjective(gb.NewExpr(cbx0.T(c57), cbx1.T(1), cbu.T(100), cby.T(-40), cbw.T(-17)).AddConstant(-c57))
+			mConstBin.AddConstraint("ub_x0", gb.VarExpr(cbx0).Le(1))
+			mConstBin.AddConstraint("eq_x1", gb.NewExpr(cbx1.T(1), cby.T(-17)).Eq(0))
+			mConstBin.AddConstraint("cap", gb.NewExpr(cby.T(5), cbw.T(2), cbu.T(1)).Le(5))
+			pConstBin := mConstBin.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pConstBin, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_obj_const_bin_cancel/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_obj_const_bin_cancel/"+v.name, pConstBin, res, -23.0)
+			}
+
+			for _, rev := range []bool{false, true} {
+				for _, isMIP := range []bool{true, false} {
+					mHop := gb.NewModel("c1_multihop_eq", gb.Maximize)
+					hx0 := mHop.AddContVar("x0", 1, 2)
+					hx1 := mHop.AddContVar("x1", 1, 2)
+					hx2 := mHop.AddContVar("x2", 1, 2)
+					var hz gb.Var
+					if isMIP {
+						hz = mHop.AddBinaryVar("z")
+					} else {
+						hz = mHop.AddContVar("z", 0, 1)
+					}
+					mHop.SetObjective(gb.VarExpr(hz))
+					if !rev {
+						mHop.AddConstraint("eq1", gb.NewExpr(hx0.T(1), hx1.T(-1)).Eq(0))
+						mHop.AddConstraint("eq2", gb.NewExpr(hx1.T(1), hx2.T(-1)).Eq(0))
+					} else {
+						mHop.AddConstraint("eq2", gb.NewExpr(hx1.T(1), hx2.T(-1)).Eq(0))
+						mHop.AddConstraint("eq1", gb.NewExpr(hx0.T(1), hx1.T(-1)).Eq(0))
+					}
+					mHop.AddConstraint("cancel", gb.NewExpr(hx0.T(c57), hz.T(7), hx2.T(-c57)).Le(0))
+					pHop := mHop.Compile()
+					for _, v := range cbcVariants {
+						res, err := gb.SolveCompiled(ctx, pHop, v.opts...)
+						if err != nil {
+							t.Fatalf("c1_multihop_eq(rev=%v,mip=%v)/%s err: %v", rev, isMIP, v.name, err)
+						}
+						checkCBCOptimal(t, fmt.Sprintf("c1_multihop_eq(rev=%v,mip=%v)/%s", rev, isMIP, v.name), pHop, res, 0.0)
+					}
+				}
+			}
+
+			mWideEq := gb.NewModel("c1_wide_26col_eq", gb.Maximize)
+			wx0 := mWideEq.AddContVar("x0", 1, 2)
+			wx2 := mWideEq.AddContVar("x2", 1, 2)
+			wz := mWideEq.AddBinaryVar("z")
+			eqTerms := []gb.Term{wx0.T(1), wx2.T(-1)}
+			for j := range 12 {
+				da := mWideEq.AddContVar(fmt.Sprintf("da%d", j), 1, 3)
+				db := mWideEq.AddContVar(fmt.Sprintf("db%d", j), 1, 3)
+				eqTerms = append(eqTerms, da.T(1), db.T(-1))
+				mWideEq.AddConstraint(fmt.Sprintf("pair%d", j), gb.NewExpr(da.T(1), db.T(-1)).Eq(0))
+			}
+			mWideEq.SetObjective(gb.VarExpr(wz))
+			mWideEq.AddConstraint("eq26", gb.NewExpr(eqTerms...).Eq(0))
+			mWideEq.AddConstraint("cancel", gb.NewExpr(wx0.T(c57), wz.T(7), wx2.T(-c57)).Le(0))
+			pWideEq := mWideEq.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, pWideEq, v.opts...)
+				if err != nil {
+					t.Fatalf("c1_wide_26col_eq/%s err: %v", v.name, err)
+				}
+				checkCBCOptimal(t, "c1_wide_26col_eq/"+v.name, pWideEq, res, 0.0)
+			}
+
+			mMaxCut := gb.NewModel("c1_cbclp_maximize_cut_cancel", gb.Maximize)
+			msp := mMaxCut.AddContVar("s_pos", 1e10, 1e10)
+			msn := mMaxCut.AddContVar("s_neg", 1e10, 1e10)
+			mz := mMaxCut.AddContVar("z", 0, 10)
+			mMaxCut.SetObjective(gb.NewExpr(msp.T(3), mz.T(4), msn.T(-3)))
+			mMaxCut.AddConstraint("le", gb.NewExpr(msp.T(1), mz.T(2), msn.T(-1)).Le(12))
+			pMaxCut := mMaxCut.Compile()
+			lpGoRef := gb.NewLPSolver(pMaxCut, nil)
+			lpCBCRef := gb.NewCBCLPSolver(pMaxCut)
+			defer lpGoRef.Close()
+			defer lpCBCRef.Close()
+			lpGoRef.AddCut([]int{0, 1, 2}, []float64{1, -1, 1}, 4)
+			lpCBCRef.AddCut([]int{0, 1, 2}, []float64{1, -1, 1}, 4)
+			rg := lpGoRef.Solve()
+			rc := lpCBCRef.Solve()
+			if rg.Status != gb.StatusOptimal || rc.Status != gb.StatusOptimal || math.Abs(rc.Objective-rg.Objective) > 1e-6 {
+				t.Fatalf("c1_cbclp_maximize_cut_cancel: Go=(%v,%g) CBC=(%v,%g)", rg.Status, rg.Objective, rc.Status, rc.Objective)
+			}
+			for j := range len(rg.ReducedCosts) {
+				if math.Abs(rc.ReducedCosts[j]-rg.ReducedCosts[j]) > 1e-6 {
+					t.Fatalf("c1_cbclp_maximize_cut_cancel rc[%d]=%g, want %g", j, rc.ReducedCosts[j], rg.ReducedCosts[j])
+				}
+			}
 		}
 	})
 }

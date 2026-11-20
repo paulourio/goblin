@@ -40,23 +40,483 @@ func twoSumAssign(a, b float64) (s, err float64) {
 	return s, err
 }
 
-func isAssignmentStrictlyWorse(m, n int, candCol4Row, baseCol4Row []int, unscaledCost []float64) bool {
-	const bigExp = 24
-	var bigS, bigC, smallS, smallC float64
-	accTerm := func(v float64) {
-		if v == 0 {
-			return
+const (
+	assignWideHalf = 528
+	assignWideCut  = 960
+	assignExpCap   = 64
+)
+
+func compressAssignSlice(e []float64) []float64 {
+	n := len(e)
+	if n == 0 {
+		return e
+	}
+	if n == 1 {
+		if e[0] == 0 {
+			return e[:0]
 		}
-		if math.Abs(v) >= 1e150 {
-			var e float64
-			bigS, e = twoSumAssign(bigS, math.Ldexp(v, -bigExp))
-			bigC += e
+		return e
+	}
+	q := e[n-1]
+	bottom := n - 1
+	for i := n - 2; i >= 0; i-- {
+		newQ, err := twoSumAssign(q, e[i])
+		if err != 0 {
+			e[bottom] = newQ
+			bottom--
+			q = err
 		} else {
-			var e float64
-			smallS, e = twoSumAssign(smallS, v)
-			smallC += e
+			q = newQ
 		}
 	}
+	e[bottom] = q
+	w := 0
+	q = e[bottom]
+	for i := bottom + 1; i < n; i++ {
+		newQ, err := twoSumAssign(e[i], q)
+		if err != 0 {
+			e[w] = err
+			w++
+		}
+		q = newQ
+	}
+	if q != 0 {
+		e[w] = q
+		return e[:w+1]
+	}
+	return e[:w]
+}
+
+func growAssignSlice(e []float64, b float64) []float64 {
+	if b == 0 || math.IsNaN(b) || math.IsInf(b, 0) {
+		return e
+	}
+	q := b
+	w := 0
+	for _, ei := range e {
+		var h float64
+		q, h = twoSumAssign(q, ei)
+		if math.IsNaN(q) || math.IsInf(q, 0) {
+			return e[:w]
+		}
+		if h != 0 {
+			e[w] = h
+			w++
+		}
+	}
+	e = e[:w]
+	if q != 0 {
+		e = append(e, q)
+	}
+	return e
+}
+
+func collapseAssignBuf(e *[assignExpCap]float64, n int) int {
+	return len(compressAssignSlice(e[:n]))
+}
+
+func assignTopRem(comp []float64) (top, rem float64) {
+	if len(comp) == 0 {
+		return 0, 0
+	}
+	if len(comp) == 1 {
+		return comp[0], 0
+	}
+	for i := range len(comp) - 1 {
+		rem += comp[i]
+	}
+	return twoSumAssign(comp[len(comp)-1], rem)
+}
+
+func assignRoundToOddSticky(top, rem float64) float64 {
+	if rem == 0 || math.Float64bits(top)&1 != 0 {
+		return top
+	}
+	if (top > 0) == (rem > 0) {
+		return math.Nextafter(top, math.Copysign(math.Inf(1), top))
+	}
+	return math.Nextafter(top, 0)
+}
+
+func growAssignBuf(e *[assignExpCap]float64, n int, b float64) (int, bool) {
+	if b == 0 {
+		return n, true
+	}
+	if math.IsNaN(b) || math.IsInf(b, 0) {
+		return n, false
+	}
+	if n >= assignExpCap {
+		n = collapseAssignBuf(e, n)
+		if n >= assignExpCap {
+			top, rem := assignTopRem(e[:n])
+			n = 0
+			if rem != 0 {
+				e[0] = rem
+				n = 1
+			}
+			if top != 0 {
+				e[n] = top
+				n++
+			}
+		}
+	}
+	q := b
+	w := 0
+	for i := range n {
+		var h float64
+		q, h = twoSumAssign(q, e[i])
+		if math.IsNaN(q) || math.IsInf(q, 0) {
+			return w, false
+		}
+		if h != 0 {
+			e[w] = h
+			w++
+		}
+	}
+	if q != 0 {
+		e[w] = q
+		w++
+	}
+	return w, true
+}
+
+type assignWideAcc struct {
+	hiBuf  [assignExpCap]float64
+	midBuf [assignExpCap]float64
+	loBuf  [assignExpCap]float64
+	hiLen  int
+	midLen int
+	loLen  int
+	nonFin bool
+}
+
+func (w *assignWideAcc) addVal(v float64) {
+	if v == 0 || w.nonFin {
+		return
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		w.nonFin = true
+		return
+	}
+	_, e := math.Frexp(math.Abs(v))
+	var ok bool
+	switch {
+	case e > assignWideCut:
+		w.hiLen, ok = growAssignBuf(&w.hiBuf, w.hiLen, math.Ldexp(math.Ldexp(v, -assignWideHalf), -assignWideHalf))
+	case e < -assignWideCut:
+		w.loLen, ok = growAssignBuf(&w.loBuf, w.loLen, math.Ldexp(math.Ldexp(v, assignWideHalf), assignWideHalf))
+	default:
+		w.midLen, ok = growAssignBuf(&w.midBuf, w.midLen, v)
+	}
+	if !ok {
+		w.nonFin = true
+	}
+}
+
+func assignSignOf(v float64) int {
+	if v > 0 {
+		return 1
+	}
+	if v < 0 {
+		return -1
+	}
+	return 0
+}
+
+func (w *assignWideAcc) eval() (val float64, sgn int) {
+	if w.nonFin {
+		return math.NaN(), 0
+	}
+	if w.hiLen == 0 && w.midLen == 0 && w.loLen == 0 {
+		return 0, 0
+	}
+	w.hiLen = collapseAssignBuf(&w.hiBuf, w.hiLen)
+	w.midLen = collapseAssignBuf(&w.midBuf, w.midLen)
+	w.loLen = collapseAssignBuf(&w.loBuf, w.loLen)
+	hi := w.hiBuf[:w.hiLen]
+	mid := w.midBuf[:w.midLen]
+	lo := w.loBuf[:w.loLen]
+
+	var midWork [3 * assignExpCap]float64
+	midMerged := midWork[:0]
+	if len(hi) == 0 {
+		midMerged = append(midMerged, mid...)
+	} else {
+		hiTop := hi[len(hi)-1]
+		_, eHi := math.Frexp(math.Abs(hiTop))
+		if eHi+2*assignWideHalf > 1026 {
+			return math.Copysign(math.Inf(1), hiTop), assignSignOf(hiTop)
+		}
+		var halfWork [2 * assignExpCap]float64
+		half := halfWork[:0]
+		for _, h := range hi {
+			half = growAssignSlice(half, math.Ldexp(h, assignWideHalf))
+		}
+		for _, m := range mid {
+			if math.Abs(m) >= 0x1p-400 {
+				half = growAssignSlice(half, math.Ldexp(m, -assignWideHalf))
+			}
+		}
+		half = compressAssignSlice(half)
+		if len(half) > 0 {
+			halfTop := half[len(half)-1]
+			_, eHalf := math.Frexp(math.Abs(halfTop))
+			if eHalf+assignWideHalf > 1024 {
+				var sc4Work [3 * assignExpCap]float64
+				sc4 := sc4Work[:0]
+				for _, m := range mid {
+					if math.Abs(m) < 0x1p-400 && math.Abs(m) >= 0x1p-1018 {
+						sc4 = growAssignSlice(sc4, math.Ldexp(m, -4))
+					}
+				}
+				for _, c := range half {
+					sc4 = growAssignSlice(sc4, math.Ldexp(c, assignWideHalf-4))
+				}
+				sc4 = compressAssignSlice(sc4)
+				t4, r4 := assignTopRem(sc4)
+				res := math.Ldexp(t4, 4)
+				if math.IsInf(res, 0) {
+					if math.Abs(t4) == 0x1p1020 && (t4 > 0) != (r4 > 0) && math.Abs(r4) > 0x1p966 {
+						res = math.Copysign(math.MaxFloat64, t4)
+					}
+					return res, assignSignOf(t4)
+				}
+				comb := res + math.Ldexp(r4, 4)
+				if math.IsNaN(comb) {
+					return res, assignSignOf(t4)
+				}
+				return comb, assignSignOf(t4)
+			}
+		}
+		for _, m := range mid {
+			if math.Abs(m) < 0x1p-400 {
+				midMerged = growAssignSlice(midMerged, m)
+			}
+		}
+		for _, c := range half {
+			midMerged = growAssignSlice(midMerged, math.Ldexp(c, assignWideHalf))
+		}
+		midMerged = compressAssignSlice(midMerged)
+	}
+
+	if len(lo) == 0 {
+		if len(midMerged) == 0 {
+			return 0, 0
+		}
+		top, rem := assignTopRem(midMerged)
+		comb := top + rem
+		if math.IsNaN(comb) {
+			comb = top
+		}
+		return comb, assignSignOf(midMerged[len(midMerged)-1])
+	}
+
+	var loSmallWork [assignExpCap]float64
+	loSmall := loSmallWork[:0]
+	addedLoNorm := false
+	for _, l := range lo {
+		if math.Abs(l) >= 0x1p34 {
+			midMerged = growAssignSlice(midMerged, math.Ldexp(math.Ldexp(l, -assignWideHalf), -assignWideHalf))
+			addedLoNorm = true
+		} else {
+			loSmall = append(loSmall, l)
+		}
+	}
+	if addedLoNorm {
+		midMerged = compressAssignSlice(midMerged)
+	}
+	if len(loSmall) == 0 {
+		if len(midMerged) == 0 {
+			return 0, 0
+		}
+		top, rem := assignTopRem(midMerged)
+		comb := top + rem
+		if math.IsNaN(comb) {
+			comb = top
+		}
+		return comb, assignSignOf(midMerged[len(midMerged)-1])
+	}
+
+	if len(midMerged) == 0 {
+		loTop, loRem := assignTopRem(loSmall)
+		if loTop == 0 {
+			return 0, 0
+		}
+		adj := assignRoundToOddSticky(loTop, loRem)
+		return math.Ldexp(math.Ldexp(adj, -assignWideHalf), -assignWideHalf), assignSignOf(loSmall[len(loSmall)-1])
+	}
+
+	if math.Abs(midMerged[0]) < 0x1p-960 {
+		var upWork [2 * assignExpCap]float64
+		up := upWork[:0]
+		var topKeepWork [assignExpCap]float64
+		topKeep := topKeepWork[:0]
+		for _, m := range midMerged {
+			if math.Abs(m) < 0x1p400 {
+				up = growAssignSlice(up, math.Ldexp(m, assignWideHalf))
+			} else {
+				topKeep = append(topKeep, m)
+			}
+		}
+		var loTinySign int
+		for _, l := range loSmall {
+			if math.Abs(l) >= 0x1p-490 {
+				up = growAssignSlice(up, math.Ldexp(l, -assignWideHalf))
+			} else {
+				loTinySign = assignSignOf(l)
+			}
+		}
+		up = compressAssignSlice(up)
+		if len(topKeep) == 0 {
+			if len(up) == 0 {
+				return 0, loTinySign
+			}
+			uTop, uRem := assignTopRem(up)
+			if math.Abs(uTop) >= 0x1p-493 {
+				s0 := math.Ldexp(uTop, -assignWideHalf)
+				e0 := math.Ldexp(uRem, -assignWideHalf)
+				s, e := twoSumAssign(s0, e0)
+				return s + e, assignSignOf(up[len(up)-1])
+			}
+			adj := assignRoundToOddSticky(uTop, uRem)
+			return math.Ldexp(adj, -assignWideHalf), assignSignOf(up[len(up)-1])
+		}
+		rebuilt := midWork[:0]
+		for _, u := range up {
+			if math.Abs(u) >= 0x1p-494 {
+				rebuilt = growAssignSlice(rebuilt, math.Ldexp(u, -assignWideHalf))
+			}
+		}
+		for _, m := range topKeep {
+			rebuilt = growAssignSlice(rebuilt, m)
+		}
+		rebuilt = compressAssignSlice(rebuilt)
+		top, rem := assignTopRem(rebuilt)
+		comb := top + rem
+		if math.IsNaN(comb) {
+			comb = top
+		}
+		return comb, assignSignOf(rebuilt[len(rebuilt)-1])
+	}
+
+	loTop, loRem := assignTopRem(loSmall)
+	loUnscaled := math.Ldexp(math.Ldexp(assignRoundToOddSticky(loTop, loRem), -assignWideHalf), -assignWideHalf)
+	r := 0.0
+	for i := range len(midMerged) - 1 {
+		r += midMerged[i]
+	}
+	if r == 0 {
+		r = loUnscaled
+	} else {
+		r += loUnscaled
+	}
+	s, e := twoSumAssign(midMerged[len(midMerged)-1], r)
+	comb := s + e
+	if math.IsNaN(comb) {
+		comb = s
+	}
+	return comb, assignSignOf(midMerged[len(midMerged)-1])
+}
+
+func (w *assignWideAcc) sign() int {
+	_, sgn := w.eval()
+	return sgn
+}
+
+func (w *assignWideAcc) finish() float64 {
+	val, _ := w.eval()
+	return val
+}
+
+func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int) bool {
+	if m <= 1 {
+		return false
+	}
+	minU, maxU := u[0], u[0]
+	maxPot := 0.0
+	minNonZeroPot := math.Inf(1)
+	for _, ui := range u[:m] {
+		if ui < minU {
+			minU = ui
+		}
+		if ui > maxU {
+			maxU = ui
+		}
+		a := math.Abs(ui)
+		if a > maxPot {
+			maxPot = a
+		}
+		if a > 0 && a < minNonZeroPot {
+			minNonZeroPot = a
+		}
+	}
+	minV, maxV := v[0], v[0]
+	for _, vj := range v[:n] {
+		if vj < minV {
+			minV = vj
+		}
+		if vj > maxV {
+			maxV = vj
+		}
+		a := math.Abs(vj)
+		if a > maxPot {
+			maxPot = a
+		}
+		if a > 0 && a < minNonZeroPot {
+			minNonZeroPot = a
+		}
+	}
+	if maxPot == 0 {
+		return false
+	}
+	var objAcc assignWideAcc
+	suspect := minNonZeroPot <= 0x1p-20*maxPot
+	for i := range m {
+		j := col4row[i]
+		if uint(j) >= uint(n) {
+			continue
+		}
+		c := normCost[i*n+j]
+		objAcc.addVal(c)
+		s1, e1 := twoSumAssign(c, -u[i])
+		s2, e2 := twoSumAssign(s1, -v[j])
+		if math.Abs(s2+(e1+e2)) > 8.0*0x1p-53*math.Abs(c) {
+			suspect = true
+		}
+	}
+	if !suspect {
+		oppSign := (maxU > 0 && minV < 0) || (minU < 0 && maxV > 0)
+		if oppSign && math.Abs(objAcc.finish()) <= 0.25*maxPot {
+			suspect = true
+		}
+	}
+	if !suspect {
+		return false
+	}
+	for i := range m {
+		ui := u[i]
+		rowSlice := normCost[i*n : (i+1)*n]
+		mj := col4row[i]
+		for j, c := range rowSlice {
+			if math.IsInf(c, 1) {
+				continue
+			}
+			s1, e1 := twoSumAssign(c, -ui)
+			s2, e2 := twoSumAssign(s1, -v[j])
+			rc := s2 + (e1 + e2)
+			if j == mj && rc > 0 {
+				return true
+			}
+			if rc < 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAssignmentStrictlyWorse(m, n int, candCol4Row, baseCol4Row []int, unscaledCost []float64) bool {
+	var diffAcc assignWideAcc
 	for i := range m {
 		jc := candCol4Row[i]
 		jb := baseCol4Row[i]
@@ -70,24 +530,13 @@ func isAssignmentStrictlyWorse(m, n int, candCol4Row, baseCol4Row []int, unscale
 		if math.IsInf(cc, 1) || math.IsNaN(cc) {
 			return true
 		}
-		accTerm(cc)
-		accTerm(-unscaledCost[i*n+jb])
+		diffAcc.addVal(cc)
+		diffAcc.addVal(-unscaledCost[i*n+jb])
 	}
-	bigSum, bigRem := twoSumAssign(bigS, bigC)
-	smallSum, smallRem := twoSumAssign(smallS, smallC)
-	if bigSum != 0 {
-		return bigSum > 0
+	if diffAcc.nonFin {
+		return true
 	}
-	if bigRem != 0 {
-		remOrig := math.Ldexp(bigRem, bigExp)
-		if comb := remOrig + smallSum; comb != 0 {
-			return comb > 0
-		}
-	}
-	if smallSum != 0 {
-		return smallSum > 0
-	}
-	return smallRem > 0
+	return diffAcc.sign() > 0
 }
 
 func hasTinyEntry(cost []float64) bool {
@@ -413,18 +862,25 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	}
 
 	var uSubOrig, vSubOrig []float64
-	if lostSubnormal {
+	hasPotCancel := !lostSubnormal && hasPotentialCancellation(m, n, normCost, u, v, col4row)
+	if lostSubnormal || hasPotCancel {
 		hasDeepSub := false
-		for _, oc := range unscaledCost[:m*n] {
-			if oc != 0 && math.Abs(oc) < 0x1p-950 {
-				hasDeepSub = true
-				break
+		if lostSubnormal {
+			for _, oc := range unscaledCost[:m*n] {
+				if oc != 0 && math.Abs(oc) < 0x1p-950 {
+					hasDeepSub = true
+					break
+				}
 			}
 		}
 		tau := 4.0 * float64(m+1) * math.SmallestNonzeroFloat64
 		subCap := float64(m+2) * tau
+		maxPot := 0.0
 		uBase := make([]float64, m)
 		for i, ui := range u {
+			if a := math.Abs(ui); a > maxPot {
+				maxPot = a
+			}
 			if math.Abs(ui) > subCap {
 				uBase[i] = ui
 			}
@@ -432,12 +888,18 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		vBase := make([]float64, n)
 		if m == n {
 			for j, vj := range v {
+				if a := math.Abs(vj); a > maxPot {
+					maxPot = a
+				}
 				if math.Abs(vj) > subCap {
 					vBase[j] = vj
 				}
 			}
 		} else {
 			for j, vj := range v {
+				if a := math.Abs(vj); a > maxPot {
+					maxPot = a
+				}
 				if vj < -subCap {
 					vBase[j] = vj
 				}
@@ -463,6 +925,31 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		r4c2 := make([]int, n)
 		capRC := math.MaxFloat64 / (64.0 * float64(m+2) * float64(m+2))
 		for pass := range maxPasses {
+			s1Pos := 0.0
+			maxNegD := 0.0
+			for i := range m {
+				ui, uSub := uBase[i], uSubCur[i]
+				for j := range n {
+					idx := i*n + j
+					if math.IsInf(unscaledCost[idx], 1) {
+						continue
+					}
+					s2, rem := edgeResidual(idx, ui, uSub, vBase[j], vSubCur[j])
+					d := s2 + rem
+					if j == col4row[i] && d > 0 {
+						s1Pos += d
+					}
+					if -d > maxNegD {
+						maxNegD = -d
+					}
+				}
+			}
+			cutCap := s1Pos + float64(m)*maxNegD
+			globalFpTol := 0.0
+			if hasPotCancel {
+				globalFpTol = 8.0 * float64(m+2) * 0x1p-53 * (2.0 * maxPot)
+			}
+			baseCap := max(2.0*subCap, max(cutCap, globalFpTol))
 			maxOrigCandAbs := 0.0
 			for i := range m {
 				ui, uSub := uBase[i], uSubCur[i]
@@ -480,7 +967,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 					if pass > 0 {
 						fpTol = 2.0 * float64(m+2) * 0x1p-53 * edgeScale
 					}
-					if d > max(fpTol, 2.0*subCap) {
+					if d > max(fpTol, baseCap) {
 						continue
 					}
 					origAbs := math.Ldexp(math.Abs(d), scaleExp)
@@ -516,7 +1003,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 					if pass > 0 {
 						fpTol = 2.0 * float64(m+2) * 0x1p-53 * edgeScale
 					}
-					if d > max(fpTol, 2.0*subCap) {
+					if d > max(fpTol, baseCap) {
 						resCost[idx] = math.Inf(1)
 						continue
 					}
@@ -602,70 +1089,27 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	}
 
 	// Extract primal assignment in ascending row order and compute exact objective on input scale.
-	var totalMin float64
-	if scaleExp == 0 && uSubOrig == nil {
-		if !transposed {
-			for i := range m {
-				j := col4row[i]
-				rowInd[i] = i
-				colInd[i] = j
-				totalMin += unscaledCost[i*n+j]
-			}
-		} else {
-			outIdx := 0
-			for origRow := range n {
-				origCol := row4col[origRow]
-				if origCol >= 0 {
-					rowInd[outIdx] = origRow
-					colInd[outIdx] = origCol
-					totalMin += unscaledCost[origCol*n+origRow]
-					outIdx++
-				}
-			}
+	var totalAcc assignWideAcc
+	if !transposed {
+		for i := range m {
+			j := col4row[i]
+			rowInd[i] = i
+			colInd[i] = j
+			totalAcc.addVal(unscaledCost[i*n+j])
 		}
 	} else {
-		const bigExp = 24
-		var bigS, bigC, smallS, smallC float64
-		accCost := func(c float64) {
-			if math.Abs(c) >= 1e150 {
-				var e float64
-				bigS, e = twoSumAssign(bigS, math.Ldexp(c, -bigExp))
-				bigC += e
-			} else {
-				var e float64
-				smallS, e = twoSumAssign(smallS, c)
-				smallC += e
+		outIdx := 0
+		for origRow := range n {
+			origCol := row4col[origRow]
+			if origCol >= 0 {
+				rowInd[outIdx] = origRow
+				colInd[outIdx] = origCol
+				totalAcc.addVal(unscaledCost[origCol*n+origRow])
+				outIdx++
 			}
-		}
-		if !transposed {
-			for i := range m {
-				j := col4row[i]
-				rowInd[i] = i
-				colInd[i] = j
-				accCost(unscaledCost[i*n+j])
-			}
-		} else {
-			outIdx := 0
-			for origRow := range n {
-				origCol := row4col[origRow]
-				if origCol >= 0 {
-					rowInd[outIdx] = origRow
-					colInd[outIdx] = origCol
-					accCost(unscaledCost[origCol*n+origRow])
-					outIdx++
-				}
-			}
-		}
-		bigSum, bigRem := twoSumAssign(bigS, bigC)
-		smallSum := smallS + smallC
-		hi := math.Ldexp(bigSum, bigExp)
-		if math.IsInf(hi, 0) {
-			mid := math.Ldexp(bigSum, 12) + (math.Ldexp(bigRem, 12) + math.Ldexp(smallSum, -12))
-			totalMin = math.Ldexp(mid, 12)
-		} else {
-			totalMin = hi + (math.Ldexp(bigRem, bigExp) + smallSum)
 		}
 	}
+	totalMin := totalAcc.finish()
 
 	if scaleExp > 0 || uSubOrig != nil {
 		shift := 0.0

@@ -158,28 +158,37 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 				g = gcdInt64(g, ic)
 			}
 			if allInt && g > 1 {
-				fg := float64(g)
-				for k := range r.vals {
-					r.vals[k] = math.Round(r.vals[k]) / fg
-				}
-				errScaled := maxRoundErr / fg
-				intTolScaled := presolveIntTol / fg
-				feasTolScaled := presolveFeasTol / fg
-				scaledRHS := r.rhs / fg
-				switch r.sense {
-				case LessEqual:
-					r.rhs = math.Floor(scaledRHS + errScaled + intTolScaled)
-				case GreaterEqual:
-					r.rhs = math.Ceil(scaledRHS - errScaled - intTolScaled)
-				case Equal:
-					nearest := math.Round(scaledRHS)
-					if math.Abs(scaledRHS-nearest) > feasTolScaled+errScaled {
+				if r.sense == Equal && maxRoundErr == 0 && math.Abs(r.rhs) <= 0x1p62 {
+					loInt := int64(math.Ceil(r.rhs - presolveFeasTol))
+					hiInt := int64(math.Floor(r.rhs + presolveFeasTol))
+					if q := divCeilInt64(loInt, g); q*g > hiInt {
 						return PresolveResult{Infeasible: true}
 					}
-					r.rhs = nearest
 				}
-				strengthened++
-			} else if allInt && g == 1 {
+				if math.Abs(r.rhs) <= 0x1p52 {
+					fg := float64(g)
+					for k := range r.vals {
+						r.vals[k] = math.Round(r.vals[k]) / fg
+					}
+					switch r.sense {
+					case LessEqual:
+						ubInt := int64(math.Floor(r.rhs + maxRoundErr + presolveIntTol))
+						r.rhs = float64(divFloorInt64(ubInt, g))
+					case GreaterEqual:
+						lbInt := int64(math.Ceil(r.rhs - maxRoundErr - presolveIntTol))
+						r.rhs = float64(divCeilInt64(lbInt, g))
+					case Equal:
+						loInt := int64(math.Ceil(r.rhs - presolveFeasTol - maxRoundErr))
+						hiInt := int64(math.Floor(r.rhs + presolveFeasTol + maxRoundErr))
+						q := divCeilInt64(loInt, g)
+						if q*g > hiInt {
+							return PresolveResult{Infeasible: true}
+						}
+						r.rhs = float64(q)
+					}
+					strengthened++
+				}
+			} else if allInt && g == 1 && math.Abs(r.rhs) <= 0x1p52 {
 				if maxRoundErr > 0 {
 					for k := range r.vals {
 						r.vals[k] = math.Round(r.vals[k])
@@ -252,41 +261,35 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			if !r.active || r.sense != LessEqual {
 				continue
 			}
-			maxAct := 0.0
-			l1Bin := math.Abs(r.rhs)
-			finite := true
-			for k, col := range r.cols {
-				a := r.vals[k]
-				l, u := lb[col], ub[col]
-				if (a > 0 && math.IsInf(u, 1)) || (a < 0 && math.IsInf(l, -1)) {
-					finite = false
-					break
-				}
-				if a > 0 {
-					t := a * u
-					maxAct += t
-					l1Bin += math.Abs(t)
-				} else {
-					t := a * l
-					maxAct += t
-					l1Bin += math.Abs(t)
-				}
+			s, _ := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+			if s.extreme || s.maxInfCount > 0 {
+				continue
 			}
-			binTol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, l1Bin))
-			if finite && !math.IsNaN(maxAct) && !math.IsInf(maxAct, 0) && !math.IsNaN(l1Bin) && !math.IsInf(l1Bin, 0) && maxAct > r.rhs+binTol {
+			binTol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, s.l1Max))
+			surplusLo := -s.deficitHi
+			surplusHi := -s.deficitLo
+			if surplusLo > binTol {
 				for k, col := range r.cols {
 					if orig.varCat[col] == Binary && lb[col] == 0 && ub[col] == 1 {
 						a := r.vals[k]
-						if a > binTol && maxAct-a < r.rhs-binTol {
-							delta := r.rhs - (maxAct - a)
-							r.vals[k] -= delta
-							r.rhs -= delta
-							maxAct -= delta
-							strengthened++
-						} else if a < -binTol && maxAct+a < r.rhs-binTol {
-							delta := r.rhs - (maxAct + a)
-							r.vals[k] += delta
-							strengthened++
+						if a > binTol && a-surplusHi > binTol {
+							delta := a - surplusHi
+							newVal := a - delta
+							newRHS := r.rhs - delta
+							tol := 1e-12 * max(1.0, math.Abs(delta))
+							if delta > 0 && math.Abs((a-newVal)-delta) <= tol && math.Abs((r.rhs-newRHS)-delta) <= tol {
+								r.vals[k] = newVal
+								r.rhs = newRHS
+								strengthened++
+							}
+						} else if a < -binTol && -a-surplusHi > binTol {
+							delta := -a - surplusHi
+							newVal := a + delta
+							tol := 1e-12 * max(1.0, math.Abs(delta))
+							if delta > 0 && math.Abs((newVal-a)-delta) <= tol {
+								r.vals[k] = newVal
+								strengthened++
+							}
 						}
 					}
 				}
@@ -384,114 +387,94 @@ func runActivityTightening(
 				continue
 			}
 
-			minFinite := 0.0
-			maxFinite := 0.0
-			l1Act := 0.0
-			minInfCount := 0
-			maxInfCount := 0
-
-			for k, col := range r.cols {
-				a := r.vals[k]
-				l, u := lb[col], ub[col]
-				if a > 0 {
-					if math.IsInf(l, -1) {
-						minInfCount++
-					} else {
-						t := a * l
-						minFinite += t
-						l1Act += math.Abs(t)
-					}
-					if math.IsInf(u, 1) {
-						maxInfCount++
-					} else {
-						t := a * u
-						maxFinite += t
-						l1Act += math.Abs(t)
-					}
-				} else if a < 0 {
-					if math.IsInf(u, 1) {
-						minInfCount++
-					} else {
-						t := a * u
-						minFinite += t
-						l1Act += math.Abs(t)
-					}
-					if math.IsInf(l, -1) {
-						maxInfCount++
-					} else {
-						t := a * l
-						maxFinite += t
-						l1Act += math.Abs(t)
-					}
-				}
-			}
-
 			hasUpper := r.sense == LessEqual || r.sense == Equal
 			hasLower := r.sense == GreaterEqual || r.sense == Equal
-			extremeAct := math.IsNaN(minFinite) || math.IsInf(minFinite, 0) ||
-				math.IsNaN(maxFinite) || math.IsInf(maxFinite, 0) ||
-				math.IsNaN(l1Act) || math.IsInf(l1Act, 0)
-			var rowScale, rowFeasTol float64
-			if !extremeAct {
-				rowScale = max(1.0, max(math.Abs(r.rhs), l1Act))
-				rowFeasTol = max(presolveFeasTol, presolveRelScaleTol*rowScale)
-			} else {
-				const shift = 32
-				var minAcc, maxAcc dot2Acc
-				l1Scaled := math.Ldexp(math.Abs(r.rhs), -shift)
+			s, _ := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, true, true)
+			if s.extreme {
+				maxExp := 0
+				if r.rhs != 0 && !math.IsInf(r.rhs, 0) && !math.IsNaN(r.rhs) {
+					if _, re := math.Frexp(math.Abs(r.rhs)); re > maxExp {
+						maxExp = re
+					}
+				}
+				for k, col := range r.cols {
+					a := r.vals[k]
+					if a == 0 {
+						continue
+					}
+					_, ea := math.Frexp(math.Abs(a))
+					if l := lb[col]; !math.IsInf(l, 0) && l != 0 {
+						if _, el := math.Frexp(math.Abs(l)); ea+el > maxExp {
+							maxExp = ea + el
+						}
+					}
+					if u := ub[col]; !math.IsInf(u, 0) && u != 0 {
+						if _, eu := math.Frexp(math.Abs(u)); ea+eu > maxExp {
+							maxExp = ea + eu
+						}
+					}
+				}
+				shift := max(32, maxExp-wideExpCutoff)
+				s1 := shift / 2
+				s2 := shift - s1
+				var slackW, defW wideDotAcc
+				rhsS := math.Ldexp(r.rhs, -shift)
+				slackW.addVal(rhsS)
+				defW.addVal(rhsS)
+				l1Scaled := math.Abs(rhsS)
 				for k, col := range r.cols {
 					a := r.vals[k]
 					l, u := lb[col], ub[col]
+					as := math.Ldexp(a, -s1)
 					if a > 0 {
 						if !math.IsInf(l, -1) {
-							as, ls := math.Ldexp(a, -shift/2), math.Ldexp(l, -shift/2)
-							minAcc.addProd(as, ls)
+							ls := math.Ldexp(l, -s2)
+							slackW.addProd(-as, ls)
 							l1Scaled += math.Abs(as * ls)
 						}
 						if !math.IsInf(u, 1) {
-							as, us := math.Ldexp(a, -shift/2), math.Ldexp(u, -shift/2)
-							maxAcc.addProd(as, us)
+							us := math.Ldexp(u, -s2)
+							defW.addProd(-as, us)
 							l1Scaled += math.Abs(as * us)
 						}
 					} else if a < 0 {
 						if !math.IsInf(u, 1) {
-							as, us := math.Ldexp(a, -shift/2), math.Ldexp(u, -shift/2)
-							minAcc.addProd(as, us)
+							us := math.Ldexp(u, -s2)
+							slackW.addProd(-as, us)
 							l1Scaled += math.Abs(as * us)
 						}
 						if !math.IsInf(l, -1) {
-							as, ls := math.Ldexp(a, -shift/2), math.Ldexp(l, -shift/2)
-							maxAcc.addProd(as, ls)
+							ls := math.Ldexp(l, -s2)
+							defW.addProd(-as, ls)
 							l1Scaled += math.Abs(as * ls)
 						}
 					}
 				}
-				minS, minOk := minAcc.s+minAcc.c, !minAcc.nonFin
-				maxS, maxOk := maxAcc.s+maxAcc.c, !maxAcc.nonFin
-				if !minOk || !maxOk || math.IsNaN(l1Scaled) || math.IsInf(l1Scaled, 0) {
+				slackS := slackW.finish(math.NaN())
+				defS := defW.finish(math.NaN())
+				if math.IsNaN(slackS) || math.IsInf(slackS, 0) || math.IsNaN(defS) || math.IsInf(defS, 0) || math.IsNaN(l1Scaled) || math.IsInf(l1Scaled, 0) {
 					continue
 				}
-				rhsS := math.Ldexp(r.rhs, -shift)
-				errS := 0x1p-100 * l1Scaled
+				errS := 0x1p-50 * (math.Abs(slackS) + math.Abs(defS))
 				tolS := max(math.Ldexp(presolveFeasTol, -shift), presolveRelScaleTol*l1Scaled) + errS
 				chgS := math.Ldexp(presolveBoundChangeTol, -shift)
-				if hasUpper && minInfCount == 0 && minS > rhsS+tolS {
+				if hasUpper && s.minInfCount == 0 && slackS+errS < -tolS {
 					return tightened, removedRows, true, false
 				}
-				if hasLower && maxInfCount == 0 && maxS < rhsS-tolS {
+				if hasLower && s.maxInfCount == 0 && defS-errS > tolS {
 					return tightened, removedRows, true, false
 				}
-				if r.sense == LessEqual && maxInfCount == 0 && maxS+errS <= rhsS+chgS {
+				if r.sense == LessEqual && s.maxInfCount == 0 && defS-errS >= -chgS {
 					r.active = false
 					removedRows++
 					continue
 				}
-				if r.sense == GreaterEqual && minInfCount == 0 && minS-errS >= rhsS-chgS {
+				if r.sense == GreaterEqual && s.minInfCount == 0 && slackS+errS <= chgS {
 					r.active = false
 					removedRows++
 					continue
 				}
-				if r.sense == Equal && minInfCount == 0 && maxInfCount == 0 && minS-errS >= rhsS-chgS && maxS+errS <= rhsS+chgS {
+				if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && slackS+errS <= chgS && defS-errS >= -chgS {
 					r.active = false
 					removedRows++
 					continue
@@ -499,48 +482,49 @@ func runActivityTightening(
 				continue
 			}
 
-			if hasUpper && minInfCount == 0 && minFinite > r.rhs+rowFeasTol {
+			rowScale := max(1.0, max(s.l1Min, s.l1Max))
+			rowFeasTol := max(presolveFeasTol, presolveRelScaleTol*rowScale)
+
+			if hasUpper && s.minInfCount == 0 && s.slackHi < -rowFeasTol {
 				return tightened, removedRows, true, false
 			}
-			if hasLower && maxInfCount == 0 && maxFinite < r.rhs-rowFeasTol {
+			if hasLower && s.maxInfCount == 0 && s.deficitLo > rowFeasTol {
 				return tightened, removedRows, true, false
 			}
 
-			if r.sense == LessEqual && maxInfCount == 0 && maxFinite <= r.rhs+presolveBoundChangeTol {
+			if r.sense == LessEqual && s.maxInfCount == 0 && s.deficitLo >= -presolveBoundChangeTol {
 				r.active = false
 				removedRows++
 				continue
 			}
-			if r.sense == GreaterEqual && minInfCount == 0 && minFinite >= r.rhs-presolveBoundChangeTol {
+			if r.sense == GreaterEqual && s.minInfCount == 0 && s.slackHi <= presolveBoundChangeTol {
 				r.active = false
 				removedRows++
 				continue
 			}
-			if r.sense == Equal && minInfCount == 0 && maxInfCount == 0 && minFinite >= r.rhs-presolveBoundChangeTol && maxFinite <= r.rhs+presolveBoundChangeTol {
+			if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && s.slackHi <= presolveBoundChangeTol && s.deficitLo >= -presolveBoundChangeTol {
 				r.active = false
 				removedRows++
 				continue
 			}
 
 			upperTightenedRow := false
-			if hasUpper && minInfCount <= 1 {
+			if hasUpper && s.minInfCount <= 1 {
 				for k, col := range r.cols {
 					a := r.vals[k]
 					if math.Abs(a) <= presolveZeroTol {
 						continue
 					}
 					l, u := lb[col], ub[col]
-					var resMin float64
 					if a > 0 {
-						if minInfCount == 1 {
-							if !math.IsInf(l, -1) {
-								continue
-							}
-							resMin = minFinite
-						} else {
-							resMin = minFinite - a*l
+						if s.minInfCount == 1 && !math.IsInf(l, -1) {
+							continue
 						}
-						newUB := (r.rhs - resMin) / a
+						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
+						if !qOK {
+							continue
+						}
+						newUB := qVal + qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
 						if orig.varCat[col] != Continuous {
 							newUB = math.Floor(newUB + bTol)
@@ -563,16 +547,15 @@ func runActivityTightening(
 							}
 						}
 					} else {
-						if minInfCount == 1 {
-							if !math.IsInf(u, 1) {
-								continue
-							}
-							resMin = minFinite
-						} else {
-							resMin = minFinite - a*u
+						if s.minInfCount == 1 && !math.IsInf(u, 1) {
+							continue
+						}
+						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
+						if !qOK {
+							continue
 						}
 						absA := -a
-						newLB := (r.rhs - resMin) / a
+						newLB := qVal - qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
 						if orig.varCat[col] != Continuous {
 							newLB = math.Ceil(newLB - bTol)
@@ -599,59 +582,33 @@ func runActivityTightening(
 			}
 
 			if hasLower && upperTightenedRow {
-				maxFinite = 0
-				maxInfCount = 0
-				l1Max := 0.0
-				for k, col := range r.cols {
-					a := r.vals[k]
-					if a > 0 {
-						u := ub[col]
-						if math.IsInf(u, 1) {
-							maxInfCount++
-						} else {
-							t := a * u
-							maxFinite += t
-							l1Max += math.Abs(t)
-						}
-					} else if a < 0 {
-						l := lb[col]
-						if math.IsInf(l, -1) {
-							maxInfCount++
-						} else {
-							t := a * l
-							maxFinite += t
-							l1Max += math.Abs(t)
-						}
-					}
-				}
-				if math.IsNaN(maxFinite) || math.IsInf(maxFinite, 0) || math.IsNaN(l1Max) || math.IsInf(l1Max, 0) {
+				s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+				if s.extreme {
 					continue
 				}
-				rowScale = max(1.0, max(math.Abs(r.rhs), l1Max))
+				rowScale = max(1.0, s.l1Max)
 				rowFeasTol = max(presolveFeasTol, presolveRelScaleTol*rowScale)
-				if maxInfCount == 0 && maxFinite < r.rhs-rowFeasTol {
+				if s.maxInfCount == 0 && s.deficitLo > rowFeasTol {
 					return tightened, removedRows, true, false
 				}
 			}
 
-			if hasLower && maxInfCount <= 1 {
+			if hasLower && s.maxInfCount <= 1 {
 				for k, col := range r.cols {
 					a := r.vals[k]
 					if math.Abs(a) <= presolveZeroTol {
 						continue
 					}
 					l, u := lb[col], ub[col]
-					var resMax float64
 					if a > 0 {
-						if maxInfCount == 1 {
-							if !math.IsInf(u, 1) {
-								continue
-							}
-							resMax = maxFinite
-						} else {
-							resMax = maxFinite - a*u
+						if s.maxInfCount == 1 && !math.IsInf(u, 1) {
+							continue
 						}
-						newLB := (r.rhs - resMax) / a
+						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
+						if !qOK {
+							continue
+						}
+						newLB := qVal - qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
 						if orig.varCat[col] != Continuous {
 							newLB = math.Ceil(newLB - bTol)
@@ -673,16 +630,15 @@ func runActivityTightening(
 							}
 						}
 					} else {
-						if maxInfCount == 1 {
-							if !math.IsInf(l, -1) {
-								continue
-							}
-							resMax = maxFinite
-						} else {
-							resMax = maxFinite - a*l
+						if s.maxInfCount == 1 && !math.IsInf(l, -1) {
+							continue
+						}
+						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
+						if !qOK {
+							continue
 						}
 						absA := -a
-						newUB := (r.rhs - resMax) / a
+						newUB := qVal + qEB
 						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
 						if orig.varCat[col] != Continuous {
 							newUB = math.Floor(newUB + bTol)
@@ -713,6 +669,228 @@ func runActivityTightening(
 		}
 	}
 	return tightened, removedRows, false, false
+}
+
+type rowActivitySummary struct {
+	slackAcc             dot2Acc
+	deficitAcc           dot2Acc
+	slackLo, slackHi     float64
+	deficitLo, deficitHi float64
+	l1Min, l1Max         float64
+	minInfCount          int
+	maxInfCount          int
+	useWideSlack         bool
+	useWideDeficit       bool
+	extreme              bool
+}
+
+func evalRowActivitySummary(
+	cols []int,
+	vals, lb, ub []float64,
+	rhs float64,
+	bailBothInf, hasUpper, hasLower bool,
+) (s rowActivitySummary, earlyBail bool) {
+	if math.IsNaN(rhs) || math.IsInf(rhs, 0) {
+		s.extreme = true
+		return s, false
+	}
+	if hasUpper {
+		s.slackAcc.addVal(rhs)
+	}
+	if hasLower {
+		s.deficitAcc.addVal(rhs)
+	}
+	for k, col := range cols {
+		a := vals[k]
+		l, u := lb[col], ub[col]
+		if a > 0 {
+			if hasUpper {
+				if math.IsInf(l, -1) {
+					s.minInfCount++
+				} else {
+					s.slackAcc.addProd(-a, l)
+					if l < u {
+						s.l1Min += math.Abs(a * l)
+					}
+				}
+			}
+			if hasLower {
+				if math.IsInf(u, 1) {
+					s.maxInfCount++
+				} else {
+					s.deficitAcc.addProd(-a, u)
+					if l < u {
+						s.l1Max += math.Abs(a * u)
+					}
+				}
+			}
+		} else if a < 0 {
+			if hasUpper {
+				if math.IsInf(u, 1) {
+					s.minInfCount++
+				} else {
+					s.slackAcc.addProd(-a, u)
+					if l < u {
+						s.l1Min += math.Abs(a * u)
+					}
+				}
+			}
+			if hasLower {
+				if math.IsInf(l, -1) {
+					s.maxInfCount++
+				} else {
+					s.deficitAcc.addProd(-a, l)
+					if l < u {
+						s.l1Max += math.Abs(a * l)
+					}
+				}
+			}
+		}
+		if bailBothInf && (!hasUpper || s.minInfCount > 0) && (!hasLower || s.maxInfCount > 0) {
+			return s, true
+		}
+	}
+
+	if math.IsNaN(s.l1Min) || math.IsInf(s.l1Min, 0) || math.IsNaN(s.l1Max) || math.IsInf(s.l1Max, 0) {
+		s.extreme = true
+		return s, false
+	}
+
+	if hasUpper {
+		if val, eb, ok := s.slackAcc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
+			s.slackLo = val - eb
+			s.slackHi = val + eb
+		} else {
+			s.useWideSlack = true
+			var w wideDotAcc
+			w.addVal(rhs)
+			for k, col := range cols {
+				a := vals[k]
+				if a > 0 && !math.IsInf(lb[col], -1) {
+					w.addProd(-a, lb[col])
+				} else if a < 0 && !math.IsInf(ub[col], 1) {
+					w.addProd(-a, ub[col])
+				}
+			}
+			val := w.finish(math.NaN())
+			if math.IsNaN(val) || math.IsInf(val, 0) {
+				s.extreme = true
+				return s, false
+			}
+			ulp := 0x1p-50 * math.Abs(val)
+			s.slackLo = val - ulp
+			s.slackHi = val + ulp
+		}
+	}
+
+	if hasLower {
+		if val, eb, ok := s.deficitAcc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
+			s.deficitLo = val - eb
+			s.deficitHi = val + eb
+		} else {
+			s.useWideDeficit = true
+			var w wideDotAcc
+			w.addVal(rhs)
+			for k, col := range cols {
+				a := vals[k]
+				if a > 0 && !math.IsInf(ub[col], 1) {
+					w.addProd(-a, ub[col])
+				} else if a < 0 && !math.IsInf(lb[col], -1) {
+					w.addProd(-a, lb[col])
+				}
+			}
+			val := w.finish(math.NaN())
+			if math.IsNaN(val) || math.IsInf(val, 0) {
+				s.extreme = true
+				return s, false
+			}
+			ulp := 0x1p-50 * math.Abs(val)
+			s.deficitLo = val - ulp
+			s.deficitHi = val + ulp
+		}
+	}
+
+	return s, false
+}
+
+func (s *rowActivitySummary) residualQuotient(
+	cols []int,
+	vals, lb, ub []float64,
+	rhs float64,
+	skipIdx int,
+	isUpper bool,
+) (qVal, qEB float64, ok bool) {
+	a := vals[skipIdx]
+	col := cols[skipIdx]
+	if isUpper {
+		if !s.useWideSlack {
+			acc := s.slackAcc
+			if s.minInfCount == 0 {
+				if a > 0 {
+					acc.addProd(a, lb[col])
+				} else {
+					acc.addProd(a, ub[col])
+				}
+			}
+			if val, eb, accOK := acc.result(); accOK && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
+				if q, qErr, divOK := divDDByFloat(acc.s, acc.c, a, eb); divOK {
+					return q, qErr, true
+				}
+			}
+		}
+		var w wideDotAcc
+		w.addVal(rhs)
+		for k, c := range cols {
+			if k == skipIdx {
+				continue
+			}
+			ak := vals[k]
+			if ak > 0 && !math.IsInf(lb[c], -1) {
+				w.addProd(-ak, lb[c])
+			} else if ak < 0 && !math.IsInf(ub[c], 1) {
+				w.addProd(-ak, ub[c])
+			}
+		}
+		top, rem, wOK := w.finishDD()
+		if !wOK {
+			return 0, 0, false
+		}
+		return divDDByFloat(top, rem, a, 0)
+	}
+
+	if !s.useWideDeficit {
+		acc := s.deficitAcc
+		if s.maxInfCount == 0 {
+			if a > 0 {
+				acc.addProd(a, ub[col])
+			} else {
+				acc.addProd(a, lb[col])
+			}
+		}
+		if val, eb, accOK := acc.result(); accOK && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
+			if q, qErr, divOK := divDDByFloat(acc.s, acc.c, a, eb); divOK {
+				return q, qErr, true
+			}
+		}
+	}
+	var w wideDotAcc
+	w.addVal(rhs)
+	for k, c := range cols {
+		if k == skipIdx {
+			continue
+		}
+		ak := vals[k]
+		if ak > 0 && !math.IsInf(ub[c], 1) {
+			w.addProd(-ak, ub[c])
+		} else if ak < 0 && !math.IsInf(lb[c], -1) {
+			w.addProd(-ak, lb[c])
+		}
+	}
+	top, rem, wOK := w.finishDD()
+	if !wOK {
+		return 0, 0, false
+	}
+	return divDDByFloat(top, rem, a, 0)
 }
 
 type presolveColEntry struct {
@@ -1447,4 +1625,20 @@ func gcdInt64(a, b int64) int64 {
 		a, b = b, a%b
 	}
 	return a
+}
+
+func divFloorInt64(a, d int64) int64 {
+	q := a / d
+	if a%d < 0 {
+		q--
+	}
+	return q
+}
+
+func divCeilInt64(a, d int64) int64 {
+	q := a / d
+	if a%d > 0 {
+		q++
+	}
+	return q
 }

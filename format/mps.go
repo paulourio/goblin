@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 
 	gb "github.com/paulourio/goblin"
 )
@@ -19,6 +20,9 @@ func validateMPSIdent(kind, s string, allowEmpty bool) error {
 			return nil
 		}
 		return fmt.Errorf("MPS %s identifier cannot be empty", kind)
+	}
+	if strings.EqualFold(s, "'MARKER'") {
+		return fmt.Errorf("MPS %s identifier %q is reserved for INTORG/INTEND markers", kind, s)
 	}
 	for i := range len(s) {
 		ch := s[i]
@@ -67,6 +71,13 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		seenRows[rname] = struct{}{}
 	}
 	seenCols := make(map[string]struct{}, numVars)
+	type conflictRow struct {
+		col  int
+		name string
+		rhs  float64
+	}
+	var conflictRows []conflictRow
+	conflictRowByCol := make(map[int]string)
 	for j := range numVars {
 		vname := p.VarName(j)
 		if err := validateMPSIdent("column", vname, false); err != nil {
@@ -76,6 +87,27 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			return fmt.Errorf("MPS duplicate column name %q", vname)
 		}
 		seenCols[vname] = struct{}{}
+		lb, ub := p.VarBounds(j)
+		if lb > ub {
+			rname := fmt.Sprintf("_INFEAS_UB_%d", j)
+			for idx := 0; ; idx++ {
+				if idx > 0 {
+					rname = fmt.Sprintf("_INFEAS_UB_%d_%d", j, idx)
+				}
+				if rname != objName {
+					if _, exists := seenRows[rname]; !exists {
+						break
+					}
+				}
+			}
+			seenRows[rname] = struct{}{}
+			rhs := ub
+			if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
+				rhs = 0
+			}
+			conflictRows = append(conflictRows, conflictRow{col: j, name: rname, rhs: rhs})
+			conflictRowByCol[j] = rname
+		}
 	}
 
 	sense := p.Sense()
@@ -100,6 +132,11 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			senseChar = "G"
 		}
 		if _, err := fmt.Fprintf(w, " %s  %s\n", senseChar, p.RowName(i)); err != nil {
+			return err
+		}
+	}
+	for _, cr := range conflictRows {
+		if _, err := fmt.Fprintf(w, " L  %s\n", cr.name); err != nil {
 			return err
 		}
 	}
@@ -143,6 +180,12 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		if colWriteErr != nil {
 			return colWriteErr
 		}
+		if crName, ok := conflictRowByCol[j]; ok {
+			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, crName, "1"); err != nil {
+				return err
+			}
+			hasEntry = true
+		}
 		if !hasEntry {
 			// Emit an explicit zero objective entry so MPS parsers register unused columns before BOUNDS.
 			if _, err := fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, "0"); err != nil {
@@ -176,6 +219,13 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			}
 		}
 	}
+	for _, cr := range conflictRows {
+		if cr.rhs != 0 {
+			if _, err := fmt.Fprintf(w, "    RHS       %-10s %15s\n", cr.name, formatMPSFloat(cr.rhs)); err != nil {
+				return err
+			}
+		}
+	}
 
 	if _, err := io.WriteString(w, "BOUNDS\n"); err != nil {
 		return err
@@ -184,6 +234,25 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		vname := p.VarName(j)
 		lb, ub := p.VarBounds(j)
 		cat := p.VarCategory(j)
+		if _, isConflict := conflictRowByCol[j]; isConflict {
+			effLB := lb
+			if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
+				effLB = 1
+			}
+			bndType := "LO"
+			if cat != gb.Continuous {
+				bndType = "LI"
+			}
+			if _, err := fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, formatMPSFloat(effLB)); err != nil {
+				return err
+			}
+			if cat != gb.Continuous {
+				if _, err := fmt.Fprintf(w, " PL BND       %-10s\n", vname); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if cat == gb.Binary && lb == 0 && ub == 1 {
 			if _, err := fmt.Fprintf(w, " BV BND       %-10s\n", vname); err != nil {
 				return err

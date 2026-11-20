@@ -1752,3 +1752,63 @@ func TestAdversarialScaledRectangularAndSubnormalLSAP(t *testing.T) {
 	}
 	verifyOptimalityCertificate(t, "stage2_unscaled_sub_2x2", 2, 2, []float64{2e-323, -c292, c292, -4e-323}, assign.Maximize, resUnscaledSub)
 }
+
+func TestAssignPotentialCancellationPermutations(t *testing.T) {
+	ctx := t.Context()
+	base := [3][3]float64{
+		{1e17, 0, 1e18},
+		{1e18, 9, 0},
+		{14, 1e18, -1e17},
+	}
+	perms := [6][3]int{
+		{0, 1, 2},
+		{0, 2, 1},
+		{1, 0, 2},
+		{1, 2, 0},
+		{2, 0, 1},
+		{2, 1, 0},
+	}
+	for _, rp := range perms {
+		for _, cp := range perms {
+			flatMin := make([]float64, 9)
+			flatMax := make([]float64, 9)
+			for i := range 3 {
+				for j := range 3 {
+					v := base[rp[i]][cp[j]]
+					flatMin[i*3+j] = v
+					flatMax[i*3+j] = -v
+				}
+			}
+			for _, opt := range [][]assign.Option{{}, {assign.WithoutSIMD()}} {
+				resMin, err := assign.LinearSumFlat(ctx, 3, 3, flatMin, assign.Minimize, opt...)
+				if err != nil {
+					t.Fatalf("rp=%v cp=%v Minimize err: %v", rp, cp, err)
+				}
+				if resMin.Objective != 9.0 {
+					t.Fatalf("rp=%v cp=%v Minimize obj=%.17g, want 9", rp, cp, resMin.Objective)
+				}
+				resMax, err := assign.LinearSumFlat(ctx, 3, 3, flatMax, assign.Maximize, opt...)
+				if err != nil {
+					t.Fatalf("rp=%v cp=%v Maximize err: %v", rp, cp, err)
+				}
+				if resMax.Objective != -9.0 {
+					t.Fatalf("rp=%v cp=%v Maximize obj=%.17g, want -9", rp, cp, resMax.Objective)
+				}
+			}
+		}
+	}
+
+	wantLo := math.Ldexp(1, -970)
+	matLo := [][]float64{
+		{math.Ldexp(1, 960), 1e300, 1e300, 1e300, 1e300, 1e300},
+		{1e300, -math.Ldexp(1, 958), 1e300, 1e300, 1e300, 1e300},
+		{1e300, 1e300, -math.Ldexp(1, 958), 1e300, 1e300, 1e300},
+		{1e300, 1e300, 1e300, -math.Ldexp(1, 958), 1e300, 1e300},
+		{1e300, 1e300, 1e300, 1e300, -math.Ldexp(1, 958), 1e300},
+		{1e300, 1e300, 1e300, 1e300, 1e300, wantLo},
+	}
+	resLo, err := assign.LinearSum(ctx, matLo, assign.Minimize)
+	if err != nil || resLo.Objective != wantLo {
+		t.Fatalf("assign lo after hi+mid cancel = (%g, %v), want %g", resLo.Objective, err, wantLo)
+	}
+}

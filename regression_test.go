@@ -2148,3 +2148,349 @@ func TestAdversarialReviewRegressions(t *testing.T) {
 		}
 	})
 }
+
+// TestPeerReviewV2Regressions covers the v1.0.0 peer-review numerical, presolve, heuristic,
+// and simplex dual-refinement findings on pure-Go LP and MILP paths.
+func TestPeerReviewV2Regressions(t *testing.T) {
+	t.Run("c1_presolve_activity_and_cancellation_milp", func(t *testing.T) {
+		// Presolve activity tightening and redundant-row detection must not absorb O(1) terms
+		// into +-1e17 cancellation (exact optimum is z = 0, not z = 10).
+		mPre := gb.NewModel("c1_presolve_false_opt", gb.Maximize)
+		px0 := mPre.AddContVar("x0", 1, 1)
+		px1 := mPre.AddContVar("x1", 1, 1)
+		pz := mPre.AddIntVar("z", 0, 10)
+		mPre.SetObjective(gb.VarExpr(pz))
+		mPre.AddConstraint("c", gb.NewExpr(px0.T(1e17), px1.T(-1e17), pz.T(7)).Le(0))
+		pPre := mPre.Compile()
+		for name, opts := range optionVariants() {
+			assertOptimal(t, "c1_presolve/"+name, pPre, mustSolveCompiled(t, pPre, opts...), 0.0)
+		}
+
+		// Duplicate-variable +-1e17 cancellation in Validate, Compile, MaxViolation, and AddCut.
+		mDup := gb.NewModel("c1_dup_1e17", gb.Minimize)
+		dx := mDup.AddContVar("x", 0, 10)
+		mDup.SetObjective(gb.NewExpr(dx.T(1e17), dx.T(9), dx.T(-1e17)))
+		mDup.AddConstraint("ge9", gb.NewExpr(dx.T(1e17), dx.T(9), dx.T(-1e17)).Ge(9))
+		if err := mDup.Validate(); err != nil {
+			t.Fatalf("Validate duplicate +-1e17 error: %v", err)
+		}
+		pDup := mDup.Compile()
+		if obj := pDup.EvaluateObjective([]float64{1}); obj != 9 {
+			t.Fatalf("EvaluateObjective duplicate +-1e17 = %v, want 9", obj)
+		}
+		if bV, rV, iV := pDup.MaxViolation([]float64{1}, false); bV != 0 || rV != 0 || iV != 0 {
+			t.Fatalf("MaxViolation duplicate +-1e17 = (%v, %v, %v), want (0, 0, 0)", bV, rV, iV)
+		}
+		lpDup := gb.NewLPSolver(pDup, nil)
+		lpDup.AddCut([]int{0, 0, 0}, []float64{1e17, -1, -1e17}, -2)
+		rDup := lpDup.Solve()
+		lpDup.Close()
+		if rDup.Status != gb.StatusOptimal || math.Abs(rDup.Objective-18) > 1e-9 {
+			t.Fatalf("LPSolver duplicate +-1e17: status=%v obj=%v, want Optimal 18", rDup.Status, rDup.Objective)
+		}
+
+		// Binary knapsack under +-1e17 fixed-column cancellation: 5*b0 + 7*b1 + 8*b2 <= 14 -> -22
+		// (since 7 + 8 = 15 > 14 is infeasible, optimal is b0=1, b2=1 with 5 + 8 = 13 <= 14).
+		mBin := gb.NewModel("c1_bin_cancel", gb.Minimize)
+		bx0 := mBin.AddContVar("x0", 1, 1)
+		bx1 := mBin.AddContVar("x1", 1, 1)
+		b0 := mBin.AddBinaryVar("b0")
+		b1 := mBin.AddBinaryVar("b1")
+		b2 := mBin.AddBinaryVar("b2")
+		mBin.SetObjective(gb.NewExpr(b0.T(-10), b1.T(-11), b2.T(-12)))
+		mBin.AddConstraint("cap", gb.NewExpr(bx0.T(1e17), bx1.T(-1e17), b0.T(5), b1.T(7), b2.T(8)).Le(14))
+		pBin := mBin.Compile()
+		for _, name := range []string{"default", "no-heuristics"} {
+			assertOptimal(t, "c1_bin/"+name, pBin, mustSolveCompiled(t, pBin, optionVariants()[name]...), -22.0)
+		}
+		for _, name := range []string{"bare", "bare-no-presolve"} {
+			res := mustSolveCompiled(t, pBin, optionVariants()[name]...)
+			if res.Status == gb.StatusOptimal {
+				assertOptimal(t, "c1_bin/"+name, pBin, res, -22.0)
+			} else if res.Status != gb.StatusNumericalError || res.BestBound > -22.0+1e-6 {
+				t.Fatalf("c1_bin/%s: status=%v obj=%v bound=%v, want Optimal -22 or NumericalError with bound <= -22",
+					name, res.Status, res.Objective, res.BestBound)
+			}
+		}
+
+		// Unbounded integer tightening under +-1e17 cancellation: z <= 16 -> max z = 16.
+		mUnbInt := gb.NewModel("c1_unb_int_cancel", gb.Maximize)
+		ux0 := mUnbInt.AddContVar("x0", 1, 1)
+		ux1 := mUnbInt.AddContVar("x1", 1, 1)
+		uz := mUnbInt.AddIntVar("z", 0, math.Inf(1))
+		mUnbInt.SetObjective(gb.VarExpr(uz))
+		mUnbInt.AddConstraint("cap", gb.NewExpr(ux0.T(1e17), ux1.T(-1e17), uz.T(1)).Le(16))
+		pUnbInt := mUnbInt.Compile()
+		for name, opts := range optionVariants() {
+			assertOptimal(t, "c1_unb_int/"+name, pUnbInt, mustSolveCompiled(t, pUnbInt, opts...), 16.0)
+		}
+
+		// Savelsbergh binary coefficient tightening with 1e17 upper bound must not absorb O(1) delta.
+		mSav := gb.NewModel("c1_savelsbergh_large_rhs", gb.Maximize)
+		sx := mSav.AddContVar("x", 0, 1e17)
+		sb := mSav.AddBinaryVar("b")
+		mSav.SetObjective(gb.NewExpr(sx.T(1), sb.T(100)))
+		mSav.AddConstraint("c", gb.NewExpr(sx.T(1), sb.T(10)).Le(1e17))
+		pSav := mSav.Compile()
+		resSav := mustSolveCompiled(t, pSav)
+		if resSav.Status != gb.StatusOptimal {
+			t.Fatalf("c1_savelsbergh_large_rhs: status=%v, want Optimal", resSav.Status)
+		}
+		if bV, rV, iV := pSav.MaxViolation(resSav.Values, true); bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
+			t.Fatalf("c1_savelsbergh_large_rhs violation = (%v, %v, %v)", bV, rV, iV)
+		}
+	})
+
+	t.Run("c2_heuristic_partial_sum_overflow", func(t *testing.T) {
+		for _, sense := range []gb.Sense{gb.Minimize, gb.Maximize} {
+			sign := 1.0
+			if sense == gb.Maximize {
+				sign = -1.0
+			}
+			m := gb.NewModel("c2_heur_overflow", sense)
+			x0 := m.AddIntVar("x0", 1, 1)
+			x1 := m.AddIntVar("x1", 1, 1)
+			x2 := m.AddIntVar("x2", 1, 1)
+			y0 := m.AddIntVar("y0", 1, 1)
+			y1 := m.AddIntVar("y1", 1, 1)
+			m.SetObjective(gb.NewExpr(
+				x0.T(sign*-0.7e308),
+				x1.T(sign*-0.7e308),
+				x2.T(sign*-0.7e308),
+				y0.T(sign*1.1e308),
+				y1.T(sign*1.1e308),
+			))
+			m.AddConstraint("c", gb.NewExpr(x0.T(1), x1.T(1), x2.T(1), y0.T(1), y1.T(1)).Eq(5))
+			res := mustSolve(t, m, gb.WithPresolve(false), gb.WithHeuristics(true))
+			want := sign * 1e307
+			if res.Status != gb.StatusOptimal || math.IsInf(res.Objective, 0) || math.IsInf(res.BestBound, 0) {
+				t.Fatalf("sense=%v: status=%v obj=%v bound=%v, want finite Optimal %.3e",
+					sense, res.Status, res.Objective, res.BestBound, want)
+			}
+			if math.Abs(res.Objective-want) > 1e295 || math.Abs(res.BestBound-want) > 1e295 {
+				t.Fatalf("sense=%v: obj=%v bound=%v, want %.3e", sense, res.Objective, res.BestBound, want)
+			}
+		}
+	})
+
+	t.Run("c3_working_dual_refinement_component_bound", func(t *testing.T) {
+		// Synthetic disconnected model: 120-row equality component with O(1000) duals plus an
+		// independent GreaterEqual row whose basic slack carries a 0x1p-101 roundoff artifact.
+		m := gb.NewModel("c3_disconnected_dual_floor", gb.Minimize)
+		var prev gb.Var
+		obj := gb.NewExpr()
+		for k := range 120 {
+			v := m.AddContVar(fmt.Sprintf("v_%d", k), 0, 10)
+			obj = obj.AddTerm(v, 1000.0)
+			if k > 0 {
+				m.AddConstraint(fmt.Sprintf("eq_%d", k), gb.NewExpr(v.T(1), prev.T(-1)).Eq(0))
+			} else {
+				m.AddConstraint("eq_0", gb.VarExpr(v).Ge(1))
+			}
+			prev = v
+		}
+		freeSlack := m.AddContVar("indep_hi", 0, math.Inf(1))
+		obj = obj.AddTerm(freeSlack, 1.0)
+		m.SetObjective(obj)
+		m.AddConstraint("indep_ge", gb.VarExpr(freeSlack).Ge(0))
+		lp := gb.NewLPSolver(m.Compile(), nil)
+		rLP := lp.Solve()
+		lp.Close()
+		if rLP.Status != gb.StatusOptimal {
+			t.Fatalf("disconnected LP status=%v, want Optimal", rLP.Status)
+		}
+
+		if !testing.Short() {
+			rawMAD, err := os.ReadFile(filepath.Join("testdata", "corpus", "t3_mad_g4_i1000.json"))
+			if err != nil {
+				t.Fatalf("read t3_mad_g4_i1000.json: %v", err)
+			}
+			docMAD, err := format.ParsePuLPJSON(rawMAD)
+			if err != nil {
+				t.Fatalf("parse t3_mad_g4_i1000.json: %v", err)
+			}
+			mMAD, err := format.BuildModelFromPuLPJSON(docMAD)
+			if err != nil {
+				t.Fatalf("build t3_mad_g4_i1000: %v", err)
+			}
+			lpMAD := gb.NewLPSolver(mMAD.Compile(), nil)
+			resMAD := lpMAD.Solve()
+			lpMAD.Close()
+			if resMAD.Status != gb.StatusOptimal || math.Abs(resMAD.Objective-208000.0) > 1e-2 {
+				t.Fatalf("t3_mad_g4_i1000 LPSolver: status=%v obj=%v, want Optimal 208000",
+					resMAD.Status, resMAD.Objective)
+			}
+		}
+	})
+
+	t.Run("m2_objective_constant_overflow", func(t *testing.T) {
+		for _, isMIP := range []bool{false, true} {
+			m := gb.NewModel("m2_const_overflow", gb.Minimize)
+			var x gb.Var
+			if isMIP {
+				x = m.AddIntVar("x", 1, 1)
+			} else {
+				x = m.AddContVar("x", 1, 1)
+			}
+			m.SetObjective(gb.NewExpr(x.T(1e308)).AddConstant(1e308))
+			m.AddConstraint("c", gb.VarExpr(x).Ge(1))
+			for _, pre := range []bool{false, true} {
+				res := mustSolve(t, m, gb.WithPureGo(), gb.WithPresolve(pre))
+				if res.Status != gb.StatusNumericalError {
+					t.Fatalf("isMIP=%v pre=%v: status=%v obj=%v, want StatusNumericalError",
+						isMIP, pre, res.Status, res.Objective)
+				}
+			}
+		}
+	})
+
+	t.Run("m1_minor_root_submip_postcut_basis", func(t *testing.T) {
+		m := gb.NewModel("root_submip_postcut", gb.Minimize)
+		var xs []gb.Var
+		obj := gb.NewExpr()
+		capExpr := gb.NewExpr()
+		eqExpr := gb.NewExpr()
+		for i := range 24 {
+			v := m.AddBinaryVar(fmt.Sprintf("x_%d", i))
+			xs = append(xs, v)
+			obj = obj.AddTerm(v, -float64(10+(i*7)%13))
+			capExpr = capExpr.AddTerm(v, float64(3+(i*5)%9))
+			if i < 6 {
+				eqExpr = eqExpr.AddTerm(v, 1.0)
+			}
+		}
+		y := m.AddContVar("y", 0, 10)
+		obj = obj.AddTerm(y, 0.5)
+		capExpr = capExpr.AddTerm(y, 1.0)
+		m.SetObjective(obj)
+		m.AddConstraint("cap", capExpr.Le(37))
+		m.AddConstraint("eq6", eqExpr.Eq(3))
+		_ = xs
+		p := m.Compile()
+		want := mustSolveCompiled(t, p, gb.WithHeuristics(false)).Objective
+		res := mustSolveCompiled(t, p, gb.WithHeuristics(true), gb.WithCuts(true))
+		assertOptimal(t, "root_submip_postcut", p, res, want)
+	})
+
+	t.Run("c1_cross_bucket_and_lo_preservation_and_rhs_residual", func(t *testing.T) {
+		a0 := math.Ldexp(1.0+math.Ldexp(1.0, -52), 500)
+		x0Val := math.Ldexp(1.0+math.Ldexp(1.0, -52), 460)
+		m := gb.NewModel("cross_bucket_3limb", gb.Maximize)
+		x0 := m.AddContVar("x0", x0Val, x0Val)
+		x1 := m.AddContVar("x1", 1, 1)
+		x2 := m.AddContVar("x2", 1, 1)
+		x3 := m.AddContVar("x3", 1, 1)
+		x4 := m.AddContVar("x4", 1, 1)
+		z := m.AddBinaryVar("z")
+		m.SetObjective(gb.VarExpr(z))
+		m.AddConstraint("c", gb.NewExpr(
+			x0.T(a0),
+			x1.T(-math.Ldexp(1, 959)),
+			x2.T(-math.Ldexp(1, 959)),
+			x3.T(-math.Ldexp(1, 909)),
+			x4.T(-math.Ldexp(1, 856)),
+			z.T(7.0),
+		).Le(0))
+		p := m.Compile()
+		if _, rViol, _ := p.MaxViolation([]float64{x0Val, 1, 1, 1, 1, 1}, true); math.Abs(rViol-7.0) > 1e-12 {
+			t.Fatalf("cross_bucket_3limb MaxViolation = %g, want 7", rViol)
+		}
+		assertOptimal(t, "cross_bucket_3limb", p, mustSolveCompiled(t, p, gb.WithPureGo()), 0)
+
+		wantLo := math.Ldexp(1, -970)
+		mDup := gb.NewModel("dup_lo_survives", gb.Minimize)
+		xd := mDup.AddContVar("x", 0, 1)
+		mDup.SetObjective(gb.NewExpr(
+			xd.T(math.Ldexp(1, 960)),
+			xd.T(-math.Ldexp(1, 958)),
+			xd.T(-math.Ldexp(1, 958)),
+			xd.T(-math.Ldexp(1, 958)),
+			xd.T(-math.Ldexp(1, 958)),
+			xd.T(wantLo),
+		))
+		pDup := mDup.Compile()
+		if got := pDup.EvaluateObjective([]float64{1}); got != wantLo {
+			t.Fatalf("dup_lo_survives EvaluateObjective = %g, want %g", got, wantLo)
+		}
+
+		mRHS := gb.NewModel("rhs_cancel_1e17", gb.Maximize)
+		xr := mRHS.AddContVar("x0", 1e17, 1e17)
+		zr := mRHS.AddBinaryVar("z")
+		mRHS.SetObjective(gb.VarExpr(zr))
+		mRHS.AddConstraint("c", gb.NewExpr(xr.T(1), zr.T(7)).Le(1e17))
+		pRHS := mRHS.Compile()
+		if _, rViol, _ := pRHS.MaxViolation([]float64{1e17, 1}, true); math.Abs(rViol-7.0) > 1e-12 {
+			t.Fatalf("rhs_cancel_1e17 MaxViolation = %g, want 7", rViol)
+		}
+
+		mGCD := gb.NewModel("gcd_3x_2p56", gb.Minimize)
+		xg := mGCD.AddIntVar("x", 0, 1e18)
+		mGCD.SetObjective(gb.VarExpr(xg))
+		mGCD.AddConstraint("eq", gb.NewExpr(xg.T(3)).Eq(math.Ldexp(1, 56)))
+		pGCD := mGCD.Compile()
+		for _, pre := range []bool{true, false} {
+			res := mustSolveCompiled(t, pGCD, gb.WithPureGo(), gb.WithPresolve(pre))
+			if res.Status != gb.StatusInfeasible {
+				t.Fatalf("gcd_3x_2p56 (pre=%v): status=%v obj=%g, want Infeasible", pre, res.Status, res.Objective)
+			}
+		}
+
+		if e := gb.Sum(gb.ConstExpr(1e17), gb.ConstExpr(9), gb.ConstExpr(-1e17)); e.Constant != 9.0 {
+			t.Fatalf("Sum(1e17, 9, -1e17).Constant = %g, want 9", e.Constant)
+		}
+		if e := gb.Sum(gb.ConstExpr(1.5e308), gb.ConstExpr(1.5e308), gb.ConstExpr(-1.5e308)); e.Constant != 1.5e308 {
+			t.Fatalf("Sum(1.5e308, 1.5e308, -1.5e308).Constant = %g, want 1.5e308", e.Constant)
+		}
+
+		c57 := math.Ldexp(1, 57)
+		mConstMax := gb.NewModel("obj_const_max_cancel", gb.Maximize)
+		cs := mConstMax.AddContVar("s", 1, 1)
+		cz := mConstMax.AddBinaryVar("z")
+		mConstMax.SetObjective(gb.NewExpr(cs.T(1e17), cz.T(7)).AddConstant(-1e17))
+		mConstMax.AddConstraint("c", gb.VarExpr(cz).Ge(1))
+		pConstMax := mConstMax.Compile()
+		for _, pre := range []bool{true, false} {
+			res := mustSolveCompiled(t, pConstMax, gb.WithPureGo(), gb.WithPresolve(pre))
+			assertOptimal(t, fmt.Sprintf("obj_const_max_cancel(pre=%v)", pre), pConstMax, res, 7.0)
+			if math.Abs(res.BestBound-7.0) > 1e-6 || math.Abs(res.RootLPBound-7.0) > 1e-6 {
+				t.Fatalf("obj_const_max_cancel(pre=%v): BestBound=%g RootLPBound=%g, want 7", pre, res.BestBound, res.RootLPBound)
+			}
+		}
+		lpConst := gb.NewLPSolver(pConstMax, nil)
+		rLPConst := lpConst.Solve()
+		lpConst.Close()
+		if rLPConst.Status != gb.StatusOptimal || math.Abs(rLPConst.Objective-7.0) > 1e-9 {
+			t.Fatalf("obj_const_max_cancel NewLPSolver: status=%v obj=%g, want Optimal 7", rLPConst.Status, rLPConst.Objective)
+		}
+
+		mConstBin := gb.NewModel("obj_const_bin_cancel", gb.Minimize)
+		cbx0 := mConstBin.AddContVar("x0", 1, 2)
+		cbx1 := mConstBin.AddContVar("x1", 0, 17)
+		cbu := mConstBin.AddContVar("u", 0, 3)
+		cby := mConstBin.AddBinaryVar("y")
+		cbw := mConstBin.AddBinaryVar("w")
+		mConstBin.SetObjective(gb.NewExpr(cbx0.T(c57), cbx1.T(1), cbu.T(100), cby.T(-40), cbw.T(-17)).AddConstant(-c57))
+		mConstBin.AddConstraint("ub_x0", gb.VarExpr(cbx0).Le(1))
+		mConstBin.AddConstraint("eq_x1", gb.NewExpr(cbx1.T(1), cby.T(-17)).Eq(0))
+		mConstBin.AddConstraint("cap", gb.NewExpr(cby.T(5), cbw.T(2), cbu.T(1)).Le(5))
+		pConstBin := mConstBin.Compile()
+		for _, pre := range []bool{true, false} {
+			res := mustSolveCompiled(t, pConstBin, gb.WithPureGo(), gb.WithPresolve(pre))
+			assertOptimal(t, fmt.Sprintf("obj_const_bin_cancel(pre=%v)", pre), pConstBin, res, -23.0)
+		}
+
+		mLPBox := gb.NewModel("lp_box_blocked", gb.Maximize)
+		bsp := mLPBox.AddContVar("s_pos", 1e17, 2e17)
+		bz := mLPBox.AddContVar("z", 0, 1)
+		bsn := mLPBox.AddContVar("s_neg", 0, 1e17)
+		mLPBox.SetObjective(gb.VarExpr(bz))
+		mLPBox.AddConstraint("le", gb.NewExpr(bsp.T(1), bz.T(7), bsn.T(-1)).Le(0))
+		pLPBox := mLPBox.Compile()
+		resLPBox := mustSolveCompiled(t, pLPBox, gb.WithPureGo())
+		if resLPBox.Status == gb.StatusOptimal {
+			assertOptimal(t, "lp_box_blocked", pLPBox, resLPBox, 0.0)
+		} else if resLPBox.Status != gb.StatusNumericalError {
+			t.Fatalf("lp_box_blocked: status=%v, want Optimal 0 or NumericalError", resLPBox.Status)
+		}
+	})
+}
