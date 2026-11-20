@@ -22,6 +22,14 @@ type bfrtCand struct {
 	maxFlip float64
 }
 
+type dualShiftEntry struct {
+	col    int
+	origLB float64
+	origUB float64
+	shiftL bool
+	shiftU bool
+}
+
 const (
 	defaultLUInitCap      = 64
 	tabRowChunkBits       = 6
@@ -52,6 +60,9 @@ type Workspace struct {
 	basicRow    []int
 	rowBasicDeg []int
 	status      []varBasisStatus
+	basicLB     []float64
+	basicUB     []float64
+	basicTol    []float64
 
 	// Primal, dual, reduced-cost, and steepest-edge vectors.
 	x   []float64
@@ -81,6 +92,9 @@ type Workspace struct {
 	// Ratio-test and residual-tracking scratch buffers.
 	flipCols   []int
 	bfrtCands  []bfrtCand
+	dualShift  []dualShiftEntry
+	preShiftCP lpCheckpoint
+	sbCP       lpCheckpoint
 	rowMaxTerm []float64
 	varTol     []float64
 
@@ -151,6 +165,9 @@ func (ws *Workspace) ensureSize(n, m int) {
 	} else {
 		ws.status = ws.status[:tot]
 	}
+	ws.basicLB = resizeFloat64(ws.basicLB, m)
+	ws.basicUB = resizeFloat64(ws.basicUB, m)
+	ws.basicTol = resizeFloat64(ws.basicTol, m)
 
 	ws.x = resizeFloat64(ws.x, tot)
 	ws.xb = resizeFloat64(ws.xb, m)
@@ -188,6 +205,7 @@ func (ws *Workspace) ensureSize(n, m int) {
 	}
 	ws.flipCols = ws.flipCols[:0]
 	ws.bfrtCands = ws.bfrtCands[:0]
+	ws.dualShift = ws.dualShift[:0]
 	ws.rowMaxTerm = resizeFloat64(ws.rowMaxTerm, m)
 	if cap(ws.varTol) < tot {
 		ws.varTol = make([]float64, tot)
