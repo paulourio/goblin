@@ -82,7 +82,19 @@ type Workspace struct {
 	flipCols   []int
 	bfrtCands  []bfrtCand
 	rowMaxTerm []float64
-	inPool     atomic.Bool
+	varTol     []float64
+
+	// Lazy refinement, exact-tableau, and residual-verification scratch buffers shared sequentially across post-solve checks.
+	dotAccBuf  []dot2Acc
+	refineBuf1 []float64
+	refineBuf2 []float64
+	refineBuf3 []float64
+	evalDJOrig []float64
+	evalDJErr  []float64
+	evalDY2Sc  []float64
+	evalYDotSc []float64
+
+	inPool atomic.Bool
 }
 
 var workspacePool = sync.Pool{
@@ -177,6 +189,11 @@ func (ws *Workspace) ensureSize(n, m int) {
 	ws.flipCols = ws.flipCols[:0]
 	ws.bfrtCands = ws.bfrtCands[:0]
 	ws.rowMaxTerm = resizeFloat64(ws.rowMaxTerm, m)
+	if cap(ws.varTol) < tot {
+		ws.varTol = make([]float64, tot)
+	} else {
+		ws.varTol = ws.varTol[:tot]
+	}
 }
 
 func (ws *Workspace) ensureRowMaxTerm(m int) []float64 {
@@ -186,6 +203,28 @@ func (ws *Workspace) ensureRowMaxTerm(m int) []float64 {
 		ws.rowMaxTerm = ws.rowMaxTerm[:m]
 	}
 	return ws.rowMaxTerm
+}
+
+func (ws *Workspace) ensureDotAcc(size int) []dot2Acc {
+	if cap(ws.dotAccBuf) < size {
+		ws.dotAccBuf = make([]dot2Acc, max(size, max(ws.n, ws.m)))
+		return ws.dotAccBuf[:size]
+	}
+	buf := ws.dotAccBuf[:size]
+	clear(buf)
+	return buf
+}
+
+func ensureFloat64Slice(buf *[]float64, n int, zero bool) []float64 {
+	if cap(*buf) < n {
+		*buf = make([]float64, n)
+		return *buf
+	}
+	s := (*buf)[:n]
+	if zero {
+		clear(s)
+	}
+	return s
 }
 
 func resizeFloat64(s []float64, n int) []float64 {

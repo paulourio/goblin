@@ -636,3 +636,233 @@ func TestRuizScaledCutsCrashRecoveryAndInternalGuards(t *testing.T) {
 		}
 	}
 }
+
+func assertExtraColumnParity(t *testing.T, label string, s *LPSolver) {
+	t.Helper()
+	p := s.mat
+	n := p.numVars
+	baseM := p.numConstraints
+	m := s.TotalRows()
+
+	// Seed deterministic non-zero duals to test colDualNoiseTol against row-wise scan.
+	savedY := make([]float64, m)
+	copy(savedY, s.ws.y[:m])
+	for i := range m {
+		s.ws.y[i] = float64(i+1) * 0.375
+		if i%2 == 1 {
+			s.ws.y[i] = -s.ws.y[i]
+		}
+	}
+	defer copy(s.ws.y[:m], savedY)
+
+	ref := make([]float64, m)
+	gotFill := make([]float64, m)
+	gotSparse := make([]float64, m)
+	gotScaled := make([]float64, m)
+	const scale = -2.25
+
+	for col := range n {
+		clear(ref)
+		for k := p.colPtr[col]; k < p.colPtr[col+1]; k++ {
+			ref[p.rowIdx[k]] = p.colVal[k]
+		}
+		for e, dr := range s.extraRows {
+			for k, c := range dr.ColIdx {
+				if c == col && dr.Val[k] != 0 {
+					ref[baseM+e] = dr.Val[k]
+				}
+			}
+		}
+
+		clear(gotFill)
+		s.fillColumn(col, gotFill)
+		for i := range m {
+			if math.Float64bits(gotFill[i]) != math.Float64bits(ref[i]) {
+				t.Fatalf("%s col %d fillColumn[%d] = %.17g, want %.17g", label, col, i, gotFill[i], ref[i])
+			}
+		}
+
+		clear(gotSparse)
+		spIdx := s.fillColumnSparse(col, gotSparse, nil)
+		for i := range m {
+			if math.Float64bits(gotSparse[i]) != math.Float64bits(ref[i]) {
+				t.Fatalf("%s col %d fillColumnSparse[%d] = %.17g, want %.17g", label, col, i, gotSparse[i], ref[i])
+			}
+		}
+		var wantRows []int
+		var wantVals []float64
+		for i, v := range ref {
+			if v != 0 {
+				wantRows = append(wantRows, i)
+				wantVals = append(wantVals, v)
+			}
+		}
+		if len(spIdx) != len(wantRows) {
+			t.Fatalf("%s col %d fillColumnSparse idx len = %d, want %d", label, col, len(spIdx), len(wantRows))
+		}
+		for k, r := range spIdx {
+			if r != wantRows[k] {
+				t.Fatalf("%s col %d fillColumnSparse idx[%d] = %d, want %d", label, col, k, r, wantRows[k])
+			}
+		}
+
+		gotRows, gotVals := s.appendBasisColumn(col, nil, nil)
+		if len(gotRows) != len(wantRows) || len(gotVals) != len(wantVals) {
+			t.Fatalf("%s col %d appendBasisColumn len = (%d,%d), want (%d,%d)", label, col, len(gotRows), len(gotVals), len(wantRows), len(wantVals))
+		}
+		for k := range wantRows {
+			if gotRows[k] != wantRows[k] || math.Float64bits(gotVals[k]) != math.Float64bits(wantVals[k]) {
+				t.Fatalf("%s col %d appendBasisColumn[%d] = (%d,%.17g), want (%d,%.17g)", label, col, k, gotRows[k], gotVals[k], wantRows[k], wantVals[k])
+			}
+		}
+
+		clear(gotScaled)
+		scIdx := s.addScaledColumn(col, scale, gotScaled, nil)
+		touched := make([]bool, m)
+		for _, r := range scIdx {
+			touched[r] = true
+		}
+		for i, rv := range ref {
+			want := 0.0
+			if rv != 0 {
+				want = scale * rv
+				if !touched[i] {
+					t.Fatalf("%s col %d addScaledColumn missing touched row %d", label, col, i)
+				}
+			}
+			if math.Float64bits(gotScaled[i]) != math.Float64bits(want) {
+				t.Fatalf("%s col %d addScaledColumn[%d] = %.17g, want %.17g", label, col, i, gotScaled[i], want)
+			}
+		}
+
+		refL1 := 0.0
+		for q := p.colPtr[col]; q < p.colPtr[col+1]; q++ {
+			r := p.rowIdx[q]
+			if uint(r) < uint(m) {
+				refL1 += math.Abs(s.ws.y[r] * p.colVal[q])
+			}
+		}
+		for e, dr := range s.extraRows {
+			yr := s.ws.y[baseM+e]
+			if yr == 0 {
+				continue
+			}
+			for k, c := range dr.ColIdx {
+				if c == col {
+					refL1 += math.Abs(yr * dr.Val[k])
+					break
+				}
+			}
+		}
+		wantNoise := 128.0 * unitRoundoff64 * refL1
+		gotNoise := s.colDualNoiseTol(col, s.ws.cost)
+		if math.Float64bits(gotNoise) != math.Float64bits(wantNoise) {
+			t.Fatalf("%s col %d colDualNoiseTol = %.17g, want %.17g", label, col, gotNoise, wantNoise)
+		}
+	}
+}
+
+// TestExtraRowCSCSyncAndColumnParity verifies that the lazy CSC index over dynamic cut rows
+// matches direct row-wise scans bit-for-bit across AddCut, PurgeSlackCuts, snapshot restore,
+// unscaleToOriginal, InitCrashBasis, and shared workspace tolerance reuse.
+func TestExtraRowCSCSyncAndColumnParity(t *testing.T) {
+	// Exercise Ruiz-scaled LP transitions across AddCut, PurgeSlackCuts, snapshot restore, and unscaleToOriginal.
+	m := NewModel("extra_csc_ruiz", Minimize)
+	x0 := m.AddContVar("x0", 0, 100)
+	x1 := m.AddContVar("x1", 0, 100)
+	x2 := m.AddContVar("x2", 0, 100)
+	m.SetObjective(NewExpr(x0.T(1), x1.T(2), x2.T(3)))
+	m.AddConstraint("r0", NewExpr(x0.T(1e-8), x1.T(1e-8), x2.T(1e-8)).Ge(3e-8))
+	m.AddConstraint("r1", NewExpr(x0.T(2e4), x1.T(1e4)).Ge(4e4))
+	p := m.Compile()
+	s := NewLPSolver(p, nil)
+	defer s.Close()
+	if !s.scaled {
+		t.Fatal("expected Ruiz scaling on wide-scale test LP")
+	}
+
+	if res := s.Solve(); res.Status != StatusOptimal {
+		t.Fatalf("base solve failed: %v", res.Status)
+	}
+	assertExtraColumnParity(t, "base_zero_cuts", s)
+
+	snap0 := s.snapshot()
+	// Add an active cut, a loose slack cut, and a non-canonical unsorted duplicate cut.
+	s.AddCut([]int{0}, []float64{1.0}, 2.0)
+	assertExtraColumnParity(t, "after_first_addcut", s)
+	snap1 := s.snapshot()
+
+	s.AddCut([]int{2, 0, 2}, []float64{0.5, 1.0, 0.5}, 100.0)
+	s.AddCut([]int{1, 2}, []float64{1.5, -0.25}, 150.0)
+	assertExtraColumnParity(t, "after_three_addcuts", s)
+
+	resCut := s.Solve()
+	if resCut.Status != StatusOptimal || math.Abs(resCut.ObjectiveMin-4.0) > 1e-6 {
+		t.Fatalf("cut solve status=%v obj=%v, want Optimal 4", resCut.Status, resCut.ObjectiveMin)
+	}
+	for r := range s.TotalRows() {
+		if !s.computeExactTableauRow(r) {
+			t.Fatalf("computeExactTableauRow(%d) failed after cuts", r)
+		}
+	}
+
+	purged := s.PurgeSlackCuts(1e-4)
+	if purged < 1 {
+		t.Fatalf("expected PurgeSlackCuts to drop inactive cuts, dropped %d", purged)
+	}
+	assertExtraColumnParity(t, "after_purge_slack_cuts", s)
+	if resPurge := s.Solve(); resPurge.Status != StatusOptimal || math.Abs(resPurge.ObjectiveMin-4.0) > 1e-6 {
+		t.Fatalf("post-purge solve status=%v obj=%v, want Optimal 4", resPurge.Status, resPurge.ObjectiveMin)
+	}
+
+	// Restore to snap1, append a second cut, and trigger unscaleToOriginal.
+	s.restore(snap1)
+	assertExtraColumnParity(t, "after_restore_snap1", s)
+	s.AddCut([]int{0, 1}, []float64{1.0, 2.0}, 50.0)
+	assertExtraColumnParity(t, "before_unscale_two_cuts", s)
+	s.unscaleToOriginal()
+	if s.scaled {
+		t.Fatal("expected solver to be unscaled after unscaleToOriginal")
+	}
+	assertExtraColumnParity(t, "after_unscale_two_cuts", s)
+	if resUnscaled := s.Solve(); resUnscaled.Status != StatusOptimal || math.Abs(resUnscaled.ObjectiveMin-4.0) > 1e-6 {
+		t.Fatalf("post-unscale solve status=%v obj=%v, want Optimal 4", resUnscaled.Status, resUnscaled.ObjectiveMin)
+	}
+
+	s.InitCrashBasis()
+	assertExtraColumnParity(t, "after_init_crash_with_cuts", s)
+
+	s.restore(snap0)
+	if len(s.extraRows) != 0 {
+		t.Fatalf("expected 0 extraRows after restoring snap0, got %d", len(s.extraRows))
+	}
+	assertExtraColumnParity(t, "after_restore_snap0", s)
+
+	// Verify pooled Workspace varTol invalidation when two solvers with different column scales share one Workspace.
+	mSmall := NewModel("small_norm", Minimize)
+	a0 := mSmall.AddContVar("a0", 0, 10)
+	a1 := mSmall.AddContVar("a1", 0, 10)
+	mSmall.SetObjective(NewExpr(a0.T(1), a1.T(1)))
+	mSmall.AddConstraint("c0", NewExpr(a0.T(1), a1.T(1)).Ge(2))
+
+	mBig := NewModel("big_norm", Minimize)
+	b0 := mBig.AddContVar("b0", 0, 10)
+	b1 := mBig.AddContVar("b1", 0, 10)
+	mBig.SetObjective(NewExpr(b0.T(1), b1.T(1)))
+	mBig.AddConstraint("c0", NewExpr(b0.T(1000), b1.T(1)).Ge(2))
+
+	ws := AcquireWorkspace(2, 1)
+	defer ReleaseWorkspace(ws)
+
+	s1 := NewLPSolver(mSmall.Compile(), ws)
+	tol1 := append([]float64(nil), s1.syncVarTol(ws.totVar)...)
+	s2 := NewLPSolver(mBig.Compile(), ws)
+	tol2 := s2.syncVarTol(ws.totVar)
+	if math.Float64bits(tol1[0]) == math.Float64bits(tol2[0]) {
+		t.Fatalf("shared workspace leaked stale varTol[0]: got %.17g for both models", tol2[0])
+	}
+	wantTol2 := s2.feasTol(0)
+	if math.Float64bits(tol2[0]) != math.Float64bits(wantTol2) {
+		t.Fatalf("shared workspace varTol[0] = %.17g, want %.17g", tol2[0], wantTol2)
+	}
+}
