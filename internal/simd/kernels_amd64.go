@@ -709,7 +709,7 @@ func Min2ReducedRow64With(costRow, v []float64, disableSIMD bool) (u1, u2 float6
 		return Min2ReducedRow64Scalar(costRow, v)
 	}
 	n := min(len(costRow), len(v))
-	if n >= 64 {
+	if n >= 256 {
 		return min2ReducedRow64AVX2(costRow[:n], v[:n])
 	}
 	return Min2ReducedRow64Scalar(costRow, v)

@@ -10,7 +10,7 @@ import (
 
 // kernelSizes covers the scalar-only range, the n = 32 dispatch threshold, and AVX2 vector
 // bodies with every tail length (n mod 4 and n mod 8).
-var kernelSizes = []int{0, 1, 3, 4, 7, 15, 31, 32, 33, 34, 35, 39, 40, 53, 255, 256, 257, 258, 259, 263, 264, 512, 1031}
+var kernelSizes = []int{0, 1, 3, 4, 7, 15, 31, 32, 33, 34, 35, 39, 40, 53, 255, 256, 257, 258, 259, 263, 264, 272, 512, 1031}
 
 func randVec(r *rand.Rand, n int) []float64 {
 	v := make([]float64, n)
@@ -251,7 +251,7 @@ func TestMinReducedSlice64AndAllAbsLE64(t *testing.T) {
 }
 
 func TestNaNParity(t *testing.T) {
-	for _, n := range []int{1, 4, 7, 31, 32, 33, 39, 64, 67} {
+	for _, n := range []int{1, 4, 7, 31, 32, 33, 39, 64, 67, 255, 256, 259, 272} {
 		for _, pos := range []int{0, n / 2, n - 1} {
 			x := make([]float64, n)
 			y := make([]float64, n)
@@ -293,19 +293,21 @@ func TestNaNParity(t *testing.T) {
 	}
 
 	// Verify paired low-cost element (index 16) and NaN (index 20) in the same 8-wide AVX2 step.
-	cost := make([]float64, 64)
-	v := make([]float64, 64)
-	for i := range cost {
-		cost[i] = 10.0
-	}
-	cost[16] = 1.0
-	cost[20] = math.NaN()
-	u1SIMD, u2SIMD, j1SIMD, j2SIMD := simd.Min2ReducedRow64With(cost, v, false)
-	u1Scal, u2Scal, j1Scal, j2Scal := simd.Min2ReducedRow64Scalar(cost, v)
-	if !(math.IsNaN(u1SIMD) && math.IsNaN(u2SIMD) && math.IsNaN(u1Scal) && math.IsNaN(u2Scal)) ||
-		j1SIMD != 20 || j1Scal != 20 || j2SIMD != -1 || j2Scal != -1 {
-		t.Fatalf("paired NaN: simd=(%v,%v,%d,%d) scalar=(%v,%v,%d,%d), want NaN at 20",
-			u1SIMD, u2SIMD, j1SIMD, j2SIMD, u1Scal, u2Scal, j1Scal, j2Scal)
+	for _, sz := range []int{64, 256} {
+		cost := make([]float64, sz)
+		v := make([]float64, sz)
+		for i := range cost {
+			cost[i] = 10.0
+		}
+		cost[16] = 1.0
+		cost[20] = math.NaN()
+		u1SIMD, u2SIMD, j1SIMD, j2SIMD := simd.Min2ReducedRow64With(cost, v, false)
+		u1Scal, u2Scal, j1Scal, j2Scal := simd.Min2ReducedRow64Scalar(cost, v)
+		if !(math.IsNaN(u1SIMD) && math.IsNaN(u2SIMD) && math.IsNaN(u1Scal) && math.IsNaN(u2Scal)) ||
+			j1SIMD != 20 || j1Scal != 20 || j2SIMD != -1 || j2Scal != -1 {
+			t.Fatalf("sz=%d paired NaN: simd=(%v,%v,%d,%d) scalar=(%v,%v,%d,%d), want NaN at 20",
+				sz, u1SIMD, u2SIMD, j1SIMD, j2SIMD, u1Scal, u2Scal, j1Scal, j2Scal)
+		}
 	}
 }
 
