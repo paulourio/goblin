@@ -172,3 +172,10 @@ linters:
         linters:
           - modernize
         text: "slicesbackward"
+
+      # Concrete archsimd AVX2 (Float64x4) and AVX-512 (Float64x8) kernels share identical
+      # method-call structure and cannot be generalized over Go type parameters without
+      # breaking direct register lowering.
+      - path: (^|/)internal/simd/(kernels|assign)(_avx512)?_amd64\.go$
+        linters:
+          - dupl

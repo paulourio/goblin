@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -121,6 +122,37 @@ func unameRelease() string {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+func cpuModelName() string {
+	raw, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "unknown"
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if after, ok := strings.CutPrefix(line, "model name"); ok {
+			if _, val, found := strings.Cut(after, ":"); found {
+				return strings.TrimSpace(val)
+			}
+		}
+	}
+	return "unknown"
+}
+
+func goAMD64Level() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, s := range bi.Settings {
+		if s.Key == "GOAMD64" {
+			return s.Value
+		}
+	}
+	if runtime.GOARCH == "amd64" {
+		return "v1"
+	}
+	return runtime.GOARCH
 }
 
 func loadTrialPayloads(corpusDir, id string, nTrials int) ([][]byte, error) {
@@ -305,6 +337,9 @@ func buildAssignResult(
 		Sense:             int(ac.Sense),
 		Family:            ac.Family,
 		SIMDEnabled:       simdActive,
+		SIMDTier:          simd.ActiveSIMDTierWith(!simdActive),
+		CPUModel:          cpuModelName(),
+		GOAMD64:           goAMD64Level(),
 		Objective:         trialObjs[0],
 		TrialObjectives:   trialObjs,
 		TPrepMS:           medianDurationMS(tPrep),
@@ -387,7 +422,9 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 	}
 
 	simdActive := simd.UsingHardwareSIMDWith(noSIMD)
-	fmt.Printf("=== GOBLIN ASSIGN WARM-STATE BENCHMARK SUITE (SIMD=%v, Paired=%v) ===\n\n", simdActive, paired)
+	fmt.Printf("=== GOBLIN ASSIGN WARM-STATE BENCHMARK SUITE (SIMD=%v, Tier=%s/%s, GOAMD64=%s, Paired=%v) ===\n",
+		simdActive, simd.ActiveSIMDTierWith(noSIMD), simd.HardwareSIMDTier(), goAMD64Level(), paired)
+	fmt.Printf("CPU: %s\n\n", cpuModelName())
 	fmt.Printf("%-18s | %9s | %10s %10s | %10s %10s | %8s | %7s\n",
 		"Problem ID", "Shape",
 		"SciPySolve", "GoSolve",
@@ -531,9 +568,15 @@ func main() {
 	simdJSONPath := flag.String("simd-json", "bench/results/goblin_simd.json", "SIMD JSON path for report")
 	backendFlag := flag.String("backend", "go", "Solver backend to benchmark ('go' or 'cbc')")
 	noSIMD := flag.Bool("no-simd", false, "Disable hardware SIMD kernels via gb.WithoutSIMD()")
+	simdTier := flag.String("simd-tier", "auto", "Cap runtime SIMD dispatch tier ('auto', 'avx512', 'avx2', or 'scalar')")
 	trials := flag.Int("trials", defaultTrialsCount, "Number of measured trials per problem")
 	workers := flag.Int("workers", 1, "Number of concurrent benchmark workers")
 	flag.Parse()
+
+	if err := simd.SetMaxTier(strings.ToLower(strings.TrimSpace(*simdTier))); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitCodeBadFlag)
+	}
 
 	if *printFP {
 		fp, err := bench.SourceFingerprint(".")
@@ -840,6 +883,10 @@ func buildMILPBenchResult(
 		TimeMS:     medianDurationMS(tSolve),
 	}
 
+	simdTierStr := ""
+	if backend == gb.BackendGo {
+		simdTierStr = simd.ActiveSIMDTierWith(noSIMD)
+	}
 	goMeanMS, goSDMS := meanSDDurationMS(tTotal)
 	return bench.ProblemBenchResult{
 		ID:                c.ID,
@@ -849,6 +896,9 @@ func buildMILPBenchResult(
 		IsMIP:             canonicalCompiled.IsMIP(),
 		Backend:           backend.String(),
 		SIMDEnabled:       simdActive,
+		SIMDTier:          simdTierStr,
+		CPUModel:          cpuModelName(),
+		GOAMD64:           goAMD64Level(),
 		TrialObjectives:   trialObjs,
 		TrialStatuses:     trialStatuses,
 		TParseMS:          medianDurationMS(tParse),
@@ -1122,8 +1172,9 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 
 	simdActive := backend == gb.BackendGo && simd.UsingHardwareSIMDWith(cfg.noSIMD)
 	nWorkers := max(1, cfg.workers)
-	fmt.Printf("=== GOBLIN WARM-STATE MULTI-TRIAL BENCHMARK SUITE (Backend=%s, SIMD=%v, Paired=%v, Workers=%d) ===\n\n",
-		backend, simdActive, paired, nWorkers)
+	fmt.Printf("=== GOBLIN WARM-STATE MULTI-TRIAL BENCHMARK SUITE (Backend=%s, SIMD=%v, Tier=%s/%s, GOAMD64=%s, Paired=%v, Workers=%d) ===\n",
+		backend, simdActive, simd.ActiveSIMDTierWith(cfg.noSIMD), simd.HardwareSIMDTier(), goAMD64Level(), paired, nWorkers)
+	fmt.Printf("CPU: %s\n\n", cpuModelName())
 	fmt.Printf("%-18s | %5s %4s | %8s %8s | %8s %8s | %9s %9s | %7s | %7s\n",
 		"Problem ID", "Vars", "Rows",
 		"PyPrep", "GoPrep",

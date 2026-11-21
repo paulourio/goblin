@@ -70,6 +70,9 @@ type ProblemBenchResult struct {
 	IsMIP             bool              `json:"is_mip"`
 	Backend           string            `json:"backend,omitempty"`
 	SIMDEnabled       bool              `json:"simd_enabled"`
+	SIMDTier          string            `json:"simd_tier,omitempty"`
+	CPUModel          string            `json:"cpu_model,omitempty"`
+	GOAMD64           string            `json:"goamd64,omitempty"`
 	TrialObjectives   []float64         `json:"trial_objectives,omitempty"`
 	TrialStatuses     []string          `json:"trial_statuses,omitempty"`
 	TParseMS          float64           `json:"t_parse_ms"`
@@ -138,6 +141,9 @@ type AssignBenchResult struct {
 	Sense             int       `json:"sense"`
 	Family            string    `json:"family"`
 	SIMDEnabled       bool      `json:"simd_enabled"`
+	SIMDTier          string    `json:"simd_tier,omitempty"`
+	CPUModel          string    `json:"cpu_model,omitempty"`
+	GOAMD64           string    `json:"goamd64,omitempty"`
 	Objective         float64   `json:"objective"`
 	TrialObjectives   []float64 `json:"trial_objectives,omitempty"`
 	TPrepMS           float64   `json:"t_prep_ms"`

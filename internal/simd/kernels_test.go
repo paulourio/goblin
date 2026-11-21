@@ -1,21 +1,23 @@
 package simd_test
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/paulourio/goblin/internal/simd"
 )
 
-// ExhaustiveSizes builds every length from 0 through 65 plus larger AVX2
-// dispatch thresholds and non-multiple tail lengths up to 1031.
+// ExhaustiveSizes builds every length from 0 through 65 plus larger AVX2/AVX-512
+// dispatch thresholds and non-multiple tail lengths up to 2063.
 func exhaustiveSizes() []int {
-	sizes := make([]int, 0, 78)
+	sizes := make([]int, 0, 81)
 	for n := range 66 {
 		sizes = append(sizes, n)
 	}
-	return append(sizes, 100, 128, 255, 256, 257, 258, 259, 263, 264, 272, 512, 1031)
+	return append(sizes, 100, 128, 255, 256, 257, 258, 259, 263, 264, 272, 512, 1031, 2048, 2055, 2063)
 }
 
 var kernelSizes = exhaustiveSizes()
@@ -703,4 +705,491 @@ func BenchmarkDot64_N56(b *testing.B) {
 		sink = simd.Dot64(x, y)
 	}
 	_ = sink
+}
+
+// availableTiers returns all hardware tiers executable on this host (always includes scalar;
+// includes avx2 when AVX2+FMA is available; includes avx512 when AVX-512 is available).
+func availableTiers() []string {
+	switch simd.HardwareSIMDTier() {
+	case simd.TierAVX512:
+		return []string{simd.TierScalar, simd.TierAVX2, simd.TierAVX512}
+	case simd.TierAVX2:
+		return []string{simd.TierScalar, simd.TierAVX2}
+	default:
+		return []string{simd.TierScalar}
+	}
+}
+
+func TestTierIntrospectionAndCaps(t *testing.T) {
+	defer func() {
+		_ = simd.SetMaxTier("auto")
+		simd.SetDisabled(false)
+	}()
+
+	hw := simd.HardwareSIMDTier()
+	if hw != simd.TierScalar && hw != simd.TierAVX2 && hw != simd.TierAVX512 {
+		t.Fatalf("unexpected HardwareSIMDTier: %q", hw)
+	}
+	if err := simd.SetMaxTier("bogus"); err == nil {
+		t.Fatal("expected error for unknown tier")
+	}
+
+	if err := simd.SetMaxTier(simd.TierScalar); err != nil {
+		t.Fatalf("SetMaxTier(scalar): %v", err)
+	}
+	if simd.ActiveSIMDTier() != simd.TierScalar || simd.UsingHardwareSIMD() {
+		t.Fatalf("expected scalar active tier, got %q (using=%v)", simd.ActiveSIMDTier(), simd.UsingHardwareSIMD())
+	}
+
+	if err := simd.SetMaxTier(simd.TierAVX2); err != nil {
+		t.Fatalf("SetMaxTier(avx2): %v", err)
+	}
+	wantAVX2 := simd.TierScalar
+	if hw != simd.TierScalar {
+		wantAVX2 = simd.TierAVX2
+	}
+	if simd.ActiveSIMDTier() != wantAVX2 {
+		t.Fatalf("SetMaxTier(avx2): active=%q want=%q (hw=%q)", simd.ActiveSIMDTier(), wantAVX2, hw)
+	}
+
+	if err := simd.SetMaxTier("auto"); err != nil {
+		t.Fatalf("SetMaxTier(auto): %v", err)
+	}
+	if simd.ActiveSIMDTier() != hw || simd.MaxTier() != simd.TierAVX512 {
+		t.Fatalf("SetMaxTier(auto): active=%q want=%q max=%q", simd.ActiveSIMDTier(), hw, simd.MaxTier())
+	}
+	if simd.ActiveSIMDTierWith(true) != simd.TierScalar {
+		t.Fatalf("expected ActiveSIMDTierWith(true)=scalar, got %q", simd.ActiveSIMDTierWith(true))
+	}
+}
+
+func TestSelectDualLeaveRow64Parity(t *testing.T) {
+	defer func() { _ = simd.SetMaxTier("auto") }()
+
+	for _, tier := range availableTiers() {
+		t.Run(tier, func(t *testing.T) {
+			if err := simd.SetMaxTier(tier); err != nil {
+				t.Fatalf("SetMaxTier(%s): %v", tier, err)
+			}
+			rng := rand.New(rand.NewPCG(777, 888))
+			for _, m := range kernelSizes {
+				xb := make([]float64, m)
+				lb := make([]float64, m)
+				ub := make([]float64, m)
+				tol := make([]float64, m)
+				dse := make([]float64, m)
+
+				for r := range m {
+					lb[r] = -10.0 + rng.Float64()*5.0
+					ub[r] = lb[r] + 1.0 + rng.Float64()*20.0
+					tol[r] = 1e-7 * (1.0 + rng.Float64())
+					dse[r] = 0.25 + rng.Float64()*10.0
+					xb[r] = 0.5 * (lb[r] + ub[r]) // feasible default
+				}
+				if m > 4 {
+					lb[0] = math.Inf(-1)
+					ub[1] = math.Inf(1)
+					xb[0] = -1e12
+					xb[1] = 1e12
+				}
+
+				// Case 1: all feasible.
+				gr, gd, gv := simd.SelectDualLeaveRow64With(xb, lb, ub, tol, dse, false)
+				wr, wd, wv := simd.SelectDualLeaveRow64Scalar(xb, lb, ub, tol, dse)
+				if gr != wr || !sameFloat64Bits(gd, wd) || !sameFloat64Bits(gv, wv) {
+					t.Fatalf("m=%d all-feasible: got=(%d,%v,%v) want=(%d,%v,%v)", m, gr, gd, gv, wr, wd, wv)
+				}
+
+				// Case 2: sparse violations at boundary/tail positions.
+				for _, pos := range samplePositions(m) {
+					if pos%2 == 0 {
+						xb[pos] = lb[pos] - tol[pos] - (0.01 + rng.Float64())
+					} else {
+						xb[pos] = ub[pos] + tol[pos] + (0.01 + rng.Float64())
+					}
+				}
+				gr, gd, gv = simd.SelectDualLeaveRow64With(xb, lb, ub, tol, dse, false)
+				wr, wd, wv = simd.SelectDualLeaveRow64Scalar(xb, lb, ub, tol, dse)
+				if gr != wr || !sameFloat64Bits(gd, wd) || !sameFloat64Bits(gv, wv) {
+					t.Fatalf("m=%d sparse-viol: got=(%d,%v,%v) want=(%d,%v,%v)", m, gr, gd, gv, wr, wd, wv)
+				}
+
+				// Case 3: dense violations (>64 infeasible rows to exercise multi-chunk collection).
+				for r := range m {
+					switch r % 3 {
+					case 0:
+						xb[r] = lb[r] - tol[r] - float64(r+1)*1e-3
+					case 1:
+						xb[r] = ub[r] + tol[r] + float64(r+1)*1e-3
+					}
+				}
+				gr, gd, gv = simd.SelectDualLeaveRow64With(xb, lb, ub, tol, dse, false)
+				wr, wd, wv = simd.SelectDualLeaveRow64Scalar(xb, lb, ub, tol, dse)
+				if gr != wr || !sameFloat64Bits(gd, wd) || !sameFloat64Bits(gv, wv) {
+					t.Fatalf("m=%d dense-viol: got=(%d,%v,%v) want=(%d,%v,%v)", m, gr, gd, gv, wr, wd, wv)
+				}
+			}
+		})
+	}
+}
+
+func TestScanDualRatioCand64Parity(t *testing.T) {
+	defer func() { _ = simd.SetMaxTier("auto") }()
+
+	const (
+		pivotTol   = 1e-8
+		harrisTol  = 1e-9
+		guardDelta = 2e-12
+	)
+	type candRec struct {
+		col   int
+		ratio float64
+		absA  float64
+	}
+	type passOut struct {
+		thetaMax float64
+		minRatio float64
+		subTol   bool
+		hasNaN   bool
+		cands    []candRec
+	}
+	runPass := func(tab, dj []float64, status []uint8, chunks []int, leaveDir float64, bland, useVec bool) passOut {
+		n := len(tab)
+		negLeave := -leaveDir
+		thetaMax := math.Inf(1)
+		minRatio := math.Inf(1)
+		var out passOut
+		evalCol := func(k int) bool {
+			tv := tab[k]
+			if tv == 0 {
+				return false
+			}
+			alphaBar := negLeave * tv
+			st := status[k]
+			if tv > pivotTol || tv < -pivotTol {
+				var absA, djSign float64
+				super := false
+				switch st {
+				case 0:
+					if alphaBar <= 0 {
+						return false
+					}
+					absA, djSign = alphaBar, 1.0
+				case 1:
+					if alphaBar >= 0 {
+						return false
+					}
+					absA, djSign = -alphaBar, -1.0
+				case 4:
+					absA = math.Abs(alphaBar)
+					super = true
+				default:
+					return false
+				}
+				if super {
+					thetaMax, minRatio = 0, 0
+					out.cands = append(out.cands, candRec{col: k, ratio: 0, absA: absA})
+					return false
+				}
+				d := djSign * dj[k]
+				if math.IsNaN(d) {
+					out.hasNaN = true
+					return true
+				}
+				if d < 0 {
+					d = 0
+				}
+				if bland {
+					if r0 := d / absA; r0 < minRatio {
+						minRatio = r0
+					}
+				}
+				if d <= (thetaMax+guardDelta)*absA {
+					invA := 1.0 / absA
+					r0 := d * invA
+					if hr := (d + harrisTol) * invA; hr < thetaMax {
+						thetaMax = hr
+					}
+					out.cands = append(out.cands, candRec{col: k, ratio: r0, absA: absA})
+				}
+				return false
+			}
+			if math.IsNaN(tv) {
+				out.hasNaN = true
+				return true
+			}
+			if (st == 0 && alphaBar > 0) || (st == 1 && alphaBar < 0) || st == 4 {
+				out.subTol = true
+			}
+			return false
+		}
+		if !useVec {
+			for _, ch := range chunks {
+				start := ch << 6
+				end := min(start+64, n)
+				for k := start; k < end; k++ {
+					if evalCol(k) {
+						return out
+					}
+				}
+			}
+			out.thetaMax, out.minRatio = thetaMax, minRatio
+			return out
+		}
+		var candBuf [64]int
+		ci, elem := 0, 0
+		for ci < len(chunks) {
+			batchCap := len(candBuf)
+			if !bland && math.IsInf(thetaMax, 1) {
+				batchCap = 8
+			}
+			var cnt int
+			cnt, ci, elem = simd.ScanDualRatioCand64With(
+				tab, dj, status, chunks, ci, elem,
+				negLeave, pivotTol, thetaMax+guardDelta, bland, false, candBuf[:batchCap],
+			)
+			if slices.ContainsFunc(candBuf[:cnt], evalCol) {
+				return out
+			}
+		}
+		out.thetaMax, out.minRatio = thetaMax, minRatio
+		return out
+	}
+
+	equalOut := func(a, b passOut) bool {
+		if a.hasNaN != b.hasNaN || a.subTol != b.subTol || len(a.cands) != len(b.cands) {
+			return false
+		}
+		if !a.hasNaN && (!sameFloat64Bits(a.thetaMax, b.thetaMax) || !sameFloat64Bits(a.minRatio, b.minRatio)) {
+			return false
+		}
+		for i := range a.cands {
+			if a.cands[i].col != b.cands[i].col ||
+				!sameFloat64Bits(a.cands[i].ratio, b.cands[i].ratio) ||
+				!sameFloat64Bits(a.cands[i].absA, b.cands[i].absA) {
+				return false
+			}
+		}
+		return true
+	}
+
+	sizes := []int{1, 2, 3, 4, 7, 8, 15, 63, 64, 65, 130, 1090, 2048, 2055, 2063, 4036, 8192, 8205}
+	for _, tier := range availableTiers() {
+		t.Run(tier, func(t *testing.T) {
+			if err := simd.SetMaxTier(tier); err != nil {
+				t.Fatalf("SetMaxTier(%s): %v", tier, err)
+			}
+			for _, n := range sizes {
+				rng := rand.New(rand.NewPCG(777, uint64(n)))
+				tab := make([]float64, n)
+				dj := make([]float64, n)
+				st := make([]uint8, n)
+				numChunks := (n + 63) >> 6
+				chunks := make([]int, numChunks)
+				for c := range numChunks {
+					chunks[c] = c
+				}
+				for j := range n {
+					st[j] = uint8(rng.IntN(4))
+					if rng.IntN(3) != 0 {
+						tab[j] = (rng.Float64() - 0.5) * 4.0
+					}
+					switch st[j] {
+					case 0:
+						dj[j] = rng.Float64()*10.0 - 0.05
+					case 1:
+						dj[j] = -(rng.Float64()*10.0 - 0.05)
+					}
+				}
+				if n > 10 {
+					tab[5] = math.Copysign(0, -1)
+					tab[6] = 0.5 * pivotTol
+					st[6] = 0
+					tab[7] = -0.5 * pivotTol
+					st[7] = 1
+					st[n-1] = 4
+					tab[n-1] = -2.5
+				}
+				for _, leaveDir := range []float64{1.0, -1.0} {
+					for _, bland := range []bool{false, true} {
+						got := runPass(tab, dj, st, chunks, leaveDir, bland, true)
+						want := runPass(tab, dj, st, chunks, leaveDir, bland, false)
+						if !equalOut(got, want) {
+							t.Fatalf("n=%d dir=%v bland=%v mismatch: got=(%.6g,%.6g,sub=%v,nan=%v,len=%d) want=(%.6g,%.6g,sub=%v,nan=%v,len=%d)",
+								n, leaveDir, bland, got.thetaMax, got.minRatio, got.subTol, got.hasNaN, len(got.cands),
+								want.thetaMax, want.minRatio, want.subTol, want.hasNaN, len(want.cands))
+						}
+					}
+				}
+				// Inject NaN in tab on a fixed column and NaN in dj on a blocking column.
+				if n > 16 {
+					tabNaN := append([]float64(nil), tab...)
+					stNaN := append([]uint8(nil), st...)
+					stNaN[n-3] = 3
+					tabNaN[n-3] = math.NaN()
+					got := runPass(tabNaN, dj, stNaN, chunks, 1.0, false, true)
+					want := runPass(tabNaN, dj, stNaN, chunks, 1.0, false, false)
+					if !equalOut(got, want) || !got.hasNaN {
+						t.Fatalf("n=%d tab-NaN mismatch: got=%+v want=%+v", n, got.hasNaN, want.hasNaN)
+					}
+
+					djNaN := append([]float64(nil), dj...)
+					tabDJ := append([]float64(nil), tab...)
+					stDJ := append([]uint8(nil), st...)
+					stDJ[n-2] = 0
+					tabDJ[n-2] = -2.0
+					djNaN[n-2] = math.NaN()
+					got = runPass(tabDJ, djNaN, stDJ, chunks, 1.0, false, true)
+					want = runPass(tabDJ, djNaN, stDJ, chunks, 1.0, false, false)
+					if !equalOut(got, want) || !got.hasNaN {
+						t.Fatalf("n=%d dj-NaN mismatch: got=%+v want=%+v", n, got.hasNaN, want.hasNaN)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMultiTierCoreKernelsParity(t *testing.T) {
+	defer func() { _ = simd.SetMaxTier("auto") }()
+
+	for _, tier := range availableTiers() {
+		t.Run(tier, func(t *testing.T) {
+			if err := simd.SetMaxTier(tier); err != nil {
+				t.Fatalf("SetMaxTier(%s): %v", tier, err)
+			}
+			TestDot64BitParity(t)
+			TestAxpy64BitParity(t)
+			TestScale64AndAbsMax64(t)
+			TestRowActivityBoundsFinite(t)
+			TestInitReducedRow64BitParity(t)
+			TestMin2ReducedRow64BitParity(t)
+			TestMinReducedSlice64AndAllAbsLE64(t)
+			TestNaNParity(t)
+			TestSpecialIEEE754Parity(t)
+		})
+	}
+}
+
+func BenchmarkKernelCrossover(b *testing.B) {
+	defer func() { _ = simd.SetMaxTier("auto") }()
+
+	sizes := []int{16, 32, 64, 128, 256, 512, 1024, 2048, 4096}
+	tiers := availableTiers()
+
+	for _, n := range sizes {
+		a := make([]float64, n)
+		v := make([]float64, n)
+		d := make([]float64, n)
+		lb := make([]float64, n)
+		ub := make([]float64, n)
+		tol := make([]float64, n)
+		dse := make([]float64, n)
+		pred := make([]int, n)
+		rc := make([]float64, n)
+		dRelax := make([]float64, n)
+		tab := make([]float64, n)
+		dj := make([]float64, n)
+		status := make([]uint8, n)
+		chunks := make([]int, (n+63)/64)
+		for ci := range chunks {
+			chunks[ci] = ci
+		}
+		rng := rand.New(rand.NewPCG(42, uint64(n)))
+		for i := range n {
+			a[i] = rng.Float64() * 100.0
+			v[i] = rng.Float64() * 50.0
+			d[i] = 100.0 + rng.Float64()*50.0
+			rc[i] = 100.0 + rng.Float64()*50.0
+			dRelax[i] = 60.0
+			lb[i] = 0.0
+			ub[i] = 100.0
+			tol[i] = 1e-7
+			dse[i] = 1.0 + rng.Float64()
+			// 5% active ratio-test candidates to mirror dense MAD dualRatioPass1 scans.
+			switch i % 20 {
+			case 0:
+				tab[i] = 1.5
+				dj[i] = 0.5
+				status[i] = 0
+			case 1:
+				tab[i] = -1.5
+				dj[i] = -0.5
+				status[i] = 1
+			default:
+				tab[i] = 0
+				dj[i] = 5.0
+				status[i] = 0
+			}
+		}
+		// Inject 2% infeasible rows for SelectDualLeaveRow64.
+		for i := 0; i < n; i += 50 {
+			a[i] = -0.5
+		}
+
+		for _, tier := range tiers {
+			if err := simd.SetMaxTier(tier); err != nil {
+				b.Fatalf("SetMaxTier(%s): %v", tier, err)
+			}
+			b.Run(fmt.Sprintf("Dot64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink float64
+				for range b.N {
+					sink = simd.Dot64(a, v)
+				}
+				_ = sink
+			})
+			b.Run(fmt.Sprintf("Axpy64/N=%d/%s", n, tier), func(b *testing.B) {
+				for range b.N {
+					simd.Axpy64(d, v, 0.0)
+					simd.Axpy64(d, v, 1e-12)
+				}
+			})
+			b.Run(fmt.Sprintf("InitReducedRow64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink float64
+				for range b.N {
+					sink = simd.InitReducedRow64(d, a, v, 1.5)
+				}
+				_ = sink
+			})
+			b.Run(fmt.Sprintf("Min2ReducedRow64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink float64
+				for range b.N {
+					u1, _, _, _ := simd.Min2ReducedRow64(a, v)
+					sink = u1
+				}
+				_ = sink
+			})
+			b.Run(fmt.Sprintf("RelaxRow64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink int
+				for range b.N {
+					sink = simd.RelaxRow64(rc, v, dRelax, pred, 0, 1, 0.5, 1.0)
+				}
+				_ = sink
+			})
+			b.Run(fmt.Sprintf("SelectDualLeaveRow64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink int
+				for range b.N {
+					r, _, _ := simd.SelectDualLeaveRow64With(a, lb, ub, tol, dse, false)
+					sink = r
+				}
+				_ = sink
+			})
+			if n >= 256 {
+				b.Run(fmt.Sprintf("ScanDualRatioCand64/N=%d/%s", n, tier), func(b *testing.B) {
+					var out [128]int
+					var sink int
+					for range b.N {
+						cnt, ci, elem := simd.ScanDualRatioCand64With(tab, dj, status, chunks, 0, 0, 1.0, 1e-9, 1.0, false, false, out[:])
+						for ci < len(chunks) {
+							var c2 int
+							c2, ci, elem = simd.ScanDualRatioCand64With(tab, dj, status, chunks, ci, elem, 1.0, 1e-9, 1.0, false, false, out[:])
+							cnt += c2
+						}
+						sink = cnt
+					}
+					_ = sink
+				})
+			}
+		}
+	}
 }

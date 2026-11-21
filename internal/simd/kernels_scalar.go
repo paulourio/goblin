@@ -3,14 +3,66 @@
 package simd
 
 import (
+	"fmt"
 	"math"
 	"sync/atomic"
 )
 
-var simdDisabled atomic.Bool
+// SIMD tier identifiers reported by HardwareSIMDTier, ActiveSIMDTier, and MaxTier,
+// and accepted by SetMaxTier.
+const (
+	TierScalar = "scalar"
+	TierAVX2   = "avx2"
+	TierAVX512 = "avx512"
+)
+
+var (
+	simdDisabled atomic.Bool
+	maxTierCap   atomic.Uint32
+)
+
+func init() {
+	maxTierCap.Store(2)
+}
 
 // HardwareSIMDAvailable returns false when compiled without GOEXPERIMENT=simd on amd64.
 func HardwareSIMDAvailable() bool { return false }
+
+// HardwareSIMDTier returns "scalar" when compiled without GOEXPERIMENT=simd on amd64.
+func HardwareSIMDTier() string { return TierScalar }
+
+// ActiveSIMDTier returns "scalar" when compiled without GOEXPERIMENT=simd on amd64.
+func ActiveSIMDTier() string { return TierScalar }
+
+// ActiveSIMDTierWith returns "scalar" when compiled without GOEXPERIMENT=simd on amd64.
+func ActiveSIMDTierWith(_ bool) string { return TierScalar }
+
+// SetMaxTier records the runtime SIMD tier ceiling (no-op on scalar-only builds).
+func SetMaxTier(tier string) error {
+	switch tier {
+	case "", "auto", TierAVX512:
+		maxTierCap.Store(2)
+	case TierAVX2:
+		maxTierCap.Store(1)
+	case TierScalar:
+		maxTierCap.Store(0)
+	default:
+		return fmt.Errorf("simd: unknown tier %q (expected auto, avx512, avx2, or scalar)", tier)
+	}
+	return nil
+}
+
+// MaxTier returns the configured runtime SIMD tier ceiling.
+func MaxTier() string {
+	switch maxTierCap.Load() {
+	case 2:
+		return TierAVX512
+	case 1:
+		return TierAVX2
+	default:
+		return TierScalar
+	}
+}
 
 // SetDisabled toggles the process-wide SIMD disable flag.
 func SetDisabled(disabled bool) { simdDisabled.Store(disabled) }
@@ -72,10 +124,18 @@ func Axpy64(dst, src []float64, alpha float64) {
 
 	i := 0
 	for ; i <= len(dst)-4; i += 4 {
-		dst[i] += float64(alpha * src[i])
-		dst[i+1] += float64(alpha * src[i+1])
-		dst[i+2] += float64(alpha * src[i+2])
-		dst[i+3] += float64(alpha * src[i+3])
+		p0 := float64(alpha * src[i])
+		p1 := float64(alpha * src[i+1])
+		p2 := float64(alpha * src[i+2])
+		p3 := float64(alpha * src[i+3])
+		d0 := dst[i] + p0
+		d1 := dst[i+1] + p1
+		d2 := dst[i+2] + p2
+		d3 := dst[i+3] + p3
+		dst[i] = d0
+		dst[i+1] = d1
+		dst[i+2] = d2
+		dst[i+3] = d3
 	}
 	for ; i < len(dst); i++ {
 		dst[i] += float64(alpha * src[i])
@@ -348,4 +408,135 @@ func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		}
 	}
 	return u1, u2, j1, j2
+}
+
+// SelectDualLeaveRow64Scalar scans basic rows [0, m) for the steepest-edge leaving row
+// maximizing viol^2 / dse[r] where viol exceeds basicTol[r].
+func SelectDualLeaveRow64Scalar(xb, basicLB, basicUB, basicTol, dse []float64) (leaveRow int, leaveDir, primalInfeas float64) {
+	leaveRow = -1
+	m := len(xb)
+	if m == 0 {
+		return -1, 0, 0
+	}
+	_ = basicLB[m-1]
+	_ = basicUB[m-1]
+	_ = basicTol[m-1]
+	_ = dse[m-1]
+
+	bestScore := -1.0
+	for r, val := range xb {
+		lbr := basicLB[r]
+		ubr := basicUB[r]
+		tol := basicTol[r]
+		var viol, dir float64
+		if val < lbr-tol {
+			viol = lbr - val
+			dir = 1.0
+		} else if val > ubr+tol {
+			viol = val - ubr
+			dir = -1.0
+		}
+		if viol > 0 {
+			w := dse[r]
+			v2 := viol * viol
+			if v2 > bestScore*w {
+				score := v2 / w
+				if leaveRow == -1 || score > bestScore {
+					bestScore = score
+					leaveRow = r
+					leaveDir = dir
+					primalInfeas = viol
+				}
+			}
+		}
+	}
+	return leaveRow, leaveDir, primalInfeas
+}
+
+// SelectDualLeaveRow64With selects the dual steepest-edge leaving row.
+func SelectDualLeaveRow64With(xb, basicLB, basicUB, basicTol, dse []float64, _ bool) (leaveRow int, leaveDir, primalInfeas float64) {
+	return SelectDualLeaveRow64Scalar(xb, basicLB, basicUB, basicTol, dse)
+}
+
+// ScanDualRatioCand64Scalar scans 64-column structural chunks starting at (chunkPos, elemPos),
+// appending qualifying column indices (blocking ratio candidates, superbasic columns,
+// sub-tolerance pivots, or NaN entries) into dst until len(dst) is filled or chunks end.
+// Status bytes encode 0=AtLower, 1=AtUpper, 2=Basic, 3=Fixed, 4=SuperBasic.
+func ScanDualRatioCand64Scalar[S ~uint8](
+	tab, dj []float64,
+	status []S,
+	chunks []int,
+	chunkPos, elemPos int,
+	negLeaveDir, pivotTol, thetaGuard float64,
+	bland bool,
+	dst []int,
+) (hitCount, nextChunk, nextElem int) {
+	n := min(len(tab), min(len(dj), len(status)))
+	capDst := len(dst)
+	if capDst == 0 {
+		return 0, chunkPos, elemPos
+	}
+	filterByTheta := !bland && !math.IsInf(thetaGuard, 1)
+	cnt := 0
+	for ci := chunkPos; ci < len(chunks); ci++ {
+		ch := chunks[ci]
+		start := ch << 6
+		if start >= n {
+			elemPos = 0
+			continue
+		}
+		end := min(start+64, n)
+		size := end - start
+		i := elemPos
+		elemPos = 0
+		for ; i < size; i++ {
+			col := start + i
+			tv := tab[col]
+			if tv == 0 {
+				continue
+			}
+			hit := false
+			if !(tv > pivotTol || tv < -pivotTol) {
+				hit = true
+			} else {
+				alphaBar := negLeaveDir * tv
+				switch uint8(status[col]) {
+				case 0: // statusAtLower
+					if alphaBar > 0 && (!filterByTheta || !(dj[col] > thetaGuard*alphaBar)) {
+						hit = true
+					}
+				case 1: // statusAtUpper
+					if alphaBar < 0 && (!filterByTheta || !(dj[col] < thetaGuard*alphaBar)) {
+						hit = true
+					}
+				case 4: // statusSuperBasic
+					hit = true
+				}
+			}
+			if hit {
+				dst[cnt] = col
+				cnt++
+				if cnt >= capDst {
+					if i+1 >= size {
+						return cnt, ci + 1, 0
+					}
+					return cnt, ci, i + 1
+				}
+			}
+		}
+	}
+	return cnt, len(chunks), 0
+}
+
+// ScanDualRatioCand64With scans 64-column structural chunks starting at (chunkPos, elemPos).
+func ScanDualRatioCand64With[S ~uint8](
+	tab, dj []float64,
+	status []S,
+	chunks []int,
+	chunkPos, elemPos int,
+	negLeaveDir, pivotTol, thetaGuard float64,
+	bland, _ bool,
+	dst []int,
+) (hitCount, nextChunk, nextElem int) {
+	return ScanDualRatioCand64Scalar(tab, dj, status, chunks, chunkPos, elemPos, negLeaveDir, pivotTol, thetaGuard, bland, dst)
 }

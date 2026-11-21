@@ -250,3 +250,37 @@ func BenchmarkContextOverhead(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkDataflowConcurrentMILP measures multi-goroutine pure-Go MILP throughput
+// sharing an immutable CompiledProblem across concurrent workers (matching Apache Beam
+// Go SDK DoFn parallelism on multi-vCPU cloud workers). Run with -cpu=1,2,4,8.
+func BenchmarkDataflowConcurrentMILP(b *testing.B) {
+	byID := corpusLookup(b)
+	ids := []string{
+		"t1_mad_g2_i4",
+		"t2_mad_g4_i12",
+		"t2_lotsizing_48",
+		"t3_cflp_300",
+	}
+	for _, id := range ids {
+		mdl, ok := byID[id]
+		if !ok {
+			b.Fatalf("missing corpus model %s", id)
+		}
+		p := mdl.Compile()
+		b.Run(id, func(b *testing.B) {
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					res, err := gb.SolveCompiled(ctx, p, gb.WithPureGo())
+					if err != nil || res.Status != gb.StatusOptimal {
+						b.Errorf("[%s] err=%v status=%v", id, err, res.Status)
+						return
+					}
+				}
+			})
+		})
+	}
+}

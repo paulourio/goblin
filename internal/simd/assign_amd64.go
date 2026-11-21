@@ -4,6 +4,7 @@ package simd
 
 import (
 	"math"
+	"math/bits"
 	"simd/archsimd"
 	"unsafe"
 )
@@ -91,12 +92,22 @@ func RelaxRow64With(rCost, v, d []float64, pred []int, start, rowI int, ui, minV
 	if start >= n {
 		return n
 	}
-	if disableSIMD || simdOff() || n-start < 4 {
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n-start < 4 {
 		return RelaxRow64Scalar(rCost[:n], v[:n], d[:n], pred[:n], start, rowI, ui, minVal)
 	}
-	j := relaxRow64AVX2(rCost[:n], v[:n], d[:n], pred[:n], start, rowI, ui, minVal)
-	if j+4 <= n {
-		return j
+	j := start
+	if tier == tierAVX512 && n >= minAVX512Len && n-j >= 8 {
+		var found bool
+		j, found = relaxRow64AVX512(rCost[:n], v[:n], d[:n], pred[:n], j, rowI, ui, minVal)
+		if found {
+			return j
+		}
+	} else {
+		j = relaxRow64AVX2(rCost[:n], v[:n], d[:n], pred[:n], j, rowI, ui, minVal)
+		if j+4 <= n {
+			return j
+		}
 	}
 	for ; j < n; j++ {
 		r := minVal + ((rCost[j] - v[j]) - ui)
@@ -111,7 +122,7 @@ func RelaxRow64With(rCost, v, d []float64, pred []int, start, rowI int, ui, minV
 	return n
 }
 
-// RelaxRow64 relaxes contiguous distances d[start:n] for row rowI using AVX2 when enabled.
+// RelaxRow64 relaxes contiguous distances d[start:n] for row rowI using AVX-512 or AVX2 when enabled.
 func RelaxRow64(rCost, v, d []float64, pred []int, start, rowI int, ui, minVal float64) int {
 	return RelaxRow64With(rCost, v, d, pred, start, rowI, ui, minVal, false)
 }
@@ -179,13 +190,17 @@ func MinNoNaN64Scalar(x []float64) float64 {
 
 // MinNoNaN64With returns the minimum non-NaN value in x, honoring a per-call disableSIMD flag.
 func MinNoNaN64With(x []float64, disableSIMD bool) float64 {
-	if disableSIMD || simdOff() || len(x) < minAVX2Len {
-		return MinNoNaN64Scalar(x)
+	tier := currentTier(disableSIMD)
+	if tier == tierAVX512 && len(x) >= minAVX512Len {
+		return minNoNaN64AVX512(x)
 	}
-	return minNoNaN64AVX2(x)
+	if tier >= tierAVX2 && len(x) >= minAVX2Len {
+		return minNoNaN64AVX2(x)
+	}
+	return MinNoNaN64Scalar(x)
 }
 
-// MinNoNaN64 returns the minimum non-NaN value in x using AVX2 when enabled.
+// MinNoNaN64 returns the minimum non-NaN value in x using AVX-512 or AVX2 when enabled.
 func MinNoNaN64(x []float64) float64 {
 	return MinNoNaN64With(x, false)
 }
@@ -230,6 +245,181 @@ func minNoNaN64AVX2(x []float64) float64 {
 	return res
 }
 
+// CollectLE64Scalar scans x[start:len(x)] and writes up to len(out) indices j where x[j] <= limit
+// (ignoring NaN entries), returning the next unscanned index and the number of indices written.
+func CollectLE64Scalar(x []float64, start int, limit float64, out []int) (next, count int) {
+	n := len(x)
+	if start < 0 {
+		start = 0
+	}
+	if start >= n || len(out) == 0 {
+		return min(max(start, 0), n), 0
+	}
+	capOut := len(out)
+	j := start
+	for ; j+4 <= n; j += 4 {
+		if x[j] <= limit || x[j+1] <= limit || x[j+2] <= limit || x[j+3] <= limit {
+			for k := range 4 {
+				if x[j+k] <= limit {
+					if count == capOut {
+						return j + k, count
+					}
+					out[count] = j + k
+					count++
+				}
+			}
+		}
+	}
+	for ; j < n; j++ {
+		if x[j] <= limit {
+			if count == capOut {
+				return j, count
+			}
+			out[count] = j
+			count++
+		}
+	}
+	return n, count
+}
+
+// CollectLE64With scans x[start:len(x)] and writes up to len(out) indices j where x[j] <= limit,
+// dispatching to AVX-512 or AVX2 when enabled.
+func CollectLE64With(x []float64, start int, limit float64, out []int, disableSIMD bool) (next, count int) {
+	n := len(x)
+	if start < 0 {
+		start = 0
+	}
+	if start >= n || len(out) == 0 {
+		return min(max(start, 0), n), 0
+	}
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n-start < minAVX2Len {
+		return CollectLE64Scalar(x, start, limit, out)
+	}
+	var j int
+	if tier == tierAVX512 && n-start >= minAVX512Len {
+		j, count = collectLE64AVX512(x, start, limit, out)
+	} else {
+		j, count = collectLE64AVX2(x, start, limit, out)
+	}
+	if count == len(out) || j >= n {
+		return j, count
+	}
+	for ; j < n; j++ {
+		if x[j] <= limit {
+			if count == len(out) {
+				return j, count
+			}
+			out[count] = j
+			count++
+		}
+	}
+	return n, count
+}
+
+// CollectLE64 scans x[start:len(x)] for entries <= limit using AVX-512 or AVX2 when enabled.
+func CollectLE64(x []float64, start int, limit float64, out []int) (next, count int) {
+	return CollectLE64With(x, start, limit, out, false)
+}
+
+//go:noinline
+func collectLE64AVX2(x []float64, start int, limit float64, out []int) (int, int) {
+	n := len(x)
+	xp := unsafe.Pointer(&x[0])
+	vlim := archsimd.BroadcastFloat64x4(limit)
+	capOut := len(out)
+	count := 0
+	j := start
+	for ; j+8 <= n; j += 8 {
+		v0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, j*8)))
+		v1 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, (j+4)*8)))
+		m0 := v0.LessEqual(vlim)
+		m1 := v1.LessEqual(vlim)
+		if m0.Or(m1).ToBits() != 0 {
+			bm := (m0.ToBits() & 0xF) | ((m1.ToBits() & 0xF) << 4)
+			for bm != 0 {
+				k := bits.TrailingZeros8(bm)
+				if count == capOut {
+					archsimd.ClearAVXUpperBits()
+					return j + k, count
+				}
+				out[count] = j + k
+				count++
+				bm &= bm - 1
+			}
+		}
+	}
+	for ; j+4 <= n; j += 4 {
+		v0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(xp, j*8)))
+		bm := v0.LessEqual(vlim).ToBits() & 0xF
+		for bm != 0 {
+			k := bits.TrailingZeros8(bm)
+			if count == capOut {
+				archsimd.ClearAVXUpperBits()
+				return j + k, count
+			}
+			out[count] = j + k
+			count++
+			bm &= bm - 1
+		}
+	}
+	archsimd.ClearAVXUpperBits()
+	return j, count
+}
+
+// FillIntScalar sets every element of dst to val using 4-way scalar unrolling.
+func FillIntScalar(dst []int, val int) {
+	i := 0
+	for ; i <= len(dst)-4; i += 4 {
+		dst[i] = val
+		dst[i+1] = val
+		dst[i+2] = val
+		dst[i+3] = val
+	}
+	for ; i < len(dst); i++ {
+		dst[i] = val
+	}
+}
+
+// FillIntWith sets every element of dst to val, dispatching to AVX-512 or AVX2 when enabled.
+func FillIntWith(dst []int, val int, disableSIMD bool) {
+	n := len(dst)
+	tier := currentTier(disableSIMD)
+	if tier == tierAVX512 && n >= minAVX512Len {
+		fillIntAVX512(dst, val)
+		return
+	}
+	if tier >= tierAVX2 && n >= minAVX2Len {
+		fillIntAVX2(dst, val)
+		return
+	}
+	FillIntScalar(dst, val)
+}
+
+// FillInt sets every element of dst to val using AVX-512 or AVX2 when enabled.
+func FillInt(dst []int, val int) {
+	FillIntWith(dst, val, false)
+}
+
+//go:noinline
+func fillIntAVX2(dst []int, val int) {
+	n := len(dst)
+	dp := unsafe.Pointer(&dst[0])
+	v := archsimd.BroadcastInt64x4(int64(val))
+	i := 0
+	for ; i+8 <= n; i += 8 {
+		v.StoreArray((*[4]int64)(unsafe.Add(dp, i*8)))
+		v.StoreArray((*[4]int64)(unsafe.Add(dp, (i+4)*8)))
+	}
+	for ; i+4 <= n; i += 4 {
+		v.StoreArray((*[4]int64)(unsafe.Add(dp, i*8)))
+	}
+	archsimd.ClearAVXUpperBits()
+	for ; i < n; i++ {
+		*(*int)(unsafe.Add(dp, i*8)) = val
+	}
+}
+
 // MinReducedSkip64Scalar returns min_{j != skip} (rowCost[j] - v[j]) over 0 <= j < min(len(rowCost), len(v)).
 func MinReducedSkip64Scalar(rowCost, v []float64, skip int) float64 {
 	n := min(len(rowCost), len(v))
@@ -248,13 +438,17 @@ func MinReducedSkip64Scalar(rowCost, v []float64, skip int) float64 {
 // MinReducedSkip64With returns min_{j != skip} (rowCost[j] - v[j]), honoring disableSIMD.
 func MinReducedSkip64With(rowCost, v []float64, skip int, disableSIMD bool) float64 {
 	n := min(len(rowCost), len(v))
-	if disableSIMD || simdOff() || n < minAVX2Len {
-		return MinReducedSkip64Scalar(rowCost, v, skip)
+	tier := currentTier(disableSIMD)
+	if tier == tierAVX512 && n >= minAVX512Len {
+		return minReducedSkip64AVX512(rowCost[:n], v[:n], skip)
 	}
-	return minReducedSkip64AVX2(rowCost[:n], v[:n], skip)
+	if tier >= tierAVX2 && n >= minAVX2Len {
+		return minReducedSkip64AVX2(rowCost[:n], v[:n], skip)
+	}
+	return MinReducedSkip64Scalar(rowCost, v, skip)
 }
 
-// MinReducedSkip64 returns min_{j != skip} (rowCost[j] - v[j]) using AVX2 when enabled.
+// MinReducedSkip64 returns min_{j != skip} (rowCost[j] - v[j]) using AVX-512 or AVX2 when enabled.
 func MinReducedSkip64(rowCost, v []float64, skip int) float64 {
 	return MinReducedSkip64With(rowCost, v, skip, false)
 }
@@ -331,6 +525,9 @@ func minReducedSkip64AVX2(rowCost, v []float64, skip int) float64 {
 			minRed = min(minRed, *(*float64)(unsafe.Add(cp, k*8))-*(*float64)(unsafe.Add(vp, k*8)))
 		}
 	}
+	if minRed == 0 {
+		minRed = 0
+	}
 	return minRed
 }
 
@@ -373,11 +570,19 @@ func ValidateAndNegate64Scalar(dst, src []float64, limit float64) bool {
 // whether all entries satisfy |src[i]| <= limit, honoring disableSIMD.
 func ValidateAndNegate64With(dst, src []float64, limit float64, disableSIMD bool) bool {
 	n := min(len(dst), len(src))
-	if disableSIMD || simdOff() || n < minAVX2Len {
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n < minAVX2Len {
 		return ValidateAndNegate64Scalar(dst, src, limit)
 	}
-	vecEnd := n &^ 3
-	allOK := validateAndNegate64AVX2(dst[:vecEnd], src[:vecEnd], limit)
+	var vecEnd int
+	var allOK bool
+	if tier == tierAVX512 && n >= minAVX512Len {
+		vecEnd = n &^ 7
+		allOK = validateAndNegate64AVX512(dst[:vecEnd], src[:vecEnd], limit)
+	} else {
+		vecEnd = n &^ 3
+		allOK = validateAndNegate64AVX2(dst[:vecEnd], src[:vecEnd], limit)
+	}
 	for i := vecEnd; i < n; i++ {
 		c := src[i]
 		if !(math.Abs(c) <= limit) {
@@ -507,7 +712,8 @@ func ColReduceValidateRows64Scalar(n, rowStart, rowEnd int, cost, v []float64, r
 // ColReduceValidateRows64With validates |cost| <= limit and performs row-major column reduction
 // over rows [rowStart, rowEnd), honoring disableSIMD.
 func ColReduceValidateRows64With(n, rowStart, rowEnd int, cost, v []float64, row4col []int, limit float64, disableSIMD bool) bool {
-	if disableSIMD || simdOff() || n < minAVX2Len || rowStart < 0 || rowEnd <= rowStart || len(v) < n || len(row4col) < n || len(cost) < rowEnd*n {
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n < minAVX2Len || rowStart < 0 || rowEnd <= rowStart || len(v) < n || len(row4col) < n || len(cost) < rowEnd*n {
 		return ColReduceValidateRows64Scalar(n, rowStart, rowEnd, cost, v, row4col, limit)
 	}
 	v = v[:n]
@@ -515,10 +721,18 @@ func ColReduceValidateRows64With(n, rowStart, rowEnd int, cost, v []float64, row
 	if rowStart == 0 {
 		clear(row4col)
 	}
-	if !colReduceValidateRows64AVX2(n, rowStart, rowEnd, cost, v, row4col, limit) {
-		return false
+	var vecEnd int
+	if tier == tierAVX512 && n >= minAVX512Len {
+		if !colReduceValidateRows64AVX512(n, rowStart, rowEnd, cost, v, row4col, limit) {
+			return false
+		}
+		vecEnd = n &^ 7
+	} else {
+		if !colReduceValidateRows64AVX2(n, rowStart, rowEnd, cost, v, row4col, limit) {
+			return false
+		}
+		vecEnd = n &^ 3
 	}
-	vecEnd := n &^ 3
 	if vecEnd < n {
 		r := rowStart
 		if r == 0 {
@@ -549,7 +763,7 @@ func ColReduceValidateRows64With(n, rowStart, rowEnd int, cost, v []float64, row
 }
 
 // ColReduceValidateRows64 validates |cost| <= limit and performs row-major column reduction
-// over rows [rowStart, rowEnd) using AVX2 when enabled.
+// over rows [rowStart, rowEnd) using AVX-512 or AVX2 when enabled.
 func ColReduceValidateRows64(n, rowStart, rowEnd int, cost, v []float64, row4col []int, limit float64) bool {
 	return ColReduceValidateRows64With(n, rowStart, rowEnd, cost, v, row4col, limit, false)
 }
@@ -690,7 +904,8 @@ func ColReduceRows64Scalar(n, rowStart, rowEnd int, cost, v []float64, row4col [
 // ColReduceRows64With performs row-major column reduction over rows [rowStart, rowEnd),
 // honoring disableSIMD.
 func ColReduceRows64With(n, rowStart, rowEnd int, cost, v []float64, row4col []int, disableSIMD bool) {
-	if disableSIMD || simdOff() || n < minAVX2Len || rowStart < 0 || rowEnd <= rowStart || len(v) < n || len(row4col) < n || len(cost) < rowEnd*n {
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n < minAVX2Len || rowStart < 0 || rowEnd <= rowStart || len(v) < n || len(row4col) < n || len(cost) < rowEnd*n {
 		ColReduceRows64Scalar(n, rowStart, rowEnd, cost, v, row4col)
 		return
 	}
@@ -705,8 +920,14 @@ func ColReduceRows64With(n, rowStart, rowEnd int, cost, v []float64, row4col []i
 	if i >= rowEnd {
 		return
 	}
-	colReduceRows64AVX2(n, i, rowEnd, cost, v, row4col)
-	vecEnd := n &^ 3
+	var vecEnd int
+	if tier == tierAVX512 && n >= minAVX512Len {
+		colReduceRows64AVX512(n, i, rowEnd, cost, v, row4col)
+		vecEnd = n &^ 7
+	} else {
+		colReduceRows64AVX2(n, i, rowEnd, cost, v, row4col)
+		vecEnd = n &^ 3
+	}
 	if vecEnd < n {
 		for r := i; r < rowEnd; r++ {
 			rowOff := r * n
@@ -720,7 +941,7 @@ func ColReduceRows64With(n, rowStart, rowEnd int, cost, v []float64, row4col []i
 	}
 }
 
-// ColReduceRows64 performs row-major column reduction over rows [rowStart, rowEnd) using AVX2 when enabled.
+// ColReduceRows64 performs row-major column reduction over rows [rowStart, rowEnd) using AVX-512 or AVX2 when enabled.
 func ColReduceRows64(n, rowStart, rowEnd int, cost, v []float64, row4col []int) {
 	ColReduceRows64With(n, rowStart, rowEnd, cost, v, row4col, false)
 }
@@ -831,7 +1052,8 @@ func Transpose64Scalar(dst, src []float64, rows, cols int, negate bool) {
 // Transpose64With transposes a row-major rows-by-cols matrix src into cols-by-rows dst,
 // optionally negating entries as 0.0 - val and honoring disableSIMD.
 func Transpose64With(dst, src []float64, rows, cols int, negate, disableSIMD bool) {
-	if disableSIMD || simdOff() || rows < 8 || cols < 8 {
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || rows < 8 || cols < 8 {
 		Transpose64Scalar(dst, src, rows, cols, negate)
 		return
 	}
@@ -841,40 +1063,48 @@ func Transpose64With(dst, src []float64, rows, cols int, negate, disableSIMD boo
 	}
 	dst = dst[:total]
 	src = src[:total]
-	transpose64AVX2(dst, src, rows, cols, negate)
 
-	rows4 := rows &^ 3
-	cols4 := cols &^ 3
+	var rowsVec, colsVec int
+	if tier == tierAVX512 {
+		transpose64AVX512(dst, src, rows, cols, negate)
+		rowsVec = rows &^ 7
+		colsVec = cols &^ 7
+	} else {
+		transpose64AVX2(dst, src, rows, cols, negate)
+		rowsVec = rows &^ 3
+		colsVec = cols &^ 3
+	}
+
 	if negate {
-		for c := cols4; c < cols; c++ {
+		for c := colsVec; c < cols; c++ {
 			dstRow := dst[c*rows : (c+1)*rows]
 			for r := range rows {
 				dstRow[r] = 0.0 - src[r*cols+c]
 			}
 		}
-		for c := range cols4 {
-			dstTail := dst[c*rows+rows4 : (c+1)*rows]
+		for c := range colsVec {
+			dstTail := dst[c*rows+rowsVec : (c+1)*rows]
 			for k := range dstTail {
-				dstTail[k] = 0.0 - src[(rows4+k)*cols+c]
+				dstTail[k] = 0.0 - src[(rowsVec+k)*cols+c]
 			}
 		}
 		return
 	}
-	for c := cols4; c < cols; c++ {
+	for c := colsVec; c < cols; c++ {
 		dstRow := dst[c*rows : (c+1)*rows]
 		for r := range rows {
 			dstRow[r] = src[r*cols+c]
 		}
 	}
-	for c := range cols4 {
-		dstTail := dst[c*rows+rows4 : (c+1)*rows]
+	for c := range colsVec {
+		dstTail := dst[c*rows+rowsVec : (c+1)*rows]
 		for k := range dstTail {
-			dstTail[k] = src[(rows4+k)*cols+c]
+			dstTail[k] = src[(rowsVec+k)*cols+c]
 		}
 	}
 }
 
-// Transpose64 transposes a row-major rows-by-cols matrix src into cols-by-rows dst using AVX2 when enabled.
+// Transpose64 transposes a row-major rows-by-cols matrix src into cols-by-rows dst using AVX-512 or AVX2 when enabled.
 func Transpose64(dst, src []float64, rows, cols int, negate bool) {
 	Transpose64With(dst, src, rows, cols, negate, false)
 }

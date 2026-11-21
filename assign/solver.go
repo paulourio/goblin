@@ -34,9 +34,12 @@ func minimalDownscaleExp(maxAbsFinite float64, n int) int {
 }
 
 func twoSumAssign(a, b float64) (s, err float64) {
-	s = a + b
-	bb := s - a
-	err = (a - (s - bb)) + (b - bb)
+	// Explicit float64 conversions prevent FMA contraction from breaking the error-free transform under GOAMD64=v3/arm64.
+	a = float64(a)
+	b = float64(b)
+	s = float64(a + b)
+	bb := float64(s - a)
+	err = float64(a-float64(s-bb)) + float64(b-bb)
 	return s, err
 }
 
@@ -1940,11 +1943,13 @@ func initAugmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, co
 	}
 
 	nan := math.NaN()
-	for j, dj := range d {
-		pred[j] = curRow
-		if dj <= minVal {
+	var hits [8]int
+	for pos := 0; pos < n; {
+		next, cnt := simd.CollectLE64(d, pos, minVal, hits[:])
+		for k := range cnt {
+			j := hits[k]
 			if row4col[j] == -1 {
-				u[curRow] += dj
+				u[curRow] += d[j]
 				col4row[curRow] = j
 				row4col[j] = curRow
 				return minVal, 0, true, nil
@@ -1954,7 +1959,9 @@ func initAugmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, co
 			d[j] = nan
 			up++
 		}
+		pos = next
 	}
+	simd.FillInt(pred, curRow)
 	return minVal, up, false, nil
 }
 
@@ -1967,29 +1974,11 @@ func refillQueueContigSIMD(d, dQueue []float64, row4col, remaining []int, up int
 	if !(minVal < math.Inf(1)) {
 		return 0, up, -1, ErrInfeasible
 	}
-	dS := d
-	j := 0
-	for len(dS) >= 4 {
-		if dS[0] <= minVal || dS[1] <= minVal || dS[2] <= minVal || dS[3] <= minVal {
-			for k := range 4 {
-				if dS[k] <= minVal {
-					jj := j + k
-					if row4col[jj] == -1 {
-						return minVal, up, jj, nil
-					}
-					remaining[up] = jj
-					dQueue[up] = minVal
-					d[jj] = nan
-					up++
-				}
-			}
-		}
-		dS = dS[4:]
-		j += 4
-	}
-	for k, dj := range dS {
-		if dj <= minVal {
-			jj := j + k
+	var hits [8]int
+	for pos := 0; pos < len(d); {
+		next, cnt := simd.CollectLE64(d, pos, minVal, hits[:])
+		for k := range cnt {
+			jj := hits[k]
 			if row4col[jj] == -1 {
 				return minVal, up, jj, nil
 			}
@@ -1998,6 +1987,7 @@ func refillQueueContigSIMD(d, dQueue []float64, row4col, remaining []int, up int
 			d[jj] = nan
 			up++
 		}
+		pos = next
 	}
 	return minVal, up, -1, nil
 }

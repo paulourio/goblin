@@ -122,6 +122,77 @@ func MinNoNaN64(x []float64) float64 {
 	return MinNoNaN64Scalar(x)
 }
 
+// CollectLE64Scalar scans x[start:len(x)] and writes up to len(out) indices j where x[j] <= limit
+// (ignoring NaN entries), returning the next unscanned index and the number of indices written.
+func CollectLE64Scalar(x []float64, start int, limit float64, out []int) (next, count int) {
+	n := len(x)
+	if start < 0 {
+		start = 0
+	}
+	if start >= n || len(out) == 0 {
+		return min(max(start, 0), n), 0
+	}
+	capOut := len(out)
+	j := start
+	for ; j+4 <= n; j += 4 {
+		if x[j] <= limit || x[j+1] <= limit || x[j+2] <= limit || x[j+3] <= limit {
+			for k := range 4 {
+				if x[j+k] <= limit {
+					if count == capOut {
+						return j + k, count
+					}
+					out[count] = j + k
+					count++
+				}
+			}
+		}
+	}
+	for ; j < n; j++ {
+		if x[j] <= limit {
+			if count == capOut {
+				return j, count
+			}
+			out[count] = j
+			count++
+		}
+	}
+	return n, count
+}
+
+// CollectLE64With scans x[start:len(x)] for entries <= limit.
+func CollectLE64With(x []float64, start int, limit float64, out []int, _ bool) (next, count int) {
+	return CollectLE64Scalar(x, start, limit, out)
+}
+
+// CollectLE64 scans x[start:len(x)] for entries <= limit.
+func CollectLE64(x []float64, start int, limit float64, out []int) (next, count int) {
+	return CollectLE64Scalar(x, start, limit, out)
+}
+
+// FillIntScalar sets every element of dst to val using 4-way scalar unrolling.
+func FillIntScalar(dst []int, val int) {
+	i := 0
+	for ; i <= len(dst)-4; i += 4 {
+		dst[i] = val
+		dst[i+1] = val
+		dst[i+2] = val
+		dst[i+3] = val
+	}
+	for ; i < len(dst); i++ {
+		dst[i] = val
+	}
+}
+
+// FillIntWith sets every element of dst to val.
+func FillIntWith(dst []int, val int, _ bool) {
+	FillIntScalar(dst, val)
+}
+
+// FillInt sets every element of dst to val.
+func FillInt(dst []int, val int) {
+	FillIntScalar(dst, val)
+}
+
 // MinReducedSkip64Scalar returns min_{j != skip} (rowCost[j] - v[j]) over 0 <= j < min(len(rowCost), len(v)).
 func MinReducedSkip64Scalar(rowCost, v []float64, skip int) float64 {
 	n := min(len(rowCost), len(v))

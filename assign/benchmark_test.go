@@ -158,3 +158,52 @@ func BenchmarkAssignContextOverhead(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkDataflowConcurrentAssign measures multi-goroutine LSAP throughput via both
+// LinearSumFlat (shared sync.Pool workspaces) and per-goroutine warm SolveInto across
+// concurrent workers (matching Apache Beam Go SDK DoFn parallelism). Run with -cpu=1,2,4,8.
+func BenchmarkDataflowConcurrentAssign(b *testing.B) {
+	ctx := context.Background()
+	cases := []struct {
+		name       string
+		rows, cols int
+	}{
+		{"N=32", 32, 32},
+		{"N=100", 100, 100},
+		{"N=500", 500, 500},
+		{"Wide_250x1000", 250, 1000},
+	}
+	for _, tc := range cases {
+		cost := buildBenchMatrix(tc.rows, tc.cols, uint64(7000+tc.rows*13+tc.cols), false)
+		k := min(tc.rows, tc.cols)
+		b.Run(tc.name+"/LinearSumFlat", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					res, err := assign.LinearSumFlat(ctx, tc.rows, tc.cols, cost, assign.Minimize)
+					if err != nil || len(res.RowInd) != k {
+						b.Errorf("unexpected result: err=%v len=%d", err, len(res.RowInd))
+						return
+					}
+				}
+			})
+		})
+		b.Run(tc.name+"/SolveIntoWorker", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				rowInd := make([]int, k)
+				colInd := make([]int, k)
+				ws := assign.AcquireWorkspace(tc.rows, tc.cols)
+				defer assign.ReleaseWorkspace(ws)
+				for pb.Next() {
+					if _, err := assign.SolveInto(ctx, tc.rows, tc.cols, cost, assign.Minimize, rowInd, colInd, ws); err != nil {
+						b.Errorf("solve failed: %v", err)
+						return
+					}
+				}
+			})
+		})
+	}
+}

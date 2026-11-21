@@ -391,3 +391,88 @@ func TestTranspose64Parity(t *testing.T) {
 		}
 	}
 }
+
+func TestCollectLE64AndFillIntParity(t *testing.T) {
+	defer func() { _ = simd.SetMaxTier("auto") }()
+
+	for _, tier := range availableTiers() {
+		t.Run(tier, func(t *testing.T) {
+			if err := simd.SetMaxTier(tier); err != nil {
+				t.Fatalf("SetMaxTier(%s): %v", tier, err)
+			}
+			rng := rand.New(rand.NewPCG(1313, 1414))
+			nan := math.NaN()
+
+			for _, n := range assignKernelSizes {
+				// FillInt parity
+				gotFill := make([]int, n)
+				wantFill := make([]int, n)
+				simd.FillInt(gotFill, 42+n)
+				simd.FillIntScalar(wantFill, 42+n)
+				if !slices.Equal(gotFill, wantFill) {
+					t.Fatalf("FillInt n=%d mismatch", n)
+				}
+
+				// CollectLE64 parity across sparse hits, NaN sentinels, and dense ties > cap(out).
+				x := make([]float64, n)
+				limit := 5.0
+				for i := range n {
+					switch rng.IntN(6) {
+					case 0:
+						x[i] = nan
+					case 1:
+						x[i] = limit - rng.Float64()*2.0
+					case 2:
+						x[i] = limit
+					default:
+						x[i] = limit + 0.1 + rng.Float64()*20.0
+					}
+				}
+
+				for _, start := range []int{0, 1, 7, max(0, n-5)} {
+					for _, bufCap := range []int{1, 4, 16, 64} {
+						var gotAll, wantAll []int
+						buf := make([]int, bufCap)
+						for pos := start; pos < n; {
+							next, cnt := simd.CollectLE64(x, pos, limit, buf)
+							gotAll = append(gotAll, buf[:cnt]...)
+							if next <= pos && cnt == 0 {
+								break
+							}
+							pos = next
+						}
+						for pos := start; pos < n; {
+							next, cnt := simd.CollectLE64Scalar(x, pos, limit, buf)
+							wantAll = append(wantAll, buf[:cnt]...)
+							if next <= pos && cnt == 0 {
+								break
+							}
+							pos = next
+						}
+						if !slices.Equal(gotAll, wantAll) {
+							t.Fatalf("CollectLE64 n=%d start=%d buf=%d: got=%v want=%v", n, start, bufCap, gotAll, wantAll)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMultiTierAssignKernelsParity(t *testing.T) {
+	defer func() { _ = simd.SetMaxTier("auto") }()
+
+	for _, tier := range availableTiers() {
+		t.Run(tier, func(t *testing.T) {
+			if err := simd.SetMaxTier(tier); err != nil {
+				t.Fatalf("SetMaxTier(%s): %v", tier, err)
+			}
+			TestRelaxRow64Parity(t)
+			TestMinNoNaN64Parity(t)
+			TestMinReducedSkip64Parity(t)
+			TestValidateAndNegate64Parity(t)
+			TestColReduceRows64Parity(t)
+			TestTranspose64Parity(t)
+		})
+	}
+}

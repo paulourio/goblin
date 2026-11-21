@@ -291,10 +291,10 @@ func parseRepoFuncSpans(root string, useSIMD bool) ([]funcSpan, error) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if useSIMD && strings.HasSuffix(path, "kernels_scalar.go") {
+		if useSIMD && strings.HasSuffix(path, "_scalar.go") {
 			return nil
 		}
-		if !useSIMD && strings.HasSuffix(path, "kernels_amd64.go") {
+		if !useSIMD && strings.HasSuffix(path, "_amd64.go") {
 			return nil
 		}
 		fileAst, err := parser.ParseFile(fset, path, nil, 0)
