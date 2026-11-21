@@ -279,17 +279,26 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 	return m, nil
 }
 
-// FromPuLPJSON reads a PuLP JSON document from r and returns a *gb.Model.
-func FromPuLPJSON(r io.Reader) (*gb.Model, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
+// FromPuLPJSONBytes decodes a PuLP JSON payload directly into a *gb.Model,
+// bypassing the intermediate PuLPJSON AST on standard unescaped inputs.
+func FromPuLPJSONBytes(data []byte) (*gb.Model, error) {
+	if m, ok := fromPuLPJSONFast(data); ok {
+		return m, nil
 	}
 	doc, err := ParsePuLPJSON(data)
 	if err != nil {
 		return nil, err
 	}
 	return BuildModelFromPuLPJSON(doc)
+}
+
+// FromPuLPJSON reads a PuLP JSON document from r and returns a *gb.Model.
+func FromPuLPJSON(r io.Reader) (*gb.Model, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	return FromPuLPJSONBytes(data)
 }
 
 type pulpTokenWriter struct {

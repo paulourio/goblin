@@ -520,3 +520,184 @@ func BenchmarkParsePuLPJSON(b *testing.B) {
 		})
 	}
 }
+
+func assertStreamingParity(t *testing.T, label string, raw []byte, expectFast bool) {
+	t.Helper()
+	if fastMdl, ok := fromPuLPJSONFast(raw); ok != expectFast {
+		t.Fatalf("%s: fromPuLPJSONFast ok=%v, want %v", label, ok, expectFast)
+	} else if ok {
+		if fastMdl == nil {
+			t.Fatalf("%s: fromPuLPJSONFast returned nil model with ok=true", label)
+		}
+	}
+
+	gotMdl, gotErr := FromPuLPJSONBytes(raw)
+	doc, pErr := ParsePuLPJSON(raw)
+	var wantMdl *gb.Model
+	var wantErr error
+	if pErr != nil {
+		wantErr = pErr
+	} else {
+		wantMdl, wantErr = BuildModelFromPuLPJSON(doc)
+	}
+	if (gotErr != nil) != (wantErr != nil) {
+		t.Fatalf("%s: FromPuLPJSONBytes err=%v vs Parse+Build err=%v", label, gotErr, wantErr)
+	}
+	if gotErr != nil {
+		return
+	}
+	gotComp := gotMdl.Compile()
+	wantComp := wantMdl.Compile()
+	if gotComp.Err() != nil || wantComp.Err() != nil {
+		t.Fatalf("%s: compile err got=%v want=%v", label, gotComp.Err(), wantComp.Err())
+	}
+	if gotComp.ObjName() != wantComp.ObjName() {
+		t.Fatalf("%s: ObjName=%q != %q", label, gotComp.ObjName(), wantComp.ObjName())
+	}
+	gotDoc := referencePuLPJSONDoc(gotComp)
+	wantDoc := referencePuLPJSONDoc(wantComp)
+	if !reflect.DeepEqual(gotDoc, wantDoc) {
+		t.Fatalf("%s: compiled model mismatch vs Parse+Build", label)
+	}
+}
+
+func TestFromPuLPJSONDirectStreamingParityAndFallback(t *testing.T) {
+	t.Parallel()
+
+	// 1. All 31 benchmark corpus files and all public Netlib/MIPLIB JSON files.
+	for _, pattern := range []string{
+		filepath.Join("..", "testdata", "corpus", "*.json"),
+		filepath.Join("..", "testdata", "public", "*.json"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil || len(matches) == 0 {
+			t.Fatalf("expected JSON files for %s, got %d (err=%v)", pattern, len(matches), err)
+		}
+		for _, path := range matches {
+			if filepath.Base(path) == "manifest.json" {
+				continue
+			}
+			raw, rErr := os.ReadFile(path)
+			if rErr != nil {
+				t.Fatalf("read %s: %v", path, rErr)
+			}
+			assertStreamingParity(t, filepath.Base(path), raw, true)
+		}
+	}
+
+	// 2. Structural & ordering variants (fast path vs canonical fallback).
+	edgeCases := []struct {
+		name     string
+		raw      string
+		wantFast bool
+	}{
+		{
+			name:     "binary_int_bounds_and_python_nonfinite",
+			raw:      `{"parameters":{"name":"edge","sense":-1,"status":1,"sol_status":1},"objective":{"name":"obj","coefficients":[{"name":"x","value":2.5},{"name":"b","value":-1}],"constant":10},"variables":[{"name":"x","cat":"Continuous","lowBound":null,"upBound":5,"varValue":NaN,"dj":-Infinity},{"name":"b","cat":"Binary","lowBound":null,"upBound":null,"varValue":Infinity},{"name":"bi","cat":"Binary","lowBound":1,"upBound":0}],"constraints":[{"name":"","sense":-1,"coefficients":[{"name":"x","value":1},{"name":"b","value":2}],"pi":Infinity,"constant":-7},{"name":"c_eq","sense":0,"coefficients":[ ],"constant":0}],"sos1":[],"sos2":[]}`,
+			wantFast: true,
+		},
+		{
+			name:     "variables_before_objective",
+			raw:      `{"parameters":{"name":"v_before_o","sense":1},"variables":[{"name":"x","cat":"Integer","lowBound":0,"upBound":5},{"name":"y","cat":"Integer"}],"objective":{"name":null,"coefficients":[{"name":"y","value":3},{"name":"x","value":-1}]},"constraints":[{"name":"c0","sense":1,"coefficients":[{"name":"x","value":1},{"name":"y","value":1}],"constant":-2}]}`,
+			wantFast: true,
+		},
+		{
+			name:     "escaped_strings_fallback",
+			raw:      `{"parameters":{"name":"esc\u0041","sense":1},"objective":{"name":"OBJ","coefficients":[]},"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":1}],"constraints":[],"sos1":[],"sos2":[]}`,
+			wantFast: false,
+		},
+		{
+			name:     "constraints_before_variables_fallback",
+			raw:      `{"parameters":{"name":"out_of_order","sense":1},"constraints":[{"name":"r","sense":0,"coefficients":[{"name":"x","value":1}],"constant":-1}],"variables":[{"name":"x","cat":"Continuous","lowBound":0,"upBound":2}],"objective":{"name":"o","coefficients":[{"name":"x","value":2}]}}`,
+			wantFast: false,
+		},
+		{
+			name:     "duplicate_var_name_fallback_error",
+			raw:      `{"parameters":{"name":"dupvar","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"x","cat":"Continuous"},{"name":"x","cat":"Continuous"}],"constraints":[]}`,
+			wantFast: false,
+		},
+		{
+			name:     "duplicate_con_name_fallback_error",
+			raw:      `{"parameters":{"name":"dupcon","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[{"name":"c","sense":0,"coefficients":[{"name":"x","value":1}],"constant":-1},{"name":"c","sense":-1,"coefficients":[{"name":"x","value":1}],"constant":-2}]}`,
+			wantFast: false,
+		},
+		{
+			name:     "unknown_var_in_constraint_fallback_error",
+			raw:      `{"parameters":{"name":"unk","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[{"name":"c","sense":0,"coefficients":[{"name":"missing","value":1}],"constant":0}]}`,
+			wantFast: false,
+		},
+		{
+			name:     "nonempty_sos1_fallback_error",
+			raw:      `{"parameters":{"name":"sos","sense":1},"objective":{"name":"o","coefficients":[]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[],"sos1":[1],"sos2":[]}`,
+			wantFast: false,
+		},
+		{
+			name:     "objective_without_variables_fallback",
+			raw:      `{"parameters":{"name":"obj_only","sense":1},"objective":{"name":"OBJ","coefficients":[],"constant":42}}`,
+			wantFast: false,
+		},
+	}
+	for _, tc := range edgeCases {
+		assertStreamingParity(t, tc.name, []byte(tc.raw), tc.wantFast)
+	}
+
+	// 3. Verify zero-pinning: mutating raw byte slice after FromPuLPJSONBytes does not corrupt names.
+	rawCopy := []byte(`{"parameters":{"name":"pincheck","sense":1},"objective":{"name":"myobj","coefficients":[{"name":"varA","value":3}]},"variables":[{"name":"varA","cat":"Continuous","lowBound":0,"upBound":10}],"constraints":[{"name":"row1","sense":-1,"coefficients":[{"name":"varA","value":2}],"constant":-5}]}`)
+	mdlPin, err := FromPuLPJSONBytes(rawCopy)
+	if err != nil {
+		t.Fatalf("pincheck err: %v", err)
+	}
+	for i := range rawCopy {
+		rawCopy[i] = 'X'
+	}
+	compPin := mdlPin.Compile()
+	if compPin.Name() != "pincheck" || compPin.ObjName() != "myobj" || compPin.VarName(0) != "varA" || compPin.RowName(0) != "row1" {
+		t.Fatalf("input byte mutation corrupted model strings: name=%q obj=%q var=%q row=%q",
+			compPin.Name(), compPin.ObjName(), compPin.VarName(0), compPin.RowName(0))
+	}
+}
+
+// BenchmarkFromPuLPJSON compares direct streaming FromPuLPJSONBytes against two-stage
+// ParsePuLPJSON + BuildModelFromPuLPJSON across corpus sizes.
+func BenchmarkFromPuLPJSON(b *testing.B) {
+	workloads := []struct {
+		name string
+		path string
+	}{
+		{"T2_Lotsizing48", filepath.Join("..", "testdata", "corpus", "t2_lotsizing_48.json")},
+		{"T3_CFLP300", filepath.Join("..", "testdata", "corpus", "t3_cflp_300.json")},
+		{"T3_Sched1000", filepath.Join("..", "testdata", "corpus", "t3_sched_1000.json")},
+		{"T3_MadG4I1000", filepath.Join("..", "testdata", "corpus", "t3_mad_g4_i1000.json")},
+		{"Coinor_Capplan1", filepath.Join("..", "testdata", "public", "coinor_capplan1.json")},
+	}
+	for _, wl := range workloads {
+		raw, err := os.ReadFile(wl.path)
+		if err != nil {
+			b.Fatalf("read %s: %v", wl.path, err)
+		}
+		b.Run(wl.name+"/DirectStreaming", func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				mdl, sErr := FromPuLPJSONBytes(raw)
+				if sErr != nil || mdl == nil {
+					b.Fatal(sErr)
+				}
+			}
+		})
+		b.Run(wl.name+"/ParseAndBuildAST", func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				doc, pErr := ParsePuLPJSON(raw)
+				if pErr != nil {
+					b.Fatal(pErr)
+				}
+				mdl, bErr := BuildModelFromPuLPJSON(doc)
+				if bErr != nil || mdl == nil {
+					b.Fatal(bErr)
+				}
+			}
+		})
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -639,9 +640,25 @@ func TestWriteMPSByteForByteCompatibility(t *testing.T) {
 	}
 }
 
+func isRaceBuild() bool {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return false
+	}
+	for _, s := range info.Settings {
+		if s.Key == "-race" && s.Value == "true" {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCodecLowAllocations guards against allocation regressions in ParsePuLPJSON,
 // WriteMPS, ToPuLPJSON, and ToPuLPJSONCompact on a Tier 3 corpus model.
 func TestCodecLowAllocations(t *testing.T) {
+	if isRaceBuild() {
+		t.Skip("allocation counts are inflated under -race because sync.Pool drops entries")
+	}
 	raw, err := os.ReadFile(filepath.Join("..", "testdata", "corpus", "t3_sched_1000.json"))
 	if err != nil {
 		t.Fatalf("read t3_sched_1000.json: %v", err)
