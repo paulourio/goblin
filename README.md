@@ -115,11 +115,11 @@ Full technical guides live in the [`docs/`](docs/index.md) directory:
 All benchmark tables in `README.md`, [`docs/benchmarks.md`](docs/benchmarks.md), and [`bench/results/final_report.md`](bench/results/final_report.md) are rendered deterministically from the seven JSON telemetry files in `bench/results/` (`python_baseline.json`, `goblin_cbc.json`, `goblin_scalar.json`, `goblin_simd.json`, `scipy_assign_baseline.json`, `goblin_assign_scalar.json`, `goblin_assign_simd.json`). [`doc_sync_test.go`](doc_sync_test.go) fails `go test ./...` if any table drifts from the telemetry, if any `goblin` build disagrees with CBC or SciPy on a status or objective, or if any telemetry file differs in git commit, source/corpus fingerprint, or host kernel. Headline timings use the default pure-Go scalar build (`BackendGo`).
 
 <!-- BEGIN GENERATED:PROVENANCE -->
-- **Unified telemetry source**: fingerprint `e204cda60eec4c2c` (commit `99a49c0d04e2f9edf0a4c6466a80b49b8a54b088`), `go1.27.3-X:simd`, Linux kernel `6.18.63-gentoo-x86_64`; the documentation gate rejects any telemetry file whose commit, fingerprint, or kernel differs.
+- **Unified telemetry source**: fingerprint `5b410dffd8dc05c7` (commit `2b7305d20ada300b230498a89f1e7f64aa619fc4`), `go1.27.3-X:simd`, Linux kernel `6.18.64-gentoo-r1-x86_64`; the documentation gate rejects any telemetry file whose commit, fingerprint, or kernel differs.
 - **CPU affinity**: goblin `6`; Python + CBC `6`; Python + SciPy `6`.
 - **Python MILP reference**: PuLP `4.2.0`, `CBC devel (git:c1c171ec)` (`cbc`, SHA-256 `0be2af228dd0056d`, `ratioGap=1e-6`, `allowableGap=1e-6`).
 - **Python LSAP reference**: SciPy `1.18.1` (`scipy.optimize.linear_sum_assignment`, C++ `rectangular_lsap`), NumPy `2.5.4`.
-- **CBC subprocess spawn floor**: 6.56 ms median on a 1-variable MILP and 6.27 ms median on a 1-variable LP (measured separately for provenance; summary tables report unadjusted wall times and paired ratios without floor subtraction).
+- **CBC subprocess spawn floor**: 7.21 ms median on a 1-variable MILP and 6.70 ms median on a 1-variable LP (measured separately for provenance; summary tables report unadjusted wall times and paired ratios without floor subtraction).
 - **goblin `WithCBC()` backend**: COIN-OR CBC/CLP `devel` (commit `c1c171ec`, vendored in `third_party/Cbc` and built with `-O3 -DNDEBUG`), linked in-process through `cgo` when built with `-tags cbc` (`gb.WithCBC()`). Both Python `PuLP + CBC` and in-process `BackendCBC` run the same `c1c171ec` solver stack at matching `1e-6` relative and absolute MIP gap tolerances; untouched default settings map `MaxCutPasses` to `passC = 30` and `MaxNodes` to unlimited on `BackendCBC`, while honoring explicit `WithMaxNodes` and `WithMaxCutPasses` overrides.
 <!-- END GENERATED:PROVENANCE -->
 
@@ -130,15 +130,15 @@ Read the synthetic corpus ratios with three methodological notes. First, Tier 1 
 <!-- BEGIN GENERATED:TIER_SUMMARY_TABLE -->
 | Workload Subset | Families (Trials) | Equal-Family `Py / Go` GeoMean [Clustered 95% CI] | Pooled Trial `Py / Go` | Equal-Family `Go / CBC` | `Go` Trial (Med) Sum (ms) | `CBC` Trial (Med) Sum (ms) | `Py` Trial (Med) Sum (ms) | Per-Instance `Py / Go` Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Canonical micro-models (`N <= 26`, spawn-dominated) | 10 (110) | **272.73x** [123.43x-602.64x] | 272.73x | 0.06x | 16.5 (1.5) | 193.2 (19.3) | 1065.3 (100.2) | 365.74x [10.99x-2701.65x] |
-| Tier 2: Target p90 MILPs (`30 <= N <= 84`) | 13 (143) | **14.56x** [8.16x-26.00x] | 14.56x | 0.20x | 1097.0 (53.3) | 1959.1 (170.9) | 4307.9 (416.9) | 18.67x [0.10x-145.71x] |
-| Tier 3: Large tail MILPs (`145 <= N <= 4036`) | 8 (40) | **6.28x** [2.57x-15.35x] | 6.28x | 0.33x | 4368.5 (210.4) | 2882.3 (557.8) | 6174.8 (1064.9) | 7.42x [0.07x-32.39x] |
-| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | **7.96x** [4.39x-14.44x] | 9.09x | 0.32x | 5080.1 (207.2) | 3103.3 (392.6) | 6761.3 (985.0) | 9.19x [0.07x-145.71x] |
-| Tier 3 non-MAD MILPs | 4 (20) | **3.88x** [0.56x-27.01x] | 3.88x | 0.56x | 3991.9 (154.7) | 1238.2 (229.7) | 2800.5 (599.2) | 3.62x [0.07x-23.01x] |
-| Planted-gap MAD family (zero root LP gap by design) | 8 (64) | **24.09x** [9.33x-62.19x] | 33.29x | 0.12x | 386.2 (56.5) | 1762.5 (338.6) | 3826.0 (506.4) | 34.64x [3.77x-156.02x] |
-| Random-weight MAD (negative controls) | 3 (33) | **9.64x** [0.71x-130.32x] | 9.64x | 0.25x | 539.4 (34.2) | 1210.6 (115.5) | 2242.0 (247.7) | 8.72x [0.97x-69.31x] |
-| All non-planted families (Tiers 1-3) | 23 (229) | **32.62x** [13.25x-80.35x] | 40.78x | 0.17x | 5095.9 (208.7) | 3272.1 (409.4) | 7722.0 (1075.6) | 31.40x [0.07x-2701.65x] |
-| All 31 synthetic corpus families | 31 (293) | **30.17x** [15.18x-59.95x] | 39.01x | 0.15x | 5482.1 (265.2) | 5034.6 (748.0) | 11548.0 (1582.0) | 32.97x [0.07x-2701.65x] |
+| Tier 1: Canonical micro-models (`N <= 26`, spawn-dominated) | 10 (110) | **419.70x** [184.06x-957.03x] | 419.70x | 0.04x | 9.8 (0.8) | 193.5 (19.0) | 1077.7 (100.8) | 649.99x [31.36x-2522.44x] |
+| Tier 2: Target p90 MILPs (`30 <= N <= 84`) | 13 (143) | **18.65x** [11.03x-31.52x] | 18.65x | 0.16x | 755.9 (33.8) | 2010.2 (173.7) | 4323.0 (419.2) | 24.85x [0.15x-161.18x] |
+| Tier 3: Large tail MILPs (`145 <= N <= 4036`) | 8 (40) | **8.79x** [3.58x-21.54x] | 8.79x | 0.23x | 3436.6 (164.7) | 2968.2 (577.6) | 6186.9 (1063.7) | 10.85x [0.09x-36.20x] |
+| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | **10.14x** [5.80x-17.73x] | 11.69x | 0.25x | 3936.3 (155.7) | 3204.4 (407.0) | 6774.1 (986.1) | 12.01x [0.09x-161.18x] |
+| Tier 3 non-MAD MILPs | 4 (20) | **4.69x** [0.75x-29.44x] | 4.69x | 0.45x | 3188.0 (122.7) | 1283.5 (240.8) | 2805.5 (598.8) | 4.61x [0.09x-25.05x] |
+| Planted-gap MAD family (zero root LP gap by design) | 8 (64) | **31.84x** [15.59x-65.06x] | 40.77x | 0.09x | 257.2 (42.9) | 1798.0 (346.6) | 3839.7 (506.3) | 44.28x [4.26x-146.82x] |
+| Random-weight MAD (negative controls) | 3 (33) | **15.89x** [1.01x-249.75x] | 15.89x | 0.15x | 361.6 (17.8) | 1243.8 (117.6) | 2245.8 (247.8) | 13.39x [1.40x-111.50x] |
+| All non-planted families (Tiers 1-3) | 23 (229) | **46.14x** [18.00x-118.29x] | 58.64x | 0.12x | 3945.1 (156.4) | 3373.9 (423.7) | 7747.9 (1077.4) | 41.42x [0.09x-2522.44x] |
+| All 31 synthetic corpus families | 31 (293) | **41.93x** [20.76x-84.69x] | 54.17x | 0.11x | 4202.3 (199.3) | 5172.0 (770.3) | 11587.6 (1583.7) | 43.11x [0.09x-2522.44x] |
 <!-- END GENERATED:TIER_SUMMARY_TABLE -->
 
 ### 2. Synthetic MAD Group-Item Allocation Family (`G` Groups $\times$ `I` Items, $T = 6$ Periods)
@@ -148,17 +148,17 @@ The synthetic `MAD` group-item allocation family ([`BuildMADFromWeights`](bench/
 <!-- BEGIN GENERATED:MAD_PIPELINE_TABLE -->
 | Problem ID | $G \times I$ | Vars | Rows | Paired `Py / Go` [Min-Max] | GoTotal Med (ms) | PyTotal Med (ms) | GoSolve Med (ms) | PySolve Med (ms) | GoPrep (ms) | PyPrep (ms) | Trial 0 Obj | Parity |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | 26 | 34 | **144.8x** [134.1x-156.0x] | 0.07 | 9.65 | 0.04 | 9.44 | 0.023 | 0.265 | 2400.0 | `OK` |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | 26 | 34 | **31.5x** [11.0x-69.3x] | 1.25 | 33.39 | 1.22 | 33.14 | 0.031 | 0.309 | 4601.0 | `OK` |
-| `t2_mad_g2_i8` | $2 \times 8$ | 34 | 38 | **46.2x** [34.9x-64.6x] | 0.23 | 9.53 | 0.16 | 9.26 | 0.042 | 0.362 | 2400.0 | `OK` |
-| `t2_mad_g3_i9` | $3 \times 9$ | 54 | 54 | **55.0x** [33.0x-65.0x] | 0.18 | 10.05 | 0.12 | 9.65 | 0.054 | 0.515 | 4800.0 | `OK` |
-| `t2_mad_g4_i12` | $4 \times 12$ | 84 | 72 | **28.8x** [23.2x-34.4x] | 0.39 | 11.50 | 0.31 | 10.89 | 0.082 | 0.785 | 8000.0 | `OK` |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | 34 | 38 | **6.7x** [2.8x-17.9x] | 5.04 | 47.32 | 4.98 | 47.02 | 0.045 | 0.388 | 5975.0 | `OK` |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | 54 | 54 | **4.3x** [1.0x-16.4x] | 27.90 | 167.03 | 27.84 | 166.57 | 0.070 | 0.577 | 7720.0 | `OK` |
-| `t3_mad_g5_i20` | $5 \times 20$ | 145 | 95 | **27.9x** [22.7x-32.4x] | 0.64 | 17.79 | 0.48 | 16.67 | 0.156 | 1.361 | 12000.0 | `OK` |
-| `t3_mad_g6_i30` | $6 \times 30$ | 234 | 120 | **10.5x** [9.8x-11.0x] | 1.78 | 18.71 | 1.50 | 16.96 | 0.263 | 2.286 | 16800.0 | `OK` |
-| `t3_mad_g10_i100` | $10 \times 100$ | 1090 | 250 | **4.8x** [3.8x-6.0x] | 12.68 | 60.66 | 11.36 | 52.91 | 1.607 | 10.821 | 88000.0 | `OK` |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | 4036 | 1060 | **7.7x** [3.8x-13.5x] | 40.56 | 368.54 | 34.94 | 334.66 | 4.737 | 43.643 | 208000.0 | `OK` |
+| `t1_mad_g2_i4` | $2 \times 4$ | 26 | 34 | **109.5x** [66.9x-146.8x] | 0.08 | 9.50 | 0.04 | 9.29 | 0.032 | 0.285 | 2400.0 | `OK` |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | 26 | 34 | **55.4x** [31.4x-111.5x] | 0.58 | 33.73 | 0.55 | 33.50 | 0.027 | 0.307 | 4601.0 | `OK` |
+| `t2_mad_g2_i8` | $2 \times 8$ | 34 | 38 | **68.5x** [62.7x-79.6x] | 0.14 | 9.72 | 0.11 | 9.35 | 0.035 | 0.384 | 2400.0 | `OK` |
+| `t2_mad_g3_i9` | $3 \times 9$ | 54 | 54 | **58.4x** [43.5x-79.7x] | 0.19 | 10.15 | 0.10 | 9.74 | 0.065 | 0.542 | 4800.0 | `OK` |
+| `t2_mad_g4_i12` | $4 \times 12$ | 84 | 72 | **32.8x** [27.9x-39.5x] | 0.39 | 11.95 | 0.26 | 11.33 | 0.098 | 0.805 | 8000.0 | `OK` |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | 34 | 38 | **10.8x** [3.9x-33.4x] | 3.12 | 47.21 | 3.07 | 46.84 | 0.040 | 0.396 | 5975.0 | `OK` |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | 54 | 54 | **6.7x** [1.4x-26.0x] | 14.09 | 166.84 | 13.99 | 166.41 | 0.067 | 0.573 | 7720.0 | `OK` |
+| `t3_mad_g5_i20` | $5 \times 20$ | 145 | 95 | **31.6x** [22.3x-36.2x] | 0.54 | 18.02 | 0.37 | 16.93 | 0.156 | 1.384 | 12000.0 | `OK` |
+| `t3_mad_g6_i30` | $6 \times 30$ | 234 | 120 | **21.0x** [18.7x-24.5x] | 0.88 | 18.20 | 0.65 | 16.48 | 0.235 | 2.260 | 16800.0 | `OK` |
+| `t3_mad_g10_i100` | $10 \times 100$ | 1090 | 250 | **11.1x** [9.3x-12.7x] | 5.29 | 60.48 | 3.65 | 52.55 | 1.431 | 10.796 | 88000.0 | `OK` |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | 4036 | 1060 | **10.0x** [4.3x-26.0x] | 35.34 | 368.23 | 29.18 | 334.19 | 4.823 | 43.997 | 208000.0 | `OK` |
 <!-- END GENERATED:MAD_PIPELINE_TABLE -->
 
 Cross-instance total latency dispersion across the randomized instances in each family (mean $\pm$ sample SD and two-sided 95% Student-$t$ interval after warmup):
@@ -166,17 +166,17 @@ Cross-instance total latency dispersion across the randomized instances in each 
 <!-- BEGIN GENERATED:MAD_STATS_TABLE -->
 | Problem ID | $G \times I$ | Trials | `goblin (Go)` Scalar Total (Mean $\pm$ SD [95% CI], ms) | Python `PuLP + CBC` Total (Mean $\pm$ SD [95% CI], ms) | `goblin (Go)` SIMD Total (Mean $\pm$ SD [95% CI], ms) |
 | :--- | :---: | ---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | 11 | $0.07 \pm 0.00$ ($\pm 0.00$) | $9.51 \pm 0.38$ ($\pm 0.26$) | $0.07 \pm 0.00$ ($\pm 0.00$) |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | $1.18 \pm 0.76$ ($\pm 0.51$) | $30.56 \pm 9.54$ ($\pm 6.41$) | $1.21 \pm 0.78$ ($\pm 0.52$) |
-| `t2_mad_g2_i8` | $2 \times 8$ | 11 | $0.21 \pm 0.04$ ($\pm 0.03$) | $9.78 \pm 0.74$ ($\pm 0.50$) | $0.21 \pm 0.02$ ($\pm 0.02$) |
-| `t2_mad_g3_i9` | $3 \times 9$ | 11 | $0.19 \pm 0.04$ ($\pm 0.03$) | $10.09 \pm 0.20$ ($\pm 0.14$) | $0.18 \pm 0.03$ ($\pm 0.02$) |
-| `t2_mad_g4_i12` | $4 \times 12$ | 11 | $0.41 \pm 0.04$ ($\pm 0.03$) | $11.69 \pm 0.70$ ($\pm 0.47$) | $0.41 \pm 0.04$ ($\pm 0.03$) |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | $6.79 \pm 5.61$ ($\pm 3.77$) | $35.39 \pm 16.92$ ($\pm 11.37$) | $6.74 \pm 5.51$ ($\pm 3.70$) |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | $41.08 \pm 40.63$ ($\pm 27.30$) | $137.87 \pm 63.08$ ($\pm 42.38$) | $41.19 \pm 41.02$ ($\pm 27.56$) |
-| `t3_mad_g5_i20` | $5 \times 20$ | 5 | $0.63 \pm 0.02$ ($\pm 0.02$) | $17.81 \pm 2.29$ ($\pm 2.85$) | $0.63 \pm 0.02$ ($\pm 0.02$) |
-| `t3_mad_g6_i30` | $6 \times 30$ | 5 | $1.76 \pm 0.07$ ($\pm 0.09$) | $18.49 \pm 0.47$ ($\pm 0.58$) | $1.88 \pm 0.19$ ($\pm 0.24$) |
-| `t3_mad_g10_i100` | $10 \times 100$ | 5 | $13.33 \pm 1.89$ ($\pm 2.35$) | $63.07 \pm 3.89$ ($\pm 4.83$) | $12.62 \pm 1.26$ ($\pm 1.57$) |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | $59.59 \pm 35.75$ ($\pm 44.39$) | $575.49 \pm 606.99$ ($\pm 753.56$) | $58.07 \pm 33.82$ ($\pm 41.98$) |
+| `t1_mad_g2_i4` | $2 \times 4$ | 11 | $0.09 \pm 0.02$ ($\pm 0.02$) | $9.44 \pm 0.49$ ($\pm 0.33$) | $0.08 \pm 0.01$ ($\pm 0.01$) |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | $0.64 \pm 0.33$ ($\pm 0.22$) | $30.72 \pm 9.55$ ($\pm 6.42$) | $0.65 \pm 0.34$ ($\pm 0.23$) |
+| `t2_mad_g2_i8` | $2 \times 8$ | 11 | $0.14 \pm 0.01$ ($\pm 0.01$) | $9.81 \pm 0.62$ ($\pm 0.42$) | $0.15 \pm 0.02$ ($\pm 0.02$) |
+| `t2_mad_g3_i9` | $3 \times 9$ | 11 | $0.18 \pm 0.04$ ($\pm 0.03$) | $10.39 \pm 0.59$ ($\pm 0.39$) | $0.18 \pm 0.04$ ($\pm 0.02$) |
+| `t2_mad_g4_i12` | $4 \times 12$ | 11 | $0.37 \pm 0.04$ ($\pm 0.03$) | $12.02 \pm 0.77$ ($\pm 0.52$) | $0.37 \pm 0.04$ ($\pm 0.02$) |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | $4.46 \pm 4.07$ ($\pm 2.74$) | $35.37 \pm 16.90$ ($\pm 11.35$) | $4.42 \pm 3.99$ ($\pm 2.68$) |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | $27.77 \pm 29.49$ ($\pm 19.81$) | $138.08 \pm 63.42$ ($\pm 42.60$) | $27.55 \pm 29.00$ ($\pm 19.48$) |
+| `t3_mad_g5_i20` | $5 \times 20$ | 5 | $0.55 \pm 0.04$ ($\pm 0.05$) | $17.53 \pm 2.29$ ($\pm 2.85$) | $0.51 \pm 0.02$ ($\pm 0.02$) |
+| `t3_mad_g6_i30` | $6 \times 30$ | 5 | $0.88 \pm 0.11$ ($\pm 0.14$) | $18.30 \pm 0.35$ ($\pm 0.44$) | $0.91 \pm 0.10$ ($\pm 0.12$) |
+| `t3_mad_g10_i100` | $10 \times 100$ | 5 | $5.67 \pm 0.76$ ($\pm 0.94$) | $62.69 \pm 3.62$ ($\pm 4.49$) | $5.24 \pm 1.02$ ($\pm 1.26$) |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | $42.62 \pm 13.13$ ($\pm 16.30$) | $577.78 \pm 610.57$ ($\pm 758.00$) | $38.73 \pm 14.09$ ($\pm 17.49$) |
 <!-- END GENERATED:MAD_STATS_TABLE -->
 
 ### 3. Full 31-Family Synthetic Benchmark Corpus (`JSON -> Solution`)
@@ -184,37 +184,37 @@ Cross-instance total latency dispersion across the randomized instances in each 
 <!-- BEGIN GENERATED:FULL_PIPELINE_TABLE -->
 | Problem ID | Vars | Rows | Paired `Py / Go` [Min-Max] | GoTotal Med (ms) | PyTotal Med (ms) | GoSolve Med (ms) | PySolve Med (ms) | GoPrep (ms) | PyPrep (ms) | Parity |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `t1_std_lp` | 3 | 3 | **395.9x** [119.7x-602.2x] | 0.01 | 6.21 | 0.00 | 6.17 | 0.008 | 0.064 | `OK` |
-| `t1_std_lp_max` | 3 | 3 | **456.4x** [209.0x-622.5x] | 0.01 | 6.26 | 0.00 | 6.21 | 0.009 | 0.066 | `OK` |
-| `t1_std_mip` | 3 | 3 | **453.6x** [177.6x-713.4x] | 0.02 | 7.37 | 0.01 | 7.32 | 0.008 | 0.069 | `OK` |
-| `t1_mip_float_obj` | 3 | 3 | **506.2x** [401.8x-672.4x] | 0.01 | 7.68 | 0.01 | 7.63 | 0.007 | 0.076 | `OK` |
-| `t1_whiskas` | 6 | 5 | **330.7x** [231.9x-425.8x] | 0.02 | 6.50 | 0.01 | 6.41 | 0.013 | 0.100 | `OK` |
-| `t1_furniture` | 2 | 3 | **197.9x** [52.2x-580.6x] | 0.03 | 7.71 | 0.02 | 7.66 | 0.007 | 0.064 | `OK` |
-| `t1_knapsack_12` | 12 | 3 | **97.4x** [27.4x-319.3x] | 0.09 | 9.21 | 0.08 | 9.12 | 0.009 | 0.112 | `OK` |
-| `t1_infeasible_mip` | 2 | 1 | **1889.7x** [1042.9x-2701.7x] | 0.00 | 6.22 | 0.00 | 6.18 | 0.002 | 0.053 | `OK` |
-| `t1_mad_g2_i4` | 26 | 34 | **144.8x** [134.1x-156.0x] | 0.07 | 9.65 | 0.04 | 9.44 | 0.023 | 0.265 | `OK` |
-| `t1_mad_rand_g2_i4` | 26 | 34 | **31.5x** [11.0x-69.3x] | 1.25 | 33.39 | 1.22 | 33.14 | 0.031 | 0.309 | `OK` |
-| `t2_mkp_30` | 30 | 6 | **6.0x** [3.4x-10.2x] | 3.07 | 27.83 | 3.05 | 27.66 | 0.023 | 0.224 | `OK` |
-| `t2_mkp_50` | 50 | 8 | **3.1x** [1.2x-25.2x] | 8.66 | 16.66 | 8.62 | 16.42 | 0.040 | 0.326 | `OK` |
-| `t2_cflp_36` | 36 | 11 | **28.2x** [3.7x-145.7x] | 0.27 | 9.24 | 0.25 | 9.07 | 0.021 | 0.206 | `OK` |
-| `t2_cflp_49` | 49 | 13 | **17.2x** [9.2x-31.3x] | 0.58 | 10.30 | 0.55 | 10.08 | 0.025 | 0.254 | `OK` |
-| `t2_gap_45` | 45 | 13 | **15.8x** [2.0x-67.9x] | 1.02 | 14.27 | 1.00 | 14.08 | 0.024 | 0.245 | `OK` |
-| `t2_lotsizing_48` | 48 | 32 | **9.9x** [4.4x-22.8x] | 5.19 | 68.18 | 5.15 | 67.94 | 0.032 | 0.314 | `OK` |
-| `t2_binpack_44` | 44 | 14 | **9.5x** [0.1x-42.1x] | 0.58 | 13.62 | 0.56 | 13.43 | 0.030 | 0.238 | `OK` |
-| `t2_setcover_50` | 50 | 20 | **47.2x** [3.6x-142.7x] | 0.20 | 11.44 | 0.16 | 11.15 | 0.037 | 0.399 | `OK` |
-| `t2_mad_g2_i8` | 34 | 38 | **46.2x** [34.9x-64.6x] | 0.23 | 9.53 | 0.16 | 9.26 | 0.042 | 0.362 | `OK` |
-| `t2_mad_g3_i9` | 54 | 54 | **55.0x** [33.0x-65.0x] | 0.18 | 10.05 | 0.12 | 9.65 | 0.054 | 0.515 | `OK` |
-| `t2_mad_g4_i12` | 84 | 72 | **28.8x** [23.2x-34.4x] | 0.39 | 11.50 | 0.31 | 10.89 | 0.082 | 0.785 | `OK` |
-| `t2_mad_rand_g2_i8` | 34 | 38 | **6.7x** [2.8x-17.9x] | 5.04 | 47.32 | 4.98 | 47.02 | 0.045 | 0.388 | `OK` |
-| `t2_mad_rand_g3_i9` | 54 | 54 | **4.3x** [1.0x-16.4x] | 27.90 | 167.03 | 27.84 | 166.57 | 0.070 | 0.577 | `OK` |
-| `t3_mkp_200` | 200 | 8 | **1.8x** [1.2x-3.2x] | 52.40 | 115.68 | 52.28 | 115.07 | 0.107 | 0.799 | `OK` |
-| `t3_cflp_300` | 300 | 34 | **16.7x** [10.1x-23.0x] | 11.44 | 246.63 | 11.32 | 245.71 | 0.119 | 1.179 | `OK` |
-| `t3_lotsizing_504` | 504 | 336 | **1.1x** [0.1x-3.4x] | 78.84 | 156.63 | 78.59 | 154.79 | 0.250 | 2.291 | `OK` |
-| `t3_sched_1000` | 1000 | 100 | **6.5x** [3.9x-9.5x] | 12.03 | 80.23 | 11.69 | 77.33 | 0.331 | 3.481 | `OK` |
-| `t3_mad_g5_i20` | 145 | 95 | **27.9x** [22.7x-32.4x] | 0.64 | 17.79 | 0.48 | 16.67 | 0.156 | 1.361 | `OK` |
-| `t3_mad_g6_i30` | 234 | 120 | **10.5x** [9.8x-11.0x] | 1.78 | 18.71 | 1.50 | 16.96 | 0.263 | 2.286 | `OK` |
-| `t3_mad_g10_i100` | 1090 | 250 | **4.8x** [3.8x-6.0x] | 12.68 | 60.66 | 11.36 | 52.91 | 1.607 | 10.821 | `OK` |
-| `t3_mad_g4_i1000` | 4036 | 1060 | **7.7x** [3.8x-13.5x] | 40.56 | 368.54 | 34.94 | 334.66 | 4.737 | 43.643 | `OK` |
+| `t1_std_lp` | 3 | 3 | **827.7x** [471.9x-1192.1x] | 0.01 | 6.69 | 0.00 | 6.63 | 0.005 | 0.087 | `OK` |
+| `t1_std_lp_max` | 3 | 3 | **1161.1x** [937.5x-1302.1x] | 0.01 | 6.26 | 0.00 | 6.20 | 0.003 | 0.079 | `OK` |
+| `t1_std_mip` | 3 | 3 | **653.1x** [293.5x-830.5x] | 0.01 | 7.35 | 0.00 | 7.30 | 0.004 | 0.079 | `OK` |
+| `t1_mip_float_obj` | 3 | 3 | **638.6x** [273.8x-776.3x] | 0.01 | 7.41 | 0.01 | 7.35 | 0.004 | 0.090 | `OK` |
+| `t1_whiskas` | 6 | 5 | **635.2x** [504.9x-710.4x] | 0.01 | 6.33 | 0.00 | 6.23 | 0.006 | 0.099 | `OK` |
+| `t1_furniture` | 2 | 3 | **371.9x** [85.5x-1201.4x] | 0.02 | 8.07 | 0.01 | 8.00 | 0.004 | 0.087 | `OK` |
+| `t1_knapsack_12` | 12 | 3 | **135.4x** [54.4x-385.2x] | 0.08 | 9.18 | 0.07 | 9.08 | 0.008 | 0.131 | `OK` |
+| `t1_infeasible_mip` | 2 | 1 | **2179.5x** [1481.9x-2522.4x] | 0.00 | 6.29 | 0.00 | 6.23 | 0.002 | 0.063 | `OK` |
+| `t1_mad_g2_i4` | 26 | 34 | **109.5x** [66.9x-146.8x] | 0.08 | 9.50 | 0.04 | 9.29 | 0.032 | 0.285 | `OK` |
+| `t1_mad_rand_g2_i4` | 26 | 34 | **55.4x** [31.4x-111.5x] | 0.58 | 33.73 | 0.55 | 33.50 | 0.027 | 0.307 | `OK` |
+| `t2_mkp_30` | 30 | 6 | **7.7x** [4.4x-13.8x] | 2.53 | 28.01 | 2.50 | 27.82 | 0.021 | 0.235 | `OK` |
+| `t2_mkp_50` | 50 | 8 | **4.3x** [1.8x-32.4x] | 6.45 | 17.40 | 6.41 | 17.14 | 0.041 | 0.346 | `OK` |
+| `t2_cflp_36` | 36 | 11 | **32.9x** [4.0x-161.2x] | 0.24 | 9.38 | 0.22 | 9.21 | 0.019 | 0.221 | `OK` |
+| `t2_cflp_49` | 49 | 13 | **20.1x** [9.6x-34.1x] | 0.51 | 10.15 | 0.46 | 9.96 | 0.026 | 0.276 | `OK` |
+| `t2_gap_45` | 45 | 13 | **20.9x** [4.1x-62.1x] | 0.72 | 14.60 | 0.70 | 14.37 | 0.025 | 0.269 | `OK` |
+| `t2_lotsizing_48` | 48 | 32 | **11.8x** [5.0x-28.6x] | 4.70 | 68.15 | 4.67 | 67.91 | 0.030 | 0.310 | `OK` |
+| `t2_binpack_44` | 44 | 14 | **13.8x** [0.2x-50.9x] | 0.51 | 14.19 | 0.49 | 13.98 | 0.024 | 0.267 | `OK` |
+| `t2_setcover_50` | 50 | 20 | **46.3x** [4.5x-123.8x] | 0.17 | 11.39 | 0.13 | 11.07 | 0.042 | 0.417 | `OK` |
+| `t2_mad_g2_i8` | 34 | 38 | **68.5x** [62.7x-79.6x] | 0.14 | 9.72 | 0.11 | 9.35 | 0.035 | 0.384 | `OK` |
+| `t2_mad_g3_i9` | 54 | 54 | **58.4x** [43.5x-79.7x] | 0.19 | 10.15 | 0.10 | 9.74 | 0.065 | 0.542 | `OK` |
+| `t2_mad_g4_i12` | 84 | 72 | **32.8x** [27.9x-39.5x] | 0.39 | 11.95 | 0.26 | 11.33 | 0.098 | 0.805 | `OK` |
+| `t2_mad_rand_g2_i8` | 34 | 38 | **10.8x** [3.9x-33.4x] | 3.12 | 47.21 | 3.07 | 46.84 | 0.040 | 0.396 | `OK` |
+| `t2_mad_rand_g3_i9` | 54 | 54 | **6.7x** [1.4x-26.0x] | 14.09 | 166.84 | 13.99 | 166.41 | 0.067 | 0.573 | `OK` |
+| `t3_mkp_200` | 200 | 8 | **2.5x** [1.7x-4.3x] | 38.24 | 114.62 | 38.13 | 114.02 | 0.096 | 0.808 | `OK` |
+| `t3_cflp_300` | 300 | 34 | **17.7x** [10.2x-25.1x] | 10.50 | 247.14 | 10.39 | 246.23 | 0.121 | 1.185 | `OK` |
+| `t3_lotsizing_504` | 504 | 336 | **1.3x** [0.1x-3.5x] | 64.78 | 156.21 | 64.54 | 154.38 | 0.248 | 2.287 | `OK` |
+| `t3_sched_1000` | 1000 | 100 | **8.1x** [4.9x-10.9x] | 9.14 | 80.79 | 8.81 | 78.06 | 0.342 | 3.484 | `OK` |
+| `t3_mad_g5_i20` | 145 | 95 | **31.6x** [22.3x-36.2x] | 0.54 | 18.02 | 0.37 | 16.93 | 0.156 | 1.384 | `OK` |
+| `t3_mad_g6_i30` | 234 | 120 | **21.0x** [18.7x-24.5x] | 0.88 | 18.20 | 0.65 | 16.48 | 0.235 | 2.260 | `OK` |
+| `t3_mad_g10_i100` | 1090 | 250 | **11.1x** [9.3x-12.7x] | 5.29 | 60.48 | 3.65 | 52.55 | 1.431 | 10.796 | `OK` |
+| `t3_mad_g4_i1000` | 4036 | 1060 | **10.0x** [4.3x-26.0x] | 35.34 | 368.23 | 29.18 | 334.19 | 4.823 | 43.997 | `OK` |
 <!-- END GENERATED:FULL_PIPELINE_TABLE -->
 
 ### 4. Linear Sum Assignment (`goblin/assign` vs. `scipy.optimize.linear_sum_assignment`)
@@ -224,40 +224,40 @@ The 22-family synthetic Linear Sum Assignment corpus ([`bench/assign_corpus.go`]
 <!-- BEGIN GENERATED:ASSIGN_TIER_SUMMARY_TABLE -->
 | Workload Subset | Families (Trials) | Equal-Family `SciPy Solve / goblin` GeoMean [Clustered 95% CI] | Pooled Trial `SciPy Solve / goblin` | Equal-Family `SciPy Total / goblin` | `goblin` Solve Trial (Med) Sum (ms) | SciPy Solve Trial (Med) Sum (ms) | Per-Instance `SciPy Solve / goblin` Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Micro/Small (`N <= 32`) | 6 (66) | **1.76x** [1.55x-1.99x] | 1.76x | 4.85x | 0.189 (0.0151) | 0.316 (0.0290) | 1.77x [0.73x-3.95x] |
-| Tier 2: Medium / Target p90 (`64 <= N <= 256`) | 9 (99) | **3.38x** [2.05x-5.58x] | 3.38x | 3.23x | 9.261 (0.727) | 32.592 (2.952) | 3.07x [0.17x-20.23x] |
-| Tier 3: Large Tail (`500 <= N <= 2000`) | 7 (35) | **3.23x** [2.15x-4.84x] | 3.23x | 3.93x | 206.122 (40.593) | 922.564 (184.208) | 3.27x [1.48x-6.39x] |
-| Square families ($m = n$) | 16 (146) | **2.98x** [2.15x-4.13x] | 2.92x | 3.96x | 211.837 (40.650) | 944.623 (185.258) | 2.73x [0.17x-20.23x] |
-| Rectangular families ($m \neq n$, wide and tall) | 6 (54) | **2.33x** [1.65x-3.29x] | 2.20x | 3.54x | 3.736 (0.685) | 10.850 (1.932) | 2.56x [0.85x-3.54x] |
-| Degenerate / structured (ties, rank-1, geometric, sparse) | 7 (65) | **2.50x** [1.18x-5.26x] | 2.63x | 3.01x | 35.183 (6.056) | 64.709 (10.919) | 2.07x [0.17x-20.23x] |
-| **All 22 synthetic LSAP families** | 22 (200) | **2.79x** [2.18x-3.56x] | 2.70x | 3.84x | 215.572 (41.335) | 955.473 (187.189) | 2.61x [0.17x-20.23x] |
+| Tier 1: Micro/Small (`N <= 32`) | 6 (66) | **1.78x** [1.43x-2.23x] | 1.78x | 5.39x | 0.194 (0.0159) | 0.318 (0.0292) | 1.80x [0.59x-3.40x] |
+| Tier 2: Medium / Target p90 (`64 <= N <= 256`) | 9 (99) | **3.11x** [1.88x-5.16x] | 3.11x | 3.09x | 10.055 (0.780) | 33.057 (2.944) | 3.04x [0.19x-18.84x] |
+| Tier 3: Large Tail (`500 <= N <= 2000`) | 7 (35) | **3.16x** [2.17x-4.62x] | 3.16x | 3.91x | 208.854 (41.183) | 942.443 (187.380) | 3.04x [1.59x-6.29x] |
+| Square families ($m = n$) | 16 (146) | **2.91x** [2.13x-3.98x] | 2.85x | 4.07x | 215.120 (41.308) | 964.934 (188.379) | 2.63x [0.19x-18.84x] |
+| Rectangular families ($m \neq n$, wide and tall) | 6 (54) | **2.17x** [1.55x-3.03x] | 2.02x | 3.40x | 3.983 (0.672) | 10.884 (1.974) | 2.23x [0.75x-3.54x] |
+| Degenerate / structured (ties, rank-1, geometric, sparse) | 7 (65) | **2.37x** [1.14x-4.93x] | 2.46x | 3.03x | 33.859 (5.954) | 65.982 (11.445) | 1.87x [0.61x-18.84x] |
+| **All 22 synthetic LSAP families** | 22 (200) | **2.69x** [2.12x-3.41x] | 2.60x | 3.88x | 219.103 (41.979) | 975.818 (190.353) | 2.43x [0.19x-18.84x] |
 <!-- END GENERATED:ASSIGN_TIER_SUMMARY_TABLE -->
 
 <!-- BEGIN GENERATED:ASSIGN_PIPELINE_TABLE -->
 | Problem ID | Shape ($m \times n$) | Family | Paired `SciPy Solve / goblin` | GoSolve Med (ms) | SciPySolve Med (ms) | GoTotal Med (ms) | SciPyTotal Med (ms) | Go Solve Mean $\pm$ SD (ms) | SciPy Solve Mean $\pm$ SD (ms) | Trial 0 Obj | Parity |
 | :--- | :---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
-| `a1_canon_4x4` | $4 \times 4$ | `canonical` | **1.85x** | 0.0005 | 0.0009 | 0.0006 | 0.0115 | $0.0005 \pm 0.0001$ | $0.0009 \pm 0.0002$ | 275.00 | `OK` |
-| `a1_unif_10x10` | $10 \times 10$ | `uniform` | **1.75x** | 0.0013 | 0.0024 | 0.0017 | 0.0103 | $0.0016 \pm 0.0010$ | $0.0025 \pm 0.0006$ | 18107.93 | `OK` |
-| `a1_ties_20x20` | $20 \times 20$ | `integer_ties` | **2.04x** | 0.0026 | 0.0064 | 0.0044 | 0.0153 | $0.0032 \pm 0.0016$ | $0.0062 \pm 0.0017$ | 4.00 | `OK` |
-| `a1_wide_16x32` | $16 \times 32$ | `wide` | **1.52x** | 0.0025 | 0.0040 | 0.0042 | 0.0150 | $0.0027 \pm 0.0008$ | $0.0040 \pm 0.0008$ | 5044.66 | `OK` |
-| `a1_tall_32x16` | $32 \times 16$ | `tall` | **1.55x** | 0.0028 | 0.0043 | 0.0044 | 0.0157 | $0.0030 \pm 0.0014$ | $0.0044 \pm 0.0008$ | 2840.65 | `OK` |
-| `a1_sparse_24x24` | $24 \times 24$ | `sparse` | **1.89x** | 0.0054 | 0.0109 | 0.0089 | 0.0325 | $0.0061 \pm 0.0028$ | $0.0108 \pm 0.0017$ | 2261.00 | `OK` |
-| `a2_unif_64x64` | $64 \times 64$ | `uniform` | **2.96x** | 0.0239 | 0.0711 | 0.0337 | 0.0964 | $0.0238 \pm 0.0051$ | $0.0695 \pm 0.0098$ | 16825.55 | `OK` |
-| `a2_unif_100x100` | $100 \times 100$ | `uniform` | **3.72x** | 0.0482 | 0.177 | 0.0651 | 0.227 | $0.0472 \pm 0.0042$ | $0.176 \pm 0.0251$ | 15794.03 | `OK` |
-| `a2_ties_100x100` | $100 \times 100$ | `integer_ties` | **2.04x** | 0.0428 | 0.0930 | 0.0675 | 0.141 | $0.0491 \pm 0.0169$ | $0.0960 \pm 0.0141$ | 1.00 | `OK` |
-| `a2_geom_100x100` | $100 \times 100$ | `geometric` | **1.43x** | 0.132 | 0.220 | 0.139 | 0.263 | $0.236 \pm 0.323$ | $0.236 \pm 0.0435$ | 610058.93 | `OK` |
-| `a2_rank1_100x100` | $100 \times 100$ | `rank1` | **15.13x** | 0.0493 | 0.687 | 0.0651 | 0.761 | $0.0457 \pm 0.0074$ | $0.682 \pm 0.0149$ | 20173201.47 | `OK` |
-| `a2_wide_80x200` | $80 \times 200$ | `wide` | **2.81x** | 0.0277 | 0.0732 | 0.0507 | 0.147 | $0.0268 \pm 0.0035$ | $0.0752 \pm 0.0078$ | 3410.92 | `OK` |
-| `a2_tall_200x80` | $200 \times 80$ | `tall` | **2.67x** | 0.0309 | 0.0837 | 0.0536 | 0.156 | $0.0315 \pm 0.0032$ | $0.0841 \pm 0.0071$ | 4329.48 | `OK` |
-| `a2_max_128x128` | $128 \times 128$ | `maximize` | **3.83x** | 0.0747 | 0.279 | 0.0976 | 0.355 | $0.0742 \pm 0.0084$ | $0.284 \pm 0.0321$ | 1233885.41 | `OK` |
-| `a2_unif_256x256` | $256 \times 256$ | `uniform` | **4.12x** | 0.297 | 1.268 | 0.410 | 1.683 | $0.307 \pm 0.0500$ | $1.259 \pm 0.121$ | 14858.73 | `OK` |
-| `a3_unif_500x500` | $500 \times 500$ | `uniform` | **4.41x** | 1.138 | 5.217 | 1.516 | 7.699 | $1.210 \pm 0.158$ | $5.318 \pm 0.392$ | 16720.22 | `OK` |
-| `a3_ties_500x500` | $500 \times 500$ | `integer_ties` | **2.11x** | 0.717 | 1.504 | 1.319 | 4.088 | $0.709 \pm 0.0293$ | $1.495 \pm 0.0535$ | 0.00 | `OK` |
-| `a3_geom_500x500` | $500 \times 500$ | `geometric` | **1.68x** | 5.107 | 8.397 | 5.312 | 9.232 | $5.579 \pm 2.066$ | $9.177 \pm 2.644$ | 1396753.69 | `OK` |
-| `a3_wide_250x1000` | $250 \times 1000$ | `wide` | **3.23x** | 0.264 | 0.810 | 0.636 | 3.699 | $0.259 \pm 0.0131$ | $0.835 \pm 0.0581$ | 2515.07 | `OK` |
-| `a3_tall_1000x250` | $1000 \times 250$ | `tall` | **2.78x** | 0.357 | 0.956 | 0.725 | 3.655 | $0.348 \pm 0.0228$ | $0.966 \pm 0.0348$ | 2394.37 | `OK` |
-| `a3_unif_1000x1000` | $1000 \times 1000$ | `uniform` | **5.16x** | 5.513 | 27.708 | 7.369 | 35.599 | $5.467 \pm 0.335$ | $28.233 \pm 2.217$ | 16203.23 | `OK` |
-| `a3_unif_2000x2000` | $2000 \times 2000$ | `uniform` | **5.04x** | 27.496 | 139.615 | 38.809 | 181.954 | $27.653 \pm 4.068$ | $138.488 \pm 9.926$ | 16450.52 | `OK` |
+| `a1_canon_4x4` | $4 \times 4$ | `canonical` | **2.37x** | 0.0004 | 0.0009 | 0.0005 | 0.0116 | $0.0004 \pm 0.0001$ | $0.0010 \pm 0.0002$ | 275.00 | `OK` |
+| `a1_unif_10x10` | $10 \times 10$ | `uniform` | **1.93x** | 0.0012 | 0.0024 | 0.0015 | 0.0103 | $0.0013 \pm 0.0007$ | $0.0024 \pm 0.0005$ | 18107.93 | `OK` |
+| `a1_ties_20x20` | $20 \times 20$ | `integer_ties` | **1.37x** | 0.0037 | 0.0062 | 0.0050 | 0.0151 | $0.0047 \pm 0.0023$ | $0.0060 \pm 0.0015$ | 4.00 | `OK` |
+| `a1_wide_16x32` | $16 \times 32$ | `wide` | **1.43x** | 0.0028 | 0.0043 | 0.0042 | 0.0145 | $0.0029 \pm 0.0006$ | $0.0041 \pm 0.0008$ | 5044.66 | `OK` |
+| `a1_tall_32x16` | $32 \times 16$ | `tall` | **1.74x** | 0.0029 | 0.0044 | 0.0037 | 0.0153 | $0.0027 \pm 0.0006$ | $0.0047 \pm 0.0009$ | 2840.65 | `OK` |
+| `a1_sparse_24x24` | $24 \times 24$ | `sparse` | **2.05x** | 0.0050 | 0.0111 | 0.0078 | 0.0329 | $0.0055 \pm 0.0021$ | $0.0107 \pm 0.0017$ | 2261.00 | `OK` |
+| `a2_unif_64x64` | $64 \times 64$ | `uniform` | **3.06x** | 0.0232 | 0.0713 | 0.0311 | 0.0973 | $0.0231 \pm 0.0056$ | $0.0695 \pm 0.0111$ | 16825.55 | `OK` |
+| `a2_unif_100x100` | $100 \times 100$ | `uniform` | **4.27x** | 0.0471 | 0.176 | 0.0633 | 0.224 | $0.0463 \pm 0.0045$ | $0.220 \pm 0.148$ | 15794.03 | `OK` |
+| `a2_ties_100x100` | $100 \times 100$ | `integer_ties` | **1.79x** | 0.0561 | 0.0941 | 0.0825 | 0.142 | $0.0553 \pm 0.0159$ | $0.0963 \pm 0.0144$ | 1.00 | `OK` |
+| `a2_geom_100x100` | $100 \times 100$ | `geometric` | **1.61x** | 0.135 | 0.219 | 0.149 | 0.270 | $0.149 \pm 0.0515$ | $0.233 \pm 0.0431$ | 610058.93 | `OK` |
+| `a2_rank1_100x100` | $100 \times 100$ | `rank1` | **13.86x** | 0.0512 | 0.674 | 0.0670 | 0.762 | $0.0512 \pm 0.0153$ | $0.687 \pm 0.0227$ | 20173201.47 | `OK` |
+| `a2_wide_80x200` | $80 \times 200$ | `wide` | **2.64x** | 0.0270 | 0.0688 | 0.0522 | 0.143 | $0.0268 \pm 0.0029$ | $0.0707 \pm 0.0081$ | 3410.92 | `OK` |
+| `a2_tall_200x80` | $200 \times 80$ | `tall` | **1.79x** | 0.0380 | 0.0790 | 0.0605 | 0.153 | $0.0505 \pm 0.0294$ | $0.0803 \pm 0.0086$ | 4329.48 | `OK` |
+| `a2_max_128x128` | $128 \times 128$ | `maximize` | **2.87x** | 0.0773 | 0.288 | 0.103 | 0.372 | $0.180 \pm 0.338$ | $0.285 \pm 0.0327$ | 1233885.41 | `OK` |
+| `a2_unif_256x256` | $256 \times 256$ | `uniform` | **3.85x** | 0.325 | 1.273 | 0.421 | 1.668 | $0.332 \pm 0.0607$ | $1.263 \pm 0.122$ | 14858.73 | `OK` |
+| `a3_unif_500x500` | $500 \times 500$ | `uniform` | **3.69x** | 1.537 | 5.181 | 1.958 | 7.867 | $1.467 \pm 0.356$ | $5.294 \pm 0.397$ | 16720.22 | `OK` |
+| `a3_ties_500x500` | $500 \times 500$ | `integer_ties` | **2.11x** | 0.722 | 1.501 | 1.271 | 4.188 | $0.705 \pm 0.0490$ | $1.487 \pm 0.0476$ | 0.00 | `OK` |
+| `a3_geom_500x500` | $500 \times 500$ | `geometric` | **1.75x** | 4.981 | 8.940 | 5.179 | 10.606 | $5.481 \pm 1.983$ | $9.437 \pm 2.730$ | 1396753.69 | `OK` |
+| `a3_wide_250x1000` | $250 \times 1000$ | `wide` | **3.11x** | 0.264 | 0.821 | 0.665 | 3.636 | $0.271 \pm 0.0371$ | $0.840 \pm 0.0557$ | 2515.07 | `OK` |
+| `a3_tall_1000x250` | $1000 \times 250$ | `tall` | **2.88x** | 0.337 | 0.997 | 0.699 | 3.859 | $0.343 \pm 0.0139$ | $0.985 \pm 0.0332$ | 2394.37 | `OK` |
+| `a3_unif_1000x1000` | $1000 \times 1000$ | `uniform` | **5.09x** | 5.648 | 28.195 | 7.490 | 36.776 | $5.610 \pm 0.241$ | $28.621 \pm 2.264$ | 16203.23 | `OK` |
+| `a3_unif_2000x2000` | $2000 \times 2000$ | `uniform` | **5.11x** | 27.694 | 141.746 | 37.189 | 184.189 | $27.893 \pm 3.697$ | $141.824 \pm 11.451$ | 16450.52 | `OK` |
 <!-- END GENERATED:ASSIGN_PIPELINE_TABLE -->
 
 ---
@@ -273,48 +273,72 @@ The 11 MAD corpus families (`N = G(I + T + 3)` variables, `M = G(2T + 3) + I` co
 <!-- BEGIN GENERATED:MAD_CBC_GAP_TABLE -->
 | Problem ID | $G \times I$ ($N \times M$) | Paired `Go / CBC` | Go Total Med (ms) | CBC Total Med (ms) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | $2 \times 4$ ($26 \times 34$) | **0.03x** | 0.07 | 2.45 | 0.49x | 0.04 (1 / 19) | 2.41 (0 / 0) | 0.068 (28) | 0.140 (19) |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ ($26 \times 34$) | **0.10x** | 1.25 | 11.08 | 0.58x | 1.22 (10 / 216) | 11.03 (6 / 83) | 0.084 (30) | 0.144 (18) |
-| `t2_mad_g2_i8` | $2 \times 8$ ($34 \times 38$) | **0.09x** | 0.23 | 2.03 | 0.66x | 0.16 (1 / 26) | 1.98 (0 / 0) | 0.108 (33) | 0.165 (21) |
-| `t2_mad_g3_i9` | $3 \times 9$ ($54 \times 54$) | **0.07x** | 0.18 | 2.60 | 0.80x | 0.12 (1 / 39) | 2.54 (0 / 0) | 0.230 (58) | 0.286 (40) |
-| `t2_mad_g4_i12` | $4 \times 12$ ($84 \times 72$) | **0.11x** | 0.39 | 3.33 | 0.81x | 0.31 (1 / 51) | 3.25 (0 / 0) | 0.324 (67) | 0.403 (63) |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ ($34 \times 38$) | **0.36x** | 5.04 | 16.54 | 0.90x | 4.98 (45 / 582) | 16.50 (12 / 216) | 0.142 (38) | 0.158 (24) |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ ($54 \times 54$) | **0.41x** | 27.90 | 87.87 | 0.86x | 27.84 (220 / 2391) | 87.80 (198 / 1300) | 0.247 (65) | 0.288 (54) |
-| `t3_mad_g5_i20` | $5 \times 20$ ($145 \times 95$) | **0.08x** | 0.64 | 8.10 | 1.44x | 0.48 (1 / 75) | 7.95 (0 / 0) | 0.906 (137) | 0.629 (94) |
-| `t3_mad_g6_i30` | $6 \times 30$ ($234 \times 120$) | **0.24x** | 1.78 | 7.42 | 1.39x | 1.50 (1 / 105) | 7.19 (0 / 0) | 1.482 (337) | 1.068 (149) |
-| `t3_mad_g10_i100` | $10 \times 100$ ($1090 \times 250$) | **0.37x** | 12.68 | 35.58 | 3.30x | 11.36 (2 / 365) | 34.55 (0 / 0) | 12.048 (1203) | 3.654 (319) |
-| `t3_mad_g4_i1000` | $4 \times 1000$ ($4036 \times 1060$) | **0.23x** | 40.56 | 277.04 | 3.16x | 34.94 (1 / 2439) | 271.50 (0 / 0) | 111.759 (1905) | 35.324 (3128) |
+| `t1_mad_g2_i4` | $2 \times 4$ ($26 \times 34$) | **0.04x** | 0.08 | 2.36 | 0.47x | 0.04 (1 / 19) | 2.32 (0 / 0) | 0.064 (28) | 0.135 (19) |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ ($26 \times 34$) | **0.06x** | 0.58 | 11.02 | 0.52x | 0.55 (5 / 108) | 10.98 (6 / 83) | 0.074 (30) | 0.141 (18) |
+| `t2_mad_g2_i8` | $2 \times 8$ ($34 \times 38$) | **0.07x** | 0.14 | 1.82 | 0.71x | 0.11 (1 / 26) | 1.78 (0 / 0) | 0.100 (33) | 0.142 (21) |
+| `t2_mad_g3_i9` | $3 \times 9$ ($54 \times 54$) | **0.07x** | 0.19 | 2.46 | 0.79x | 0.10 (1 / 39) | 2.39 (0 / 0) | 0.200 (58) | 0.253 (40) |
+| `t2_mad_g4_i12` | $4 \times 12$ ($84 \times 72$) | **0.11x** | 0.39 | 3.16 | 0.67x | 0.26 (1 / 51) | 3.06 (0 / 0) | 0.270 (67) | 0.403 (63) |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ ($34 \times 38$) | **0.22x** | 3.12 | 16.62 | 0.73x | 3.07 (39 / 362) | 16.57 (12 / 216) | 0.114 (38) | 0.155 (24) |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ ($54 \times 54$) | **0.26x** | 14.09 | 89.97 | 0.75x | 13.99 (220 / 2391) | 89.89 (198 / 1300) | 0.231 (65) | 0.307 (54) |
+| `t3_mad_g5_i20` | $5 \times 20$ ($145 \times 95$) | **0.06x** | 0.54 | 8.48 | 1.09x | 0.37 (1 / 75) | 8.24 (0 / 0) | 0.728 (128) | 0.665 (94) |
+| `t3_mad_g6_i30` | $6 \times 30$ ($234 \times 120$) | **0.11x** | 0.88 | 7.96 | 1.25x | 0.65 (1 / 93) | 7.70 (0 / 0) | 1.418 (182) | 1.135 (149) |
+| `t3_mad_g10_i100` | $10 \times 100$ ($1090 \times 250$) | **0.14x** | 5.29 | 39.72 | 0.62x | 3.65 (1 / 243) | 38.16 (0 / 0) | 2.426 (221) | 3.933 (319) |
+| `t3_mad_g4_i1000` | $4 \times 1000$ ($4036 \times 1060$) | **0.17x** | 35.34 | 280.64 | 2.90x | 29.18 (1 / 2439) | 275.44 (0 / 0) | 105.384 (1905) | 36.306 (3128) |
 <!-- END GENERATED:MAD_CBC_GAP_TABLE -->
 
 1. **Small-to-Medium Planted-Gap MAD (`t1_mad_g2_i4` through `t3_mad_g5_i20`, $26 \le N \le 145$)**: Every structured `t*_mad_g*` instance has a zero root LP gap by design (`RootLPBound == OptimalObj`). Pure-Go closes those models at node 1 through presolve orbit fixing and root heuristics (`tryPropagatedRounding`, `tryRootSubMIP`, and `tryFractionalDiving` in [`heuristics.go`](heuristics.go)) without C++ `CbcModel` and `CglPreProcess` setup costs.
-2. **Large Planted-Gap MAD (`t3_mad_g6_i30`, `t3_mad_g10_i100`, `t3_mad_g4_i1000`)**: Pure-Go `Go Solve` finishes faster than its own unpresolved `Go Root LP` because [`Presolve`](presolve.go) detects and verifies the $S_G$ group-permutation automorphism (`applyOrbitSymmetryBreaking`), fixes the $G \times G$ designated-item bijection to $I_G$, and eliminates $G^2$ binary variables and $2G$ assignment equations before the root LP runs, while [`FTRANSparseHint`](lu.go) and [`BTRANSparseHint`](lu.go) restrict basis triangular sweeps to active index windows. On the unpresolved `Root LP` column, however, `COIN-OR CLP` remains faster for two reasons:
-   - **Degenerate Simplex Iteration Growth (`t3_mad_g10_i100`)**: Partitioning 100 items across $G = 10$ identical groups creates severe primal and dual degeneracy. `COIN-OR CLP` mitigates that degeneracy via LP presolve (`ClpPresolve`), geometric-mean matrix scaling, anti-degeneracy cost shifts, and crash basis assembly (`Idiot` / triangular crash). [`LPSolver`](simplex.go) starts from an all-slack basis without LP presolve or cost shifts, and its Phase II primal fallback uses full Dantzig pricing.
-   - **Per-Pivot PFI Eta Update Cost (`t3_mad_g4_i1000`)**: On 1,000-row bases, pure-Go costs more per pivot on the unpresolved Root LP because the basis factorizer ([`lu.go`](lu.go)) appends a Product-Form of the Inverse (PFI) eta file (`PushEtaSparse`) up to `maxEtaUpdates = 56` before rebuilding factors from scratch, whereas `CLP` updates the $U$ factor in place via Forrest-Tomlin updates.
+2. **Large Planted-Gap MAD (`t3_mad_g6_i30`, `t3_mad_g10_i100`, `t3_mad_g4_i1000`)**: Pure-Go `Go Solve` closes all three at node 1 because [`Presolve`](presolve.go) verifies the $S_G$ group-permutation automorphism (`applyOrbitSymmetryBreaking`), fixes the $G \times G$ designated-item bijection to $I_G$, and eliminates $G^2$ binary variables and $2G$ assignment equations before the root LP runs, while [`FTRANSparseHint`](lu.go) and [`BTRANSparseHint`](lu.go) restrict basis triangular sweeps to active index windows. On the unpresolved `Root LP` column:
+   - **Equality Crash Basis (`t3_mad_g10_i100`)**: [`crashEqualityBasis`](simplex.go) builds a lower-triangular, dual-feasible equality basis with exact analytical DSE weights (`2.426 ms` / `221` iters vs. `COIN-OR CLP`'s `3.933 ms` / `319` iters, **`0.62x`**).
+   - **Dense-Row Coupling and PFI Eta Cost (`t3_mad_g4_i1000`)**: On 1,000-row bases (`2.90x` vs. `CLP` on unpresolved Root LP), [`crashEqualityBasis`](simplex.go) intentionally skips columns incident to coupling rows wider than 128 nonzeros so BFRT bound flips retain sparse unit slacks, and [`lu.go`](lu.go) appends a Product-Form of the Inverse (PFI) eta file (`PushEtaSparse`) up to `maxEtaUpdates = 56` before rebuilding factors from scratch, whereas `CLP` updates the $U$ factor in place via Forrest-Tomlin updates.
 3. **Symmetric Random-Weight MAD (`t1_mad_rand_g2_i4`, `t2_mad_rand_g2_i8`, `t2_mad_rand_g3_i9`)**: Assigning dense random weights (`BuildMADRandom`) removes the zero-gap structure and forces Branch-and-Cut to prove optimality:
-   - [`Presolve`](presolve.go) verifies exact $S_G$ group symmetry and fixes the $G \times G$ designated-item bijection to $I_G$, [`bab.go`](bab.go) rolls back trailing cut rounds that fail to improve the root bound and purges slack root cuts via [`PurgeSlackCuts`](simplex.go) before branching, and post-cut root heuristics are skipped when cuts add zero bound gain.
-   - Even so, [`docs/benchmarks.md`](docs/benchmarks.md#mad-solver-core-checkpoint-progression) shows that `CP5 +Presolve` (`Presolve=on, Cuts=off, Heuristics=off`) finishes faster than `CP6 +Cuts` and `CP7 Full` on `t2_mad_rand_g3_i9` because trial root cut separation (`CP6`) and pre-cut root diving and sub-MIP LPs (`CP7`) pay root LP work without closing the random-weight integrality gap.
+   - [`Presolve`](presolve.go) verifies exact $S_G$ group symmetry and fixes the $G \times G$ designated-item bijection to $I_G$, [`bab.go`](bab.go) bails out after round 1 when root cuts yield zero bound gain and purges slack root cuts via [`PurgeSlackCuts`](simplex.go), and [`tryRootSubMIP`](heuristics.go) enforces a 50% RINS integer-fixing gate on zero-cut roots.
+   - Across [`docs/benchmarks.md`](docs/benchmarks.md#mad-solver-core-checkpoint-progression), `CP5 +Presolve` (`Presolve=on, Cuts=off, Heuristics=off`) remains marginally faster than `CP7 Full` on `t1_mad_rand_g2_i4` (0.50 ms vs. 0.55 ms) and `t2_mad_rand_g2_i8` (2.43 ms vs. 3.07 ms) due to trial cut-separation overhead on tiny trees, whereas `CP7 Full` runs more than twice as fast as `CP5 +Presolve` on `t2_mad_rand_g3_i9` (13.99 ms vs. 29.94 ms).
 
 ### 2. Non-MAD Corpus Comparison, Heavy-Tail Dispersion, and Checkpoint Trade-Offs
 
-Across the non-MAD families, multi-item lot sizing (`t3_lotsizing_504`) and outlier seeds of `t2_binpack_44` exhibit heavy-tail tree variance where single-row root cuts leave a larger search tree than CBC's multi-row cut aggregation, while on `t3_cflp_300` and `t2_mkp_50` `CP5 +Presolve` finishes faster than `CP7 Full`:
+Across the non-MAD families, multi-item lot sizing (`t3_lotsizing_504`) and outlier seeds of `t2_binpack_44` exhibit heavy-tail tree variance where single-row root cuts leave a larger search tree than CBC's multi-row cut aggregation, while `CP5 +Presolve` remains slightly faster than `CP7 Full` on `t3_cflp_300` (9.07 ms vs. 10.39 ms):
 
 <!-- BEGIN GENERATED:NON_MAD_CBC_GAP_TABLE -->
 | Problem ID | $N \times M$ | Paired `Go / CBC` | Go Total Mean $\pm$ SD (ms) | CBC Total Mean $\pm$ SD (ms) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP5 +Presolve (ms / nodes) |
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `t3_mkp_200` | $200 \times 8$ | **1.31x** | $49.99 \pm 21.11$ | $40.12 \pm 19.04$ | 52.28 (598 / 5126) | 49.15 (154 / 1145) | 143.49 (1552 / 9) | 250.02 (4957, `TimeLimit`) |
-| `t2_mkp_50` | $50 \times 8$ | **0.69x** | $12.84 \pm 15.22$ | $12.28 \pm 8.97$ | 8.62 (1 / 19) | 8.50 (0 / 8) | 22.62 (2 / 4) | 9.16 (132) |
-| `t2_binpack_44` | $44 \times 14$ | **0.23x** | $21.42 \pm 60.84$ | $6.82 \pm 2.24$ | 0.56 (2 / 67) | 6.19 (0 / 8) | 1.05 (7 / 7) | 25.19 (1372) |
-| `t3_cflp_300` | $300 \times 34$ | **0.25x** | $14.45 \pm 7.20$ | $54.74 \pm 11.66$ | 11.32 (53 / 1213) | 49.76 (18 / 483) | 12.72 (59 / 20) | 10.11 (134) |
-| `t3_lotsizing_504` | $504 \times 336$ | **1.48x** | $721.02 \pm 1478.43$ | $92.24 \pm 56.70$ | 78.59 (30 / 1534) | 70.63 (10 / 377) | 133.60 (488 / 205) | 250.05 (2653, `TimeLimit`) |
-| `t3_sched_1000` | $1000 \times 100$ | **0.20x** | $12.92 \pm 4.61$ | $60.54 \pm 5.02$ | 11.69 (64 / 426) | 59.02 (0 / 76) | 46.61 (206 / 46) | 250.12 (1786, `TimeLimit`) |
+| `t3_mkp_200` | $200 \times 8$ | **0.94x** | $36.60 \pm 16.16$ | $40.41 \pm 19.05$ | 38.13 (598 / 5126) | 49.08 (154 / 1145) | 101.73 (1552 / 9) | 180.97 (5000, `NodeLimit`) |
+| `t2_mkp_50` | $50 \times 8$ | **0.48x** | $9.09 \pm 10.76$ | $12.86 \pm 9.13$ | 6.41 (1 / 19) | 9.45 (0 / 8) | 14.59 (2 / 4) | 6.87 (132) |
+| `t2_binpack_44` | $44 \times 14$ | **0.16x** | $13.91 \pm 40.01$ | $6.81 \pm 2.42$ | 0.49 (2 / 43) | 6.12 (0 / 8) | 0.86 (5 / 7) | 21.02 (1496) |
+| `t3_cflp_300` | $300 \times 34$ | **0.23x** | $13.74 \pm 6.96$ | $57.18 \pm 12.76$ | 10.39 (53 / 1213) | 53.50 (18 / 483) | 12.25 (59 / 20) | 9.07 (134) |
+| `t3_lotsizing_504` | $504 \times 336$ | **1.20x** | $576.76 \pm 1176.14$ | $96.71 \pm 59.74$ | 64.54 (30 / 1534) | 75.36 (10 / 377) | 106.51 (488 / 205) | 250.03 (3282, `TimeLimit`) |
+| `t3_sched_1000` | $1000 \times 100$ | **0.16x** | $10.49 \pm 3.61$ | $62.38 \pm 4.47$ | 8.81 (64 / 426) | 62.04 (0 / 76) | 35.78 (206 / 46) | 250.02 (2157, `TimeLimit`) |
 <!-- END GENERATED:NON_MAD_CBC_GAP_TABLE -->
 
-### 3. Summary of Architectural Bottlenecks
+---
 
-1. **PFI Eta Updates and LP Cold Starts ([`lu.go`](lu.go), [`simplex.go`](simplex.go))**: Scanning up to `maxEtaUpdates = 56` PFI eta vectors between full Markowitz factor rebuilds increases per-pivot cost on large unpresolved bases (`t3_mad_g4_i1000`), while omitting LP presolve and anti-degeneracy cost shifts inflates pivot counts on degenerate unpresolved assignment LPs (`t3_mad_g10_i100`).
-2. **Root-Only Cut Separation Without Multi-Row Aggregation ([`cuts.go`](cuts.go))**: Although [`bab.go`](bab.go) rolls back zero-gain cut tails and [`PurgeSlackCuts`](simplex.go) removes slack root cuts before branching, cutting planes are separated only at the root node from single rows using global bounds. Multi-item lot-sizing (`t3_lotsizing_504`, `coinor_capplan1`) and dense multi-constraint knapsacks (`t3_mkp_200`) require multi-row aggregation and in-tree cuts to match CBC's bound tightening across all seeds.
-3. **Static Presolve Symmetry Breaking Only ([`presolve.go`](presolve.go), [`bab.go`](bab.go))**: [`Presolve`](presolve.go) detects and verifies static $S_G$ group automorphisms (fixing designated bijections, upper-triangular partitioning/packing orbitopes, and monotone-cost block-opening indicators), whereas [`bab.go`](bab.go) does not perform dynamic orbital branching for symmetries that emerge only after branching decisions on identical-weight items.
-4. **Trial Root Cut and Pre-Cut Heuristic Overhead ([`heuristics.go`](heuristics.go), [`bab.go`](bab.go))**: Post-cut heuristics are skipped when root cuts do not improve the LP bound, yet trial root cut passes (`CP6`) and pre-cut diving and sub-MIP solves (`CP7`) still add root LP overhead relative to `CP5 +Presolve` on models whose integrality gap must be closed by branching (`t2_mad_rand_g3_i9`, `t3_cflp_300`).
+## Roadmap and Open Gaps
+
+This section consolidates open correctness, platform, algorithmic, and performance gaps across `BackendGo`, `BackendCBC`, `goblin/assign`, and `goblin/format`.
+
+| Priority | Track | Open Gap / Work Item | Primary Files | Target Workload / Outcome |
+| :--- | :--- | :--- | :--- | :--- |
+| **P0** | Correctness | Triage pre-existing `bigm347` differential mismatch (`goblin=39.4` vs. `cbc=35.0501`) | [`simplex.go`](simplex.go), [`bab.go`](bab.go), [`bench/difftest_cbc.py`](bench/difftest_cbc.py) | Zero differential mismatches across 400 random CBC test seeds |
+| **P0** | Platform | Validate native `linux/arm64` execution, including `-tags=cbc` bridge tests | [`cbc_cgo.go`](cbc_cgo.go), [`scripts/build_cbc.sh`](scripts/build_cbc.sh) | Verified parity and race tests on `aarch64` hardware |
+| **P1** | LP & LU | True in-place mutated-$U$ Forrest-Tomlin LU updates (without lazy-rank branch tax) | [`lu.go`](lu.go) | Cut per-pivot BTRAN/FTRAN cost on `t3_mad_g4_i1000` and dense Netlib/MIPLIB bases |
+| **P1** | LP & LU | Dedicated LP presolve and anti-degeneracy cost perturbation for large unpresolved LPs | [`simplex.go`](simplex.go), [`presolve.go`](presolve.go) | Close the remaining 2.90x unpresolved Root LP gap vs. CLP on `t3_mad_g4_i1000` |
+| **P1** | MIP Cuts | Multi-row cut aggregation and selective in-tree cut separation | [`cuts.go`](cuts.go), [`bab.go`](bab.go) | Reduce heavy-tail search trees on `t3_lotsizing_504`, `t3_mkp_200`, and `coinor_capplan1` |
+| **P2** | MIP Search | Dynamic orbital branching for symmetries emerging after branching on identical items | [`bab.go`](bab.go), [`presolve.go`](presolve.go) | Extend static $S_G$ presolve orbit fixing into the B&B tree |
+| **P2** | MIP Search | Strong-branching tuning (`miplib_lseu`) and trial-cut gating on small trees | [`bab.go`](bab.go), [`heuristics.go`](heuristics.go) | Eliminate remaining `CP5 +Presolve` vs. `CP7 Full` root overhead on `t3_cflp_300` and tiny random MAD |
+| **P3** | LSAP | Volgenant sparse-core pricing (`K = 16..32` candidate edges per row) for `N >= 1000` | [`assign/solver.go`](assign/solver.go) | Keep large dense LSAP active graphs inside L2 cache |
+| **P3** | Formats | Direct streaming `PuLP` JSON ingestion bypassing the intermediate `PuLPJSON` AST | [`format/pulp_json_fast.go`](format/pulp_json_fast.go) | Lower peak parse memory and prep latency on large JSON models |
+| **P3** | MIP Search | Optional parallel branch-and-bound workers with deterministic single-threaded mode | [`bab.go`](bab.go) | Multi-core scaling on deep B&B trees without changing deterministic default behavior |
+
+### Architectural Context and Rejected Designs
+
+1. **LU Updates and Row-Singleton Stability (`lu.go`)**: The factorizer stores pointer-free 32-byte `int32` PFI eta records with `[minIdx, maxIdx]` range-skipped BTRAN up to `maxEtaUpdates = 56`. Two candidate changes were tested and rejected: (a) a lazy-rank Forrest-Tomlin prototype with `maxEtaUpdates = 128` regressed `miplib_p0201` (0.62x) and increased `netlib_brandy` iterations (380 to 2,722) due to `uRank` branch mispredictions; (b) removing the `luMarkowitzTol * colMax` check on Stage 2 row singletons caused unscaled `1000x` multipliers in $L$ and numerical stalling on `t3_mad_g4_i1000`.
+2. **Root LP Crash Basis and Dense Coupling (`simplex.go`)**: Dual Phase I (`installDualPhase1Bounds`) keeps all 14 public Netlib LPs inside sparse dual simplex with zero primal fallbacks, and [`crashEqualityBasis`](simplex.go) cuts `t3_mad_g10_i100` unpresolved Root LP by 4.9x (`2.43 ms` vs. CLP `3.93 ms`). Crashing columns incident to dense coupling rows (`> 128` nonzeros) was rejected because displacing 1-NNZ artificial slacks on `t3_mad_g4_i1000` doubled $U$ fill-in and slowed solve latency by 2.5x.
+3. **Cut Separation, Symmetry, and Zero-Cut Sub-MIP Gating (`cuts.go`, `presolve.go`, `bab.go`, `heuristics.go`)**: Root cut rounds enforce GMI/MIR density caps (`maxCutNNZ`), exit after round 1 on zero bound gain, and purge inactive slack cuts both before branching and periodically in-tree via [`PurgeSlackCuts`](simplex.go). On zero-cut roots, a blanket `< 48`-integer sub-MIP ban improved 7-trial median on `t2_mad_rand_g3_i9` but inflated 11-trial mean (`29.5` to `38.6 ms`) and tail (`96.9` to `121.6 ms`); requiring 50% fixed integers (RINS criterion) improved median, mean, tail, and node counts across all 11 trials.
+4. **Recently Closed Milestones (Already Landed)**:
+   - **Numerical and Bridge Hardening (`3f52ee8`, `9a6b3f5`, `85d57a3`)**: Multi-scale three-bucket Shewchuk summation (`wideDotAcc`, `assignWideAcc`), CBC tiny-coefficient and cutoff guards, MIPLIB 3.0 public benchmark fixtures, and family-clustered Student-$t$ telemetry intervals.
+   - **Wave 0 (`facbd10`)**: Pointer-free inline `wideDotAcc` (zero heap escapes), per-row `rowMaxTerm` residual triggers, and stack `dot2Acc` fast paths.
+   - **Wave 1 (`bd0bdf4` to `fe40685`)**: Elimination of Go 1.27 `archsimd` AVX2-to-SSE `VZEROUPPER` traps, scale-relative `assign.hasPotentialCancellation` (0 allocs/op warm `SolveInto`), branchless AVX2 Dijkstra relaxation (`assign_amd64.go`), zero-pin SWAR JSON parsing and buffered `WriteMPS`, lazy CSC indexing on `extraRows`, batch-fixed `solveFixedIntContinuousLP`, and bounded post-cut root heuristics.
+   - **Wave 2 (`c7cb1a4` to `99a49c0`)**: Flat single-value LU nucleus arenas with intrusive `int32` Markowitz buckets (0 allocs/op steady-state LU), EMA-gated iterative Gilbert-Peierls reach DFS, copy-on-write `Presolve` with direct `CompiledProblem` compilation, lazy `cbcOnce` CBC slices, Dual Phase I, packed contiguous `basicLB`/`basicUB`/`basicTol`, GMI/MIR density caps, in-tree slack-cut aging, and incremental CSC node propagation (`propagateFromCols`).
+   - **Wave 3 (`8bcb706` to `2b7305d`, Multi-Tier AVX-512/AVX2 SIMD & MAD Solver Optimization, verified on GCP `n4` Emerald Rapids & `e2` Broadwell)**: Runtime AVX-512/AVX2/Scalar CPUID dispatch in a single `CGO_ENABLED=0` binary (`GOAMD64=v3` FMA-safe `twoProd`/`twoSum` error-free transforms), 4-accumulator scalar `Axpy64Scalar` for Broadwell, in-register DSE leaving-row scan (`SelectDualLeaveRow64With`), batched dual ratio screening (`ScanDualRatioCand64With`), zero-alloc equality crash basis (`crashEqualityBasis`), certified unrefined residual fast paths (`evalRowRes`), dirty-row presolve tightening and zero-sort $O(G \cdot \text{rowLen})$ orbit checks, decoupled epigraph rounding with fractional-only sort, zero-cut 50% RINS sub-MIP gating, and root-LP re-solve plus CBC primal polishing (`FuzzMADDifferentialCBC`).
 
 ---
 
