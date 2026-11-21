@@ -837,6 +837,67 @@ func colReduceValidateSquare(n int, cost, v []float64, row4col []int, disableSIM
 	return true, nil
 }
 
+const (
+	sparseCoreMinNScalar = 1000
+	sparseCoreMinNSIMD   = 1500
+	sparseCoreMinFree    = 48
+	sparseCoreK          = 24
+)
+
+func wrapContextCanceled(ctx context.Context, err error) error {
+	if errors.Is(err, errContextCanceled) {
+		return ctx.Err()
+	}
+	return err
+}
+
+func augmentFreeRows(ctx context.Context, numFree, n int, normCost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD bool, done <-chan struct{}) error {
+	if numFree == 0 {
+		return nil
+	}
+	remaining := ws.remaining[:n]
+	d := ws.d[:n]
+	dQueue := ws.dQueue[:n]
+	pred := ws.pred[:n]
+	freeRows := ws.freeRows[:numFree]
+	useSIMD := !disableSIMD && simd.UsingHardwareSIMD() && n >= 32
+	if done == nil {
+		if useSIMD {
+			for _, curRow := range freeRows {
+				if err := augmentRowSIMD(curRow, n, normCost, u, v, d, dQueue, pred, col4row, row4col, remaining, nil); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		for _, curRow := range freeRows {
+			if err := augmentRowScalar(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for idx, curRow := range freeRows {
+		if idx&3 == 0 {
+			select {
+			case <-done:
+				return ctx.Err()
+			default:
+			}
+		}
+		var err error
+		if useSIMD {
+			err = augmentRowSIMD(curRow, n, normCost, u, v, d, dQueue, pred, col4row, row4col, remaining, done)
+		} else {
+			err = augmentRowScalar(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, done)
+		}
+		if err != nil {
+			return wrapContextCanceled(ctx, err)
+		}
+	}
+	return nil
+}
+
 func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD, colReduced bool, done <-chan struct{}) error {
 	for i := range m {
 		col4row[i] = -1
@@ -855,58 +916,22 @@ func runNormalizedLSAP(ctx context.Context, m, n int, normCost, u, v []float64, 
 		numFree, errPre = preprocessRectangularBV(m, n, normCost, u, v, col4row, row4col, ws.freeRows[:m], ws.auxRows[:m], disableSIMD, done)
 	}
 	if errPre != nil {
-		if errors.Is(errPre, errContextCanceled) {
-			return ctx.Err()
-		}
-		return errPre
+		return wrapContextCanceled(ctx, errPre)
+	}
+	if numFree == 0 {
+		return nil
 	}
 
-	if numFree > 0 {
-		remaining := ws.remaining[:n]
-		d := ws.d[:n]
-		dQueue := ws.dQueue[:n]
-		pred := ws.pred[:n]
-		freeRows := ws.freeRows[:numFree]
-		useSIMD := !disableSIMD && simd.UsingHardwareSIMD() && n >= 32
-		if done == nil {
-			if useSIMD {
-				for _, curRow := range freeRows {
-					if err := augmentRowSIMD(curRow, n, normCost, u, v, d, dQueue, pred, col4row, row4col, remaining, nil); err != nil {
-						return err
-					}
-				}
-			} else {
-				for _, curRow := range freeRows {
-					if err := augmentRowScalar(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, nil); err != nil {
-						return err
-					}
-				}
-			}
-		} else {
-			for idx, curRow := range freeRows {
-				if idx&3 == 0 {
-					select {
-					case <-done:
-						return ctx.Err()
-					default:
-					}
-				}
-				var err error
-				if useSIMD {
-					err = augmentRowSIMD(curRow, n, normCost, u, v, d, dQueue, pred, col4row, row4col, remaining, done)
-				} else {
-					err = augmentRowScalar(curRow, n, normCost, u, v, d, pred, col4row, row4col, remaining, done)
-				}
-				if err != nil {
-					if errors.Is(err, errContextCanceled) {
-						return ctx.Err()
-					}
-					return err
-				}
-			}
-		}
+	useSIMD := !disableSIMD && simd.UsingHardwareSIMD()
+	minN := sparseCoreMinNScalar
+	if useSIMD {
+		minN = sparseCoreMinNSIMD
 	}
-	return nil
+	if m == n && n >= minN && numFree >= sparseCoreMinFree && !hasDenseTiesOnFreeRows(n, normCost, u, v, ws.freeRows[:numFree], sparseCoreK) {
+		return wrapContextCanceled(ctx, runSparseCorePostARR(ctx, n, normCost, u, v, col4row, row4col, numFree, ws, disableSIMD, done))
+	}
+
+	return augmentFreeRows(ctx, numFree, n, normCost, u, v, col4row, row4col, ws, disableSIMD, done)
 }
 
 func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork bool, sense Sense, rowInd, colInd []int, ws *Workspace, cfg Options) (float64, bool, error) {
@@ -1480,22 +1505,13 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 	}
 }
 
-// preprocessSquareJV executes Jonker-Volgenant (1987) Column Reduction (in row-major order),
-// Reduction Transfer, and 2-pass Augmenting Row Reduction for square n x n instances.
-// When colReduced is true, v and row4col already hold the column minima and argmin rows.
-func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD, colReduced bool, done <-chan struct{}) (int, error) {
-	if n <= 0 || len(u) < n || len(v) < n || len(col4row) < n || len(row4col) < n || len(freeRows) < n || len(auxRows) < n {
-		return 0, nil
-	}
+func initSquareColReductionAndAssign(n int, cost, u, v []float64, col4row, row4col []int, disableSIMD, colReduced bool, done <-chan struct{}) (int, error) {
 	u = u[:n]
 	v = v[:n]
 	col4row = col4row[:n]
 	row4col = row4col[:n]
-	freeRows = freeRows[:n]
-	auxRows = auxRows[:n]
 	clear(u)
 
-	// Perform row-major column reduction unless fused validation already populated v and row4col.
 	if !colReduced {
 		if done == nil || n <= 256 {
 			simd.ColReduceRows64With(n, 0, n, cost, v, row4col, disableSIMD)
@@ -1513,9 +1529,7 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 		}
 	}
 
-	// Assign columns in ascending order (retaining the smallest column index on ties
-	// so constant cost matrices yield the identity assignment) and flag contended rows.
-	// Contended rows are temporarily marked with col4row[i] = -2 - firstJ.
+	numFreeRows := n
 	for j, vj := range v {
 		if math.IsInf(vj, 1) {
 			return 0, ErrInfeasible
@@ -1526,6 +1540,7 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 		}
 		if col4row[i] == -1 {
 			col4row[i] = j
+			numFreeRows--
 		} else {
 			if col4row[i] >= 0 {
 				col4row[i] = -2 - col4row[i]
@@ -1533,6 +1548,29 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 			row4col[j] = -1
 		}
 	}
+	return numFreeRows, nil
+}
+
+// preprocessSquareJV executes Jonker-Volgenant (1987) Column Reduction (in row-major order),
+// Reduction Transfer, and 2-pass Augmenting Row Reduction for square n x n instances.
+// When colReduced is true, v and row4col already hold the column minima and argmin rows.
+func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD, colReduced bool, done <-chan struct{}) (int, error) {
+	if n <= 0 || len(u) < n || len(v) < n || len(col4row) < n || len(row4col) < n || len(freeRows) < n || len(auxRows) < n {
+		return 0, nil
+	}
+	if _, err := initSquareColReductionAndAssign(n, cost, u, v, col4row, row4col, disableSIMD, colReduced, done); err != nil {
+		return 0, err
+	}
+	return finishSquareJVReduction(n, cost, u, v, col4row, row4col, freeRows, auxRows, disableSIMD, done)
+}
+
+func finishSquareJVReduction(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
+	u = u[:n]
+	v = v[:n]
+	col4row = col4row[:n]
+	row4col = row4col[:n]
+	freeRows = freeRows[:n]
+	auxRows = auxRows[:n]
 
 	// Apply Reduction Transfer on uniquely matched rows and collect unassigned rows into freeRows.
 	numFree := 0
@@ -2288,4 +2326,411 @@ func augmentRowScalar(curRow, n int, cost, u, v, d []float64, pred, col4row, row
 
 	finishAugmentPath(curRow, sink, low, u, v, d, pred, col4row, row4col, remaining, minVal)
 	return nil
+}
+
+func hasDenseTiesOnFreeRows(n int, cost, u, v []float64, freeRows []int, k int) bool {
+	sample := min(len(freeRows), 4)
+	for s := range sample {
+		i := freeRows[s]
+		rowCost := cost[i*n:][:n]
+		ui := u[i]
+		cnt := 0
+		for j, vj := range v[:n] {
+			if rowCost[j]-vj <= ui {
+				cnt++
+				if cnt >= k {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func runSparseCorePostARR(ctx context.Context, n int, cost, u, v []float64, col4row, row4col []int, numFree int, ws *Workspace, disableSIMD bool, done <-chan struct{}) error {
+	ws.ensureSparseCore(n, sparseCoreK)
+	if err := buildSparseCorePostARR(n, sparseCoreK, cost, v, col4row, ws.coreCol, ws.coreCost, ws.coreDeg, done); err != nil {
+		return err
+	}
+	if err := augmentFreeRowsSparse(n, sparseCoreK, u, v, col4row, row4col, ws.freeRows[:numFree], ws, done); err != nil {
+		return err
+	}
+	return priceAndRepairSparseCore(ctx, n, cost, u, v, col4row, row4col, ws, disableSIMD, done)
+}
+
+func replaceTopKMax(reds *[32]float64, cols *[32]int32, k int, r float64, c int32) {
+	p := 0
+	for {
+		left := 2*p + 1
+		if left >= k {
+			break
+		}
+		best := left
+		if right := left + 1; right < k && reds[right] > reds[left] {
+			best = right
+		}
+		if !(reds[best] > r) {
+			break
+		}
+		reds[p] = reds[best]
+		cols[p] = cols[best]
+		p = best
+	}
+	reds[p] = r
+	cols[p] = c
+}
+
+func siftUpTopKMax(reds *[32]float64, cols *[32]int32, p int, r float64, c int32) {
+	for p > 0 {
+		parent := (p - 1) >> 1
+		if !(r > reds[parent]) {
+			break
+		}
+		reds[p] = reds[parent]
+		cols[p] = cols[parent]
+		p = parent
+	}
+	reds[p] = r
+	cols[p] = c
+}
+
+func buildSparseCorePostARR(n, k int, cost, v []float64, col4row []int, coreCol []int32, coreCost []float64, coreDeg []int32, done <-chan struct{}) error {
+	var topRed [32]float64
+	var topCol [32]int32
+	v = v[:n]
+	for i := range n {
+		if done != nil && i&255 == 0 {
+			select {
+			case <-done:
+				return errContextCanceled
+			default:
+			}
+		}
+		matchedCol := col4row[i]
+		rowCost := cost[i*n:][:n]
+		cnt := 0
+		j := 0
+		for ; j < n && cnt < k; j++ {
+			c := rowCost[j]
+			if math.IsInf(c, 1) {
+				continue
+			}
+			r := c - v[j]
+			if math.IsInf(r, 1) {
+				continue
+			}
+			siftUpTopKMax(&topRed, &topCol, cnt, r, int32(j))
+			cnt++
+		}
+		if cnt == k && j < n {
+			maxRed := topRed[0]
+			for ; j+4 <= n; j += 4 {
+				r0 := rowCost[j] - v[j]
+				r1 := rowCost[j+1] - v[j+1]
+				r2 := rowCost[j+2] - v[j+2]
+				r3 := rowCost[j+3] - v[j+3]
+				if r0 < maxRed || r1 < maxRed || r2 < maxRed || r3 < maxRed {
+					if r0 < maxRed {
+						replaceTopKMax(&topRed, &topCol, k, r0, int32(j))
+						maxRed = topRed[0]
+					}
+					if r1 < maxRed {
+						replaceTopKMax(&topRed, &topCol, k, r1, int32(j+1))
+						maxRed = topRed[0]
+					}
+					if r2 < maxRed {
+						replaceTopKMax(&topRed, &topCol, k, r2, int32(j+2))
+						maxRed = topRed[0]
+					}
+					if r3 < maxRed {
+						replaceTopKMax(&topRed, &topCol, k, r3, int32(j+3))
+						maxRed = topRed[0]
+					}
+				}
+			}
+			for ; j < n; j++ {
+				if r := rowCost[j] - v[j]; r < maxRed {
+					replaceTopKMax(&topRed, &topCol, k, r, int32(j))
+					maxRed = topRed[0]
+				}
+			}
+		}
+		if cnt == 0 {
+			return ErrInfeasible
+		}
+		if matchedCol >= 0 {
+			hasMatch := false
+			for t := range cnt {
+				if int(topCol[t]) == matchedCol {
+					hasMatch = true
+					break
+				}
+			}
+			if !hasMatch && matchedCol <= math.MaxInt32 {
+				topCol[0] = int32(matchedCol)
+			}
+		}
+
+		base := i * k
+		dstCol := coreCol[base : base+cnt]
+		dstCost := coreCost[base : base+cnt]
+		for t := range cnt {
+			colT := topCol[t]
+			dstCol[t] = colT
+			dstCost[t] = rowCost[colT]
+		}
+		coreDeg[i] = int32(cnt)
+	}
+	return nil
+}
+
+func pushMinHeap(dists *[]float64, cols *[]int32, heapLen int, d float64, col int32) int {
+	ds := *dists
+	cs := *cols
+	if heapLen >= cap(ds) {
+		newCap := max(16, 2*cap(ds))
+		nds := make([]float64, newCap)
+		ncs := make([]int32, newCap)
+		copy(nds, ds[:heapLen])
+		copy(ncs, cs[:heapLen])
+		ds = nds
+		cs = ncs
+		*dists = ds
+		*cols = cs
+	} else if heapLen >= len(ds) {
+		ds = ds[:cap(ds)]
+		cs = cs[:cap(cs)]
+		*dists = ds
+		*cols = cs
+	}
+	p := heapLen
+	for p > 0 {
+		parent := (p - 1) >> 1
+		if !(d < ds[parent]) {
+			break
+		}
+		ds[p] = ds[parent]
+		cs[p] = cs[parent]
+		p = parent
+	}
+	ds[p] = d
+	cs[p] = col
+	return heapLen + 1
+}
+
+func popMinHeap(ds []float64, cs []int32, heapLen int) (dist float64, col int, newLen int) {
+	dist = ds[0]
+	col = int(cs[0])
+	heapLen--
+	if heapLen > 0 {
+		lastD := ds[heapLen]
+		lastC := cs[heapLen]
+		p := 0
+		for {
+			left := 2*p + 1
+			if left >= heapLen {
+				break
+			}
+			best := left
+			if right := left + 1; right < heapLen && ds[right] < ds[left] {
+				best = right
+			}
+			if !(ds[best] < lastD) {
+				break
+			}
+			ds[p] = ds[best]
+			cs[p] = cs[best]
+			p = best
+		}
+		ds[p] = lastD
+		cs[p] = lastC
+	}
+	return dist, col, heapLen
+}
+
+func augmentFreeRowsSparse(n, k int, u, v []float64, col4row, row4col, freeRows []int, ws *Workspace, done <-chan struct{}) error {
+	d := ws.d[:n]
+	dQueue := ws.dQueue[:n]
+	pred := ws.pred[:n]
+	remaining := ws.remaining[:n]
+	coreCol := ws.coreCol
+	coreCost := ws.coreCost
+	coreDeg := ws.coreDeg
+	dStamp := ws.dStamp[:n]
+	closedStamp := ws.closedStamp[:n]
+	u = u[:n]
+	v = v[:n]
+	row4col = row4col[:n]
+
+	for idx, curRow := range freeRows {
+		if done != nil && idx&7 == 0 {
+			select {
+			case <-done:
+				return errContextCanceled
+			default:
+			}
+		}
+		if ws.stamp >= math.MaxInt32-2 {
+			clear(dStamp)
+			clear(closedStamp)
+			ws.stamp = 0
+		}
+		ws.stamp++
+		stamp := ws.stamp
+
+		deg := int(coreDeg[curRow])
+		if deg == 0 {
+			continue
+		}
+		base := curRow * k
+		ui := u[curRow]
+		minInit := math.Inf(1)
+		bestFreeVal := math.Inf(1)
+		bestFreeCol := -1
+		for t := range deg {
+			j := int(coreCol[base+t])
+			r := (coreCost[base+t] - v[j]) - ui
+			dStamp[j] = stamp
+			d[j] = r
+			pred[j] = curRow
+			if r < minInit {
+				minInit = r
+			}
+			if row4col[j] == -1 && r < bestFreeVal {
+				bestFreeVal = r
+				bestFreeCol = j
+			}
+		}
+		if !(minInit < math.Inf(1)) {
+			continue
+		}
+		if bestFreeCol >= 0 && bestFreeVal <= minInit {
+			u[curRow] += bestFreeVal
+			col4row[curRow] = bestFreeCol
+			row4col[bestFreeCol] = curRow
+			continue
+		}
+
+		heapLen := 0
+		for t := range deg {
+			col32 := coreCol[base+t]
+			heapLen = pushMinHeap(&ws.heapDist, &ws.heapCol, heapLen, d[col32], col32)
+		}
+
+		low := 0
+		sink := -1
+		minVal := 0.0
+		for heapLen > 0 {
+			var col int
+			var dist float64
+			dist, col, heapLen = popMinHeap(ws.heapDist, ws.heapCol, heapLen)
+			if closedStamp[col] == stamp || dist > d[col] {
+				continue
+			}
+			if done != nil && low&127 == 0 {
+				select {
+				case <-done:
+					return errContextCanceled
+				default:
+				}
+			}
+			if row4col[col] == -1 {
+				sink = col
+				minVal = dist
+				break
+			}
+			closedStamp[col] = stamp
+			remaining[low] = col
+			dQueue[low] = dist
+			low++
+
+			rowI := row4col[col]
+			rDeg := int(coreDeg[rowI])
+			rBase := rowI * k
+			uRow := u[rowI]
+			for t := range rDeg {
+				col32 := coreCol[rBase+t]
+				if closedStamp[col32] == stamp {
+					continue
+				}
+				r := dist + ((coreCost[rBase+t] - v[col32]) - uRow)
+				if r < dist {
+					r = dist
+				}
+				if dStamp[col32] != stamp || r < d[col32] {
+					dStamp[col32] = stamp
+					d[col32] = r
+					pred[col32] = rowI
+					heapLen = pushMinHeap(&ws.heapDist, &ws.heapCol, heapLen, r, col32)
+				}
+			}
+		}
+		if sink >= 0 {
+			finishAugmentPath(curRow, sink, low, u, v, dQueue, pred, col4row, row4col, remaining, minVal)
+		}
+	}
+	return nil
+}
+
+func minReducedSkipScalarCheck(rowCost, v []float64, skip int) float64 {
+	best := math.Inf(1)
+	for j, c := range rowCost {
+		if j == skip || math.IsInf(c, 1) {
+			continue
+		}
+		if r := c - v[j]; r < best {
+			best = r
+		}
+	}
+	return best
+}
+
+func priceAndRepairSparseCore(ctx context.Context, n int, cost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD bool, done <-chan struct{}) error {
+	u = u[:n]
+	v = v[:n]
+	col4row = col4row[:n]
+	row4col = row4col[:n]
+	freeRows := ws.freeRows[:n]
+	numRepair := 0
+
+	for i := range n {
+		if done != nil && i&255 == 0 {
+			select {
+			case <-done:
+				return errContextCanceled
+			default:
+			}
+		}
+		rowCost := cost[i*n:][:n]
+		if c := col4row[i]; c >= 0 {
+			ui := rowCost[c] - v[c]
+			u[i] = ui
+			minRed := simd.MinReducedSkip64With(rowCost, v, c, disableSIMD)
+			if math.IsNaN(minRed) {
+				minRed = minReducedSkipScalarCheck(rowCost, v, c)
+			}
+			if minRed < ui {
+				col4row[i] = -1
+				row4col[c] = -1
+				u[i] = minRed
+				freeRows[numRepair] = i
+				numRepair++
+			}
+		} else {
+			minRed := simd.MinReducedSkip64With(rowCost, v, -1, disableSIMD)
+			if math.IsNaN(minRed) {
+				minRed = minReducedSkipScalarCheck(rowCost, v, -1)
+			}
+			if math.IsInf(minRed, 1) {
+				return ErrInfeasible
+			}
+			u[i] = minRed
+			freeRows[numRepair] = i
+			numRepair++
+		}
+	}
+	if numRepair == 0 {
+		return nil
+	}
+	return augmentFreeRows(ctx, numRepair, n, cost, u, v, col4row, row4col, ws, disableSIMD, done)
 }

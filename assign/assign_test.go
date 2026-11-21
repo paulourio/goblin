@@ -2151,3 +2151,174 @@ func TestTallTransposeAndSIMDParity(t *testing.T) {
 		}
 	}
 }
+
+func TestSparseCoreLSAPParityAndZeroAlloc(t *testing.T) {
+	const n = 1000
+	bgCtx := context.Background()
+	inf := math.Inf(1)
+
+	makeCost := func(kind string, seed uint64) []float64 {
+		rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
+		c := make([]float64, n*n)
+		switch kind {
+		case "uniform":
+			for i := range c {
+				c[i] = rng.Float64() * 10000.0
+			}
+		case "tied16":
+			for i := range c {
+				c[i] = float64(rng.IntN(16))
+			}
+		case "geom2d":
+			px := make([]float64, n)
+			py := make([]float64, n)
+			qx := make([]float64, n)
+			qy := make([]float64, n)
+			for i := range n {
+				px[i] = rng.Float64()
+				py[i] = rng.Float64()
+				qx[i] = rng.Float64()
+				qy[i] = rng.Float64()
+			}
+			for i := range n {
+				row := c[i*n : (i+1)*n]
+				for j := range n {
+					row[j] = math.Hypot(px[i]-qx[j], py[i]-qy[j])
+				}
+			}
+		case "sparse90":
+			perm := rng.Perm(n)
+			for i := range n {
+				row := c[i*n : (i+1)*n]
+				for j := range n {
+					if j == perm[i] || rng.Float64() < 0.10 {
+						row[j] = rng.Float64() * 1000.0
+					} else {
+						row[j] = inf
+					}
+				}
+			}
+		case "row_dominated":
+			for i := range n {
+				row := c[i*n : (i+1)*n]
+				scale := float64(1 + (i/4)*100)
+				for j := range n {
+					row[j] = scale * (1.0 + rng.Float64())
+				}
+			}
+		case "collinear":
+			rowW := make([]float64, n)
+			colW := make([]float64, n)
+			for i := range n {
+				rowW[i] = rng.Float64()*10.0 + 0.1
+				colW[i] = float64(i) * 0.5
+			}
+			for i := range n {
+				row := c[i*n : (i+1)*n]
+				for j := range n {
+					row[j] = rowW[i] * colW[j]
+				}
+			}
+		case "huge_cancel":
+			for i := range c {
+				c[i] = 1e15 + rng.Float64()*10.0
+			}
+			c[0] = -1e15
+		}
+		return c
+	}
+
+	cases := []struct {
+		kind  string
+		sense assign.Sense
+		seed  uint64
+	}{
+		{"uniform", assign.Minimize, 3101},
+		{"uniform", assign.Maximize, 3102},
+		{"tied16", assign.Minimize, 3103},
+		{"geom2d", assign.Minimize, 3104},
+		{"sparse90", assign.Minimize, 3105},
+		{"row_dominated", assign.Minimize, 3106},
+		{"collinear", assign.Minimize, 3107},
+		{"huge_cancel", assign.Minimize, 3108},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.kind+"_"+tc.sense.String(), func(t *testing.T) {
+			cost := makeCost(tc.kind, tc.seed)
+			resSIMD, err := assign.LinearSumFlat(bgCtx, n, n, cost, tc.sense, assign.WithSIMD(true))
+			if err != nil {
+				t.Fatalf("SIMD LinearSumFlat failed: %v", err)
+			}
+			verifyOptimalityCertificate(t, tc.kind+"/simd", n, n, cost, tc.sense, resSIMD)
+
+			resScalar, err := assign.LinearSumFlat(bgCtx, n, n, cost, tc.sense, assign.WithoutSIMD())
+			if err != nil {
+				t.Fatalf("Scalar LinearSumFlat failed: %v", err)
+			}
+			verifyOptimalityCertificate(t, tc.kind+"/scalar", n, n, cost, tc.sense, resScalar)
+
+			tol := 1e-8 * max(1.0, math.Abs(resScalar.Objective))
+			if math.Abs(resSIMD.Objective-resScalar.Objective) > tol {
+				t.Fatalf("SIMD obj=%.15g != Scalar obj=%.15g", resSIMD.Objective, resScalar.Objective)
+			}
+
+			if tc.kind == "uniform" && tc.sense == assign.Minimize {
+				rowInd := make([]int, n)
+				colInd := make([]int, n)
+				ws := assign.AcquireWorkspace(n, n)
+				defer assign.ReleaseWorkspace(ws)
+				warmObj, wErr := assign.SolveInto(bgCtx, n, n, cost, tc.sense, rowInd, colInd, ws)
+				if wErr != nil {
+					t.Fatalf("SolveInto warmup failed: %v", wErr)
+				}
+				if math.Abs(warmObj-resScalar.Objective) > tol {
+					t.Fatalf("SolveInto obj=%.15g != %.15g", warmObj, resScalar.Objective)
+				}
+				for _, opt := range []assign.Option{assign.WithSIMD(true), assign.WithoutSIMD()} {
+					allocs := testing.AllocsPerRun(3, func() {
+						if _, sErr := assign.SolveInto(bgCtx, n, n, cost, tc.sense, rowInd, colInd, ws, opt); sErr != nil {
+							t.Fatal(sErr)
+						}
+					})
+					if allocs != 0 {
+						t.Fatalf("expected 0 allocs/op in warm N=%d SolveInto, got %v", n, allocs)
+					}
+				}
+			}
+		})
+	}
+
+	// Also verify SIMD post-ARR sparse core (N >= 1500) on geometric costs.
+	const nBig = 1500
+	rng := rand.New(rand.NewPCG(3199, 3199^0x9e3779b97f4a7c15))
+	px := make([]float64, nBig)
+	py := make([]float64, nBig)
+	qx := make([]float64, nBig)
+	qy := make([]float64, nBig)
+	for i := range nBig {
+		px[i] = rng.Float64()
+		py[i] = rng.Float64()
+		qx[i] = rng.Float64()
+		qy[i] = rng.Float64()
+	}
+	bigCost := make([]float64, nBig*nBig)
+	for i := range nBig {
+		row := bigCost[i*nBig : (i+1)*nBig]
+		for j := range nBig {
+			row[j] = math.Hypot(px[i]-qx[j], py[i]-qy[j])
+		}
+	}
+	bigRes, err := assign.LinearSumFlat(bgCtx, nBig, nBig, bigCost, assign.Minimize, assign.WithSIMD(true))
+	if err != nil {
+		t.Fatalf("N=%d SIMD failed: %v", nBig, err)
+	}
+	verifyOptimalityCertificate(t, "geom2d_1500/simd", nBig, nBig, bigCost, assign.Minimize, bigRes)
+	bigScal, err := assign.LinearSumFlat(bgCtx, nBig, nBig, bigCost, assign.Minimize, assign.WithoutSIMD())
+	if err != nil {
+		t.Fatalf("N=%d Scalar failed: %v", nBig, err)
+	}
+	if math.Abs(bigRes.Objective-bigScal.Objective) > 1e-8*max(1.0, math.Abs(bigScal.Objective)) {
+		t.Fatalf("N=%d SIMD obj=%.15g != Scalar obj=%.15g", nBig, bigRes.Objective, bigScal.Objective)
+	}
+}

@@ -6,28 +6,37 @@ import (
 )
 
 const (
-	defaultDimCap = 64
-	maxPooledDim  = 4096
-	maxPooledCost = maxPooledDim * maxPooledDim
+	defaultDimCap     = 64
+	maxPooledDim      = 4096
+	maxPooledCost     = maxPooledDim * maxPooledDim
+	maxPooledCoreCols = maxPooledDim * 32
 )
 
 // Workspace holds reusable solver buffers for the Linear Sum Assignment solver.
 // Callers may acquire a pooled Workspace via AcquireWorkspace and return it via
 // ReleaseWorkspace to eliminate per-solve allocations in hot loops.
 type Workspace struct {
-	u         []float64
-	v         []float64
-	d         []float64
-	dQueue    []float64
-	pred      []int
-	col4row   []int
-	row4col   []int
-	remaining []int
-	freeRows  []int
-	auxRows   []int
-	workCost  []float64
-	opts      Options
-	inPool    atomic.Bool
+	u           []float64
+	v           []float64
+	d           []float64
+	dQueue      []float64
+	pred        []int
+	col4row     []int
+	row4col     []int
+	remaining   []int
+	freeRows    []int
+	auxRows     []int
+	workCost    []float64
+	coreCol     []int32
+	coreCost    []float64
+	coreDeg     []int32
+	dStamp      []int32
+	closedStamp []int32
+	heapCol     []int32
+	heapDist    []float64
+	stamp       int32
+	opts        Options
+	inPool      atomic.Bool
 }
 
 var workspacePool = sync.Pool{
@@ -71,7 +80,38 @@ func ReleaseWorkspace(ws *Workspace) {
 	if cap(ws.workCost) > maxPooledCost {
 		ws.workCost = nil
 	}
+	if cap(ws.coreCol) > maxPooledCoreCols {
+		ws.coreCol = nil
+		ws.coreCost = nil
+		ws.heapCol = nil
+		ws.heapDist = nil
+	}
 	workspacePool.Put(ws)
+}
+
+func (ws *Workspace) ensureSparseCore(n, k int) {
+	need := n * k
+	ws.coreCol = growInt32(ws.coreCol, need)
+	ws.coreCost = growFloat64(ws.coreCost, need)
+	ws.coreDeg = growInt32(ws.coreDeg, n)
+	if cap(ws.dStamp) < n {
+		ws.dStamp = make([]int32, n)
+		ws.closedStamp = make([]int32, n)
+		ws.stamp = 0
+	} else {
+		oldLen := len(ws.dStamp)
+		ws.dStamp = ws.dStamp[:n]
+		ws.closedStamp = ws.closedStamp[:n]
+		if oldLen < n {
+			clear(ws.dStamp[oldLen:n])
+			clear(ws.closedStamp[oldLen:n])
+		}
+	}
+	initHeapCap := min(need, 4*n)
+	if cap(ws.heapCol) < initHeapCap {
+		ws.heapCol = make([]int32, initHeapCap)
+		ws.heapDist = make([]float64, initHeapCap)
+	}
 }
 
 func (ws *Workspace) ensure(m, n int) {
@@ -117,6 +157,13 @@ func growFloat64(s []float64, n int) []float64 {
 func growInt(s []int, n int) []int {
 	if cap(s) < n {
 		return make([]int, n)
+	}
+	return s[:n]
+}
+
+func growInt32(s []int32, n int) []int32 {
+	if cap(s) < n {
+		return make([]int32, n)
 	}
 	return s[:n]
 }
