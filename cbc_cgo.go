@@ -711,12 +711,21 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	if hasValidSol {
 		snapCBCBounds(primal, p.varLB, p.varUB, n)
 		if !cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, primal, true) {
-			hasValidSol = false
-			if status == StatusOptimal {
-				status = StatusNumericalError
-				cRes.has_best_bound = 0
-				cRes.has_root_lp = 0
-				cRes.has_root_cut = 0
+			if polished, extraIt, ok := polishCBCMIPPrimal(
+				ctx, p, opt, int(cRes.iterations), status == StatusOptimal,
+				cRes.has_best_bound != 0, float64(cRes.best_bound_min), primal, deadline, done,
+			); ok {
+				cRes.iterations += C.int(extraIt)
+				primal = polished
+			} else {
+				cRes.iterations += C.int(extraIt)
+				hasValidSol = false
+				if status == StatusOptimal {
+					status = StatusNumericalError
+					cRes.has_best_bound = 0
+					cRes.has_root_lp = 0
+					cRes.has_root_cut = 0
+				}
 			}
 		}
 	}
@@ -1463,6 +1472,88 @@ func hasUnrepresentableCBCFiniteBound(colLB, colUB, rowLB, rowUB, cutRHS []float
 		}
 	}
 	return false
+}
+
+// polishCBCMIPPrimal repairs small continuous-variable primal/row residuals left by CBC's
+// internal tolerances (e.g. on wide dynamic-range MILPs) by fixing all integer variables to
+// their rounded values and solving the resulting continuous LP in pure Go. It succeeds only
+// when all integer variables are already within integrality tolerance, the polished LP is
+// optimal and passes cbcPrimalWithinTol, and (for claimed StatusOptimal) its objective agrees
+// with CBC's best dual bound within gap tolerance.
+func polishCBCMIPPrimal(
+	ctx context.Context,
+	p *CompiledProblem,
+	opt Options,
+	baseIters int,
+	claimedOptimal bool,
+	hasBestBound bool,
+	bestBoundMin float64,
+	primal []float64,
+	deadline time.Time,
+	done <-chan struct{},
+) ([]float64, int, bool) {
+	n := p.numVars
+	if len(primal) < n || len(p.intCols) >= n {
+		return nil, 0, false
+	}
+	if stopRequested(deadline, done) || (ctx != nil && ctx.Err() != nil) {
+		return nil, 0, false
+	}
+	lbFix := slices.Clone(p.varLB)
+	ubFix := slices.Clone(p.varUB)
+	for _, col := range p.intCols {
+		v := primal[col]
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, 0, false
+		}
+		rv := math.Round(v)
+		if math.Abs(v-rv) > 1e-3 {
+			return nil, 0, false
+		}
+		if (!math.IsInf(p.varLB[col], -1) && rv < p.varLB[col]-1e-9) ||
+			(!math.IsInf(p.varUB[col], 1) && rv > p.varUB[col]+1e-9) {
+			return nil, 0, false
+		}
+		lbFix[col] = rv
+		ubFix[col] = rv
+	}
+
+	lpFixed := NewLPSolver(p, nil)
+	lpFixed.DisableSIMD = opt.DisableSIMD
+	lpFixed.Deadline = deadline
+	lpFixed.Done = done
+	if opt.MaxIter > 0 {
+		rem := opt.MaxIter - baseIters
+		if rem <= 0 {
+			lpFixed.Close()
+			return nil, 0, false
+		}
+		lpFixed.MaxIter = rem
+	}
+	lpFixed.SetStructuralBounds(lbFix, ubFix)
+	resFix := lpFixed.Solve()
+	extraIters := resFix.Iterations
+	lpFixed.Close()
+
+	if resFix.Status != StatusOptimal || len(resFix.Primal) < n {
+		return nil, extraIters, false
+	}
+	polished := slices.Clone(resFix.Primal[:n])
+	snapCBCBounds(polished, p.varLB, p.varUB, n)
+	if !cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, polished, true) {
+		return nil, extraIters, false
+	}
+	polishedMin := evalLinearSum(0, p.objMin, polished, n)
+	if math.IsNaN(polishedMin) || math.IsInf(polishedMin, 0) {
+		return nil, extraIters, false
+	}
+	if claimedOptimal && hasBestBound && !math.IsNaN(bestBoundMin) && !math.IsInf(bestBoundMin, 0) {
+		gapTol := max(1e-5, max(clampCBCGapTol(opt.AbsGapTol), clampCBCGapTol(opt.RelGapTol)*max(1.0, math.Abs(polishedMin))))
+		if math.Abs(polishedMin-bestBoundMin) > gapTol {
+			return nil, extraIters, false
+		}
+	}
+	return polished, extraIters, true
 }
 
 func verifyCBCMIPOptimality(

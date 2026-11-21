@@ -853,6 +853,74 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	}
 
 	rootNodeMin := b.rootCutMin
+
+	// If tightenUnboundedIntCols or root bound propagation cut off curLPRes.Primal,
+	// re-solve the root LP under the tightened bounds so curLPRes stays consistent
+	// with curLB/curUB (and cannot leave all integer cols fixed with a stale fractional primal).
+	rootBoundsCutLP := false
+	if len(curLPRes.Primal) >= n {
+		for j := range n {
+			if curLPRes.Primal[j] < curLB[j]-primalTol || curLPRes.Primal[j] > curUB[j]+primalTol {
+				rootBoundsCutLP = true
+				break
+			}
+		}
+	}
+	if rootBoundsCutLP {
+		reRes, stop := solveNodeLP(b.lpSolver, curLB, curUB, b.defaultLPIter, b.capLPIter, b.budgetBound, &b.totalLPIters)
+		if stop != StatusNotSolved {
+			if stop == StatusTimeLimit {
+				b.hitTimeLimit = true
+			} else {
+				b.hitIterLimit = true
+			}
+			b.unsolvedMinBound = rootNodeMin
+			return Result{}, false
+		}
+		if reRes.Status == StatusInfeasible {
+			return Result{}, false
+		}
+		if reRes.Status != StatusOptimal {
+			b.unsolvedMinBound = rootNodeMin
+			if b.hitLPLimitStatus == StatusNotSolved {
+				b.hitLPLimitStatus = reRes.Status
+			}
+			return Result{}, false
+		}
+		reMin := lpMinWithConst(p, reRes)
+		if math.IsNaN(reMin) || math.IsInf(reMin, 0) {
+			b.unsolvedMinBound = rootNodeMin
+			b.hitLPLimitStatus = StatusNumericalError
+			return Result{}, false
+		}
+		curLPRes = reRes
+		rootNodeMin = max(rootNodeMin, reMin)
+		if isIntegerFeasible(p, curLPRes.Primal) {
+			if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
+				b.acceptIncumbent(cand, minObjective(p, cand))
+			}
+		}
+		if b.bestPrimal != nil && isGapClosed(rootNodeMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
+			boundMin := min(b.bestObjMin, rootNodeMin)
+			return b.optimalOrNumErr(Result{
+				modelID:      p.modelID,
+				Status:       StatusOptimal,
+				Objective:    p.EvaluateObjective(b.bestPrimal),
+				BestBound:    p.userObjFromShiftedMin(boundMin),
+				RootLPBound:  b.rootLPUser,
+				RootCutBound: b.rootCutUser,
+				Values:       b.bestPrimal,
+				Nodes:        b.nodesExplored,
+				Iterations:   b.totalLPIters,
+				CutsAdded:    b.cutsAdded,
+				SolveTime:    time.Since(b.startTime),
+			}), true
+		}
+		if rootNodeMin >= b.bestObjMin-b.opts.AbsGapTol {
+			b.prunedMinBound = min(b.prunedMinBound, rootNodeMin)
+			return Result{}, false
+		}
+	}
 	var brVar int
 	var brVal float64
 	rootSBRounds := 0
