@@ -754,13 +754,24 @@ func TestOrbitSymmetryBreaking(t *testing.T) {
 				gb.Eq(gb.NewExpr(gb.T(x[0][i], 1), gb.T(x[1][i], 1), gb.T(x[2][i], 1)), 1.0))
 		}
 		p := m.Compile()
+		preRes := gb.Presolve(p, 5)
+		if preRes.Infeasible {
+			t.Fatalf("Presolve reported infeasible on feasible sym_makespan_3")
+		}
+		if preRes.Reduced.NumVars() >= p.NumVars() && preRes.Reduced.NumConstraints() >= p.NumConstraints() {
+			t.Fatalf("Presolve failed to fix orbitope variables on sym_makespan_3: vars %d->%d, rows %d->%d",
+				p.NumVars(), preRes.Reduced.NumVars(), p.NumConstraints(), preRes.Reduced.NumConstraints())
+		}
 		for name, opts := range optionVariants() {
 			assertOptimal(t, "orbitope/"+name, p, mustSolveCompiled(t, p, opts...), 26.0)
 		}
 		resNoPre := mustSolveCompiled(t, p, gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false))
 		resBare := mustSolveCompiled(t, p, gb.WithCuts(false), gb.WithHeuristics(false))
-		if resBare.Nodes >= resNoPre.Nodes {
-			t.Fatalf("orbitope symmetry breaking nodes=%d, want < %d", resBare.Nodes, resNoPre.Nodes)
+		if resBare.Nodes > 60 {
+			t.Fatalf("orbitope symmetry breaking nodes=%d, want <= 60", resBare.Nodes)
+		}
+		if resNoPre.Nodes > 60 {
+			t.Fatalf("orbital branching no-presolve nodes=%d, want <= 60", resNoPre.Nodes)
 		}
 
 		// Symmetric infeasible partitioning model: 3 groups with capacity 1 each cannot hold 4 items.

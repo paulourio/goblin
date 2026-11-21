@@ -1841,6 +1841,7 @@ func tryRootSubMIP(
 		subOpts.MaxCutPasses = 0
 	}
 	subOpts.EnableHeuristics = true
+	subOpts.Workers = 1
 	if lpSolver != nil {
 		subOpts.DisableSIMD = lpSolver.DisableSIMD
 	}

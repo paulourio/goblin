@@ -54,6 +54,8 @@ type Options struct {
 	AbsGapTol float64
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
+	// Workers controls parallel Branch-and-Bound node evaluation (<= 1 runs single-threaded).
+	Workers int
 
 	cutoffMin float64
 
@@ -183,6 +185,11 @@ func WithMaxCutPasses(n int) Option {
 		cfg.MaxCutPasses = n
 		cfg.defaultCutPassesUsed = false
 	}
+}
+
+// WithWorkers sets the number of parallel Branch-and-Bound worker goroutines (<= 1 runs single-threaded).
+func WithWorkers(n int) Option {
+	return func(cfg *Options) { cfg.Workers = n }
 }
 
 // WithMaxIter sets the maximum total simplex pivots (0 = unlimited).
@@ -355,6 +362,8 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 
 func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options, backend Backend, start, deadline time.Time, done <-chan struct{}) Result {
 	workProb := p
+	var lpPre LPPresolveResult
+	usedLPPresolve := false
 	if opt.EnablePresolve && p.isMIP {
 		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
 		if ctx != nil && ctx.Err() != nil {
@@ -379,6 +388,31 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 		if preRes.Reduced != nil && preRes.Reduced.invalidErr == nil {
 			workProb = preRes.Reduced
 		}
+	} else if opt.EnablePresolve && !p.isMIP && p.numConstraints > 0 && p.numVars > 0 {
+		lpPre = presolveLPWithDeadline(p, defaultPresolveMaxPass, deadline, done)
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
+		}
+		if lpPre.TimedOut {
+			return Result{
+				modelID:   p.modelID,
+				Backend:   backend,
+				Status:    StatusTimeLimit,
+				SolveTime: time.Since(start),
+			}
+		}
+		if lpPre.Infeasible {
+			return Result{
+				modelID:   p.modelID,
+				Backend:   backend,
+				Status:    StatusInfeasible,
+				SolveTime: time.Since(start),
+			}
+		}
+		if lpPre.Reduced != nil && lpPre.Reduced != p && lpPre.Reduced.invalidErr == nil {
+			workProb = lpPre.Reduced
+			usedLPPresolve = true
+		}
 	}
 
 	res := solveBranchAndCutWithDone(workProb, opt, start, deadline, done)
@@ -386,8 +420,18 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 		return Result{}
 	}
 	if workProb != p && len(res.Values) == p.numVars {
-		bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
-		if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) {
+		needFallback := false
+		if usedLPPresolve {
+			if res.Status == StatusOptimal && !postsolveLP(p, &lpPre, &res) {
+				needFallback = true
+			}
+		} else {
+			bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
+			if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) {
+				needFallback = true
+			}
+		}
+		if needFallback {
 			fallbackOpt := opt
 			fallbackOpt.EnablePresolve = false
 			if fallbackOpt.MaxIter > 0 {

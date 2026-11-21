@@ -1,6 +1,7 @@
 package goblin
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -782,4 +783,353 @@ func TestCutDensityCapAndStaticCache(t *testing.T) {
 			t.Fatalf("invalid lower bound after cut rollback: bestBound=%g > opt=%g", resLim.BestBound, resFull.Objective)
 		}
 	})
+}
+
+func assertCutsRespectFeasiblePoints(t *testing.T, label string, cuts []cutPlane, points [][]float64) {
+	t.Helper()
+	for ci, cut := range cuts {
+		for pi, x := range points {
+			lhs := 0.0
+			for k, col := range cut.ColIdx {
+				lhs += cut.Val[k] * x[col]
+			}
+			if lhs > cut.RHS+1e-7 {
+				t.Fatalf("%s: cut %d invalidated feasible point %d: lhs=%.10g > rhs=%.10g",
+					label, ci, pi, lhs, cut.RHS)
+			}
+		}
+	}
+}
+
+func TestMultiRowAggregatedCutsAndInTreeGMI(t *testing.T) {
+	t.Parallel()
+
+	t.Run("CapacitatedLotSizingMultiRowMIR", func(t *testing.T) {
+		t.Parallel()
+		// 3-period capacitated lot-sizing: d = (10, 10, 10), sum = 30 > C = 25,
+		// so at least 2 setups are required even though single-row MIR and uncapacitated (l,S)
+		// permit y_0 = 1, y_1 = 0, y_2 = 0.2 (sum y = 1.2) or distributed fractional setups.
+		m := NewModel("cap_lot_agg", Minimize)
+		const T = 3
+		const capBatch = 25.0
+		y := make([]Var, T)
+		pVar := make([]Var, T)
+		inv := make([]Var, T)
+		var obj []Term
+		for idx := range T {
+			y[idx] = m.AddBinaryVar(fmt.Sprintf("y%d", idx))
+			pVar[idx] = m.AddIntVar(fmt.Sprintf("p%d", idx), 0, capBatch)
+			inv[idx] = m.AddContVar(fmt.Sprintf("s%d", idx), 0, 100)
+			obj = append(obj, y[idx].T(100), pVar[idx].T(1), inv[idx].T(0.5))
+		}
+		m.SetObjective(Expr{Terms: obj})
+		for idx := range T {
+			if idx == 0 {
+				m.AddConstraint("bal0", NewExpr(pVar[0].T(1), inv[0].T(-1)).Eq(10))
+			} else {
+				m.AddConstraint(fmt.Sprintf("bal%d", idx), NewExpr(inv[idx-1].T(1), pVar[idx].T(1), inv[idx].T(-1)).Eq(10))
+			}
+			m.AddConstraint(fmt.Sprintf("link%d", idx), NewExpr(pVar[idx].T(1), y[idx].T(-capBatch)).Le(0))
+		}
+		prob := m.Compile()
+
+		lp := NewLPSolver(prob, nil)
+		defer lp.Close()
+		lpRes := lp.Solve()
+		if lpRes.Status != StatusOptimal {
+			t.Fatalf("root LP status=%v, want Optimal", lpRes.Status)
+		}
+
+		var ws cutGenWorkspace
+		aggCuts := separateAggregatedMIRCuts(lp, lpRes.Primal, &ws)
+		if len(aggCuts) == 0 {
+			t.Fatal("expected capacitated lot-sizing multi-row MIR cuts, got none")
+		}
+
+		// Enumerate all feasible setup combinations y in {0,1}^3, setting canonical valid schedules.
+		var feasPts [][]float64
+		for mask := range 1 << T {
+			y0 := float64(mask & 1)
+			y1 := float64((mask >> 1) & 1)
+			y2 := float64((mask >> 2) & 1)
+			if y0 == 0 || y0+y1+y2 < 2 {
+				continue
+			}
+			for p0 := 10; p0 <= 25; p0++ {
+				if p0 > 0 && y0 == 0 {
+					continue
+				}
+				s0 := p0 - 10
+				for p1 := max(0, 10-s0); p1 <= 25*int(y1); p1++ {
+					s1 := s0 + p1 - 10
+					p2 := 10 - s1
+					if p2 < 0 || p2 > 25*int(y2) {
+						continue
+					}
+					pt := make([]float64, prob.numVars)
+					pt[y[0].Index()] = y0
+					pt[y[1].Index()] = y1
+					pt[y[2].Index()] = y2
+					pt[pVar[0].Index()] = float64(p0)
+					pt[pVar[1].Index()] = float64(p1)
+					pt[pVar[2].Index()] = float64(p2)
+					pt[inv[0].Index()] = float64(s0)
+					pt[inv[1].Index()] = float64(s1)
+					feasPts = append(feasPts, pt)
+				}
+			}
+		}
+		if len(feasPts) == 0 {
+			t.Fatal("failed to construct feasible test points")
+		}
+		assertCutsRespectFeasiblePoints(t, "cap_lot_agg", aggCuts, feasPts)
+
+		// Verify adding aggregated cuts raises LP bound.
+		addDynamicCutPlanes(lp, aggCuts)
+		cutRes := lp.Solve()
+		if cutRes.Status != StatusOptimal || cutRes.Objective <= lpRes.Objective+1.0 {
+			t.Fatalf("expected aggregated MIR cuts to raise LP bound from %g, got status=%v obj=%g",
+				lpRes.Objective, cutRes.Status, cutRes.Objective)
+		}
+	})
+
+	t.Run("PairwiseSurrogateAndVUBCapacitySum", func(t *testing.T) {
+		t.Parallel()
+		// Model combining tight VUB capacity constraints + partitioning rows (bin packing),
+		// AND two coupled inequality knapsack rows needing surrogate aggregation.
+		m := NewModel("vub_pair_agg", Minimize)
+		b0 := m.AddBinaryVar("b0")
+		b1 := m.AddBinaryVar("b1")
+		b2 := m.AddBinaryVar("b2")
+		x := make([][]Var, 3)
+		var obj []Term
+		obj = append(obj, b0.T(10), b1.T(10), b2.T(10))
+		for b := range 3 {
+			x[b] = make([]Var, 3)
+			for i := range 3 {
+				x[b][i] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", b, i))
+				obj = append(obj, x[b][i].T(0.01*float64(b+1)))
+			}
+		}
+		// Tight-coupling auxiliary binaries with pairwise knapsack inequalities.
+		z0 := m.AddBinaryVar("z0")
+		z1 := m.AddBinaryVar("z1")
+		z2 := m.AddBinaryVar("z2")
+		obj = append(obj, z0.T(1), z1.T(1), z2.T(1))
+		m.SetObjective(Expr{Terms: obj})
+
+		weights := []float64{6, 6, 6} // total = 18 > 14 = cap, needs >= 2 bins; LP gives 1.8 bins
+		for b := range 3 {
+			m.AddConstraint(fmt.Sprintf("cap_%d", b), NewExpr(
+				x[b][0].T(weights[0]), x[b][1].T(weights[1]), x[b][2].T(weights[2]), b0.T(0),
+			).Le(0))
+			_ = b
+		}
+		// Rebuild cleanly without dummy b0 term on wrong bin:
+		mClean := NewModel("vub_pair_clean", Minimize)
+		bc := make([]Var, 3)
+		xc := make([][]Var, 3)
+		var oc []Term
+		for b := range 3 {
+			bc[b] = mClean.AddBinaryVar(fmt.Sprintf("b%d", b))
+			oc = append(oc, bc[b].T(10))
+			xc[b] = make([]Var, 3)
+			for i := range 3 {
+				xc[b][i] = mClean.AddBinaryVar(fmt.Sprintf("x_%d_%d", b, i))
+				oc = append(oc, xc[b][i].T(0.01*float64(b+1)))
+			}
+		}
+		zc0 := mClean.AddBinaryVar("z0")
+		zc1 := mClean.AddBinaryVar("z1")
+		zc2 := mClean.AddBinaryVar("z2")
+		zc3 := mClean.AddBinaryVar("z3")
+		oc = append(oc, zc0.T(-3), zc1.T(-3), zc2.T(-2), zc3.T(-2))
+		mClean.SetObjective(Expr{Terms: oc})
+
+		for b := range 3 {
+			mClean.AddConstraint(fmt.Sprintf("bincap_%d", b), NewExpr(
+				xc[b][0].T(6), xc[b][1].T(6), xc[b][2].T(6), bc[b].T(-14),
+			).Le(0))
+		}
+		for i := range 3 {
+			mClean.AddConstraint(fmt.Sprintf("item_%d", i), NewExpr(
+				xc[0][i].T(1), xc[1][i].T(1), xc[2][i].T(1),
+			).Eq(1))
+		}
+		// Surrogate knapsack pair:
+		// 2*z0 + 2*z1 + z2 <= 3 and 2*z0 + z2 + 2*z3 <= 3 (sum: 4*z0 + 2*z1 + 2*z2 + 2*z3 <= 6)
+		mClean.AddConstraint("kn1", NewExpr(zc0.T(2), zc1.T(2), zc2.T(1)).Le(3))
+		mClean.AddConstraint("kn2", NewExpr(zc0.T(2), zc2.T(1), zc3.T(2)).Le(3))
+		prob := mClean.Compile()
+
+		lp := NewLPSolver(prob, nil)
+		defer lp.Close()
+		lpRes := lp.Solve()
+		if lpRes.Status != StatusOptimal {
+			t.Fatalf("root LP status=%v", lpRes.Status)
+		}
+
+		var ws cutGenWorkspace
+		aggCuts := separateAggregatedMIRCuts(lp, lpRes.Primal, &ws)
+		if len(aggCuts) == 0 {
+			t.Fatal("expected aggregated VUB-capacity and pairwise surrogate cuts")
+		}
+
+		// Known optimal integer feasible point: bin 0 holds items 0,1; bin 1 holds item 2; z = (0,1,1,1) -> sum z in kn1/kn2
+		pt := make([]float64, prob.numVars)
+		pt[bc[0].Index()] = 1
+		pt[bc[1].Index()] = 1
+		pt[xc[0][0].Index()] = 1
+		pt[xc[0][1].Index()] = 1
+		pt[xc[1][2].Index()] = 1
+		pt[zc1.Index()] = 1
+		pt[zc2.Index()] = 1
+		pt[zc3.Index()] = 1
+		assertCutsRespectFeasiblePoints(t, "vub_pair_clean", aggCuts, [][]float64{pt})
+	})
+
+	t.Run("InTreeGlobalOnlyGMIRejectsInteriorFixedInt", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("intree_global_gmi", Minimize)
+		y := m.AddBinaryVar("y")      // globally [0, 1]
+		k := m.AddIntVar("k", 0, 5)   // can be branched to interior value [2, 2]
+		z := m.AddIntVar("z", 0, 5)   // fractional basic integer
+		w := m.AddContVar("w", 0, 10) // continuous
+		m.SetObjective(NewExpr(z.T(-5), w.T(-1), k.T(0), y.T(1)))
+		m.AddConstraint("c0", NewExpr(z.T(2), k.T(1), w.T(1), y.T(1)).Eq(5))
+		m.AddConstraint("c1", NewExpr(w.T(1), z.T(-1)).Ge(0))
+		prob := m.Compile()
+
+		// Enumerate all globally feasible integer solutions (y in {0,1}, k in 0..5, z in 0..5, w = 5 - 2z - k - y >= z).
+		var globalFeas [][]float64
+		for yVal := range 2 {
+			for kVal := range 6 {
+				for zVal := range 6 {
+					wVal := 5 - 2*zVal - kVal - yVal
+					if wVal >= zVal && wVal <= 10 {
+						globalFeas = append(globalFeas, []float64{float64(yVal), float64(kVal), float64(zVal), float64(wVal)})
+					}
+				}
+			}
+		}
+
+		// Case 1: Branch binary y = 0 (global lower bound) and k = 2 (strictly interior to [0,5]).
+		// Global-only GMI must NOT emit a cut that relies on k == 2 and violates global solutions with k != 2.
+		lp := NewLPSolver(prob, nil)
+		defer lp.Close()
+		lb1 := []float64{0, 2, 0, 0}
+		ub1 := []float64{0, 2, 5, 10}
+		lp.SetStructuralBounds(lb1, ub1)
+		res1 := lp.Solve()
+		if res1.Status != StatusOptimal {
+			t.Fatalf("interior node LP status=%v", res1.Status)
+		}
+		var ws cutGenWorkspace
+		cuts1 := separateGMICutsEx(lp, res1.Primal, &ws, true)
+		assertCutsRespectFeasiblePoints(t, "interior_fixed_int_gmi", cuts1, globalFeas)
+
+		// Case 2: Branch y = 1 (at global upper bound) while k stays at global lower bound [0, 0] or free [0, 5].
+		// Here k == 0 is at global lower bound and y == 1 is at global upper bound, so global-only GMI
+		// safely emits a cut that cuts off node LP while remaining globally valid for all solutions.
+		lb2 := []float64{1, 0, 0, 0}
+		ub2 := []float64{1, 0, 5, 10}
+		lp.SetStructuralBounds(lb2, ub2)
+		res2 := lp.Solve()
+		if res2.Status != StatusOptimal {
+			t.Fatalf("global-bound node LP status=%v", res2.Status)
+		}
+		cuts2 := separateGMICutsEx(lp, res2.Primal, &ws, true)
+		if len(cuts2) == 0 {
+			t.Fatal("expected globally valid in-tree GMI cut when fixed nonbasics sit at global bounds")
+		}
+		assertCutsRespectFeasiblePoints(t, "global_bound_gmi", cuts2, globalFeas)
+	})
+}
+
+func TestStrongBranchingBoundCutoffDomainReduction(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Direct unit test of selectBranchVarCore bound-cutoff domain reduction with
+	// non-zero objConstant and non-zero RelGapTol:
+	//   Minimize x0 + 5*x1 + 0*x2 + 0.5*x3 + 100 (objConstant=100)
+	//   s.t. 2*x0 + x1 >= 1, 2*x2 + x3 >= 1, x0..x3 in {0, 1}
+	// Root LP optimal: x0 = 0.5, x1 = 0, x2 = 0.5, x3 = 0 -> user obj = 100.5.
+	// With incumbent bestObjMin = 105.0 and pruneRelTol = 0.02:
+	//   - cands = [x0, x2]; x0 sorts first because |obj[x0]|=1 > |obj[x2]|=0.
+	//   - branching down (x0 = 0): forces x1 >= 1 -> downBound(unshifted) = 5.0 -> shifted = 105.0 >= 105.0 (cut off!)
+	//   - branching up   (x0 = 1): x1 = 0 -> upBound(unshifted) = 1.0 -> shifted = 101.0 (not cut off!)
+	// selectBranchVarCore should fix x0 = 1 and report prunedBound == 105.0 (the shifted down bound).
+	m := NewModel("sb_bound_cutoff_unit", Minimize)
+	x0 := m.AddBinaryVar("x0")
+	x1 := m.AddBinaryVar("x1")
+	x2 := m.AddBinaryVar("x2")
+	x3 := m.AddBinaryVar("x3")
+	m.SetObjective(NewExpr(x0.T(1), x1.T(5), x2.T(0), x3.T(0.5)).AddConstant(100))
+	m.AddConstraint("c1", NewExpr(x0.T(2), x1.T(1)).Ge(1))
+	m.AddConstraint("c2", NewExpr(x2.T(2), x3.T(1)).Ge(1))
+	p := m.Compile()
+
+	lp := NewLPSolver(p, nil)
+	defer lp.Close()
+	lpRes := lp.Solve()
+	if lpRes.Status != StatusOptimal {
+		t.Fatalf("root LP status=%v, want Optimal", lpRes.Status)
+	}
+	curLB := slices.Clone(p.varLB)
+	curUB := slices.Clone(p.varUB)
+	pCosts := make([]pseudoCost, p.numVars)
+	totalIters := 0
+	var cands []branchCand
+	out := selectBranchVarCore(
+		p, lp, lpRes, curLB, curUB, pCosts, 0,
+		&totalIters, func() int { return 1000 }, &cands,
+		true,
+		sbConfig{
+			hasIncumbent: true,
+			bestObjMin:   105.0,
+			pruneRelTol:  0.02,
+			absGapTol:    1e-7,
+			objConstMin:  p.objConstMin(),
+		},
+	)
+	if out.pruned {
+		t.Fatalf("expected only down branch cut off and x0 fixed to 1, got pruned=true")
+	}
+	if len(out.fixedDeltas) != 1 || out.fixedDeltas[0].col != 0 || out.fixedDeltas[0].lb != 1 {
+		t.Fatalf("expected fixedDeltas=[{col:0 lb:1}], got %+v", out.fixedDeltas)
+	}
+	if math.Abs(out.prunedBound-105.0) > 1e-6 {
+		t.Fatalf("expected shifted prunedBound=105.0, got %.10g", out.prunedBound)
+	}
+	if totalIters == 0 {
+		t.Fatalf("expected strong-branching probe iterations to be recorded in totalIters")
+	}
+
+	// 2. End-to-end check with non-zero RelGapTol and objConstant: ensure BestBound
+	// remains a valid lower bound <= true optimum (never overstated by pruned subtrees).
+	m2 := NewModel("sb_cutoff_gap_e2e", Minimize)
+	vars := make([]Var, 6)
+	objT := make([]Term, 6)
+	capT := make([]Term, 6)
+	for i := range vars {
+		vars[i] = m2.AddBinaryVar(fmt.Sprintf("v_%d", i))
+		objT[i] = vars[i].T(float64(i + 2))
+		capT[i] = vars[i].T(2)
+	}
+	m2.SetObjective(NewExpr(objT...).AddConstant(50))
+	m2.AddConstraint("cover", NewExpr(capT...).Ge(5)) // must pick >= 3 items -> opt = 50 + 2 + 3 + 4 = 59
+	resExact, err := m2.Solve(ctx)
+	if err != nil || resExact.Status != StatusOptimal || math.Abs(resExact.Objective-59.0) > 1e-6 {
+		t.Fatalf("exact solve got status=%v obj=%.6g err=%v, want 59", resExact.Status, resExact.Objective, err)
+	}
+	resGap, err := m2.Solve(ctx, WithRelGapTol(0.05), WithCuts(false))
+	if err != nil || resGap.Status != StatusOptimal {
+		t.Fatalf("gap solve got status=%v err=%v", resGap.Status, err)
+	}
+	if resGap.BestBound > 59.0+1e-6 {
+		t.Fatalf("BestBound=%.10g overstated true optimum 59.0 under RelGapTol", resGap.BestBound)
+	}
+	if resGap.BestBound > resGap.Objective+1e-6 {
+		t.Fatalf("BestBound=%.10g > Objective=%.10g", resGap.BestBound, resGap.Objective)
+	}
 }

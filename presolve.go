@@ -358,6 +358,11 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 // rows and variable bounds, bypassing symbolic Model construction, map lookups,
 // validation, and redundant sorting.
 func buildCompiledDirect(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64) (red *CompiledProblem, droppedEmpty int, infeas bool) {
+	red, _, droppedEmpty, infeas = buildCompiledDirectWithRowMap(orig, rows, lb, ub, false)
+	return red, droppedEmpty, infeas
+}
+
+func buildCompiledDirectWithRowMap(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64, trackOrigRows bool) (red *CompiledProblem, origRowIdx []int, droppedEmpty int, infeas bool) {
 	n := orig.numVars
 	mc := 0
 	totalNNZ := 0
@@ -381,15 +386,15 @@ func buildCompiledDirect(orig *CompiledProblem, rows []presolveWorkRow, lb, ub [
 			switch r.sense {
 			case LessEqual:
 				if 0 > r.rhs+presolveFeasTol {
-					return nil, 0, true
+					return nil, nil, 0, true
 				}
 			case GreaterEqual:
 				if 0 < r.rhs-presolveFeasTol {
-					return nil, 0, true
+					return nil, nil, 0, true
 				}
 			case Equal:
 				if math.Abs(r.rhs) > presolveFeasTol {
-					return nil, 0, true
+					return nil, nil, 0, true
 				}
 			}
 			r.active = false
@@ -441,12 +446,18 @@ func buildCompiledDirect(orig *CompiledProblem, rows []presolveWorkRow, lb, ub [
 	red.rowPtr = make([]int, mc+1)
 	red.colIdx = make([]int, 0, totalNNZ)
 	red.rowVal = make([]float64, 0, totalNNZ)
+	if trackOrigRows {
+		origRowIdx = make([]int, mc)
+	}
 
 	rowOut := 0
 	for i := range rows {
 		r := &rows[i]
 		if !r.active {
 			continue
+		}
+		if trackOrigRows {
+			origRowIdx[rowOut] = i
 		}
 		red.rowNames[rowOut] = r.name
 		red.rowSense[rowOut] = r.sense
@@ -537,7 +548,7 @@ func buildCompiledDirect(orig *CompiledProblem, rows []presolveWorkRow, lb, ub [
 		}
 	}
 
-	return red, droppedEmpty, false
+	return red, origRowIdx, droppedEmpty, false
 }
 
 // canonicalizeCSRRow sorts the newly appended CSR row slice [rowStart:] by ascending
@@ -1555,91 +1566,15 @@ func applyOrbitSymmetryBreaking(
 		colRow = orig.rowIdx
 		colVal = orig.colVal
 	} else {
-		colPtr = make([]int, n+1)
-		for i := range m {
-			r := &rows[i]
-			if !r.active {
-				continue
-			}
-			for _, col := range r.cols {
-				colPtr[col+1]++
-			}
-		}
-		for j := range n {
-			colPtr[j+1] += colPtr[j]
-		}
-		nnz := colPtr[n]
-		colRow = make([]int, nnz)
-		colVal = make([]float64, nnz)
-		for i := range m {
-			r := &rows[i]
-			if !r.active {
-				continue
-			}
-			for k, col := range r.cols {
-				pos := colPtr[col]
-				colRow[pos] = i
-				colVal[pos] = r.vals[k]
-				colPtr[col] = pos + 1
-			}
-		}
-		copy(colPtr[1:], colPtr[:n])
-		colPtr[0] = 0
+		colPtr, colRow, colVal = buildPresolveCSC(n, rows)
 	}
 
-	filteredSeeds := seedRows[:0]
-	for _, sr := range seedRows {
-		cols := rows[sr].cols
-		deg0 := colPtr[cols[0]+1] - colPtr[cols[0]]
-		if deg0 < 2 {
-			continue
-		}
-		sameDeg := true
-		for _, c := range cols[1:] {
-			if colPtr[c+1]-colPtr[c] != deg0 {
-				sameDeg = false
-				break
-			}
-		}
-		if sameDeg {
-			filteredSeeds = append(filteredSeeds, sr)
-		}
-	}
-	seedRows = filteredSeeds
+	seedRows = filterAndSortOrbitSeeds(rows, colPtr, seedRows)
 	if len(seedRows) == 0 {
 		return 0, nil, false
 	}
-	slices.SortStableFunc(seedRows, func(a, b int) int {
-		sa := rows[a].sense == Equal
-		sb := rows[b].sense == Equal
-		if sa != sb {
-			if sa {
-				return -1
-			}
-			return 1
-		}
-		return cmp.Compare(len(rows[b].cols), len(rows[a].cols))
-	})
 
-	rowHash := make([]uint64, m)
-	for i := range m {
-		r := &rows[i]
-		if !r.active {
-			continue
-		}
-		h := presolveSplitmix64(uint64(r.sense) ^ (canonicalFloatBits(r.rhs) << 3) ^ uint64(len(r.cols))*0x517cc1b727220a95)
-		var sumH, xorH uint64
-		for k, col := range r.cols {
-			th := presolveSplitmix64(canonicalFloatBits(r.vals[k]))
-			th ^= presolveSplitmix64(uint64(orig.varCat[col]) + 0x100)
-			th ^= presolveSplitmix64(canonicalFloatBits(lb[col]) + 0x200)
-			th ^= presolveSplitmix64(canonicalFloatBits(ub[col]) + 0x300)
-			th ^= presolveSplitmix64(uint64(colPtr[col+1]-colPtr[col]) + 0x400)
-			sumH += th
-			xorH ^= bits.RotateLeft64(th, 17)
-		}
-		rowHash[i] = h ^ sumH ^ xorH
-	}
+	rowHash := computeOrbitRowHashes(orig, rows, lb, ub, colPtr)
 
 	sc := newOrbitTrialScratch(n, m)
 	maxTrials := min(len(seedRows), maxOrbitSeedTrials)
@@ -1665,6 +1600,528 @@ func applyOrbitSymmetryBreaking(
 		}
 	}
 	return 0, nil, false
+}
+
+func buildPresolveCSC(n int, rows []presolveWorkRow) (colPtr, colRow []int, colVal []float64) {
+	colPtr = make([]int, n+1)
+	for i := range rows {
+		r := &rows[i]
+		if !r.active {
+			continue
+		}
+		for _, col := range r.cols {
+			colPtr[col+1]++
+		}
+	}
+	for j := range n {
+		colPtr[j+1] += colPtr[j]
+	}
+	nnz := colPtr[n]
+	colRow = make([]int, nnz)
+	colVal = make([]float64, nnz)
+	for i := range rows {
+		r := &rows[i]
+		if !r.active {
+			continue
+		}
+		for k, col := range r.cols {
+			pos := colPtr[col]
+			colRow[pos] = i
+			colVal[pos] = r.vals[k]
+			colPtr[col] = pos + 1
+		}
+	}
+	copy(colPtr[1:], colPtr[:n])
+	colPtr[0] = 0
+	return colPtr, colRow, colVal
+}
+
+func filterAndSortOrbitSeeds(rows []presolveWorkRow, colPtr, seedRows []int) []int {
+	filtered := seedRows[:0]
+	for _, sr := range seedRows {
+		cols := rows[sr].cols
+		if len(cols) < 2 {
+			continue
+		}
+		deg0 := colPtr[cols[0]+1] - colPtr[cols[0]]
+		if deg0 < 2 {
+			continue
+		}
+		sameDeg := true
+		for _, c := range cols[1:] {
+			if colPtr[c+1]-colPtr[c] != deg0 {
+				sameDeg = false
+				break
+			}
+		}
+		if sameDeg {
+			filtered = append(filtered, sr)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	slices.SortStableFunc(filtered, func(a, b int) int {
+		sa := rows[a].sense == Equal
+		sb := rows[b].sense == Equal
+		if sa != sb {
+			if sa {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(len(rows[b].cols), len(rows[a].cols))
+	})
+	return filtered
+}
+
+func computeOrbitRowHashes(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64, colPtr []int) []uint64 {
+	rowHash := make([]uint64, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		if !r.active {
+			continue
+		}
+		h := presolveSplitmix64(uint64(r.sense) ^ (canonicalFloatBits(r.rhs) << 3) ^ uint64(len(r.cols))*0x517cc1b727220a95)
+		var sumH, xorH uint64
+		for k, col := range r.cols {
+			th := presolveSplitmix64(canonicalFloatBits(r.vals[k]))
+			th ^= presolveSplitmix64(uint64(orig.varCat[col]) + 0x100)
+			th ^= presolveSplitmix64(canonicalFloatBits(lb[col]) + 0x200)
+			th ^= presolveSplitmix64(canonicalFloatBits(ub[col]) + 0x300)
+			th ^= presolveSplitmix64(uint64(colPtr[col+1]-colPtr[col]) + 0x400)
+			sumH += th
+			xorH ^= bits.RotateLeft64(th, 17)
+		}
+		rowHash[i] = h ^ sumH ^ xorH
+	}
+	return rowHash
+}
+
+type nodeSymmetry struct {
+	colTwinClass []int
+	twinClasses  [][]int
+
+	symG        int
+	symOrbits   []int
+	symColOrbit []int
+	symColGroup []int
+
+	dynScratch *orbitTrialScratch
+}
+
+func initNodeSymmetry(p *CompiledProblem) nodeSymmetry {
+	if p == nil || len(p.intCols) < 2 {
+		return nodeSymmetry{}
+	}
+	var ns nodeSymmetry
+	ns.initBinaryColumnTwins(p)
+	ns.initStaticSymGroup(p)
+	return ns
+}
+
+// cloneForWorker returns a worker-local copy of s whose immutable symmetry
+// tables are shared while lazy dynamic-orbit scratch is cleared.
+func (s nodeSymmetry) cloneForWorker() nodeSymmetry {
+	s.dynScratch = nil
+	return s
+}
+
+func (s *nodeSymmetry) initBinaryColumnTwins(p *CompiledProblem) {
+	n := p.numVars
+	buckets := make(map[uint64][]int, len(p.binaryMask))
+	for j := range n {
+		if p.varCat[j] != Binary || p.varLB[j] == p.varUB[j] {
+			continue
+		}
+		cs, ce := p.colPtr[j], p.colPtr[j+1]
+		h := presolveSplitmix64(canonicalFloatBits(p.objMin[j]) ^ uint64(ce-cs)*0x517cc1b727220a95)
+		for k := cs; k < ce; k++ {
+			h = presolveSplitmix64(h ^ uint64(p.rowIdx[k]))
+			h = presolveSplitmix64(h ^ canonicalFloatBits(p.colVal[k]))
+		}
+		buckets[h] = append(buckets[h], j)
+	}
+	sameCol := func(a, b int) bool {
+		if p.objMin[a] != p.objMin[b] {
+			return false
+		}
+		as, ae := p.colPtr[a], p.colPtr[a+1]
+		bs, be := p.colPtr[b], p.colPtr[b+1]
+		if ae-as != be-bs {
+			return false
+		}
+		for k := range ae - as {
+			if p.rowIdx[as+k] != p.rowIdx[bs+k] || p.colVal[as+k] != p.colVal[bs+k] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, group := range buckets {
+		if len(group) < 2 {
+			continue
+		}
+		assigned := make([]bool, len(group))
+		for idx, rep := range group {
+			if assigned[idx] {
+				continue
+			}
+			var cls []int
+			cls = append(cls, rep)
+			assigned[idx] = true
+			for other := idx + 1; other < len(group); other++ {
+				if !assigned[other] && sameCol(rep, group[other]) {
+					assigned[other] = true
+					cls = append(cls, group[other])
+				}
+			}
+			if len(cls) < 2 {
+				continue
+			}
+			if s.colTwinClass == nil {
+				s.colTwinClass = make([]int, n)
+				for j := range n {
+					s.colTwinClass[j] = -1
+				}
+			}
+			clsID := len(s.twinClasses)
+			slices.Sort(cls)
+			for _, col := range cls {
+				s.colTwinClass[col] = clsID
+			}
+			s.twinClasses = append(s.twinClasses, cls)
+		}
+	}
+}
+
+func (s *nodeSymmetry) initStaticSymGroup(p *CompiledProblem) {
+	n := p.numVars
+	m := p.numConstraints
+	if n < 4 || m < 2 || len(p.colPtr) != n+1 {
+		return
+	}
+	rows := make([]presolveWorkRow, m)
+	var seedRows []int
+	for i := range m {
+		rs, re := p.rowPtr[i], p.rowPtr[i+1]
+		r := presolveWorkRow{
+			cols:   p.colIdx[rs:re:re],
+			vals:   p.rowVal[rs:re:re],
+			rhs:    p.rowRHS[i],
+			sense:  p.rowSense[i],
+			active: true,
+			shared: true,
+		}
+		rows[i] = r
+		g := len(r.cols)
+		if g < 2 || g > maxOrbitGroupSize || g*2 > n || (r.sense != Equal && r.sense != LessEqual) || r.rhs != 1.0 {
+			continue
+		}
+		unitBin := true
+		for k, col := range r.cols {
+			if r.vals[k] != 1.0 || p.varCat[col] != Binary || math.IsInf(p.varLB[col], -1) || math.IsInf(p.varUB[col], 1) {
+				unitBin = false
+				break
+			}
+		}
+		if unitBin {
+			seedRows = append(seedRows, i)
+		}
+	}
+	seedRows = filterAndSortOrbitSeeds(rows, p.colPtr, seedRows)
+	if len(seedRows) == 0 {
+		return
+	}
+
+	dummyZero := make([]float64, n)
+	rowHash := computeOrbitRowHashes(p, rows, dummyZero, dummyZero, p.colPtr)
+	sc := newOrbitTrialScratch(n, m)
+	maxTrials := min(len(seedRows), 16)
+	for sIdx := range maxTrials {
+		if sIdx > 0 {
+			sc.reset()
+		}
+		gCount, ok, _ := proposeAndVerifyOrbits(
+			p, rows, dummyZero, dummyZero, p.colPtr, p.rowIdx, p.colVal, rowHash, seedRows[sIdx], &sc, time.Time{}, nil,
+		)
+		if !ok || len(sc.orbits) == 0 || !hasStaticSymPair(p, sc.orbits, gCount) {
+			continue
+		}
+		s.symG = gCount
+		s.symOrbits = slices.Clone(sc.orbits)
+		s.symColOrbit = slices.Clone(sc.colOrbit)
+		s.symColGroup = slices.Clone(sc.colGroup)
+		return
+	}
+}
+
+func hasStaticSymPair(p *CompiledProblem, orbits []int, gCount int) bool {
+	if gCount < 2 || len(orbits) == 0 {
+		return false
+	}
+	numOrbs := len(orbits) / gCount
+	for g0 := range gCount - 1 {
+		for g1 := g0 + 1; g1 < gCount; g1++ {
+			ok := true
+			for o := range numOrbs {
+				a := orbits[o*gCount+g0]
+				b := orbits[o*gCount+g1]
+				if p.objMin[a] != p.objMin[b] || p.varLB[a] != p.varLB[b] || p.varUB[a] != p.varUB[b] {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// activeOrbit returns a verified slice of symmetric Binary [0, 1] variables (including bVar)
+// interchangeable with bVar under the current node bounds [curLB, curUB] and objective.
+func (s *nodeSymmetry) activeOrbit(
+	p *CompiledProblem,
+	curLB, curUB []float64,
+	bVar, depth int,
+	deadline time.Time,
+	done <-chan struct{},
+	out []int,
+) []int {
+	out = out[:0]
+	if bVar < 0 || bVar >= p.numVars || p.varCat[bVar] != Binary || curLB[bVar] != 0 || curUB[bVar] != 1 {
+		return out
+	}
+
+	if bVar < len(s.colTwinClass) {
+		if tc := s.colTwinClass[bVar]; tc >= 0 {
+			for _, c := range s.twinClasses[tc] {
+				if curLB[c] == 0 && curUB[c] == 1 {
+					out = append(out, c)
+				}
+			}
+			if len(out) >= 2 {
+				return out
+			}
+			out = out[:0]
+		}
+	}
+
+	if s.symG >= 2 && bVar < len(s.symColOrbit) {
+		if orbID := s.symColOrbit[bVar]; orbID >= 0 {
+			g0 := s.symColGroup[bVar]
+			numOrbs := len(s.symOrbits) / s.symG
+			for g := range s.symG {
+				cg := s.symOrbits[orbID*s.symG+g]
+				if curLB[cg] != 0 || curUB[cg] != 1 {
+					continue
+				}
+				if g != g0 {
+					okSym := true
+					for o := range numOrbs {
+						a := s.symOrbits[o*s.symG+g0]
+						bCol := s.symOrbits[o*s.symG+g]
+						if p.objMin[a] != p.objMin[bCol] || curLB[a] != curLB[bCol] || curUB[a] != curUB[bCol] {
+							okSym = false
+							break
+						}
+					}
+					if !okSym {
+						continue
+					}
+				}
+				out = append(out, cg)
+			}
+			if len(out) >= 2 {
+				return out
+			}
+			out = out[:0]
+		}
+	}
+
+	if depth >= 1 && depth <= 6 && p.numVars <= 512 && p.numConstraints <= 512 {
+		return detectDynamicNodeOrbit(p, curLB, curUB, bVar, deadline, done, &s.dynScratch, out)
+	}
+	return out
+}
+
+func detectDynamicNodeOrbit(
+	p *CompiledProblem,
+	curLB, curUB []float64,
+	bVar int,
+	deadline time.Time,
+	done <-chan struct{},
+	scratchPtr **orbitTrialScratch,
+	out []int,
+) []int {
+	if stopRequested(deadline, done) {
+		return out
+	}
+	n := p.numVars
+	m := p.numConstraints
+
+	hasCandidateSeed := false
+	for ck := p.colPtr[bVar]; ck < p.colPtr[bVar+1]; ck++ {
+		r := p.rowIdx[ck]
+		if p.rowSense[r] != Equal && p.rowSense[r] != LessEqual {
+			continue
+		}
+		var rhsAcc dot2Acc
+		rhsAcc.addVal(p.rowRHS[r])
+		freeCnt := 0
+		validSeed := true
+		for k := p.rowPtr[r]; k < p.rowPtr[r+1]; k++ {
+			col := p.colIdx[k]
+			val := p.rowVal[k]
+			if curLB[col] == curUB[col] {
+				rhsAcc.addProd(-val, curLB[col])
+				continue
+			}
+			if val != 1.0 || p.varCat[col] != Binary || curLB[col] != 0 || curUB[col] != 1 {
+				validSeed = false
+				break
+			}
+			freeCnt++
+			if freeCnt > maxOrbitGroupSize {
+				validSeed = false
+				break
+			}
+		}
+		if validSeed && freeCnt >= 2 {
+			effRHS, eb, ok := rhsAcc.result()
+			if ok && eb == 0 && effRHS == 1.0 {
+				hasCandidateSeed = true
+				break
+			}
+		}
+	}
+	if !hasCandidateSeed {
+		return out
+	}
+
+	isFree := make([]bool, n)
+	for j := range n {
+		if curLB[j] < curUB[j] {
+			isFree[j] = true
+		}
+	}
+
+	resRows := make([]presolveWorkRow, 0, m)
+	var seedRows []int
+	for i := range m {
+		rs, re := p.rowPtr[i], p.rowPtr[i+1]
+		freeCnt := 0
+		for k := rs; k < re; k++ {
+			if isFree[p.colIdx[k]] {
+				freeCnt++
+			}
+		}
+		if freeCnt == 0 {
+			continue
+		}
+		remRHS, ok := evalFixedRowResidual(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
+		if !ok {
+			return out
+		}
+		cols := make([]int, 0, freeCnt)
+		vals := make([]float64, 0, freeCnt)
+		touchesBVar := false
+		for k := rs; k < re; k++ {
+			col := p.colIdx[k]
+			if isFree[col] {
+				cols = append(cols, col)
+				vals = append(vals, p.rowVal[k])
+				if col == bVar {
+					touchesBVar = true
+				}
+			}
+		}
+		rowIdxOut := len(resRows)
+		resRows = append(resRows, presolveWorkRow{
+			cols:   cols,
+			vals:   vals,
+			rhs:    remRHS,
+			sense:  p.rowSense[i],
+			active: true,
+		})
+		if touchesBVar && freeCnt >= 2 && freeCnt <= maxOrbitGroupSize && (p.rowSense[i] == Equal || p.rowSense[i] == LessEqual) && remRHS == 1.0 {
+			unitBin := true
+			for k, col := range cols {
+				if vals[k] != 1.0 || p.varCat[col] != Binary || curLB[col] != 0 || curUB[col] != 1 {
+					unitBin = false
+					break
+				}
+			}
+			if unitBin {
+				seedRows = append(seedRows, rowIdxOut)
+			}
+		}
+	}
+	if len(seedRows) == 0 || len(resRows) < 2 {
+		return out
+	}
+
+	colPtr, colRow, colVal := buildPresolveCSC(n, resRows)
+	seedRows = filterAndSortOrbitSeeds(resRows, colPtr, seedRows)
+	if len(seedRows) == 0 {
+		return out
+	}
+	rowHash := computeOrbitRowHashes(p, resRows, curLB, curUB, colPtr)
+
+	sc := *scratchPtr
+	if sc == nil || len(sc.colOrbit) < n || len(sc.rowState) < len(resRows) {
+		tmp := newOrbitTrialScratch(n, len(resRows))
+		sc = &tmp
+		*scratchPtr = sc
+	} else {
+		sc.reset()
+	}
+
+	maxTrials := min(len(seedRows), 4)
+	for sIdx := range maxTrials {
+		if stopRequested(deadline, done) {
+			return out
+		}
+		if sIdx > 0 {
+			sc.reset()
+		}
+		gCount, ok, to := proposeAndVerifyOrbits(
+			p, resRows, curLB, curUB, colPtr, colRow, colVal, rowHash, seedRows[sIdx], sc, deadline, done,
+		)
+		if to {
+			return out
+		}
+		if !ok || len(sc.orbits) == 0 || sc.colOrbit[bVar] < 0 {
+			continue
+		}
+		orbID := sc.colOrbit[bVar]
+		g0 := sc.colGroup[bVar]
+		numOrbs := len(sc.orbits) / gCount
+		out = out[:0]
+		for g := range gCount {
+			cg := sc.orbits[orbID*gCount+g]
+			if g != g0 {
+				sameObj := true
+				for o := range numOrbs {
+					if p.objMin[sc.orbits[o*gCount+g0]] != p.objMin[sc.orbits[o*gCount+g]] {
+						sameObj = false
+						break
+					}
+				}
+				if !sameObj {
+					continue
+				}
+			}
+			out = append(out, cg)
+		}
+		if len(out) >= 2 {
+			return out
+		}
+		out = out[:0]
+	}
+	return out
 }
 
 // proposeAndVerifyOrbits expands a seed partitioning or packing row into G-way variable orbits
@@ -2423,4 +2880,546 @@ func divCeilInt64(a, d int64) int64 {
 		q++
 	}
 	return q
+}
+
+type lpSingletonAction struct {
+	origRow int
+	col     int
+	coeff   float64
+	sense   ConstraintSense
+	isUpper bool
+}
+
+// LPPresolveResult holds a dual-exact reduced LP problem and the postsolve mapping
+// needed to recover primal, dual, and reduced-cost KKT vectors on the original LP.
+type LPPresolveResult struct {
+	Reduced         *CompiledProblem
+	Infeasible      bool
+	TimedOut        bool
+	OrigRowIdx      []int
+	Singletons      []lpSingletonAction
+	FixedSubst      int
+	TightenedBounds int
+	RemovedRows     int
+}
+
+// presolveLPWithDeadline performs dual-exact LP presolve (fixed-variable substitution,
+// singleton bound absorption, redundant/empty row dropping, and dual-dominated column fixing).
+func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}) LPPresolveResult {
+	if maxPasses <= 0 {
+		maxPasses = defaultPresolveMaxPass
+	}
+	if stopRequested(deadline, done) {
+		return LPPresolveResult{Reduced: orig, TimedOut: true}
+	}
+	n := orig.numVars
+	m := orig.numConstraints
+	if n == 0 || m == 0 {
+		return LPPresolveResult{Reduced: orig}
+	}
+
+	lb := slices.Clone(orig.varLB)
+	ub := slices.Clone(orig.varUB)
+	for j := range n {
+		if lb[j] > ub[j]+presolveFeasTol {
+			return LPPresolveResult{Infeasible: true}
+		}
+		if lb[j] > ub[j] {
+			lb[j] = ub[j]
+		}
+	}
+
+	rows := make([]presolveWorkRow, m)
+	for i := range m {
+		s, e := orig.rowPtr[i], orig.rowPtr[i+1]
+		rows[i] = presolveWorkRow{
+			name:   orig.rowNames[i],
+			cols:   orig.colIdx[s:e:e],
+			vals:   orig.rowVal[s:e:e],
+			rhs:    orig.rowRHS[i],
+			sense:  orig.rowSense[i],
+			active: true,
+			shared: true,
+		}
+	}
+
+	colSubstDone := make([]bool, n)
+	colDirMask := make([]uint8, n) // bit 0: blocks up (LE a>0 or GE a<0), bit 1: blocks down (LE a<0 or GE a>0), bit 2: touches EQ
+	var singletons []lpSingletonAction
+	fixedSubst := 0
+	tightened := 0
+	removedRows := 0
+
+	const (
+		lpFixedMaxVal      = 1e12
+		lpFixedMaxTermRel  = 1e8
+		lpFixedMaxRHSMag   = 1e14
+		lpSingletonMinCoef = 1e-9
+		lpSingletonMaxBnd  = 1e12
+		lpRedundMargin     = 1e-6
+	)
+
+	for range maxPasses {
+		if stopRequested(deadline, done) {
+			return LPPresolveResult{Reduced: orig, TimedOut: true}
+		}
+		progress := false
+
+		// 1. Substitute fixed variables (both zero and bounded non-zero) out of active rows.
+		hasNewFixed := false
+		for j := range n {
+			if !colSubstDone[j] && lb[j] == ub[j] && !math.IsNaN(lb[j]) && math.Abs(lb[j]) <= lpFixedMaxVal {
+				hasNewFixed = true
+				break
+			}
+		}
+		if hasNewFixed {
+			for i := range m {
+				r := &rows[i]
+				if !r.active || len(r.cols) == 0 {
+					continue
+				}
+				changedRow := false
+				newRHS := r.rhs
+				k := 0
+				for k < len(r.cols) {
+					col := r.cols[k]
+					if !colSubstDone[col] && lb[col] == ub[col] && !math.IsNaN(lb[col]) && math.Abs(lb[col]) <= lpFixedMaxVal {
+						v := lb[col]
+						a := r.vals[k]
+						term := a * v
+						scale := max(1.0, math.Abs(newRHS))
+						if v == 0 || (math.Abs(term) <= lpFixedMaxTermRel*scale && math.Abs(newRHS-term) <= lpFixedMaxRHSMag) {
+							r.ensureOwned()
+							newRHS -= term
+							last := len(r.cols) - 1
+							r.cols[k] = r.cols[last]
+							r.vals[k] = r.vals[last]
+							r.cols = r.cols[:last]
+							r.vals = r.vals[:last]
+							changedRow = true
+							fixedSubst++
+							progress = true
+							continue
+						}
+					}
+					k++
+				}
+				if changedRow {
+					r.rhs = newRHS
+				}
+			}
+			for j := range n {
+				if !colSubstDone[j] && lb[j] == ub[j] && !math.IsNaN(lb[j]) && math.Abs(lb[j]) <= lpFixedMaxVal {
+					colSubstDone[j] = true
+				}
+			}
+		}
+
+		// 2. Singleton row bound absorption and empty/redundant row removal.
+		for i := range m {
+			r := &rows[i]
+			if !r.active {
+				continue
+			}
+			if len(r.cols) == 0 {
+				switch r.sense {
+				case LessEqual:
+					if 0 > r.rhs+presolveFeasTol {
+						return LPPresolveResult{Infeasible: true}
+					}
+				case GreaterEqual:
+					if 0 < r.rhs-presolveFeasTol {
+						return LPPresolveResult{Infeasible: true}
+					}
+				case Equal:
+					if math.Abs(r.rhs) > presolveFeasTol {
+						return LPPresolveResult{Infeasible: true}
+					}
+				}
+				r.active = false
+				removedRows++
+				progress = true
+				continue
+			}
+			if len(r.cols) == 1 {
+				col := r.cols[0]
+				a := r.vals[0]
+				if math.Abs(a) >= lpSingletonMinCoef && !isNonFinite(r.rhs) {
+					imp := r.rhs / a
+					if !isNonFinite(imp) && math.Abs(imp) <= lpSingletonMaxBnd {
+						sense := r.sense
+						// Convert negative-coefficient inequality into implied bound direction.
+						isUpper := (sense == LessEqual && a > 0) || (sense == GreaterEqual && a < 0)
+						isLower := (sense == GreaterEqual && a > 0) || (sense == LessEqual && a < 0)
+						if sense == Equal {
+							if imp < lb[col]-presolveFeasTol || imp > ub[col]+presolveFeasTol {
+								return LPPresolveResult{Infeasible: true}
+							}
+							if lb[col] < imp-presolveBoundChangeTol || ub[col] > imp+presolveBoundChangeTol {
+								lb[col] = imp
+								ub[col] = imp
+								tightened++
+								singletons = append(singletons, lpSingletonAction{
+									origRow: i,
+									col:     col,
+									coeff:   a,
+									sense:   sense,
+									isUpper: true,
+								})
+							}
+							r.active = false
+							removedRows++
+							progress = true
+							continue
+						}
+						if isUpper {
+							if imp < lb[col]-presolveFeasTol {
+								return LPPresolveResult{Infeasible: true}
+							}
+							if imp < ub[col]-presolveBoundChangeTol {
+								if imp < lb[col] {
+									imp = lb[col]
+								}
+								ub[col] = imp
+								tightened++
+								singletons = append(singletons, lpSingletonAction{
+									origRow: i,
+									col:     col,
+									coeff:   a,
+									sense:   sense,
+									isUpper: true,
+								})
+								r.active = false
+								removedRows++
+								progress = true
+								continue
+							}
+							if imp >= ub[col]+lpRedundMargin {
+								r.active = false
+								removedRows++
+								progress = true
+								continue
+							}
+						} else if isLower {
+							if imp > ub[col]+presolveFeasTol {
+								return LPPresolveResult{Infeasible: true}
+							}
+							if imp > lb[col]+presolveBoundChangeTol {
+								if imp > ub[col] {
+									imp = ub[col]
+								}
+								lb[col] = imp
+								tightened++
+								singletons = append(singletons, lpSingletonAction{
+									origRow: i,
+									col:     col,
+									coeff:   a,
+									sense:   sense,
+									isUpper: false,
+								})
+								r.active = false
+								removedRows++
+								progress = true
+								continue
+							}
+							if imp <= lb[col]-lpRedundMargin {
+								r.active = false
+								removedRows++
+								progress = true
+								continue
+							}
+						}
+					}
+				}
+			}
+
+			// Drop strictly redundant inequality rows (never drop if margin is zero/ambiguous).
+			switch r.sense {
+			case LessEqual:
+				s, early := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, true, true, true)
+				if !early && !s.extreme {
+					tol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, max(s.l1Min, s.l1Max)))
+					if s.minInfCount == 0 && s.slackHi < -tol {
+						return LPPresolveResult{Infeasible: true}
+					}
+					if s.maxInfCount == 0 && s.deficitLo > max(lpRedundMargin, tol) {
+						r.active = false
+						removedRows++
+						progress = true
+					}
+				}
+			case GreaterEqual:
+				s, early := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, true, true, true)
+				if !early && !s.extreme {
+					tol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, max(s.l1Min, s.l1Max)))
+					if s.maxInfCount == 0 && s.deficitLo > tol {
+						return LPPresolveResult{Infeasible: true}
+					}
+					if s.minInfCount == 0 && s.slackHi < -max(lpRedundMargin, tol) {
+						r.active = false
+						removedRows++
+						progress = true
+					}
+				}
+			}
+		}
+
+		// 3. Dual column fixing on unblocked/dominated columns.
+		clear(colDirMask)
+		for i := range m {
+			r := &rows[i]
+			if !r.active {
+				continue
+			}
+			for k, col := range r.cols {
+				a := r.vals[k]
+				if a == 0 {
+					continue
+				}
+				switch r.sense {
+				case Equal:
+					colDirMask[col] |= 4
+				case LessEqual:
+					if a > 0 {
+						colDirMask[col] |= 1
+					} else {
+						colDirMask[col] |= 2
+					}
+				case GreaterEqual:
+					if a > 0 {
+						colDirMask[col] |= 2
+					} else {
+						colDirMask[col] |= 1
+					}
+				}
+			}
+		}
+		for j := range n {
+			if lb[j] == ub[j] {
+				continue
+			}
+			mask := colDirMask[j]
+			if mask&4 != 0 {
+				continue
+			}
+			cj := orig.objMin[j]
+			if mask == 0 {
+				if cj > 0 && !math.IsInf(lb[j], -1) {
+					ub[j] = lb[j]
+					tightened++
+					progress = true
+				} else if cj < 0 && !math.IsInf(ub[j], 1) {
+					lb[j] = ub[j]
+					tightened++
+					progress = true
+				} else if cj == 0 {
+					if !math.IsInf(lb[j], -1) && !math.IsInf(ub[j], 1) {
+						val := lb[j]
+						if lb[j] <= 0 && 0 <= ub[j] {
+							val = 0
+						}
+						lb[j] = val
+						ub[j] = val
+						tightened++
+						progress = true
+					} else if !math.IsInf(lb[j], -1) {
+						val := max(0.0, lb[j])
+						lb[j] = val
+						ub[j] = val
+						tightened++
+						progress = true
+					} else if !math.IsInf(ub[j], 1) {
+						val := min(0.0, ub[j])
+						lb[j] = val
+						ub[j] = val
+						tightened++
+						progress = true
+					}
+				}
+			} else if mask == 1 && cj >= 0 && !math.IsInf(lb[j], -1) {
+				ub[j] = lb[j]
+				tightened++
+				progress = true
+			} else if mask == 2 && cj <= 0 && !math.IsInf(ub[j], 1) {
+				lb[j] = ub[j]
+				tightened++
+				progress = true
+			}
+		}
+
+		if !progress {
+			break
+		}
+	}
+
+	if tightened == 0 && removedRows == 0 && fixedSubst == 0 {
+		return LPPresolveResult{Reduced: orig}
+	}
+
+	red, origRowIdx, droppedEmpty, infeas := buildCompiledDirectWithRowMap(orig, rows, lb, ub, true)
+	if infeas {
+		return LPPresolveResult{Infeasible: true}
+	}
+	removedRows += droppedEmpty
+	return LPPresolveResult{
+		Reduced:         red,
+		OrigRowIdx:      origRowIdx,
+		Singletons:      singletons,
+		FixedSubst:      fixedSubst,
+		TightenedBounds: tightened,
+		RemovedRows:     removedRows,
+	}
+}
+
+func evalOrigColDualMin(orig *CompiledProblem, col int, yMin []float64) float64 {
+	var acc dot2Acc
+	acc.addVal(orig.objMin[col])
+	for p := orig.colPtr[col]; p < orig.colPtr[col+1]; p++ {
+		yi := yMin[orig.rowIdx[p]]
+		if yi != 0 {
+			acc.addProd(-yi, orig.colVal[p])
+		}
+	}
+	if v, _, ok := acc.result(); ok {
+		return v
+	}
+	var w wideDotAcc
+	w.addVal(orig.objMin[col])
+	for p := orig.colPtr[col]; p < orig.colPtr[col+1]; p++ {
+		yi := yMin[orig.rowIdx[p]]
+		if yi != 0 {
+			w.addProd(-yi, orig.colVal[p])
+		}
+	}
+	return w.finish(orig.objMin[col])
+}
+
+// postsolveLP reconstructs original-model Duals and ReducedCosts from a solved reduced LP,
+// unwinds absorbed singleton bounds in reverse order, and verifies primal/dual KKT conditions.
+func postsolveLP(orig *CompiledProblem, pre *LPPresolveResult, res *Result) bool {
+	if orig == nil || pre == nil || res == nil || len(res.Values) != orig.numVars || len(res.Duals) != len(pre.OrigRowIdx) {
+		return false
+	}
+	n := orig.numVars
+	m := orig.numConstraints
+	bV, rV, _ := orig.MaxViolation(res.Values, false)
+	if bV > incumbentTol || rV > incumbentTol {
+		return false
+	}
+
+	senseSign := 1.0
+	if orig.sense == Maximize {
+		senseSign = -1.0
+	}
+	yMin := make([]float64, m)
+	for rowOut, origRow := range pre.OrigRowIdx {
+		if uint(origRow) >= uint(m) {
+			return false
+		}
+		y := senseSign * res.Duals[rowOut]
+		if math.IsNaN(y) || math.IsInf(y, 0) {
+			return false
+		}
+		yMin[origRow] = y
+	}
+
+	for _, s := range slices.Backward(pre.Singletons) {
+		rcCol := evalOrigColDualMin(orig, s.col, yMin)
+		if math.IsNaN(rcCol) || math.IsInf(rcCol, 0) {
+			return false
+		}
+		var absorb bool
+		if s.sense == Equal {
+			absorb = math.Abs(rcCol) > 1e-11
+		} else if s.isUpper {
+			absorb = rcCol < -1e-11
+		} else {
+			absorb = rcCol > 1e-11
+		}
+		if absorb {
+			yVal := rcCol / s.coeff
+			if math.IsNaN(yVal) || math.IsInf(yVal, 0) {
+				return false
+			}
+			yMin[s.origRow] = yVal
+		}
+	}
+
+	const dualSignTol = 1e-5
+	const compTol = 1e-3
+	for i := range m {
+		yi := yMin[i]
+		if math.IsNaN(yi) || math.IsInf(yi, 0) {
+			return false
+		}
+		var actAcc dot2Acc
+		actAcc.addVal(-orig.rowRHS[i])
+		for p := orig.rowPtr[i]; p < orig.rowPtr[i+1]; p++ {
+			actAcc.addProd(orig.rowVal[p], res.Values[orig.colIdx[p]])
+		}
+		slack, _, ok := actAcc.result()
+		if !ok {
+			var w wideDotAcc
+			w.addVal(-orig.rowRHS[i])
+			for p := orig.rowPtr[i]; p < orig.rowPtr[i+1]; p++ {
+				w.addProd(orig.rowVal[p], res.Values[orig.colIdx[p]])
+			}
+			slack = w.finish(0)
+		}
+		switch orig.rowSense[i] {
+		case LessEqual:
+			if yi > dualSignTol*max(1.0, math.Abs(yi)) {
+				return false
+			}
+			if slack < -1e-5 && math.Abs(yi*slack) > compTol*max(1.0, max(math.Abs(yi), math.Abs(orig.rowRHS[i]))) {
+				return false
+			}
+		case GreaterEqual:
+			if yi < -dualSignTol*max(1.0, math.Abs(yi)) {
+				return false
+			}
+			if slack > 1e-5 && math.Abs(yi*slack) > compTol*max(1.0, max(math.Abs(yi), math.Abs(orig.rowRHS[i]))) {
+				return false
+			}
+		}
+	}
+
+	rcOut := make([]float64, n)
+	for j := range n {
+		rcj := evalOrigColDualMin(orig, j, yMin)
+		if math.IsNaN(rcj) || math.IsInf(rcj, 0) {
+			return false
+		}
+		xj := res.Values[j]
+		lbj, ubj := orig.varLB[j], orig.varUB[j]
+		tol := dualSignTol * max(1.0, max(math.Abs(orig.objMin[j]), math.Abs(rcj)))
+		if !math.IsInf(ubj, 1) && rcj < -tol && xj < ubj-1e-5 {
+			if math.Abs(rcj*(ubj-xj)) > compTol*max(1.0, max(math.Abs(rcj), math.Abs(xj))) {
+				return false
+			}
+		}
+		if !math.IsInf(lbj, -1) && rcj > tol && xj > lbj+1e-5 {
+			if math.Abs(rcj*(xj-lbj)) > compTol*max(1.0, max(math.Abs(rcj), math.Abs(xj))) {
+				return false
+			}
+		}
+		if math.IsInf(ubj, 1) && rcj < -tol {
+			return false
+		}
+		if math.IsInf(lbj, -1) && rcj > tol {
+			return false
+		}
+		rcOut[j] = senseSign * rcj
+	}
+
+	dualsOut := yMin
+	if orig.sense == Maximize {
+		for i := range m {
+			dualsOut[i] = -dualsOut[i]
+		}
+	}
+	res.Duals = dualsOut
+	res.ReducedCosts = rcOut
+	return true
 }

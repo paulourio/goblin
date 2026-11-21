@@ -1637,3 +1637,74 @@ func TestCrashEqualityBasisInvariants(t *testing.T) {
 		}
 	}
 }
+
+// TestDualCostPerturbationAndUnperturb verifies that dual cost perturbation triggers on
+// stalled degenerate LPs, cleanly unperturbs upon termination, and certifies both exact
+// optimality and Farkas infeasibility without leaving perturbed residuals.
+func TestDualCostPerturbationAndUnperturb(t *testing.T) {
+	t.Parallel()
+
+	// 1. Degenerate network/combinatorial LP (netlib_brandy) triggers dual perturbation
+	// and recovers exact unperturbed primal/dual optimality.
+	mBrandy := loadPublicPuLPJSONForTest(t, "netlib_brandy")
+	pBrandy := mBrandy.Compile()
+	sBrandy := NewLPSolver(pBrandy, nil)
+	defer sBrandy.Close()
+	resBrandy := sBrandy.Solve()
+	if resBrandy.Status != StatusOptimal {
+		t.Fatalf("netlib_brandy status = %v, want Optimal", resBrandy.Status)
+	}
+	if !sBrandy.lastPerturbed {
+		t.Fatal("expected dual cost perturbation to activate on netlib_brandy")
+	}
+	if math.Abs(resBrandy.Objective-1518.5098965) > 1e-4 {
+		t.Fatalf("netlib_brandy objective = %.10g, want 1518.5098965", resBrandy.Objective)
+	}
+	bV, rV, _ := pBrandy.MaxViolation(resBrandy.Primal, false)
+	if bV > 1e-6 || rV > 1e-6 {
+		t.Fatalf("netlib_brandy violation after unperturb: b=%.2e r=%.2e", bV, rV)
+	}
+
+	// 2. Synthetic dual-degenerate LP with m=140 rows and many zero-cost columns.
+	mDeg := NewModel("synth_dual_degen", Minimize)
+	const rows = 140
+	xs := make([]Var, rows+2)
+	for j := range xs {
+		xs[j] = mDeg.AddContVar(fmt.Sprintf("x%d", j), 0, 10)
+	}
+	mDeg.SetObjective(NewExpr(xs[0].T(2), xs[1].T(3)))
+	for i := range rows {
+		c := 1.0 + float64(i%5)*0.5
+		if i < rows-1 {
+			mDeg.AddConstraint(fmt.Sprintf("c%d", i), NewExpr(xs[0].T(c), xs[i+2].T(1)).Ge(5.0))
+		} else {
+			mDeg.AddConstraint(fmt.Sprintf("c%d", i), NewExpr(xs[0].T(1), xs[1].T(1)).Ge(3.0))
+		}
+	}
+	pDeg := mDeg.Compile()
+	sDeg := NewLPSolver(pDeg, nil)
+	defer sDeg.Close()
+	resDeg := sDeg.Solve()
+	if resDeg.Status != StatusOptimal || math.Abs(resDeg.Objective-6.0) > 1e-6 {
+		t.Fatalf("synth_dual_degen status=%v obj=%g, want Optimal 6.0", resDeg.Status, resDeg.Objective)
+	}
+
+	// 3. Degenerate infeasible LP must certify StatusInfeasible after unperturbing.
+	mInf := NewModel("synth_dual_degen_infeas", Minimize)
+	xi := make([]Var, rows+1)
+	for j := range xi {
+		xi[j] = mInf.AddContVar(fmt.Sprintf("x%d", j), 0, 5)
+	}
+	mInf.SetObjective(VarExpr(xi[0]))
+	for i := range rows - 1 {
+		mInf.AddConstraint(fmt.Sprintf("d%d", i), NewExpr(xi[0].T(1), xi[i+1].T(-1)).Ge(0))
+	}
+	mInf.AddConstraint("infeas", VarExpr(xi[0]).Ge(6))
+	pInf := mInf.Compile()
+	sInf := NewLPSolver(pInf, nil)
+	defer sInf.Close()
+	resInf := sInf.Solve()
+	if resInf.Status != StatusInfeasible {
+		t.Fatalf("synth_dual_degen_infeas status = %v, want Infeasible", resInf.Status)
+	}
+}

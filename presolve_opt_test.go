@@ -1146,3 +1146,360 @@ func TestPresolveAndCompileAllocations(t *testing.T) {
 		t.Fatalf("Model.AddConstraint(1000) allocs/op = %.1f, want <= 50", addAllocs)
 	}
 }
+
+// TestLPPresolveAndExactDualPostsolve verifies LP presolve reductions, reverse singleton
+// dual postsolve, KKT consistency across Minimize and Maximize LPs, infeasible/unbounded
+// status parity, and full dual/reduced-cost parity across all 14 public Netlib LPs.
+func TestLPPresolveAndExactDualPostsolve(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	assertDualKKT := func(t *testing.T, label string, p *CompiledProblem, res Result) {
+		t.Helper()
+		n := p.NumVars()
+		m := p.NumConstraints()
+		if len(res.Values) != n || len(res.Duals) != m || len(res.ReducedCosts) != n {
+			t.Fatalf("%s: vector lengths (x=%d, y=%d, rc=%d), want (%d, %d, %d)",
+				label, len(res.Values), len(res.Duals), len(res.ReducedCosts), n, m, n)
+		}
+		bV, rV, _ := p.MaxViolation(res.Values, false)
+		if bV > 1e-6 || rV > 1e-6 {
+			t.Fatalf("%s: primal violation b=%.2e r=%.2e", label, bV, rV)
+		}
+		sign := 1.0
+		if p.Sense() == Maximize {
+			sign = -1.0
+		}
+		yMin := make([]float64, m)
+		for i := range m {
+			yMin[i] = sign * res.Duals[i]
+		}
+		for i := range m {
+			var acc dot2Acc
+			acc.addVal(-p.rowRHS[i])
+			for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
+				acc.addProd(p.rowVal[k], res.Values[p.colIdx[k]])
+			}
+			slack, _, _ := acc.result()
+			switch p.rowSense[i] {
+			case LessEqual:
+				if yMin[i] > 1e-5*max(1.0, math.Abs(yMin[i])) {
+					t.Fatalf("%s: row %d LE dual yMin=%.3e > 0", label, i, yMin[i])
+				}
+				if slack < -1e-5 && math.Abs(yMin[i]*slack) > 1e-3*max(1.0, math.Abs(p.rowRHS[i])) {
+					t.Fatalf("%s: row %d LE comp slack y=%.3e slack=%.3e", label, i, yMin[i], slack)
+				}
+			case GreaterEqual:
+				if yMin[i] < -1e-5*max(1.0, math.Abs(yMin[i])) {
+					t.Fatalf("%s: row %d GE dual yMin=%.3e < 0", label, i, yMin[i])
+				}
+				if slack > 1e-5 && math.Abs(yMin[i]*slack) > 1e-3*max(1.0, math.Abs(p.rowRHS[i])) {
+					t.Fatalf("%s: row %d GE comp slack y=%.3e slack=%.3e", label, i, yMin[i], slack)
+				}
+			}
+		}
+		for j := range n {
+			wantRC := sign * evalOrigColDualMin(p, j, yMin)
+			if math.Abs(res.ReducedCosts[j]-wantRC) > 1e-5*max(1.0, math.Abs(wantRC)) {
+				t.Fatalf("%s: col %d rc=%.8g, want %.8g", label, j, res.ReducedCosts[j], wantRC)
+			}
+		}
+	}
+
+	// 1. Minimize LP exercising fixed non-zero var, singleton LE/GE/EQ (pos & neg coeffs),
+	// redundant row, and dual-dominated column.
+	mMin := NewModel("lp_pre_min", Minimize)
+	xFix := mMin.AddContVar("x_fix", 3, 3)
+	xLE := mMin.AddContVar("x_le", 0, 10)
+	xGE := mMin.AddContVar("x_ge", 0, 10)
+	xEq := mMin.AddContVar("x_eq", 0, 10)
+	xDom := mMin.AddContVar("x_dom", 1, math.Inf(1))
+	xFree := mMin.AddContVar("x_free", 0, 10)
+	mMin.SetObjective(NewExpr(xFix.T(4), xLE.T(-3), xGE.T(5), xEq.T(7), xDom.T(2), xFree.T(1)))
+	mMin.AddConstraint("s_le_pos", NewExpr(xLE.T(2)).Le(8))
+	mMin.AddConstraint("s_le_neg", NewExpr(xGE.T(-2)).Le(-6))
+	mMin.AddConstraint("s_eq", NewExpr(xEq.T(3)).Eq(6))
+	mMin.AddConstraint("coupled", NewExpr(xFix.T(1), xLE.T(1), xGE.T(1), xFree.T(2)).Ge(10))
+	mMin.AddConstraint("redund", NewExpr(xLE.T(1), xGE.T(1)).Le(50))
+	mMin.AddConstraint("dom_row", NewExpr(xDom.T(1), xFree.T(1)).Le(20))
+
+	pMin := mMin.Compile()
+	lpPre := presolveLPWithDeadline(pMin, 6, time.Time{}, nil)
+	if lpPre.Infeasible || lpPre.Reduced == pMin {
+		t.Fatalf("expected non-trivial LP presolve reduction on lp_pre_min")
+	}
+	resOn, err := SolveCompiled(ctx, pMin, WithPresolve(true))
+	if err != nil {
+		t.Fatalf("lp_pre_min presolve=true err: %v", err)
+	}
+	resOff, err := SolveCompiled(ctx, pMin, WithPresolve(false))
+	if err != nil {
+		t.Fatalf("lp_pre_min presolve=false err: %v", err)
+	}
+	if resOn.Status != StatusOptimal || resOff.Status != StatusOptimal {
+		t.Fatalf("lp_pre_min status=(%v, %v), want Optimal", resOn.Status, resOff.Status)
+	}
+	if math.Abs(resOn.Objective-resOff.Objective) > 1e-6 {
+		t.Fatalf("lp_pre_min obj=%g vs no-presolve %g", resOn.Objective, resOff.Objective)
+	}
+	assertDualKKT(t, "lp_pre_min", pMin, resOn)
+
+	// 2. Maximize LP with chained fixed-var substitution + singleton dual unwinding.
+	mMax := NewModel("lp_pre_max", Maximize)
+	y1 := mMax.AddContVar("y1", 0, 10)
+	y2 := mMax.AddContVar("y2", 0, 10)
+	y3 := mMax.AddContVar("y3", 0, 10)
+	mMax.SetObjective(NewExpr(y1.T(6), y2.T(5), y3.T(3)))
+	mMax.AddConstraint("fix_y1", NewExpr(y1.T(2)).Eq(4))
+	mMax.AddConstraint("c_y2", NewExpr(y1.T(1), y2.T(1), y3.T(1)).Le(7))
+	mMax.AddConstraint("c_y3", NewExpr(y3.T(-1)).Ge(-3))
+
+	pMax := mMax.Compile()
+	resMaxOn, err := SolveCompiled(ctx, pMax, WithPresolve(true))
+	if err != nil {
+		t.Fatalf("lp_pre_max presolve=true err: %v", err)
+	}
+	resMaxOff, err := SolveCompiled(ctx, pMax, WithPresolve(false))
+	if err != nil {
+		t.Fatalf("lp_pre_max presolve=false err: %v", err)
+	}
+	if resMaxOn.Status != StatusOptimal || math.Abs(resMaxOn.Objective-resMaxOff.Objective) > 1e-6 {
+		t.Fatalf("lp_pre_max status=%v obj=%g vs %g", resMaxOn.Status, resMaxOn.Objective, resMaxOff.Objective)
+	}
+	assertDualKKT(t, "lp_pre_max", pMax, resMaxOn)
+
+	// 3. Infeasible and Unbounded parity under LP presolve.
+	mInf := NewModel("lp_pre_infeas", Minimize)
+	xi := mInf.AddContVar("x", 0, 5)
+	mInf.SetObjective(VarExpr(xi))
+	mInf.AddConstraint("c1", NewExpr(xi.T(1)).Ge(7))
+	resInf, err := mInf.Solve(ctx, WithPresolve(true))
+	if err != nil || resInf.Status != StatusInfeasible {
+		t.Fatalf("lp_pre_infeas status=%v err=%v, want Infeasible", resInf.Status, err)
+	}
+
+	mUnb := NewModel("lp_pre_unb", Minimize)
+	xu := mUnb.AddContVar("xu", 0, math.Inf(1))
+	xf := mUnb.AddContVar("xf", 2, 2)
+	mUnb.SetObjective(NewExpr(xu.T(-1), xf.T(3)))
+	mUnb.AddConstraint("c1", NewExpr(xu.T(1), xf.T(1)).Ge(2))
+	resUnb, err := mUnb.Solve(ctx, WithPresolve(true))
+	if err != nil || resUnb.Status != StatusUnbounded {
+		t.Fatalf("lp_pre_unb status=%v err=%v, want Unbounded", resUnb.Status, err)
+	}
+
+	// 4. All 14 public Netlib LPs: objective and KKT parity with Presolve enabled vs disabled.
+	rawManifest, err := os.ReadFile(filepath.Join("testdata", "public", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest []struct {
+		ID                 string  `json:"id"`
+		IsMIP              bool    `json:"is_mip"`
+		ReferenceObjective float64 `json:"reference_objective"`
+	}
+	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	for _, inst := range manifest {
+		if inst.IsMIP {
+			continue
+		}
+		t.Run(inst.ID, func(t *testing.T) {
+			t.Parallel()
+			p := loadJSONModelForTest(t, filepath.Join("testdata", "public", inst.ID+".json")).Compile()
+			resPre, err := SolveCompiled(ctx, p, WithPresolve(true))
+			if err != nil {
+				t.Fatalf("%s presolve=true err: %v", inst.ID, err)
+			}
+			if resPre.Status != StatusOptimal {
+				t.Fatalf("%s status=%v, want Optimal", inst.ID, resPre.Status)
+			}
+			rel := math.Abs(resPre.Objective-inst.ReferenceObjective) / max(1.0, math.Abs(inst.ReferenceObjective))
+			if rel > 1e-5 {
+				t.Fatalf("%s obj=%.10g, want %.10g (rel=%.2e)", inst.ID, resPre.Objective, inst.ReferenceObjective, rel)
+			}
+			assertDualKKT(t, inst.ID, p, resPre)
+		})
+	}
+}
+
+func TestDynamicOrbitalBranchingIdenticalItems(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Identical binary items in a parity-infeasible knapsack (2*sum x_i = 9).
+	// Without cuts or GCD presolve, LP relaxation is feasible (x_i = 0.375) and an
+	// unbroken B&B tree explores hundreds of subsets; Tier A orbital branching closes in linear nodes.
+	mInf := NewModel("orbital_identical_infeas", Maximize)
+	const nItems = 12
+	varsInf := make([]Var, nItems)
+	termsInf := make([]Term, nItems)
+	objInf := make([]Term, nItems)
+	for i := range nItems {
+		varsInf[i] = mInf.AddBinaryVar(fmt.Sprintf("x_%d", i))
+		termsInf[i] = varsInf[i].T(2)
+		objInf[i] = varsInf[i].T(1)
+	}
+	mInf.SetObjective(NewExpr(objInf...))
+	mInf.AddConstraint("parity", NewExpr(termsInf...).Eq(9))
+
+	resInf, err := mInf.Solve(ctx, WithPresolve(false), WithCuts(false), WithHeuristics(false))
+	if err != nil {
+		t.Fatalf("parity infeas solve err: %v", err)
+	}
+	if resInf.Status != StatusInfeasible {
+		t.Fatalf("parity infeas status=%v, want Infeasible", resInf.Status)
+	}
+	if resInf.Nodes > 30 {
+		t.Fatalf("expected orbital branching to prove infeasibility quickly, got %d nodes", resInf.Nodes)
+	}
+
+	// 2. Identical binary items optimization (sum 3*x_i <= 23, max sum 5*x_i -> opt=35).
+	mOpt := NewModel("orbital_identical_opt", Maximize)
+	const nOpt = 16
+	termsOpt := make([]Term, nOpt)
+	objOpt := make([]Term, nOpt)
+	for i := range nOpt {
+		v := mOpt.AddBinaryVar(fmt.Sprintf("y_%d", i))
+		termsOpt[i] = v.T(3)
+		objOpt[i] = v.T(5)
+	}
+	mOpt.SetObjective(NewExpr(objOpt...))
+	mOpt.AddConstraint("cap", NewExpr(termsOpt...).Le(23))
+
+	for _, usePre := range []bool{false, true} {
+		res, err := mOpt.Solve(ctx, WithPresolve(usePre), WithCuts(false), WithHeuristics(false))
+		if err != nil || res.Status != StatusOptimal {
+			t.Fatalf("presolve=%v status=%v err=%v, want Optimal", usePre, res.Status, err)
+		}
+		if math.Abs(res.Objective-35.0) > 1e-6 {
+			t.Fatalf("presolve=%v obj=%.8g, want 35", usePre, res.Objective)
+		}
+		if res.Nodes > 35 {
+			t.Fatalf("presolve=%v expected <= 35 nodes with orbital branching, got %d", usePre, res.Nodes)
+		}
+	}
+}
+
+func TestDynamicOrbitalBranchingEmergentSymmetry(t *testing.T) {
+	ctx := context.Background()
+
+	// Root asymmetry via binary trigger z in an LP-feasible K_5 4-coloring model:
+	//   - 5 vertices v in 0..4, 4 colors c in 0..3: sum_c x_{v,c} = 1 (root LP x=0.25)
+	//   - Conflict rows: x_{u,c} + x_{v,c} <= 1, except (u,v,c)=(0,1,0) adds + z <= 1
+	//   - Trigger row: 2*z + aux = 1, objective Maximize(z) => root LP sets z = 0.5 (obj = 0.5)
+	// At root, static color symmetry is broken by z; once z = 0 is fixed in-tree (depth >= 1),
+	// Tier C detectDynamicNodeOrbit dynamically discovers all 4 symmetric colors.
+	m := NewModel("orbital_emergent_k5_4col", Maximize)
+	const nVerts = 5
+	const nColors = 4
+	z := m.AddBinaryVar("z")
+	aux := m.AddBinaryVar("aux")
+	x := make([][]Var, nVerts)
+	for v := range nVerts {
+		x[v] = make([]Var, nColors)
+		pTerms := make([]Term, nColors)
+		for c := range nColors {
+			x[v][c] = m.AddBinaryVar(fmt.Sprintf("x_%d_%d", v, c))
+			pTerms[c] = x[v][c].T(1)
+		}
+		m.AddConstraint(fmt.Sprintf("part_%d", v), NewExpr(pTerms...).Eq(1))
+	}
+	for c := range nColors {
+		for u := range nVerts {
+			for v := u + 1; v < nVerts; v++ {
+				terms := []Term{x[u][c].T(1), x[v][c].T(1)}
+				if u == 0 && v == 1 && c == 0 {
+					terms = append(terms, z.T(1))
+				}
+				m.AddConstraint(fmt.Sprintf("edge_%d_%d_%d", u, v, c), NewExpr(terms...).Le(1))
+			}
+		}
+	}
+	m.AddConstraint("asym_break", NewExpr(z.T(2), aux.T(1)).Eq(1))
+	m.SetObjective(NewExpr(z.T(1)))
+
+	p := m.Compile()
+	colZ := z.Index()
+	colX00 := x[0][0].Index()
+
+	ns := initNodeSymmetry(p)
+	if rootOrb := ns.activeOrbit(p, p.varLB, p.varUB, colX00, 0, time.Time{}, nil, nil); len(rootOrb) >= 2 {
+		t.Fatalf("expected no root orbit for colX00 before z is fixed, got %v (symG=%d)", rootOrb, ns.symG)
+	}
+	curLB := slices.Clone(p.varLB)
+	curUB := slices.Clone(p.varUB)
+	curUB[colZ] = 0
+	dynOrb := ns.activeOrbit(p, curLB, curUB, colX00, 1, time.Time{}, nil, nil)
+	if len(dynOrb) != nColors {
+		t.Fatalf("expected Tier C dynamic orbit size %d after fixing z=0, got %d (%v)", nColors, len(dynOrb), dynOrb)
+	}
+
+	// Verify both with presolve disabled (pure B&B + dynamic orbital branching) and default solver.
+	resNoPre, err := SolveCompiled(ctx, p, WithPresolve(false), WithCuts(false), WithHeuristics(false))
+	if err != nil {
+		t.Fatalf("emergent symmetry no-presolve err: %v", err)
+	}
+	if resNoPre.Status != StatusInfeasible {
+		t.Fatalf("emergent symmetry status=%v, want Infeasible", resNoPre.Status)
+	}
+	if resNoPre.Nodes <= 1 || resNoPre.Nodes > 150 {
+		t.Fatalf("emergent symmetry nodes=%d, want in [2, 150]", resNoPre.Nodes)
+	}
+
+	resDef, err := SolveCompiled(ctx, p)
+	if err != nil {
+		t.Fatalf("emergent symmetry default err: %v", err)
+	}
+	if resDef.Status != StatusInfeasible {
+		t.Fatalf("emergent symmetry default status=%v, want Infeasible", resDef.Status)
+	}
+}
+
+func TestDynamicOrbitalBranchingAsymmetricControl(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Tiny objective perturbations: 5.0 + i*1e-5 over 16 items, cap 3*sum <= 23 -> max 7 items (9..15).
+	mObj := NewModel("orbital_asym_obj", Maximize)
+	const n = 16
+	capTerms := make([]Term, n)
+	objTerms := make([]Term, n)
+	for i := range n {
+		v := mObj.AddBinaryVar(fmt.Sprintf("x_%d", i))
+		capTerms[i] = v.T(3)
+		objTerms[i] = v.T(5.0 + float64(i)*1e-5)
+	}
+	mObj.SetObjective(NewExpr(objTerms...))
+	mObj.AddConstraint("cap", NewExpr(capTerms...).Le(23))
+
+	resObj, err := mObj.Solve(ctx, WithCuts(false), WithHeuristics(false))
+	if err != nil || resObj.Status != StatusOptimal {
+		t.Fatalf("asym obj status=%v err=%v", resObj.Status, err)
+	}
+	wantObj := 35.0 + 1e-5*(9+10+11+12+13+14+15)
+	if math.Abs(resObj.Objective-wantObj) > 1e-8 {
+		t.Fatalf("asym obj=%.10f, want %.10f (false symmetry breaking lost highest-obj items)", resObj.Objective, wantObj)
+	}
+
+	// 2. Tiny constraint perturbations: w_i = 3.0 - i*1e-5, cap = 20.9995, equal obj=5.
+	// Items 9..15 have weight sum 21 - 1e-5*84 = 20.99916 <= 20.9995 (7 items -> obj=35).
+	// Low-index items 0..6 have weight sum 21 - 1e-5*21 = 20.99979 > 20.9995 (at most 6 items -> obj=30).
+	mCon := NewModel("orbital_asym_con", Maximize)
+	capTerms2 := make([]Term, n)
+	objTerms2 := make([]Term, n)
+	for i := range n {
+		v := mCon.AddBinaryVar(fmt.Sprintf("w_%d", i))
+		capTerms2[i] = v.T(3.0 - float64(i)*1e-5)
+		objTerms2[i] = v.T(5.0)
+	}
+	mCon.SetObjective(NewExpr(objTerms2...))
+	mCon.AddConstraint("cap", NewExpr(capTerms2...).Le(20.9995))
+
+	resCon, err := mCon.Solve(ctx, WithPresolve(false), WithCuts(false), WithHeuristics(false))
+	if err != nil || resCon.Status != StatusOptimal {
+		t.Fatalf("asym con status=%v err=%v", resCon.Status, err)
+	}
+	if math.Abs(resCon.Objective-35.0) > 1e-6 {
+		t.Fatalf("asym con obj=%.10f, want 35.0 (false orbital pruning excluded feasible high-index items)", resCon.Objective)
+	}
+}

@@ -54,6 +54,7 @@ type Workspace struct {
 	ub       []float64
 	cost     []float64
 	workCost []float64
+	pertCost []float64
 
 	// Basis indices: Basis[r] stores slot r's variable, while BasicRow[k] maps variable k back to its basis row or -1 when nonbasic.
 	basis       []int
