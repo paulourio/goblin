@@ -948,6 +948,7 @@ func (f *LUFactorization) popNucRowEntry(r, c int32) (float64, bool) {
 func (f *LUFactorization) refreshNucColMax(c int32) float64 {
 	cStart := f.nucColStart[c]
 	cEnd := cStart + f.nucColLen[c]
+	oldMax := f.nucColMax[c]
 	colMax := 0.0
 	for p := cStart; p < cEnd; p++ {
 		r2 := f.nucColRow[p]
@@ -957,6 +958,9 @@ func (f *LUFactorization) refreshNucColMax(c int32) float64 {
 		cv := f.findRowVal(r2, c)
 		if ac := math.Abs(cv); ac > colMax {
 			colMax = ac
+			if colMax >= oldMax {
+				break
+			}
 		}
 	}
 	f.nucColMax[c] = colMax
@@ -967,31 +971,14 @@ func (f *LUFactorization) refreshNucColMax(c int32) float64 {
 func (f *LUFactorization) findRowVal(r, c int32) float64 {
 	s := f.nucRowStart[r]
 	end := s + f.nucRowLen[r]
-	cols := f.nucRowCol
-	vals := f.nucRowVal
-	rm := f.nucRowMax[r]
-	val := 0.0
-	if rm >= 0 {
-		for p := s; p < end; p++ {
-			if cols[p] == c {
-				return vals[p]
-			}
-		}
-		return 0
-	}
-	rm = 0
-	for p := s; p < end; p++ {
-		v := vals[p]
-		av := math.Abs(v)
-		if av > rm {
-			rm = av
-		}
-		if cols[p] == c {
-			val = v
+	cols := f.nucRowCol[s:end]
+	vals := f.nucRowVal[s:end]
+	for i, col := range cols {
+		if col == c {
+			return vals[i]
 		}
 	}
-	f.nucRowMax[r] = rm
-	return val
+	return 0
 }
 
 func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
@@ -1150,9 +1137,11 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 					continue
 				}
 				// Recompute exact column max only when the monotonic upper bound is dirty,
-				// skipping rows whose cached rowMax cannot improve colMax.
+				// skipping rows whose cached rowMax cannot improve colMax and stopping early
+				// once the monotonic upper bound oldMax is attained.
 				cStart := f.nucColStart[candC]
 				cEnd := cStart + f.nucColLen[candC]
+				oldMax := f.nucColMax[candC]
 				colMax := av
 				for p := cStart; p < cEnd; p++ {
 					r2 := f.nucColRow[p]
@@ -1165,6 +1154,9 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 					cv := f.findRowVal(r2, candC)
 					if ac := math.Abs(cv); ac > colMax {
 						colMax = ac
+						if colMax >= oldMax {
+							break
+						}
 					}
 				}
 				f.nucColMax[candC] = colMax
@@ -1280,24 +1272,40 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 						colThresh := max(luPivotTol, luMarkowitzTol*f.nucColMax[c])
 						cStart := f.nucColStart[c]
 						cEnd := cStart + d
-						for p := cStart; p < cEnd; p++ {
-							r := f.nucColRow[p]
+						// Probe the sparsest row in column c first so a valid pivot tightens
+						// bestMerit before calling findRowVal on denser rows in the same column.
+						minP := cStart
+						minRLen := f.nucRowLen[f.nucColRow[cStart]]
+						for p := cStart + 1; p < cEnd; p++ {
+							if rl := f.nucRowLen[f.nucColRow[p]]; rl < minRLen {
+								minRLen = rl
+								minP = p
+							}
+						}
+						if pivNR >= 0 && (minRLen-1)*(d-1) >= bestMerit {
+							searched++
+							if searched >= 4 {
+								break
+							}
+							continue
+						}
+						probeColEntry := func(r int32) {
 							merit := (f.nucRowLen[r] - 1) * (d - 1)
 							if pivNR >= 0 && merit >= bestMerit {
-								continue
+								return
 							}
 							v := f.findRowVal(r, c)
 							av := math.Abs(v)
 							if av < luPivotTol {
-								continue
+								return
 							}
 							if av < colThresh {
 								if !f.nucColMaxDirty[c] {
-									continue
+									return
 								}
 								colThresh = max(luPivotTol, luMarkowitzTol*f.refreshNucColMax(c))
 								if av < colThresh {
-									continue
+									return
 								}
 							}
 							if merit < bestMerit || (merit == bestMerit && av > bestAbs) {
@@ -1307,6 +1315,13 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 								pivNC = c
 								pivVal = v
 							}
+						}
+						probeColEntry(f.nucColRow[minP])
+						for p := cStart; p < cEnd; p++ {
+							if p == minP {
+								continue
+							}
+							probeColEntry(f.nucColRow[p])
 						}
 						searched++
 						if pivNR >= 0 && searched >= 4 {
@@ -1401,7 +1416,6 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 		for _, r := range pivRows {
 			aik, found := f.popNucRowEntry(r, pivNC)
 			if !found || aik == 0 {
-				f.nucRowMax[r] = -1
 				f.moveRowBucket(r, f.nucRowLen[r])
 				continue
 			}
@@ -1410,7 +1424,6 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 			f.nucLVal = append(f.nucLVal, mult)
 
 			if pivUCount == 0 {
-				f.nucRowMax[r] = -1
 				f.moveRowBucket(r, f.nucRowLen[r])
 				continue
 			}
