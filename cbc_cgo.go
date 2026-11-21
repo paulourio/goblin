@@ -1836,7 +1836,11 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 		bTol := max(1e-6, 1e-8*max(1.0, math.Abs(primal[j])))
 		interior := (math.IsInf(lb[j], -1) || primal[j] > lb[j]+bTol) &&
 			(math.IsInf(ub[j], 1) || primal[j] < ub[j]-bTol)
-		if interior || (j < len(rcMin) && rcMin[j] == 0) {
+		// Only basic columns (rcMin[j] == 0 when available) estimate basis-solve
+		// dual roundoff; an interior column with non-zero rcMin (e.g. an unbounded
+		// ray stopped at CLP's internal 1e10 bound) must not inflate maxBasisDualRel.
+		isBasic := (j < len(rcMin) && rcMin[j] == 0) || (len(rcMin) < n && interior)
+		if isBasic {
 			denSc := yds + math.Ldexp(math.Abs(p.objMin[j]), -32)
 			if denSc > 0 {
 				numSc := math.Ldexp(math.Abs(v)+ebj, -32)

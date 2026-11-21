@@ -179,7 +179,9 @@ func TestInitReducedRow64BitParity(t *testing.T) {
 	for _, n := range kernelSizes {
 		costRow := randVec(r, n)
 		v := randVec(r, n)
-		ui := (r.Float64() - 0.5) * 10
+		// Explicit float64() prevents arm64/v3 FMA contraction of (costRow[i]-v[i])-ui
+		// in the reference loop when InitReducedRow64 receives the rounded float64 ui.
+		ui := float64((r.Float64() - 0.5) * 10)
 		dstSIMD := make([]float64, n)
 		dstScalar := make([]float64, n)
 		want := make([]float64, n)
