@@ -246,22 +246,27 @@ FAMILIES = [fam_general, fam_general, fam_bigm, fam_eqknap, fam_scaled]
 
 def solve_cbc(
     doc: dict[str, Any], options: list[str] | None = None
-) -> tuple[str, float | None]:
+) -> tuple[str, float | None, dict[str, float]]:
     _, prob = pulp.LpProblem.fromDict(doc)
     solve_ret = prob.solve(make_cbc(options))
     status = extract_solve_status(prob, solve_ret)
     if status != "Optimal":
-        return status, None
+        return status, None, {}
     raw_obj = pulp.value(prob.objective)
-    return status, float(raw_obj) if raw_obj is not None else 0.0
+    x = {v.name: float(v.varValue or 0.0) for v in prob.variables()}
+    return status, float(raw_obj) if raw_obj is not None else 0.0, x
 
 
 def feasible_in_pulp(doc: dict[str, Any], x: dict[str, float]) -> tuple[bool, float]:
-    """Evaluate a primal vector in PuLP's model; return (feasible, objective)."""
+    """Evaluate a primal vector in PuLP's model; return (feasible, objective).
+
+    Integer and binary variables are snapped to their nearest integer after
+    checking integrality tolerance so big-M trickle-flow solutions (e.g.
+    y = 1e-6 with M = 1e6) cannot masquerade as feasible.
+    """
     _, prob = pulp.LpProblem.fromDict(doc)
     for name, var in prob.variablesDict().items():
         val = x.get(name, 0.0)
-        var.varValue = val
         if (
             var.lowBound is not None
             and math.isfinite(var.lowBound)
@@ -274,11 +279,11 @@ def feasible_in_pulp(doc: dict[str, Any], x: dict[str, float]) -> tuple[bool, fl
             and val > var.upBound + FEAS_TOL
         ):
             return False, math.nan
-        if (
-            var.cat in (pulp.LpInteger, pulp.LpBinary)
-            and abs(val - round(val)) > FEAS_TOL
-        ):
-            return False, math.nan
+        if var.cat in (pulp.LpInteger, pulp.LpBinary):
+            if abs(val - round(val)) > FEAS_TOL:
+                return False, math.nan
+            val = float(round(val))
+        var.varValue = val
     for con in iter_constraints(prob):
         slack = con.value()
         if (con.sense == pulp.LpConstraintLE and slack > FEAS_TOL) or (
@@ -333,15 +338,17 @@ def classify(ref: dict[str, Any], got: dict[str, Any]) -> str:
         return f"goblin Optimal {got_obj:.6g} is infeasible in PuLP (cbc={cs} {ref['obj']})"
     if not dual_bound_valid(got.get("bound"), obj, sense):
         return f"goblin invalid dual bound {got.get('bound')} vs obj {obj:.6g}"
-    answers = [(cs, ref["obj"])]
+    answers: list[tuple[str, float | None, dict[str, float]]] = [
+        (cs, ref["obj"], ref.get("x", {}))
+    ]
     answers.append(solve_cbc(ref["doc"], ["preprocess off", "presolve off"]))
-    for status, cbc_obj in answers:
-        if (
-            status == "Optimal"
-            and cbc_obj is not None
-            and not better_or_equal(obj, cbc_obj, sense)
-        ):
-            return f"objective goblin={obj:.6g} cbc={cbc_obj:.6g} (goblin worse)"
+    for status, cbc_obj, cbc_x in answers:
+        if status == "Optimal" and cbc_obj is not None:
+            cbc_feas, cbc_exact_obj = feasible_in_pulp(ref["doc"], cbc_x)
+            if cbc_feas and not better_or_equal(obj, cbc_exact_obj, sense):
+                return (
+                    f"objective goblin={obj:.6g} cbc={cbc_exact_obj:.6g} (goblin worse)"
+                )
     return "cbc-defect"
 
 
@@ -363,12 +370,13 @@ def main() -> None:
             for k in range(args.instances):
                 fam = FAMILIES[k % len(FAMILIES)]
                 doc = fam(rng, k).toDict()
-                status, obj = solve_cbc(doc)
+                status, obj, cbc_x = solve_cbc(doc)
                 rec = {
                     "id": doc["parameters"]["name"],
                     "fam": fam.__name__,
                     "status": status,
                     "obj": obj,
+                    "x": cbc_x,
                     "doc": doc,
                 }
                 refs[rec["id"]] = rec

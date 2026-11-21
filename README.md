@@ -317,7 +317,6 @@ This section consolidates open correctness, platform, algorithmic, and performan
 
 | Priority | Track | Open Gap / Work Item | Primary Files | Target Workload / Outcome |
 | :--- | :--- | :--- | :--- | :--- |
-| **P0** | Correctness | Triage pre-existing `bigm347` differential mismatch (`goblin=39.4` vs. `cbc=35.0501`) | [`simplex.go`](simplex.go), [`bab.go`](bab.go), [`bench/difftest_cbc.py`](bench/difftest_cbc.py) | Zero differential mismatches across 400 random CBC test seeds |
 | **P0** | Platform | Validate native `linux/arm64` execution, including `-tags=cbc` bridge tests | [`cbc_cgo.go`](cbc_cgo.go), [`scripts/build_cbc.sh`](scripts/build_cbc.sh) | Verified parity and race tests on `aarch64` hardware |
 | **P1** | LP & LU | True in-place mutated-$U$ Forrest-Tomlin LU updates (without lazy-rank branch tax) | [`lu.go`](lu.go) | Cut per-pivot BTRAN/FTRAN cost on `t3_mad_g4_i1000` and dense Netlib/MIPLIB bases |
 | **P1** | LP & LU | Dedicated LP presolve and anti-degeneracy cost perturbation for large unpresolved LPs | [`simplex.go`](simplex.go), [`presolve.go`](presolve.go) | Close the remaining 2.90x unpresolved Root LP gap vs. CLP on `t3_mad_g4_i1000` |
