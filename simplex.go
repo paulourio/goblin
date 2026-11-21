@@ -55,6 +55,7 @@ const (
 	dualShiftWorkScaleCap  = 1e10
 	dualShiftColNormCap    = 1e6
 	dualShiftColProdCap    = 1e9
+	minDualRatioSIMDChunks = 4
 )
 
 // LPResult holds the result of a continuous LP solve.
@@ -94,10 +95,13 @@ type LPSolver struct {
 	// SkipExactFarkas skips unscaled BTRANExact and rational Farkas certification on dual-simplex
 	// infeasibility exits when callers only need a fast infeasibility status.
 	SkipExactFarkas bool
-	ownsWS          bool
-	scaled          bool
-	luValid         bool
-	dualValid       bool
+	// fastHeuristicPrimal skips iterative basis refinement and dual residual certification
+	// for intermediate primal-heuristic diving LPs whose final candidates are verified independently.
+	fastHeuristicPrimal bool
+	ownsWS              bool
+	scaled              bool
+	luValid             bool
+	dualValid           bool
 	// colTol holds the primal bound tolerance of each structural column (see feasTol).
 	colTol []float64
 	// slackTol holds the scaled primal tolerance of each slack variable when scaled is true.
@@ -631,6 +635,10 @@ func (p *CompiledProblem) getScaledLP() *scaledLPData {
 
 // NewLPSolver creates an LPSolver initialized for the given CompiledProblem.
 func NewLPSolver(p *CompiledProblem, ws *Workspace) *LPSolver {
+	return newLPSolver(p, ws, true)
+}
+
+func newLPSolver(p *CompiledProblem, ws *Workspace, initBasis bool) *LPSolver {
 	if p == nil {
 		return &LPSolver{}
 	}
@@ -669,7 +677,9 @@ func NewLPSolver(p *CompiledProblem, ws *Workspace) *LPSolver {
 		s.origLB = slices.Clone(p.varLB)
 		s.origUB = slices.Clone(p.varUB)
 	}
-	s.InitCrashBasis()
+	if initBasis {
+		s.InitCrashBasis()
+	}
 	return s
 }
 
@@ -764,6 +774,290 @@ func (s *LPSolver) InitCrashBasis() {
 	s.extraCSCDirty = len(s.extraRows) > 0
 	s.luValid = false
 	s.dualValid = false
+	if len(s.extraRows) == 0 && p.numConstraints >= 8 {
+		s.crashEqualityBasis()
+	}
+}
+
+// crashEqualityBasis replaces artificial slacks on equality rows with a lower-triangular,
+// dual-feasible set of structural columns to avoid Phase-1 artificial clearance pivots.
+// Pass 1 crashes zero-cost structural columns (preserving y == 0 identically); Pass 2
+// crashes minimum cost-to-coefficient columns on disjoint positive-coefficient equality rows.
+// Columns incident to dense coupling rows (> maxCrashIncRowLen) are skipped so crashing does
+// not displace unit artificial slacks with dense multi-row columns that inflate LU fill-in.
+func (s *LPSolver) crashEqualityBasis() {
+	const (
+		maxCrashEqRowLen    = 128
+		maxCrashIncRowLen   = 128
+		maxSmallCrashColDeg = 4
+		minDenseCrashEqRows = 20
+		minCrashPivotAbs    = 1e-4
+		minCrashPivotRel    = 1e-6
+	)
+	p := s.prob
+	mp := s.mat
+	ws := s.ws
+	n := mp.numVars
+	baseM := mp.numConstraints
+	if n == 0 || baseM == 0 {
+		return
+	}
+
+	eqRows := ws.crashEqRows[:0]
+	sameLen := true
+	firstLen := -1
+	for i := range baseM {
+		if p.rowSense[i] != Equal {
+			continue
+		}
+		rLen := mp.rowPtr[i+1] - mp.rowPtr[i]
+		if rLen < 1 || rLen > maxCrashEqRowLen {
+			continue
+		}
+		if firstLen == -1 {
+			firstLen = rLen
+		} else if rLen != firstLen {
+			sameLen = false
+		}
+		eqRows = append(eqRows, i)
+	}
+	ws.crashEqRows = eqRows
+	if len(eqRows) == 0 {
+		return
+	}
+	if !sameLen && len(eqRows) > 1 {
+		slices.SortFunc(eqRows, func(a, b int) int {
+			la := mp.rowPtr[a+1] - mp.rowPtr[a]
+			lb := mp.rowPtr[b+1] - mp.rowPtr[b]
+			if c := cmp.Compare(la, lb); c != 0 {
+				return c
+			}
+			return cmp.Compare(a, b)
+		})
+	}
+
+	if cap(ws.crashRowDone) < baseM {
+		ws.crashRowDone = make([]bool, baseM)
+	} else {
+		ws.crashRowDone = ws.crashRowDone[:baseM]
+		clear(ws.crashRowDone)
+	}
+	if cap(ws.crashRowLoad) < baseM {
+		ws.crashRowLoad = make([]int, baseM)
+	} else {
+		ws.crashRowLoad = ws.crashRowLoad[:baseM]
+		clear(ws.crashRowLoad)
+	}
+	rowCrashed := ws.crashRowDone
+	rowLoad := ws.crashRowLoad
+
+	assignCrashCol := func(row, col int, pivVal float64) {
+		ws.basis[row] = col
+		ws.basicRow[col] = row
+		ws.status[col] = statusBasic
+		slackVar := n + row
+		ws.basicRow[slackVar] = -1
+		ws.status[slackVar] = statusFixed
+		ws.x[slackVar] = 0
+		rowCrashed[row] = true
+
+		invPiv := 1.0 / pivVal
+		ws.dse[row] = min(max(invPiv*invPiv, minDSEWeight), maxDSEWeight)
+		for idx := mp.colPtr[col]; idx < mp.colPtr[col+1]; idx++ {
+			r := mp.rowIdx[idx]
+			v := mp.colVal[idx]
+			if v == 0 {
+				continue
+			}
+			rowLoad[r]++
+			if r != row {
+				ratio := v * invPiv
+				w := ws.dse[r] + ratio*ratio
+				if w > maxDSEWeight {
+					w = maxDSEWeight
+				}
+				ws.dse[r] = w
+			}
+		}
+	}
+
+	allowDenseCols := len(eqRows) >= minDenseCrashEqRows
+
+	// Pass 1: zero-cost structural columns (y remains identically 0 across all rows).
+	for _, row := range eqRows {
+		rStart, rEnd := mp.rowPtr[row], mp.rowPtr[row+1]
+		bestCol := -1
+		bestPiv := 0.0
+		bestFree := 3
+		bestDeg := math.MaxInt
+		bestAbs := 0.0
+
+		for k := rStart; k < rEnd; k++ {
+			col := mp.colIdx[k]
+			if ws.status[col] == statusBasic || ws.status[col] == statusFixed {
+				continue
+			}
+			if ws.cost[col] != 0 {
+				continue
+			}
+			a := mp.rowVal[k]
+			absA := math.Abs(a)
+			if absA < minCrashPivotAbs || isNonFinite(absA) {
+				continue
+			}
+			cStart, cEnd := mp.colPtr[col], mp.colPtr[col+1]
+			deg := cEnd - cStart
+			if !allowDenseCols && deg > maxSmallCrashColDeg {
+				continue
+			}
+			colMax := 0.0
+			triOK := true
+			for idx := cStart; idx < cEnd; idx++ {
+				r := mp.rowIdx[idx]
+				v := math.Abs(mp.colVal[idx])
+				if v == 0 {
+					continue
+				}
+				if r != row {
+					if rowCrashed[r] || mp.rowPtr[r+1]-mp.rowPtr[r] > maxCrashIncRowLen {
+						triOK = false
+						break
+					}
+				}
+				if v > colMax {
+					colMax = v
+				}
+			}
+			if !triOK || absA < minCrashPivotRel*colMax {
+				continue
+			}
+			freeRank := 2
+			infLB := math.IsInf(ws.lb[col], -1)
+			infUB := math.IsInf(ws.ub[col], 1)
+			if infLB && infUB {
+				freeRank = 0
+			} else if infLB || infUB {
+				freeRank = 1
+			}
+			better := bestCol == -1 ||
+				freeRank < bestFree ||
+				(freeRank == bestFree && (deg < bestDeg ||
+					(deg == bestDeg && absA > bestAbs)))
+			if better {
+				bestCol = col
+				bestPiv = a
+				bestFree = freeRank
+				bestDeg = deg
+				bestAbs = absA
+			}
+		}
+		if bestCol != -1 {
+			assignCrashCol(row, bestCol, bestPiv)
+		}
+	}
+
+	// Pass 2: positive-coefficient equality rows untouched by earlier crashed columns.
+	// Choosing the minimum c_j / a_ij column preserves non-negative reduced costs on the row.
+	for _, row := range eqRows {
+		if rowCrashed[row] || rowLoad[row] > 0 {
+			continue
+		}
+		rStart, rEnd := mp.rowPtr[row], mp.rowPtr[row+1]
+		allPosFiniteLB := true
+		minRatio := math.Inf(1)
+		for k := rStart; k < rEnd; k++ {
+			col := mp.colIdx[k]
+			a := mp.rowVal[k]
+			if a <= 0 || isNonFinite(a) {
+				allPosFiniteLB = false
+				break
+			}
+			if ws.status[col] == statusFixed {
+				continue
+			}
+			if ws.status[col] == statusBasic || math.IsInf(ws.lb[col], -1) || isNonFinite(ws.cost[col]) {
+				allPosFiniteLB = false
+				break
+			}
+			if r := ws.cost[col] / a; r < minRatio {
+				minRatio = r
+			}
+		}
+		if !allPosFiniteLB || isNonFinite(minRatio) {
+			continue
+		}
+
+		bestCol := -1
+		bestPiv := 0.0
+		bestDeg := math.MaxInt
+		bestAbs := 0.0
+		for k := rStart; k < rEnd; k++ {
+			col := mp.colIdx[k]
+			if ws.status[col] == statusBasic || ws.status[col] == statusFixed {
+				continue
+			}
+			a := mp.rowVal[k]
+			if a < minCrashPivotAbs {
+				continue
+			}
+			if ws.cost[col]/a != minRatio {
+				continue
+			}
+			cStart, cEnd := mp.colPtr[col], mp.colPtr[col+1]
+			deg := cEnd - cStart
+			if !allowDenseCols && deg > maxSmallCrashColDeg {
+				continue
+			}
+			colMax := 0.0
+			triOK := true
+			for idx := cStart; idx < cEnd; idx++ {
+				r := mp.rowIdx[idx]
+				v := math.Abs(mp.colVal[idx])
+				if v == 0 {
+					continue
+				}
+				if r != row {
+					if rowCrashed[r] || mp.rowPtr[r+1]-mp.rowPtr[r] > maxCrashIncRowLen {
+						triOK = false
+						break
+					}
+				}
+				if v > colMax {
+					colMax = v
+				}
+			}
+			if !triOK || a < minCrashPivotRel*colMax {
+				continue
+			}
+			better := bestCol == -1 ||
+				deg < bestDeg ||
+				(deg == bestDeg && a > bestAbs)
+			if better {
+				bestCol = col
+				bestPiv = a
+				bestDeg = deg
+				bestAbs = a
+			}
+		}
+		if bestCol == -1 {
+			continue
+		}
+		yRow := ws.cost[bestCol] / bestPiv
+		dualOK := true
+		for k := rStart; k < rEnd; k++ {
+			col := mp.colIdx[k]
+			if col == bestCol || ws.status[col] == statusFixed {
+				continue
+			}
+			if ws.cost[col]-yRow*mp.rowVal[k] < -1e-12*max(1.0, math.Abs(ws.cost[col])) {
+				dualOK = false
+				break
+			}
+		}
+		if dualOK {
+			assignCrashCol(row, bestCol, bestPiv)
+		}
+	}
 }
 
 // CopyRootBasisFrom copies the root basis, bounds, duals, reduced costs, and steepest-edge weights from src when neither solver holds extra cut rows.
@@ -2753,33 +3047,39 @@ func (s *LPSolver) slackCanMoveUnbounded(r int, toPosInf bool) bool {
 	status := ws.status[:n]
 	lb := ws.lb[:n]
 	ub := ws.ub[:n]
-	checkTerm := func(c int, a float64) bool {
-		if a == 0 || status[c] == statusFixed {
-			return false
-		}
-		if toPosInf {
-			return (a > 0 && math.IsInf(lb[c], -1)) || (a < 0 && math.IsInf(ub[c], 1))
-		}
-		return (a > 0 && math.IsInf(ub[c], 1)) || (a < 0 && math.IsInf(lb[c], -1))
-	}
+	var cols []int
+	var vals []float64
 	if r < baseM {
 		st, en := p.rowPtr[r], p.rowPtr[r+1]
-		cols := p.colIdx[st:en]
-		vals := p.rowVal[st:en]
+		cols = p.colIdx[st:en]
+		vals = p.rowVal[st:en]
+	} else {
+		e := r - baseM
+		if uint(e) >= uint(len(s.extraRows)) {
+			return false
+		}
+		dr := s.extraRows[e]
+		cols = dr.ColIdx
+		vals = dr.Val
+	}
+	if toPosInf {
 		for k, c := range cols {
-			if checkTerm(c, vals[k]) {
+			a := vals[k]
+			if a == 0 || status[c] == statusFixed {
+				continue
+			}
+			if (a > 0 && math.IsInf(lb[c], -1)) || (a < 0 && math.IsInf(ub[c], 1)) {
 				return true
 			}
 		}
 		return false
 	}
-	e := r - baseM
-	if uint(e) >= uint(len(s.extraRows)) {
-		return false
-	}
-	dr := s.extraRows[e]
-	for k, c := range dr.ColIdx {
-		if checkTerm(c, dr.Val[k]) {
+	for k, c := range cols {
+		a := vals[k]
+		if a == 0 || status[c] == statusFixed {
+			continue
+		}
+		if (a > 0 && math.IsInf(ub[c], 1)) || (a < 0 && math.IsInf(lb[c], -1)) {
 			return true
 		}
 	}
@@ -2840,27 +3140,35 @@ func (s *LPSolver) stabilizeNonBasicBounds() bool {
 		case statusAtLower:
 			if dj < -dTol {
 				dualFeas = false
-			} else if hasInfStruct && (k < n || s.slackCanMoveUnbounded(k-n, true)) {
+			} else if !needRefinedCheck && hasInfStruct {
 				if dj < 0 {
-					needRefinedCheck = true
+					if k < n || s.slackCanMoveUnbounded(k-n, true) {
+						needRefinedCheck = true
+					}
 				} else if cNoise := s.colDualNoiseTol(k, costSlice); cNoise > 0 && dj <= cNoise {
-					needRefinedCheck = true
+					if k < n || s.slackCanMoveUnbounded(k-n, true) {
+						needRefinedCheck = true
+					}
 				}
 			}
 		case statusAtUpper:
 			if dj > dTol {
 				dualFeas = false
-			} else if hasInfStruct && (k < n || s.slackCanMoveUnbounded(k-n, false)) {
+			} else if !needRefinedCheck && hasInfStruct {
 				if dj > 0 {
-					needRefinedCheck = true
+					if k < n || s.slackCanMoveUnbounded(k-n, false) {
+						needRefinedCheck = true
+					}
 				} else if cNoise := s.colDualNoiseTol(k, costSlice); cNoise > 0 && -dj <= cNoise {
-					needRefinedCheck = true
+					if k < n || s.slackCanMoveUnbounded(k-n, false) {
+						needRefinedCheck = true
+					}
 				}
 			}
 		case statusSuperBasic:
 			if dj > dTol || dj < -dTol {
 				dualFeas = false
-			} else if hasInfStruct {
+			} else if !needRefinedCheck && hasInfStruct {
 				if dj != 0 || s.colDualNoiseTol(k, costSlice) > 0 {
 					needRefinedCheck = true
 				}
@@ -2896,11 +3204,15 @@ func (s *LPSolver) isDualFeasible() bool {
 				return false
 			}
 			if math.IsInf(ubSlice[k], 1) {
-				if hasInfStruct && (k < n || s.slackCanMoveUnbounded(k-n, true)) {
+				if !needRefinedCheck && hasInfStruct {
 					if dj < 0 {
-						needRefinedCheck = true
+						if k < n || s.slackCanMoveUnbounded(k-n, true) {
+							needRefinedCheck = true
+						}
 					} else if cNoise := s.colDualNoiseTol(k, costSlice); cNoise > 0 && dj <= cNoise {
-						needRefinedCheck = true
+						if k < n || s.slackCanMoveUnbounded(k-n, true) {
+							needRefinedCheck = true
+						}
 					}
 				}
 			} else if dj < -1e-14 && (-dj)*(ubSlice[k]-lbSlice[k]) > primalTol && -dj > s.colDualNoiseTol(k, costSlice) {
@@ -2911,11 +3223,15 @@ func (s *LPSolver) isDualFeasible() bool {
 				return false
 			}
 			if math.IsInf(lbSlice[k], -1) {
-				if hasInfStruct && (k < n || s.slackCanMoveUnbounded(k-n, false)) {
+				if !needRefinedCheck && hasInfStruct {
 					if dj > 0 {
-						needRefinedCheck = true
+						if k < n || s.slackCanMoveUnbounded(k-n, false) {
+							needRefinedCheck = true
+						}
 					} else if cNoise := s.colDualNoiseTol(k, costSlice); cNoise > 0 && -dj <= cNoise {
-						needRefinedCheck = true
+						if k < n || s.slackCanMoveUnbounded(k-n, false) {
+							needRefinedCheck = true
+						}
 					}
 				}
 			} else if dj > 1e-14 && dj*(ubSlice[k]-lbSlice[k]) > primalTol && dj > s.colDualNoiseTol(k, costSlice) {
@@ -2925,7 +3241,7 @@ func (s *LPSolver) isDualFeasible() bool {
 			if dj > vTol || dj < -vTol {
 				return false
 			}
-			if hasInfStruct && (dj != 0 || s.colDualNoiseTol(k, costSlice) > 0) {
+			if !needRefinedCheck && hasInfStruct && (dj != 0 || s.colDualNoiseTol(k, costSlice) > 0) {
 				needRefinedCheck = true
 			}
 		}
@@ -2975,6 +3291,7 @@ func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCan
 	}
 
 	// Evaluate in double-double first and escalate to wideDotAcc only on overflow, underflow, or deep cancellation.
+	basicPos := ws.basicRow[:tot]
 	var acc dot2Acc
 	acc.addVal(rhs)
 	if hasSlackTerm {
@@ -2984,19 +3301,21 @@ func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCan
 		if uint(col) >= uint(n) {
 			continue
 		}
-		if status[col] == statusBasic {
+		if bSlot := basicPos[col]; bSlot >= 0 {
 			if !includeBasic {
 				continue
 			}
-			bSlot := ws.basicRow[col]
-			if bSlot >= 0 && bSlot < len(xbCand) {
-				acc.addProd(-vals[k], xbCand[bSlot])
+			if bSlot < len(xbCand) {
+				if xVal := xbCand[bSlot]; xVal != 0 {
+					acc.addProd(-vals[k], xVal)
+				}
 			}
-		} else {
-			acc.addProd(-vals[k], xSlice[col])
+		} else if xVal := xSlice[col]; xVal != 0 {
+			acc.addProd(-vals[k], xVal)
 		}
 	}
-	if val, eb, ok := acc.result(); ok && eb <= 0x1p-48*math.Abs(val) {
+	if val, eb, ok := acc.result(); ok && (eb <= 0x1p-48*math.Abs(val) ||
+		(includeBasic && (eb <= 0x1p-20*math.Abs(val) || eb <= 0x1p-88*acc.absL1))) {
 		return val
 	}
 
@@ -3371,7 +3690,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 					vals := p.rowVal[start:end]
 					for k, col := range cols {
 						if uint(col) < uint(n) {
-							tabStruct[col] += yi * vals[k]
+							tabStruct[col] += float64(yi * vals[k])
 						}
 					}
 				} else {
@@ -3383,7 +3702,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 				vals := dr.Val[:len(cols)]
 				for k, col := range cols {
 					if uint(col) < uint(n) {
-						tabStruct[col] += yi * vals[k]
+						tabStruct[col] += float64(yi * vals[k])
 					}
 				}
 			}
@@ -3459,7 +3778,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 					for k := lo; k < cnt; k++ {
 						col := cols[k]
 						if uint(col) < uint(n) {
-							tabStruct[col] += yi * vals[k]
+							tabStruct[col] += float64(yi * vals[k])
 							if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 								chunkMark[ch] = true
 								chunks = append(chunks, ch)
@@ -3469,7 +3788,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 				} else {
 					for k, col := range cols {
 						if uint(col) < uint(n) {
-							tabStruct[col] += yi * vals[k]
+							tabStruct[col] += float64(yi * vals[k])
 							if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 								chunkMark[ch] = true
 								chunks = append(chunks, ch)
@@ -3480,7 +3799,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 			} else {
 				for k, col := range cols {
 					if uint(col) < uint(n) {
-						tabStruct[col] += yi * vals[k]
+						tabStruct[col] += float64(yi * vals[k])
 						if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 							chunkMark[ch] = true
 							chunks = append(chunks, ch)
@@ -3531,7 +3850,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 						tabMark[col] = true
 						tabIdx = append(tabIdx, col)
 					}
-					tabRow[col] += yi * vals[k]
+					tabRow[col] += float64(yi * vals[k])
 				}
 			} else {
 				dr := s.extraRows[i-baseM]
@@ -3545,7 +3864,7 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 						tabMark[col] = true
 						tabIdx = append(tabIdx, col)
 					}
-					tabRow[col] += yi * vals[k]
+					tabRow[col] += float64(yi * vals[k])
 				}
 			}
 			slack := n + i
@@ -3981,61 +4300,149 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 		tabStruct := tabRow[:n]
 		statusN := status[:n]
 		djN := dj[:n]
-		for _, ch := range ws.tabRowChunks {
-			start := ch << tabRowChunkBits
-			end := min(start+tabRowChunkSize, n)
-			if start >= end {
-				continue
+		chunks := ws.tabRowChunks
+		if len(chunks) >= minDualRatioSIMDChunks && simd.UsingHardwareSIMDWith(s.DisableSIMD) && math.Abs(leaveDir) == 1.0 {
+			negLeaveDir := -leaveDir
+			var candIdxBuf [128]int
+			ci, elem := 0, 0
+			for ci < len(chunks) {
+				batchCap := len(candIdxBuf)
+				if !bland {
+					if math.IsInf(thetaMax, 1) {
+						batchCap = 8
+					} else if thetaMax > 1e-6 {
+						batchCap = 24
+					}
+				}
+				var cnt int
+				cnt, ci, elem = simd.ScanDualRatioCand64With(
+					tabStruct, djN, statusN, chunks, ci, elem,
+					negLeaveDir, pivotTol, thetaMax+2*minScaledPrimalTol,
+					bland, s.DisableSIMD, candIdxBuf[:batchCap],
+				)
+				for _, k := range candIdxBuf[:cnt] {
+					tab := tabStruct[k]
+					if tab == 0 {
+						continue
+					}
+					alphaBar := negLeaveDir * tab
+					st := statusN[k]
+					if tab > pivotTol || tab < -pivotTol {
+						absA, djSign, super, ok := dualBlockDir(alphaBar, st)
+						if !ok {
+							continue
+						}
+						if super {
+							thetaMax, minRatio = 0, 0
+							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							continue
+						}
+						d := djSign * djN[k]
+						if math.IsNaN(d) {
+							ws.bfrtCands = cands
+							return 0, 0, false, true
+						}
+						if d <= 0 {
+							if bland {
+								minRatio = 0
+							}
+							if effHarris <= thetaMax*absA {
+								if hr := effHarris * (1.0 / absA); hr < thetaMax {
+									thetaMax = hr
+								}
+							}
+							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							continue
+						}
+						if bland {
+							if r0 := d / absA; r0 < minRatio {
+								minRatio = r0
+							}
+						}
+						if d <= (thetaMax+2*minScaledPrimalTol)*absA {
+							invA := 1.0 / absA
+							r0 := d * invA
+							if hr := (d + effHarris) * invA; hr < thetaMax {
+								thetaMax = hr
+							}
+							cands = append(cands, bfrtCand{col: k, ratio: r0, absA: absA})
+						}
+					} else {
+						blk, nan := dualSubTolCheck(tab, alphaBar, st)
+						if nan {
+							ws.bfrtCands = cands
+							return 0, 0, false, true
+						}
+						subTol = subTol || blk
+					}
+				}
 			}
-			size := end - start
-			tabChunk := tabStruct[start : start+size]
-			stChunk := statusN[start : start+size]
-			djChunk := djN[start : start+size]
-			for i, tab := range tabChunk {
-				if tab == 0 {
+		} else {
+			for _, ch := range chunks {
+				start := ch << tabRowChunkBits
+				end := min(start+tabRowChunkSize, n)
+				if start >= end {
 					continue
 				}
-				alphaBar := -leaveDir * tab
-				st := stChunk[i]
-				if tab > pivotTol || tab < -pivotTol {
-					absA, djSign, super, ok := dualBlockDir(alphaBar, st)
-					if !ok {
+				size := end - start
+				tabChunk := tabStruct[start : start+size]
+				stChunk := statusN[start : start+size]
+				djChunk := djN[start : start+size]
+				for i, tab := range tabChunk {
+					if tab == 0 {
 						continue
 					}
-					k := start + i
-					if super {
-						thetaMax, minRatio = 0, 0
-						cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
-						continue
-					}
-					d := djSign * djChunk[i]
-					if math.IsNaN(d) {
-						ws.bfrtCands = cands
-						return 0, 0, false, true
-					}
-					if d < 0 {
-						d = 0
-					}
-					if bland {
-						if r0 := d / absA; r0 < minRatio {
-							minRatio = r0
+					alphaBar := -leaveDir * tab
+					st := stChunk[i]
+					if tab > pivotTol || tab < -pivotTol {
+						absA, djSign, super, ok := dualBlockDir(alphaBar, st)
+						if !ok {
+							continue
 						}
-					}
-					if d <= (thetaMax+2*minScaledPrimalTol)*absA {
-						invA := 1.0 / absA
-						r0 := d * invA
-						if hr := (d + effHarris) * invA; hr < thetaMax {
-							thetaMax = hr
+						k := start + i
+						if super {
+							thetaMax, minRatio = 0, 0
+							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							continue
 						}
-						cands = append(cands, bfrtCand{col: k, ratio: r0, absA: absA})
+						d := djSign * djChunk[i]
+						if math.IsNaN(d) {
+							ws.bfrtCands = cands
+							return 0, 0, false, true
+						}
+						if d <= 0 {
+							if bland {
+								minRatio = 0
+							}
+							if effHarris <= thetaMax*absA {
+								if hr := effHarris * (1.0 / absA); hr < thetaMax {
+									thetaMax = hr
+								}
+							}
+							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							continue
+						}
+						if bland {
+							if r0 := d / absA; r0 < minRatio {
+								minRatio = r0
+							}
+						}
+						if d <= (thetaMax+2*minScaledPrimalTol)*absA {
+							invA := 1.0 / absA
+							r0 := d * invA
+							if hr := (d + effHarris) * invA; hr < thetaMax {
+								thetaMax = hr
+							}
+							cands = append(cands, bfrtCand{col: k, ratio: r0, absA: absA})
+						}
+					} else {
+						blk, nan := dualSubTolCheck(tab, alphaBar, st)
+						if nan {
+							ws.bfrtCands = cands
+							return 0, 0, false, true
+						}
+						subTol = subTol || blk
 					}
-				} else {
-					blk, nan := dualSubTolCheck(tab, alphaBar, st)
-					if nan {
-						ws.bfrtCands = cands
-						return 0, 0, false, true
-					}
-					subTol = subTol || blk
 				}
 			}
 		}
@@ -4097,11 +4504,14 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 }
 
 // selectDualLeaveRow prices all basic rows using contiguous packed bounds and tolerances.
-func selectDualLeaveRow(xb, basicLB, basicUB, basicTol, dse []float64, basis []int, tot int, bland bool) (leaveRow int, leaveDir, primalInfeas float64) {
+func selectDualLeaveRow(xb, basicLB, basicUB, basicTol, dse []float64, basis []int, tot int, bland, disableSIMD bool) (leaveRow int, leaveDir, primalInfeas float64) {
 	leaveRow = -1
 	m := len(xb)
 	if m == 0 {
 		return -1, 0, 0
+	}
+	if !bland {
+		return simd.SelectDualLeaveRow64With(xb, basicLB, basicUB, basicTol, dse, disableSIMD)
 	}
 	_ = basicLB[m-1]
 	_ = basicUB[m-1]
@@ -4109,34 +4519,7 @@ func selectDualLeaveRow(xb, basicLB, basicUB, basicTol, dse []float64, basis []i
 	_ = dse[m-1]
 	_ = basis[m-1]
 
-	if bland {
-		bestLeaveVar := tot
-		for r, val := range xb {
-			lbr := basicLB[r]
-			ubr := basicUB[r]
-			tol := basicTol[r]
-			var viol, dir float64
-			if val < lbr-tol {
-				viol = lbr - val
-				dir = 1.0
-			} else if val > ubr+tol {
-				viol = val - ubr
-				dir = -1.0
-			}
-			if viol > 0 {
-				bVar := basis[r]
-				if leaveRow == -1 || bVar < bestLeaveVar {
-					bestLeaveVar = bVar
-					leaveRow = r
-					leaveDir = dir
-					primalInfeas = viol
-				}
-			}
-		}
-		return leaveRow, leaveDir, primalInfeas
-	}
-
-	bestScore := -1.0
+	bestLeaveVar := tot
 	for r, val := range xb {
 		lbr := basicLB[r]
 		ubr := basicUB[r]
@@ -4150,16 +4533,12 @@ func selectDualLeaveRow(xb, basicLB, basicUB, basicTol, dse []float64, basis []i
 			dir = -1.0
 		}
 		if viol > 0 {
-			w := dse[r]
-			v2 := viol * viol
-			if v2 > bestScore*w {
-				score := v2 / w
-				if leaveRow == -1 || score > bestScore {
-					bestScore = score
-					leaveRow = r
-					leaveDir = dir
-					primalInfeas = viol
-				}
+			bVar := basis[r]
+			if leaveRow == -1 || bVar < bestLeaveVar {
+				bestLeaveVar = bVar
+				leaveRow = r
+				leaveDir = dir
+				primalInfeas = viol
 			}
 		}
 	}
@@ -4326,7 +4705,7 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64, dualFresh bool) (Status, i
 		}
 
 		bland := degenStreak >= blandTrigger && ((degenStreak-blandTrigger)&blandBurstMask) < blandBurstWindow
-		leaveRow, leaveDir, primalInfeas := selectDualLeaveRow(xb, basicLB, basicUB, basicTol, dse, basis, tot, bland)
+		leaveRow, leaveDir, primalInfeas := selectDualLeaveRow(xb, basicLB, basicUB, basicTol, dse, basis, tot, bland, s.DisableSIMD)
 
 		if leaveRow == -1 {
 			if len(ws.lu.etas) > 0 {
@@ -5173,27 +5552,52 @@ func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj
 	acc.addVal(c0)
 	dy2Raw := 0.0
 	yDotRaw := 0.0
-	for idx, r := range rows {
-		if uint(r) >= uint(len(y0)) {
-			continue
+	if dy1 == nil && dy2Abs == nil {
+		for idx, r := range rows {
+			if uint(r) >= uint(len(y0)) {
+				continue
+			}
+			yr := y0[r]
+			if yr == 0 {
+				continue
+			}
+			a := vals[idx]
+			acc.addProd(-yr, a)
+			yDotRaw += math.Abs(yr * a)
 		}
-		a := vals[idx]
-		acc.addProd(-y0[r], a)
-		if dy1 != nil && dy1[r] != 0 {
-			acc.addProd(-dy1[r], a)
+	} else {
+		for idx, r := range rows {
+			if uint(r) >= uint(len(y0)) {
+				continue
+			}
+			yr := y0[r]
+			d1 := 0.0
+			if dy1 != nil {
+				d1 = dy1[r]
+			}
+			d2 := 0.0
+			if dy2Abs != nil {
+				d2 = dy2Abs[r]
+			}
+			if yr == 0 && d1 == 0 && d2 == 0 {
+				continue
+			}
+			a := vals[idx]
+			if yr != 0 {
+				acc.addProd(-yr, a)
+			}
+			if d1 != 0 {
+				acc.addProd(-d1, a)
+			}
+			aa := math.Abs(a)
+			if d2 != 0 {
+				dy2Raw += d2 * aa
+			}
+			yDotRaw += (math.Abs(yr) + math.Abs(d1)) * aa
 		}
-		aa := math.Abs(a)
-		if dy2Abs != nil {
-			dy2Raw += dy2Abs[r] * aa
-		}
-		yrAbs := math.Abs(y0[r])
-		if dy1 != nil {
-			yrAbs += math.Abs(dy1[r])
-		}
-		yDotRaw += yrAbs * aa
 	}
 	v, errB, accOK := acc.result()
-	if accOK && !math.IsNaN(dy2Raw) && !math.IsInf(dy2Raw, 0) && !math.IsNaN(yDotRaw) && !math.IsInf(yDotRaw, 0) {
+	if accOK && !isNonFinite(dy2Raw) && !isNonFinite(yDotRaw) {
 		return v, errB, math.Ldexp(dy2Raw, -shift), math.Ldexp(yDotRaw, -shift), true
 	}
 	if math.IsNaN(c0) || math.IsInf(c0, 0) {
@@ -5333,44 +5737,60 @@ func (s *LPSolver) computeWorkingDualRefinement(cost []float64) (y0, dy1, dy2Abs
 	ws := s.ws
 	n := p.numVars
 	m := s.TotalRows()
-	baseM := p.numConstraints
 	tot := ws.totVar
 	if m == 0 || len(ws.y) < m || len(cost) < tot {
 		return nil, nil, nil, false
 	}
-	y0 = slices.Clone(ws.y[:m])
-	for _, yi := range y0 {
-		if math.IsNaN(yi) || math.IsInf(yi, 0) {
-			return nil, nil, nil, false
-		}
+	y0 = ensureFloat64Slice(&ws.dualRefY0, m, false)
+	copy(y0, ws.y[:m])
+	if slices.ContainsFunc(y0, isNonFinite) {
+		return nil, nil, nil, false
 	}
-	dy1 = make([]float64, m)
-	dy2Abs = make([]float64, m)
 	if !s.luValid || !ws.lu.valid {
-		return y0, dy1, dy2Abs, true
+		return y0, nil, nil, true
 	}
+	dy1 = ensureFloat64Slice(&ws.dualRefDY1, m, true)
+	dy2Abs = ensureFloat64Slice(&ws.dualRefDY2, m, true)
 
 	basis := ws.basis[:m]
-	var scratchRows []int
-	var scratchVals []float64
+	noExtra := len(s.extraRows) == 0
+	var slackRow [1]int
+	slackVal := [1]float64{1.0}
 	evalBasicResiduals := func(useDY1 bool, dst []float64) (anyNonZero, anyErr, valid bool) {
 		var curDY1 []float64
 		if useDY1 {
 			curDY1 = dy1
 		}
 		for q, bCol := range basis {
+			var rSlice []int
+			var vSlice []float64
 			if bCol >= n {
 				r := bCol - n
 				if uint(r) >= uint(m) {
 					return false, false, false
 				}
-				scratchRows = append(scratchRows[:0], r)
-				scratchVals = append(scratchVals[:0], 1.0)
+				cb := cost[bCol]
+				if cb == 0 && (curDY1 == nil || curDY1[r] == 0) {
+					v := -y0[r]
+					dst[q] = v
+					if v != 0 {
+						anyNonZero = true
+					}
+					continue
+				}
+				slackRow[0] = r
+				rSlice = slackRow[:]
+				vSlice = slackVal[:]
+			} else if noExtra {
+				st, en := p.colPtr[bCol], p.colPtr[bCol+1]
+				rSlice = p.rowIdx[st:en]
+				vSlice = p.colVal[st:en]
 			} else {
-				scratchRows, scratchVals = s.appendBasisColumn(bCol, scratchRows[:0], scratchVals[:0])
+				ws.dualRefRows, ws.dualRefVals = s.appendBasisColumn(bCol, ws.dualRefRows[:0], ws.dualRefVals[:0])
+				rSlice = ws.dualRefRows
+				vSlice = ws.dualRefVals
 			}
-			_ = baseM
-			v, eb, _, _, dotOK := evalColDualDot(cost[bCol], scratchRows, scratchVals, y0, curDY1, nil)
+			v, eb, _, _, dotOK := evalColDualDot(cost[bCol], rSlice, vSlice, y0, curDY1, nil)
 			if !dotOK {
 				return false, false, false
 			}
@@ -5386,88 +5806,91 @@ func (s *LPSolver) computeWorkingDualRefinement(cost []float64) (y0, dy1, dy2Abs
 	}
 
 	anyR1, anyEB1, okR1 := evalBasicResiduals(false, dy1)
-	if !okR1 {
-		clear(dy1)
-		return y0, dy1, dy2Abs, true
-	}
-	if !anyR1 && !anyEB1 {
-		return y0, dy1, dy2Abs, true
+	if !okR1 || (!anyR1 && !anyEB1) {
+		return y0, nil, nil, true
 	}
 	if anyR1 {
 		ws.lu.BTRANExact(dy1)
-		validDY1 := true
-		for _, v := range dy1 {
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				validDY1 = false
-				break
-			}
+		if slices.ContainsFunc(dy1, isNonFinite) {
+			return y0, nil, nil, true
 		}
-		if !validDY1 {
-			clear(dy1)
-			return y0, dy1, dy2Abs, true
-		}
-		dy2 := make([]float64, m)
+		dy2 := ensureFloat64Slice(&ws.dualRefTmp, m, true)
 		anyR2, _, okR2 := evalBasicResiduals(true, dy2)
 		if okR2 && anyR2 {
 			ws.lu.BTRANExact(dy2)
 			for i, v := range dy2 {
-				if !math.IsNaN(v) && !math.IsInf(v, 0) {
+				if !isNonFinite(v) {
 					dy2Abs[i] = math.Abs(v)
 				}
 			}
 		}
 	}
-	parent := make([]int, m)
-	compSize := make([]int, m)
+	parent := ensureIntSlice(&ws.dualRefParent, m, false)
+	compSize := ensureIntSlice(&ws.dualRefComp, m, false)
 	for i := range m {
 		parent[i] = i
 		compSize[i] = 1
-	}
-	findRoot := func(x int) int {
-		for parent[x] != x {
-			parent[x] = parent[parent[x]]
-			x = parent[x]
-		}
-		return x
-	}
-	unionRows := func(a, b int) {
-		ra, rb := findRoot(a), findRoot(b)
-		if ra == rb {
-			return
-		}
-		if compSize[ra] < compSize[rb] {
-			ra, rb = rb, ra
-		}
-		parent[rb] = ra
-		compSize[ra] += compSize[rb]
 	}
 	for _, bCol := range basis {
 		if bCol >= n {
 			continue
 		}
-		scratchRows, scratchVals = s.appendBasisColumn(bCol, scratchRows[:0], scratchVals[:0])
-		firstRow := -1
-		for idx, r := range scratchRows {
-			if uint(r) >= uint(m) || scratchVals[idx] == 0 {
+		var rSlice []int
+		var vSlice []float64
+		if noExtra {
+			st, en := p.colPtr[bCol], p.colPtr[bCol+1]
+			rSlice = p.rowIdx[st:en]
+			vSlice = p.colVal[st:en]
+		} else {
+			ws.dualRefRows, ws.dualRefVals = s.appendBasisColumn(bCol, ws.dualRefRows[:0], ws.dualRefVals[:0])
+			rSlice = ws.dualRefRows
+			vSlice = ws.dualRefVals
+		}
+		ra := -1
+		for idx, r := range rSlice {
+			if uint(r) >= uint(m) || vSlice[idx] == 0 {
 				continue
 			}
-			if firstRow == -1 {
-				firstRow = r
+			rb := r
+			for parent[rb] != rb {
+				parent[rb] = parent[parent[rb]]
+				rb = parent[rb]
+			}
+			if ra == -1 {
+				ra = rb
+				continue
+			}
+			if ra == rb {
+				continue
+			}
+			if compSize[ra] < compSize[rb] {
+				parent[ra] = rb
+				compSize[rb] += compSize[ra]
+				ra = rb
 			} else {
-				unionRows(firstRow, r)
+				parent[rb] = ra
+				compSize[ra] += compSize[rb]
 			}
 		}
 	}
-	compMaxDual := make([]float64, m)
+	compMaxDual := ensureFloat64Slice(&ws.dualRefMax, m, true)
 	for i := range m {
 		ay := math.Abs(y0[i]) + math.Abs(dy1[i])
-		root := findRoot(i)
+		root := i
+		for parent[root] != root {
+			parent[root] = parent[parent[root]]
+			root = parent[root]
+		}
 		if ay > compMaxDual[root] {
 			compMaxDual[root] = ay
 		}
 	}
 	for i := range m {
-		root := findRoot(i)
+		root := i
+		for parent[root] != root {
+			parent[root] = parent[parent[root]]
+			root = parent[root]
+		}
 		rowScaleFloor := float64(compSize[root]+2) * 0x1p-102
 		if ddFloor := rowScaleFloor * compMaxDual[root]; dy2Abs[i] < ddFloor {
 			dy2Abs[i] = ddFloor
@@ -5590,35 +6013,115 @@ func (s *LPSolver) computeRefinedWorkingPricing(cost []float64) (djC, djE, dy2Sc
 	return djC, djE, dy2Sc, yDotSc, maxBasisDualRel, true
 }
 
+func (s *LPSolver) evalRefinedCol(
+	k int,
+	cost []float64,
+	exOff, exRows []int,
+	exVals, y0, dy1, dy2Abs []float64,
+) (dj, eb, dy2Sc, yDotSc float64, ok bool) {
+	p := s.mat
+	n := p.numVars
+	if k >= n {
+		var sRow [1]int
+		sVal := [1]float64{1.0}
+		sRow[0] = k - n
+		return evalColDualDot(cost[k], sRow[:], sVal[:], y0, dy1, dy2Abs)
+	}
+	st, en := p.colPtr[k], p.colPtr[k+1]
+	if exOff == nil {
+		return evalColDualDot(cost[k], p.rowIdx[st:en], p.colVal[st:en], y0, dy1, dy2Abs)
+	}
+	ws := s.ws
+	es, ee := exOff[k], exOff[k+1]
+	if es == ee {
+		return evalColDualDot(cost[k], p.rowIdx[st:en], p.colVal[st:en], y0, dy1, dy2Abs)
+	}
+	ws.dualRefRows = append(append(ws.dualRefRows[:0], p.rowIdx[st:en]...), exRows[es:ee]...)
+	ws.dualRefVals = append(append(ws.dualRefVals[:0], p.colVal[st:en]...), exVals[es:ee]...)
+	return evalColDualDot(cost[k], ws.dualRefRows, ws.dualRefVals, y0, dy1, dy2Abs)
+}
+
 func (s *LPSolver) hasImprovingUnboundedColumn(cost []float64) bool {
 	if !s.hasInfiniteStructuralBound() {
 		return false
 	}
 	ws := s.ws
 	n := s.mat.numVars
+	m := s.TotalRows()
 	tot := ws.totVar
-	djC, djE, dy2Sc, yDotSc, maxBasisDualRel, ok := s.computeRefinedWorkingPricing(cost)
-	if !ok {
-		return true
-	}
 	status := ws.status[:tot]
-	for k := range tot {
-		st := status[k]
+	anyCand := false
+	for k, st := range status {
 		if st == statusBasic || st == statusFixed {
 			continue
 		}
-		dj := djC[k]
-		noiseTol := combineDualNoiseTol(djE[k], dy2Sc[k], yDotSc[k], maxBasisDualRel, 8.0)
+		if (st == statusAtLower && math.IsInf(ws.ub[k], 1)) ||
+			(st == statusAtUpper && math.IsInf(ws.lb[k], -1)) ||
+			st == statusSuperBasic {
+			anyCand = true
+			break
+		}
+	}
+	if !anyCand {
+		return false
+	}
+	y0, dy1, dy2Abs, ok := s.computeWorkingDualRefinement(cost)
+	if !ok {
+		return true
+	}
+	exOff, exRows, exVals := s.buildExtraColBuckets(false)
+	maxBasisDualRel := 0.0
+	for _, bCol := range ws.basis[:m] {
+		if uint(bCol) >= uint(tot) {
+			continue
+		}
+		v, eb, _, yds, dotOK := s.evalRefinedCol(bCol, cost, exOff, exRows, exVals, y0, dy1, dy2Abs)
+		if !dotOK {
+			return true
+		}
+		denSc := yds + math.Ldexp(math.Abs(cost[bCol]), -32)
+		if denSc > 0 {
+			numSc := math.Ldexp(math.Abs(v)+eb, -32)
+			if rel := numSc / denSc; rel > maxBasisDualRel {
+				maxBasisDualRel = rel
+			}
+		}
+	}
+	for k, st := range status {
+		if st == statusBasic || st == statusFixed {
+			continue
+		}
 		switch st {
 		case statusAtLower:
-			if math.IsInf(ws.ub[k], 1) && -dj > noiseTol && (k < n || s.slackCanMoveUnbounded(k-n, true)) {
+			if !math.IsInf(ws.ub[k], 1) {
+				continue
+			}
+			dj, eb, d2s, yds, dotOK := s.evalRefinedCol(k, cost, exOff, exRows, exVals, y0, dy1, dy2Abs)
+			if !dotOK {
+				return true
+			}
+			noiseTol := combineDualNoiseTol(eb, d2s, yds, maxBasisDualRel, 8.0)
+			if -dj > noiseTol && (k < n || s.slackCanMoveUnbounded(k-n, true)) {
 				return true
 			}
 		case statusAtUpper:
-			if math.IsInf(ws.lb[k], -1) && dj > noiseTol && (k < n || s.slackCanMoveUnbounded(k-n, false)) {
+			if !math.IsInf(ws.lb[k], -1) {
+				continue
+			}
+			dj, eb, d2s, yds, dotOK := s.evalRefinedCol(k, cost, exOff, exRows, exVals, y0, dy1, dy2Abs)
+			if !dotOK {
+				return true
+			}
+			noiseTol := combineDualNoiseTol(eb, d2s, yds, maxBasisDualRel, 8.0)
+			if dj > noiseTol && (k < n || s.slackCanMoveUnbounded(k-n, false)) {
 				return true
 			}
 		case statusSuperBasic:
+			dj, eb, d2s, yds, dotOK := s.evalRefinedCol(k, cost, exOff, exRows, exVals, y0, dy1, dy2Abs)
+			if !dotOK {
+				return true
+			}
+			noiseTol := combineDualNoiseTol(eb, d2s, yds, maxBasisDualRel, 8.0)
 			if math.Abs(dj) > noiseTol {
 				return true
 			}
@@ -5973,7 +6476,9 @@ func (s *LPSolver) refineOptimalBasis(primalFresh, dualFresh bool) {
 				dualAcc[q].addVal(-yCand[bCol-n])
 			} else {
 				for idx := p.colPtr[bCol]; idx < p.colPtr[bCol+1]; idx++ {
-					dualAcc[q].addProd(-yCand[p.rowIdx[idx]], p.colVal[idx])
+					if yr := yCand[p.rowIdx[idx]]; yr != 0 {
+						dualAcc[q].addProd(-yr, p.colVal[idx])
+					}
 				}
 			}
 		}
@@ -6125,10 +6630,66 @@ func (s *LPSolver) buildRefinedOptimalResult(totalIter int, primalFresh, dualFre
 	}
 }
 
+func (s *LPSolver) buildFastPrimalResult(totalIter int, primalFresh bool) (LPResult, bool) {
+	if !primalFresh {
+		s.computePrimalValues()
+	}
+	p := s.prob
+	ws := s.ws
+	n := p.numVars
+	primal := make([]float64, n)
+	if s.scaled {
+		for j := range n {
+			val := ws.x[j] * s.colScale[j]
+			if isNonFinite(val) {
+				return LPResult{}, false
+			}
+			lbj, ubj := s.origLB[j], s.origUB[j]
+			snapTol := max(primalSnapTol, 1e-8*max(1.0, math.Abs(val)))
+			if val < lbj && lbj-val <= snapTol {
+				val = lbj
+			} else if val > ubj && val-ubj <= snapTol {
+				val = ubj
+			}
+			primal[j] = val
+		}
+	} else {
+		for j := range n {
+			val := ws.x[j]
+			if isNonFinite(val) {
+				return LPResult{}, false
+			}
+			snapTol := max(primalSnapTol, 1e-8*max(1.0, math.Abs(val)))
+			if val < ws.lb[j] && ws.lb[j]-val <= snapTol {
+				val = ws.lb[j]
+			} else if val > ws.ub[j] && val-ws.ub[j] <= snapTol {
+				val = ws.ub[j]
+			}
+			primal[j] = val
+		}
+	}
+	objMin := evalLinearSum(0, p.objMin, primal, n)
+	if isNonFinite(objMin) {
+		return LPResult{}, false
+	}
+	return LPResult{
+		Status:       StatusOptimal,
+		ObjectiveMin: objMin,
+		Objective:    p.EvaluateObjective(primal),
+		Primal:       primal,
+		Iterations:   totalIter,
+	}, true
+}
+
 func (s *LPSolver) finalizeOptimalResult(totalIter int, primalFresh, dualFresh bool) (LPResult, bool) {
+	if s.fastHeuristicPrimal {
+		if res, ok := s.buildFastPrimalResult(totalIter, primalFresh); ok {
+			return res, true
+		}
+	}
 	res := s.buildRefinedOptimalResult(totalIter, primalFresh, dualFresh)
 	if !math.IsNaN(res.Objective) && !math.IsInf(res.Objective, 0) &&
-		s.primalResidualsWithinTol(res.Primal) && s.dualResidualsWithinTol(res.Primal, res.ObjectiveMin) {
+		s.primalResidualsWithinTol(res.Primal) && s.dualResidualsWithinTolWithRowRes(res.Primal, res.ObjectiveMin, s.ws.evalRowRes[:s.prob.numConstraints]) {
 		return res, true
 	}
 	if err := s.factorizeBasis(); err != nil {
@@ -6136,7 +6697,7 @@ func (s *LPSolver) finalizeOptimalResult(totalIter int, primalFresh, dualFresh b
 	}
 	res = s.buildRefinedOptimalResult(totalIter, false, false)
 	if !math.IsNaN(res.Objective) && !math.IsInf(res.Objective, 0) &&
-		s.primalResidualsWithinTol(res.Primal) && s.dualResidualsWithinTol(res.Primal, res.ObjectiveMin) {
+		s.primalResidualsWithinTol(res.Primal) && s.dualResidualsWithinTolWithRowRes(res.Primal, res.ObjectiveMin, s.ws.evalRowRes[:s.prob.numConstraints]) {
 		return res, true
 	}
 	return LPResult{}, false
@@ -6172,6 +6733,10 @@ func (s *LPSolver) boundedRowSpan(cols []int, vals []float64) (float64, bool) {
 }
 
 func (s *LPSolver) dualResidualsWithinTol(primal []float64, objMin float64) bool {
+	return s.dualResidualsWithinTolWithRowRes(primal, objMin, nil)
+}
+
+func (s *LPSolver) dualResidualsWithinTolWithRowRes(primal []float64, objMin float64, rowRes []float64) bool {
 	p := s.prob
 	ws := s.ws
 	n := p.numVars
@@ -6180,23 +6745,23 @@ func (s *LPSolver) dualResidualsWithinTol(primal []float64, objMin float64) bool
 		return false
 	}
 	hasInfStruct := s.hasInfiniteStructuralBound()
-	if !hasInfStruct {
-		if s.dualResidualsEval(primal, objMin, false, ws.y[:m], nil, nil) {
-			return true
-		}
+	if s.dualResidualsEval(primal, objMin, hasInfStruct, hasInfStruct, ws.y[:m], nil, nil, rowRes) {
+		return true
 	}
 	yWork, dy1Work, dy2AbsWork, refOK := s.computeWorkingDualRefinement(ws.cost[:ws.totVar])
 	if !refOK {
 		return false
 	}
-	return s.dualResidualsEval(primal, objMin, hasInfStruct, yWork, dy1Work, dy2AbsWork)
+	return s.dualResidualsEval(primal, objMin, hasInfStruct, false, yWork, dy1Work, dy2AbsWork, rowRes)
 }
 
 func (s *LPSolver) dualResidualsEval(
 	primal []float64,
 	objMin float64,
 	hasInfStruct bool,
+	strictUnrefined bool,
 	yWork, dy1Work, dy2AbsWork []float64,
+	rowRes []float64,
 ) bool {
 	p := s.prob
 	ws := s.ws
@@ -6252,6 +6817,9 @@ func (s *LPSolver) dualResidualsEval(
 			colAcc[j].addVal(p.objMin[j])
 			for q := p.colPtr[j]; q < p.colPtr[j+1]; q++ {
 				yr := yMin[p.rowIdx[q]]
+				if yr == 0 {
+					continue
+				}
 				av := p.colVal[q]
 				colAcc[j].addProd(-yr, av)
 				yL1[j] += math.Abs(yr * av)
@@ -6274,11 +6842,9 @@ func (s *LPSolver) dualResidualsEval(
 		var exOff, exRows []int
 		var exVals []float64
 		builtEx := false
-		var colRows []int
-		var colVals []float64
 		for j := range n {
 			v, eb, ok := colAcc[j].result()
-			if ok && !math.IsNaN(yL1[j]) && !math.IsInf(yL1[j], 0) {
+			if ok && !isNonFinite(yL1[j]) {
 				djOrig[j] = v
 				djErr[j] = eb
 				dy2Sc[j] = 0
@@ -6290,15 +6856,20 @@ func (s *LPSolver) dualResidualsEval(
 				builtEx = true
 			}
 			st, en := p.colPtr[j], p.colPtr[j+1]
-			colRows = append(colRows[:0], p.rowIdx[st:en]...)
-			colVals = append(colVals[:0], p.colVal[st:en]...)
-			if exOff != nil {
+			var rSlice []int
+			var vSlice []float64
+			if exOff == nil || exOff[j] == exOff[j+1] {
+				rSlice = p.rowIdx[st:en]
+				vSlice = p.colVal[st:en]
+			} else {
 				es, ee := exOff[j], exOff[j+1]
-				colRows = append(colRows, exRows[es:ee]...)
-				colVals = append(colVals, exVals[es:ee]...)
+				ws.dualRefRows = append(append(ws.dualRefRows[:0], p.rowIdx[st:en]...), exRows[es:ee]...)
+				ws.dualRefVals = append(append(ws.dualRefVals[:0], p.colVal[st:en]...), exVals[es:ee]...)
+				rSlice = ws.dualRefRows
+				vSlice = ws.dualRefVals
 			}
 			var d2s, yds float64
-			v, eb, d2s, yds, ok = evalColDualDot(p.objMin[j], colRows, colVals, yMin, nil, nil)
+			v, eb, d2s, yds, ok = evalColDualDot(p.objMin[j], rSlice, vSlice, yMin, nil, nil)
 			if !ok {
 				return false
 			}
@@ -6309,18 +6880,21 @@ func (s *LPSolver) dualResidualsEval(
 		}
 	} else {
 		exOff, exRows, exVals := s.buildExtraColBuckets(true)
-		var colRows []int
-		var colVals []float64
 		for j := range n {
 			st, en := p.colPtr[j], p.colPtr[j+1]
-			colRows = append(colRows[:0], p.rowIdx[st:en]...)
-			colVals = append(colVals[:0], p.colVal[st:en]...)
-			if exOff != nil {
+			var rSlice []int
+			var vSlice []float64
+			if exOff == nil || exOff[j] == exOff[j+1] {
+				rSlice = p.rowIdx[st:en]
+				vSlice = p.colVal[st:en]
+			} else {
 				es, ee := exOff[j], exOff[j+1]
-				colRows = append(colRows, exRows[es:ee]...)
-				colVals = append(colVals, exVals[es:ee]...)
+				ws.dualRefRows = append(append(ws.dualRefRows[:0], p.rowIdx[st:en]...), exRows[es:ee]...)
+				ws.dualRefVals = append(append(ws.dualRefVals[:0], p.colVal[st:en]...), exVals[es:ee]...)
+				rSlice = ws.dualRefRows
+				vSlice = ws.dualRefVals
 			}
-			v, eb, d2s, yds, ok := evalColDualDot(p.objMin[j], colRows, colVals, yMin, dy1Min, dy2MinAbs)
+			v, eb, d2s, yds, ok := evalColDualDot(p.objMin[j], rSlice, vSlice, yMin, dy1Min, dy2MinAbs)
 			if !ok {
 				return false
 			}
@@ -6365,6 +6939,10 @@ func (s *LPSolver) dualResidualsEval(
 		}
 	}
 
+	if strictUnrefined && maxBasisDualRel > 1e-12 {
+		return false
+	}
+
 	signTol := max(verifyFeasTol, 1e-7*maxDual)
 	slackNoise := max(1e-13, 1e-12*maxDual)
 	compGap := 0.0
@@ -6374,6 +6952,7 @@ func (s *LPSolver) dualResidualsEval(
 	if s.scaled {
 		unscaledLB, unscaledUB = s.origLB, s.origUB
 	}
+	hasCachedRowRes := len(rowRes) >= baseM
 
 	for i := range baseM {
 		yiSum, yiRem, d2Abs := rowDualAt(i)
@@ -6381,44 +6960,55 @@ func (s *LPSolver) dualResidualsEval(
 			continue
 		}
 		slackBasic := status[n+i] == statusBasic
-		strictSign := !slackBasic && hasInfStruct && s.slackCanMoveUnbounded(i, p.rowSense[i] == LessEqual)
+		sense := p.rowSense[i]
+		needSignCheck := (sense == LessEqual && yiSum > 0) || (sense == GreaterEqual && yiSum < 0)
+		strictSign := !slackBasic && hasInfStruct && needSignCheck && s.slackCanMoveUnbounded(i, sense == LessEqual)
 		rowSignTol := signTol
 		if strictSign {
-			d1Abs := 0.0
-			if dy1Min != nil {
-				d1Abs = math.Abs(dy1Min[i])
+			if strictUnrefined {
+				rowSignTol = 0
+			} else {
+				d1Abs := 0.0
+				if dy1Min != nil {
+					d1Abs = math.Abs(dy1Min[i])
+				}
+				rowSignTol = combineDualNoiseTol(
+					math.Abs(yiRem),
+					math.Ldexp(d2Abs, -32),
+					math.Ldexp(math.Abs(yMin[i]), -32)+math.Ldexp(d1Abs, -32),
+					maxBasisDualRel,
+					16.0,
+				)
 			}
-			rowSignTol = combineDualNoiseTol(
-				math.Abs(yiRem),
-				math.Ldexp(d2Abs, -32),
-				math.Ldexp(math.Abs(yMin[i]), -32)+math.Ldexp(d1Abs, -32),
-				maxBasisDualRel,
-				16.0,
-			)
 		} else if slackBasic && math.Abs(yiSum) > signTol {
 			return false
 		}
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, p.rowRHS[i], verifyFeasTol, 1e-8)
-		if !ok {
-			return false
-		}
-		switch p.rowSense[i] {
+		switch sense {
 		case LessEqual:
 			if yiSum > rowSignTol {
 				return false
 			}
 			if yiSum > slackNoise && !strictSign {
+				st, en := p.rowPtr[i], p.rowPtr[i+1]
 				if span, spOK := s.boundedRowSpan(p.colIdx[st:en], p.rowVal[st:en]); spOK {
 					compGap += (yiSum - slackNoise) * span
 				} else {
 					return false
 				}
 			}
-			if yiSum < -slackNoise && res < 0 {
-				diff := -res
-				if diff > rTol {
-					compGap += (-yiSum - slackNoise) * (diff - rTol)
+			if yiSum < -slackNoise {
+				if !hasCachedRowRes || rowRes[i] < -verifyFeasTol {
+					st, en := p.rowPtr[i], p.rowPtr[i+1]
+					res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, p.rowRHS[i], verifyFeasTol, 1e-8)
+					if !ok {
+						return false
+					}
+					if res < 0 {
+						diff := -res
+						if diff > rTol {
+							compGap += (-yiSum - slackNoise) * (diff - rTol)
+						}
+					}
 				}
 			}
 		case GreaterEqual:
@@ -6426,15 +7016,23 @@ func (s *LPSolver) dualResidualsEval(
 				return false
 			}
 			if yiSum < -slackNoise && !strictSign {
+				st, en := p.rowPtr[i], p.rowPtr[i+1]
 				if span, spOK := s.boundedRowSpan(p.colIdx[st:en], p.rowVal[st:en]); spOK {
 					compGap += (-yiSum - slackNoise) * span
 				} else {
 					return false
 				}
 			}
-			if yiSum > slackNoise && res > 0 {
-				if res > rTol {
-					compGap += (yiSum - slackNoise) * (res - rTol)
+			if yiSum > slackNoise {
+				if !hasCachedRowRes || rowRes[i] > verifyFeasTol {
+					st, en := p.rowPtr[i], p.rowPtr[i+1]
+					res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, p.rowRHS[i], verifyFeasTol, 1e-8)
+					if !ok {
+						return false
+					}
+					if res > rTol {
+						compGap += (yiSum - slackNoise) * (res - rTol)
+					}
 				}
 			}
 		}
@@ -6446,20 +7044,24 @@ func (s *LPSolver) dualResidualsEval(
 			continue
 		}
 		slackBasic := status[n+idx] == statusBasic
-		strictSign := !slackBasic && hasInfStruct && s.slackCanMoveUnbounded(idx, true)
+		strictSign := !slackBasic && hasInfStruct && yiSum > 0 && s.slackCanMoveUnbounded(idx, true)
 		rowSignTol := signTol
 		if strictSign {
-			d1Abs := 0.0
-			if dy1Min != nil {
-				d1Abs = math.Abs(dy1Min[idx])
+			if strictUnrefined {
+				rowSignTol = 0
+			} else {
+				d1Abs := 0.0
+				if dy1Min != nil {
+					d1Abs = math.Abs(dy1Min[idx])
+				}
+				rowSignTol = combineDualNoiseTol(
+					math.Abs(yiRem),
+					math.Ldexp(d2Abs, -32),
+					math.Ldexp(math.Abs(yMin[idx]), -32)+math.Ldexp(d1Abs, -32),
+					maxBasisDualRel,
+					16.0,
+				)
 			}
-			rowSignTol = combineDualNoiseTol(
-				math.Abs(yiRem),
-				math.Ldexp(d2Abs, -32),
-				math.Ldexp(math.Abs(yMin[idx]), -32)+math.Ldexp(d1Abs, -32),
-				maxBasisDualRel,
-				16.0,
-			)
 		} else if slackBasic && math.Abs(yiSum) > signTol {
 			return false
 		}
@@ -6514,7 +7116,12 @@ func (s *LPSolver) dualResidualsEval(
 				return false
 			}
 		} else {
-			infNoise := combineDualNoiseTol(djErr[j], dy2Sc[j], yDotSc[j], maxBasisDualRel, 16.0)
+			var infNoise float64
+			if strictUnrefined {
+				infNoise = 16.0 * djErr[j]
+			} else {
+				infNoise = combineDualNoiseTol(djErr[j], dy2Sc[j], yDotSc[j], maxBasisDualRel, 16.0)
+			}
 			if math.IsInf(ubj, 1) && dj < -infNoise {
 				return false
 			}
@@ -6577,15 +7184,28 @@ func (s *LPSolver) primalResidualsWithinTol(primal []float64) bool {
 	if s.scaled {
 		unscaledLB, unscaledUB = s.origLB, s.origUB
 	}
+	rowRes := ensureFloat64Slice(&s.ws.evalRowRes, p.numConstraints, false)
 	for i := range p.numConstraints {
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		res, rTolLo, rTolHi, ok := evalSparseRowResidualAndDirTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, p.rowRHS[i], verifyFeasTol, 1e-8)
-		if !ok {
+		rhs := p.rowRHS[i]
+		if isNonFinite(rhs) {
 			return false
 		}
-		if (!math.IsInf(p.rowLB[i], -1) && res < -rTolLo) ||
-			(!math.IsInf(p.rowUB[i], 1) && res > rTolHi) {
+		st, en := p.rowPtr[i], p.rowPtr[i+1]
+		res := evalSparseRowResidual(p.colIdx[st:en], p.rowVal[st:en], primal, rhs)
+		if isNonFinite(res) {
 			return false
+		}
+		rowRes[i] = res
+		needLo := !math.IsInf(p.rowLB[i], -1) && res < -verifyFeasTol
+		needHi := !math.IsInf(p.rowUB[i], 1) && res > verifyFeasTol
+		if needLo || needHi {
+			rTolLo, rTolHi, ok := evalSparseRowDirTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, verifyFeasTol, 1e-8)
+			if !ok {
+				return false
+			}
+			if (needLo && res < -rTolLo) || (needHi && res > rTolHi) {
+				return false
+			}
 		}
 	}
 	for _, dr := range s.extraRows {
@@ -6595,26 +7215,36 @@ func (s *LPSolver) primalResidualsWithinTol(primal []float64) bool {
 			vals = dr.OrigVal
 			rhs = dr.OrigRHS
 		}
-		res, _, rTolHi, ok := evalSparseRowResidualAndDirTol(dr.ColIdx, vals, primal, unscaledLB, unscaledUB, rhs, verifyFeasTol, 1e-8)
-		if !ok {
+		if isNonFinite(rhs) {
 			return false
 		}
-		if res > rTolHi {
+		res := evalSparseRowResidual(dr.ColIdx, vals, primal, rhs)
+		if isNonFinite(res) {
 			return false
+		}
+		if res > verifyFeasTol {
+			_, rTolHi, ok := evalSparseRowDirTol(dr.ColIdx, vals, primal, unscaledLB, unscaledUB, verifyFeasTol, 1e-8)
+			if !ok || res > rTolHi {
+				return false
+			}
 		}
 	}
 	return true
 }
 
 func twoSum(a, b float64) (s, err float64) {
-	s = a + b
-	bb := s - a
-	err = (a - (s - bb)) + (b - bb)
+	// Explicit float64 conversions enforce IEEE-754 rounding boundaries so GOAMD64=v3/arm64
+	// cannot contract an inlined caller's a*b into s = a + b and break the error-free transform.
+	a = float64(a)
+	b = float64(b)
+	s = float64(a + b)
+	bb := float64(s - a)
+	err = float64(a-float64(s-bb)) + float64(b-bb)
 	return s, err
 }
 
 func twoProd(a, b float64) (p, err float64) {
-	p = a * b
+	p = float64(a * b)
 	err = math.FMA(a, b, -p)
 	return p, err
 }
@@ -6631,11 +7261,15 @@ type dot2Acc struct {
 	nonFin   bool
 }
 
+func isNonFinite(x float64) bool {
+	return (math.Float64bits(x) & 0x7ff0000000000000) == 0x7ff0000000000000
+}
+
 func (acc *dot2Acc) addVal(v float64) {
 	if v == 0 {
 		return
 	}
-	if math.IsNaN(v) || math.IsInf(v, 0) {
+	if isNonFinite(v) {
 		acc.nonFin = true
 		return
 	}
@@ -6645,7 +7279,7 @@ func (acc *dot2Acc) addVal(v float64) {
 		acc.hasNeg = true
 	}
 	ns, se := twoSum(acc.s, v)
-	if math.IsNaN(ns) || math.IsInf(ns, 0) {
+	if isNonFinite(ns) {
 		acc.nonFin = true
 		return
 	}
@@ -6660,7 +7294,8 @@ func (acc *dot2Acc) addProd(a, b float64) {
 	if a == 0 || b == 0 {
 		return
 	}
-	if math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) {
+	p, pe := twoProd(a, b)
+	if isNonFinite(p) || isNonFinite(pe) {
 		acc.nonFin = true
 		return
 	}
@@ -6669,16 +7304,11 @@ func (acc *dot2Acc) addProd(a, b float64) {
 	} else {
 		acc.hasNeg = true
 	}
-	p, pe := twoProd(a, b)
-	if math.IsNaN(p) || math.IsInf(p, 0) || math.IsNaN(pe) || math.IsInf(pe, 0) {
-		acc.nonFin = true
-		return
-	}
 	if math.Abs(p) < twoProdExactMin {
 		acc.lowCount++
 	}
 	ns, se := twoSum(acc.s, p)
-	if math.IsNaN(ns) || math.IsInf(ns, 0) {
+	if isNonFinite(ns) {
 		acc.nonFin = true
 		return
 	}
@@ -6691,14 +7321,14 @@ func (acc *dot2Acc) addProd(a, b float64) {
 }
 
 func (acc *dot2Acc) result() (val, errBound float64, ok bool) {
-	if acc.nonFin || math.IsNaN(acc.c) || math.IsInf(acc.c, 0) || math.IsNaN(acc.errL1) || math.IsInf(acc.errL1, 0) {
+	if acc.nonFin || isNonFinite(acc.c) || isNonFinite(acc.errL1) {
 		return 0, 0, false
 	}
 	if acc.count == 0 {
 		return 0, 0, true
 	}
 	val, finalRem := twoSum(acc.s, acc.c)
-	if math.IsNaN(val) || math.IsInf(val, 0) {
+	if isNonFinite(val) {
 		return 0, 0, false
 	}
 	ku := float64(acc.count+2) * unitRoundoff64
@@ -6707,7 +7337,7 @@ func (acc *dot2Acc) result() (val, errBound float64, ok bool) {
 	}
 	gamma := ku / (1.0 - ku)
 	errBound = 2.0*(math.Abs(finalRem)+gamma*acc.errL1) + float64(acc.lowCount)*math.SmallestNonzeroFloat64
-	if math.IsNaN(errBound) || math.IsInf(errBound, 0) {
+	if isNonFinite(errBound) {
 		return 0, 0, false
 	}
 	return val, errBound, true

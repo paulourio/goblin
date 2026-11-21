@@ -1600,6 +1600,21 @@ func verifyCBCMIPOptimality(
 	return StatusOptimal, extraIters
 }
 
+func evalSparseRowResidualAndDirTol(cols []int, vals, x, lb, ub []float64, rhs, minTol, relFactor float64) (res, rTolLower, rTolUpper float64, ok bool) {
+	if math.IsNaN(rhs) || math.IsInf(rhs, 0) {
+		return 0, 0, 0, false
+	}
+	res = evalSparseRowResidual(cols, vals, x, rhs)
+	if math.IsNaN(res) || math.IsInf(res, 0) {
+		return 0, 0, 0, false
+	}
+	rTolLower, rTolUpper, ok = evalSparseRowDirTol(cols, vals, x, lb, ub, minTol, relFactor)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return res, rTolLower, rTolUpper, true
+}
+
 func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64, cutRHS, primal []float64, checkInt bool) bool {
 	n := p.numVars
 	if len(primal) < n || len(lb) < n || len(ub) < n {

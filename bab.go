@@ -210,12 +210,13 @@ func (b *babEngine) cutsEnabled() bool {
 
 func (b *babEngine) ensureHeurSolver() *LPSolver {
 	if b.heurSolver == nil {
-		b.heurSolver = NewLPSolver(b.p, nil)
+		canCopyRoot := b.lpSolver != nil && b.lpSolver.dualValid && len(b.lpSolver.extraRows) == 0
+		b.heurSolver = newLPSolver(b.p, nil, !canCopyRoot)
 		b.heurSolver.Deadline = b.deadline
 		b.heurSolver.Done = b.done
 		b.heurSolver.DisableSIMD = b.opts.DisableSIMD
 		b.heurSolver.SkipExactFarkas = true
-		if b.lpSolver != nil && b.lpSolver.dualValid {
+		if canCopyRoot {
 			b.heurSolver.CopyRootBasisFrom(b.lpSolver)
 		}
 	}
@@ -540,7 +541,7 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 	}
 }
 
-func (b *babEngine) runRootSubMIP(primal []float64, hs *LPSolver, isContLinked []bool) bool {
+func (b *babEngine) runRootSubMIP(primal []float64, hs *LPSolver, isContLinked []bool, enableCuts bool) bool {
 	remNodes := b.nodesLeft()
 	remIter := b.iterLeft()
 	if remNodes <= 0 || remIter <= 0 {
@@ -550,7 +551,7 @@ func (b *babEngine) runRootSubMIP(primal []float64, hs *LPSolver, isContLinked [
 	if b.lpSolver != nil && b.lpSolver.ws != nil && len(b.lpSolver.ws.status) >= b.p.numVars {
 		rootStatus = b.lpSolver.ws.status[:b.p.numVars]
 	}
-	sol, objMin, usedN, usedIt, ok := tryRootSubMIP(b.p, hs, rootStatus, primal, b.p.varLB, b.p.varUB, b.bestObjMin, b.deadline, b.opts.isSubMIP, remNodes, remIter, isContLinked)
+	sol, objMin, usedN, usedIt, ok := tryRootSubMIP(b.p, hs, rootStatus, primal, b.p.varLB, b.p.varUB, b.bestObjMin, b.deadline, b.opts.isSubMIP, remNodes, remIter, isContLinked, enableCuts)
 	b.nodesExplored += usedN
 	b.totalLPIters += usedIt
 	if b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter {
@@ -580,7 +581,7 @@ func (b *babEngine) runPreCutHeuristics(rootPrimal []float64) {
 	}
 	if !b.timeExpired() && !isGapClosed(b.rootLPMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 		b.heurSolver.CopyRootBasisFrom(b.lpSolver)
-		b.runRootSubMIP(rootPrimal, b.heurSolver, isContLinked)
+		b.runRootSubMIP(rootPrimal, b.heurSolver, isContLinked, b.cutsEnabled())
 	}
 }
 
@@ -662,6 +663,8 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		if nextMin-prevObj > zeroGainTol {
 			anchorLPRes = curLPRes
 			anchorCuts = b.cutsAdded
+		} else if anchorCuts == 0 {
+			break
 		}
 
 		improvement := (nextMin - prevObj) / max(1.0, math.Abs(prevObj))
@@ -717,11 +720,11 @@ func (b *babEngine) runPostCutHeuristics(cutPrimal []float64) {
 		}
 		if !b.timeExpired() && !isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {
 			hs.CopyRootBasisFrom(b.lpSolver)
-			b.runRootSubMIP(cutPrimal, hs, isContLinked)
+			b.runRootSubMIP(cutPrimal, hs, isContLinked, false)
 		}
 		return
 	}
-	if b.runRootSubMIP(cutPrimal, hs, isContLinked) {
+	if b.runRootSubMIP(cutPrimal, hs, isContLinked, true) {
 		b.postCutSubMIPFound = true
 	}
 	if !b.timeExpired() && !b.postCutSubMIPFound && !isGapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol, b.opts.AbsGapTol) {

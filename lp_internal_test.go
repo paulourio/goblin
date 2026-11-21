@@ -1503,3 +1503,137 @@ func TestCheckpointCaptureRestoreZeroAlloc(t *testing.T) {
 		t.Fatalf("ruiz post-restore: status=%v obj=%g, want Optimal 3", rAfter.Status, rAfter.ObjectiveMin)
 	}
 }
+
+// TestTwoSumTwoProdFMASafety verifies that error-free transformations (twoProd + twoSum)
+// inside dot2Acc and wideDotAcc remain exact when compiled with FMA contraction enabled
+// (e.g. GOAMD64=v3, GOAMD64=v4, or arm64).
+func TestTwoSumTwoProdFMASafety(t *testing.T) {
+	a := 1.0 + math.Ldexp(1.0, -27)
+	b := 1.0 + math.Ldexp(1.0, -27)
+	p, pe := twoProd(a, b)
+	// Exact value of (1 + 2^-27)^2 = 1 + 2^-26 + 2^-54; p rounds to 1 + 2^-26, pe must equal 2^-54.
+	wantPE := math.Ldexp(1.0, -54)
+	if pe != wantPE {
+		t.Fatalf("twoProd(%g, %g) err=%g, want %g (p=%g)", a, b, pe, wantPE, p)
+	}
+
+	// Accumulate a*b and -(1 + 2^-26) in dot2Acc: exact sum is 2^-54.
+	// If the compiler contracts twoSum(acc.s, p) into FMA(a, b, acc.s), pe is double-counted
+	// or cancelled incorrectly and the result deviates from 2^-54.
+	var d2 dot2Acc
+	d2.addVal(-(1.0 + math.Ldexp(1.0, -26)))
+	d2.addProd(a, b)
+	val, _, ok := d2.result()
+	if !ok || val != wantPE {
+		t.Fatalf("dot2Acc exact cancellation = %g (ok=%v), want %g", val, ok, wantPE)
+	}
+
+	var wd wideDotAcc
+	wd.addVal(-(1.0 + math.Ldexp(1.0, -26)))
+	wd.addProd(a, b)
+	wval, _, wok := wd.finishDD()
+	if !wok || wval != wantPE {
+		t.Fatalf("wideDotAcc exact cancellation = %g (ok=%v), want %g", wval, wok, wantPE)
+	}
+}
+
+// TestCrashEqualityBasisInvariants verifies Pass 1 zero-cost crash, Pass 2 positive-coefficient
+// GUB crash, exact analytical steepest-edge initialization, dense-coupling skipping, and zero
+// steady-state allocations on repeated InitCrashBasis calls.
+func TestCrashEqualityBasisInvariants(t *testing.T) {
+	// 1. Mix of Pass 1 zero-cost equalities and Pass 2 costed positive-coefficient equalities
+	//    coupled to inequality rows (total >= 8 rows so crashEqualityBasis activates).
+	m := NewModel("crash_invariants", Minimize)
+	nGroups := 4
+	x := make([]Var, 2*nGroups)
+	for j := range x {
+		x[j] = m.AddContVar(fmt.Sprintf("x%d", j), 0, 1)
+	}
+	z := m.AddContVar("z", 0, math.Inf(1))
+	// First 2 pairs have zero cost (Pass 1); next 2 pairs have positive costs (Pass 2).
+	m.SetObjective(NewExpr(
+		z.T(1.0),
+		x[4].T(5.0), x[5].T(2.0),
+		x[6].T(6.0), x[7].T(3.0),
+	))
+	for i := range nGroups {
+		m.AddConstraint(fmt.Sprintf("eq_%d", i), NewExpr(x[2*i].T(1.0), x[2*i+1].T(1.0)).Eq(1.0))
+	}
+	// 4 inequality coupling rows (total = 8 rows) with non-unit weights to verify DSE = ||B^-1 e_r||^2.
+	m.AddConstraint("c0", NewExpr(z.T(1.0), x[0].T(-2.0), x[2].T(-3.0)).Ge(0))
+	m.AddConstraint("c1", NewExpr(z.T(1.0), x[1].T(-4.0), x[3].T(-5.0)).Ge(0))
+	m.AddConstraint("c2", NewExpr(z.T(1.0), x[4].T(-1.5), x[5].T(-2.5)).Ge(0))
+	m.AddConstraint("c3", NewExpr(z.T(1.0), x[6].T(-0.5), x[7].T(-3.5)).Ge(0))
+
+	p := m.Compile()
+	s := NewLPSolver(p, nil)
+	defer s.Close()
+
+	// Verify all 4 equality rows crashed to structural variables (Pass 1: x0, x2; Pass 2: x5, x7).
+	wantBasic := []int{0, 2, 5, 7}
+	for r, wantCol := range wantBasic {
+		if got := s.ws.basis[r]; got != wantCol {
+			t.Fatalf("row %d crashed basis = %d, want structural col %d", r, got, wantCol)
+		}
+		if s.ws.status[p.numVars+r] != statusFixed {
+			t.Fatalf("row %d artificial slack status = %v, want statusFixed", r, s.ws.status[p.numVars+r])
+		}
+	}
+	// Verify exact analytical DSE weights on inequality coupling rows c0..c3.
+	// c0 touches x0 (-2) and x2 (-3) -> 1 + 4 + 9 = 14.
+	// c1 untouched by basic cols -> 1.
+	// c2 touches x5 (-2.5) -> 1 + 6.25 = 7.25.
+	// c3 touches x7 (-3.5) -> 1 + 12.25 = 13.25.
+	wantDSE := []float64{14.0, 1.0, 7.25, 13.25}
+	for k, want := range wantDSE {
+		if got := s.ws.dse[nGroups+k]; math.Abs(got-want) > 1e-12 {
+			t.Fatalf("ineq row %d DSE = %.12g, want %.12g", nGroups+k, got, want)
+		}
+	}
+
+	// Verify optimal solve matches exact continuous LP optimum:
+	// x0+x1=1, x2+x3=1 achieve min max(2x0+3x2, 4x1+5x3) = 25/8 = 3.125;
+	// x5=1 (cost 2, c2=2.5) and x7=1 (cost 3, c3=3.5) force z = 3.5 (moving x7->x6 costs 3/3 = 1 per unit z),
+	// giving total objective = 2 + 3 + 3.5 = 8.5.
+	res := s.Solve()
+	if res.Status != StatusOptimal || math.Abs(res.ObjectiveMin-8.5) > 1e-7 {
+		t.Fatalf("crashed LP solve: status=%v obj=%.12g, want Optimal 8.5", res.Status, res.ObjectiveMin)
+	}
+
+	// Repeated InitCrashBasis must perform zero heap allocations on a warmed workspace.
+	s.InitCrashBasis()
+	allocs := testing.AllocsPerRun(50, func() {
+		s.InitCrashBasis()
+	})
+	if allocs != 0 {
+		t.Fatalf("InitCrashBasis steady-state allocs = %.1f, want 0", allocs)
+	}
+
+	// 2. Columns touching a dense coupling row (> 128 nonzeros) must be skipped by crash.
+	mDense := NewModel("crash_dense_skip", Minimize)
+	nItems := 140
+	xd := make([]Var, 2*nItems)
+	denseTerms := make([]Term, 0, nItems+1)
+	zd := mDense.AddContVar("z", 0, math.Inf(1))
+	denseTerms = append(denseTerms, zd.T(1.0))
+	for i := range nItems {
+		xd[2*i] = mDense.AddContVar(fmt.Sprintf("a%d", i), 0, 1)
+		xd[2*i+1] = mDense.AddContVar(fmt.Sprintf("b%d", i), 0, 1)
+		denseTerms = append(denseTerms, xd[2*i].T(-1.0))
+	}
+	mDense.SetObjective(VarExpr(zd))
+	mDense.AddConstraint("dense_coupling", Ge(Expr{Terms: denseTerms}, 0))
+	for i := range nItems {
+		mDense.AddConstraint(fmt.Sprintf("eq_%d", i), NewExpr(xd[2*i].T(1.0), xd[2*i+1].T(1.0)).Eq(1.0))
+	}
+	pDense := mDense.Compile()
+	sDense := NewLPSolver(pDense, nil)
+	defer sDense.Close()
+	for i := range nItems {
+		// zd is col 0; xd[2*i] (col 1+2*i) touches dense_coupling (len 141 > 128),
+		// so crash must select xd[2*i+1] (col 2+2*i, degree 1).
+		if got := sDense.ws.basis[1+i]; got != 2+2*i {
+			t.Fatalf("dense-skip eq row %d crashed to col %d, want sparse col %d", i, got, 2+2*i)
+		}
+	}
+}

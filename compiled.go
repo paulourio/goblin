@@ -1360,14 +1360,7 @@ func evalSparseRowResidualAndTol(cols []int, vals, x, lb, ub []float64, rhs, min
 	return res, rTol, true
 }
 
-func evalSparseRowResidualAndDirTol(cols []int, vals, x, lb, ub []float64, rhs, minTol, relFactor float64) (res, rTolLower, rTolUpper float64, ok bool) {
-	if math.IsNaN(rhs) || math.IsInf(rhs, 0) {
-		return 0, 0, 0, false
-	}
-	res = evalSparseRowResidual(cols, vals, x, rhs)
-	if math.IsNaN(res) || math.IsInf(res, 0) {
-		return 0, 0, 0, false
-	}
+func evalSparseRowDirTol(cols []int, vals, x, lb, ub []float64, minTol, relFactor float64) (rTolLower, rTolUpper float64, ok bool) {
 	kLim := min(len(cols), len(vals))
 	hasBounds := len(lb) > 0 && len(ub) > 0
 	for k := range kLim {
@@ -1378,7 +1371,7 @@ func evalSparseRowResidualAndDirTol(cols []int, vals, x, lb, ub []float64, rhs, 
 		}
 		xj := x[col]
 		if math.IsNaN(xj) || math.IsInf(xj, 0) {
-			return 0, 0, 0, false
+			return 0, 0, false
 		}
 		step := relFactor * max(1.0, math.Abs(xj))
 		availInc := step
@@ -1401,7 +1394,7 @@ func evalSparseRowResidualAndDirTol(cols []int, vals, x, lb, ub []float64, rhs, 
 			decRow = ac * availInc
 		}
 		if math.IsNaN(incRow) || math.IsNaN(decRow) {
-			return 0, 0, 0, false
+			return 0, 0, false
 		}
 		rTolLower = satAddNonNeg(rTolLower, incRow)
 		rTolUpper = satAddNonNeg(rTolUpper, decRow)
@@ -1410,7 +1403,7 @@ func evalSparseRowResidualAndDirTol(cols []int, vals, x, lb, ub []float64, rhs, 
 		rTolLower = max(minTol, rTolLower)
 		rTolUpper = max(minTol, rTolUpper)
 	}
-	return res, rTolLower, rTolUpper, true
+	return rTolLower, rTolUpper, true
 }
 
 // EvaluateObjective computes the original objective value for primal vector x.

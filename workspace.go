@@ -99,14 +99,27 @@ type Workspace struct {
 	varTol     []float64
 
 	// Lazy refinement, exact-tableau, and residual-verification scratch buffers shared sequentially across post-solve checks.
-	dotAccBuf  []dot2Acc
-	refineBuf1 []float64
-	refineBuf2 []float64
-	refineBuf3 []float64
-	evalDJOrig []float64
-	evalDJErr  []float64
-	evalDY2Sc  []float64
-	evalYDotSc []float64
+	dotAccBuf     []dot2Acc
+	refineBuf1    []float64
+	refineBuf2    []float64
+	refineBuf3    []float64
+	evalDJOrig    []float64
+	evalDJErr     []float64
+	evalDY2Sc     []float64
+	evalYDotSc    []float64
+	evalRowRes    []float64
+	dualRefY0     []float64
+	dualRefDY1    []float64
+	dualRefDY2    []float64
+	dualRefTmp    []float64
+	dualRefMax    []float64
+	dualRefParent []int
+	dualRefComp   []int
+	dualRefRows   []int
+	dualRefVals   []float64
+	crashEqRows   []int
+	crashRowDone  []bool
+	crashRowLoad  []int
 
 	inPool atomic.Bool
 }
@@ -236,6 +249,18 @@ func (ws *Workspace) ensureDotAcc(size int) []dot2Acc {
 func ensureFloat64Slice(buf *[]float64, n int, zero bool) []float64 {
 	if cap(*buf) < n {
 		*buf = make([]float64, n)
+		return *buf
+	}
+	s := (*buf)[:n]
+	if zero {
+		clear(s)
+	}
+	return s
+}
+
+func ensureIntSlice(buf *[]int, n int, zero bool) []int {
+	if cap(*buf) < n {
+		*buf = make([]int, n)
 		return *buf
 	}
 	s := (*buf)[:n]

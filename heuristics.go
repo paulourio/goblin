@@ -394,35 +394,36 @@ func tryPropagatedRounding(
 		col  int
 		frac float64
 	}
-	cands := make([]cand, 0, len(p.intCols))
+	baseHLB := slices.Clone(curLB)
+	baseHUB := slices.Clone(curUB)
+	fracCands := make([]cand, 0, min(len(p.intCols), 32))
+	fixedAny := false
 	for _, col := range p.intCols {
 		if isContLinked != nil && isContLinked[col] {
 			continue
 		}
 		v := lpPrimal[col]
-		f := math.Abs(v - math.Round(v))
-		cands = append(cands, cand{col: col, frac: f})
+		rv := math.Round(v)
+		f := math.Abs(v - rv)
+		if f <= intFeasTol {
+			iv := min(max(rv, baseHLB[col]), baseHUB[col])
+			baseHLB[col] = iv
+			baseHUB[col] = iv
+			fixedAny = true
+			continue
+		}
+		fracCands = append(fracCands, cand{col: col, frac: f})
 	}
-	slices.SortFunc(cands, func(a, b cand) int {
-		return cmp.Compare(a.frac, b.frac)
-	})
-
-	baseHLB := slices.Clone(curLB)
-	baseHUB := slices.Clone(curUB)
-	firstFrac := 0
-	for firstFrac < len(cands) && cands[firstFrac].frac <= intFeasTol {
-		col := cands[firstFrac].col
-		iv := min(max(math.Round(lpPrimal[col]), baseHLB[col]), baseHUB[col])
-		baseHLB[col] = iv
-		baseHUB[col] = iv
-		firstFrac++
+	if len(fracCands) > 1 {
+		slices.SortFunc(fracCands, func(a, b cand) int {
+			return cmp.Compare(a.frac, b.frac)
+		})
 	}
-	if firstFrac > 0 {
+	if fixedAny {
 		if !propagateBounds(p, baseHLB, baseHUB, 1) {
 			return nil, 0, false
 		}
 	}
-	fracCands := cands[firstFrac:]
 	lpFallbackSolver := auxSolver
 	if hasCont && len(fracCands) > heurSubLPSkipFracCap {
 		lpFallbackSolver = nil
@@ -444,6 +445,8 @@ func tryPropagatedRounding(
 
 	snapHLB := make([]float64, n)
 	snapHUB := make([]float64, n)
+	var prevHLB, prevHUB []float64
+	hasPrevFixed := false
 	for strategy := range maxStrat {
 		if auxSolver != nil && auxSolver.timeExpired() {
 			break
@@ -508,6 +511,14 @@ func tryPropagatedRounding(
 
 		if !feasible {
 			continue
+		}
+		if hasPrevFixed && slices.Equal(hlb, prevHLB) && slices.Equal(hub, prevHUB) {
+			continue
+		}
+		if strategy == 0 && maxStrat > 1 {
+			prevHLB = slices.Clone(hlb)
+			prevHUB = slices.Clone(hub)
+			hasPrevFixed = true
 		}
 
 		if !hasCont {
@@ -875,41 +886,142 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 	if len(mCands) == 0 || len(nCands) == 0 {
 		return
 	}
+	numEpi := len(comp.epiCols)
+	objM := p.objMin[mCol]
+	objN := 0.0
+	if nCol != -1 {
+		objN = p.objMin[nCol]
+	}
+
+	// Partition rows into beta==0 (m-only) and beta!=0 (m+n coupled) so m-only
+	// epigraph maxima and objective terms are evaluated once per m candidate.
+	var mOnlyBuf [32]epigraphRowTerm
+	var mnBuf [8]epigraphRowTerm
+	mOnlyRows := mOnlyBuf[:0]
+	mnRows := mnBuf[:0]
+	var epiHasBetaBuf [32]bool
+	var epiHasBeta []bool
+	if numEpi <= len(epiHasBetaBuf) {
+		epiHasBeta = epiHasBetaBuf[:numEpi]
+	} else {
+		epiHasBeta = make([]bool, numEpi)
+	}
+	for _, r := range rows {
+		if r.beta == 0 {
+			mOnlyRows = append(mOnlyRows, r)
+		} else {
+			mnRows = append(mnRows, r)
+			epiHasBeta[r.epiIdx] = true
+		}
+	}
+	var mnEpiBuf [8]int
+	mnEpiIdxs := mnEpiBuf[:0]
+	for ei := range numEpi {
+		if epiHasBeta[ei] {
+			mnEpiIdxs = append(mnEpiIdxs, ei)
+		}
+	}
+
+	var baseEpiBuf, epiMaxBuf, bestEpiBuf, epiObjBuf, epiLBBuf [32]float64
+	var baseEpi, epiMax, bestEpiVals, epiObj, epiLB []float64
+	if numEpi <= len(baseEpiBuf) {
+		baseEpi = baseEpiBuf[:numEpi]
+		epiMax = epiMaxBuf[:numEpi]
+		bestEpiVals = bestEpiBuf[:numEpi]
+		epiObj = epiObjBuf[:numEpi]
+		epiLB = epiLBBuf[:numEpi]
+	} else {
+		baseEpi = make([]float64, numEpi)
+		epiMax = make([]float64, numEpi)
+		bestEpiVals = make([]float64, numEpi)
+		epiObj = make([]float64, numEpi)
+		epiLB = make([]float64, numEpi)
+	}
+	for ei, ec := range comp.epiCols {
+		epiObj[ei] = p.objMin[ec]
+		epiLB[ei] = hlb[ec]
+	}
+
+	if len(mnRows) == 0 && len(nCands) > 1 {
+		bestNV := nCands[0]
+		bestNC := objN * bestNV
+		for _, nv := range nCands[1:] {
+			if c := objN * nv; c < bestNC {
+				bestNC = c
+				bestNV = nv
+			}
+		}
+		nCands = []float64{bestNV}
+	}
+
 	bestCompObj := math.Inf(1)
 	bestM := mCands[0]
 	bestN := nCands[0]
-	epiMax := make([]float64, len(comp.epiCols))
-	bestEpiVals := make([]float64, len(comp.epiCols))
-
+	screenFactor := float64(numEpi+4) * 1e-13
 	var compObj wideDotAcc
+
 	for _, mv := range mCands {
-		for _, nv := range nCands {
-			for ei, ec := range comp.epiCols {
-				epiMax[ei] = hlb[ec]
+		copy(baseEpi, epiLB)
+		for _, r := range mOnlyRows {
+			if val := r.c + r.alpha*mv; val > baseEpi[r.epiIdx] {
+				baseEpi[r.epiIdx] = val
 			}
-			for _, r := range rows {
-				val := r.c + r.alpha*mv + r.beta*nv
-				if val > epiMax[r.epiIdx] {
+		}
+		baseSum := objM * mv
+		baseAbs := math.Abs(baseSum)
+		for ei := range numEpi {
+			if !epiHasBeta[ei] {
+				term := epiObj[ei] * baseEpi[ei]
+				baseSum += term
+				baseAbs += math.Abs(term)
+			}
+		}
+
+		for _, nv := range nCands {
+			for _, ei := range mnEpiIdxs {
+				epiMax[ei] = baseEpi[ei]
+			}
+			for _, r := range mnRows {
+				if val := r.c + r.alpha*mv + r.beta*nv; val > epiMax[r.epiIdx] {
+					epiMax[r.epiIdx] = val
+				}
+			}
+			nTerm := objN * nv
+			candObj := baseSum + nTerm
+			candAbs := baseAbs + math.Abs(nTerm)
+			for _, ei := range mnEpiIdxs {
+				term := epiObj[ei] * epiMax[ei]
+				candObj += term
+				candAbs += math.Abs(term)
+			}
+			errEst := screenFactor * max(1.0, candAbs)
+			if !isNonFinite(candObj) && !isNonFinite(candAbs) && candObj-errEst >= bestCompObj {
+				continue
+			}
+
+			copy(epiMax, baseEpi)
+			for _, r := range mnRows {
+				if val := r.c + r.alpha*mv + r.beta*nv; val > epiMax[r.epiIdx] {
 					epiMax[r.epiIdx] = val
 				}
 			}
 			var acc dot2Acc
-			acc.addProd(p.objMin[mCol], mv)
+			acc.addProd(objM, mv)
 			if nCol != -1 {
-				acc.addProd(p.objMin[nCol], nv)
+				acc.addProd(objN, nv)
 			}
-			for ei, ec := range comp.epiCols {
-				acc.addProd(p.objMin[ec], epiMax[ei])
+			for ei := range numEpi {
+				acc.addProd(epiObj[ei], epiMax[ei])
 			}
 			obj, eb, ok := acc.result()
 			if !ok || eb > 0x1p-48*math.Abs(obj) {
 				compObj.reset()
-				compObj.addProd(p.objMin[mCol], mv)
+				compObj.addProd(objM, mv)
 				if nCol != -1 {
-					compObj.addProd(p.objMin[nCol], nv)
+					compObj.addProd(objN, nv)
 				}
-				for ei, ec := range comp.epiCols {
-					compObj.addProd(p.objMin[ec], epiMax[ei])
+				for ei := range numEpi {
+					compObj.addProd(epiObj[ei], epiMax[ei])
 				}
 				obj = compObj.finish(math.NaN())
 			}
@@ -1334,6 +1446,14 @@ func tryFractionalDiving(
 	branch1DUB := make([]float64, n)
 	branch1X := make([]float64, n)
 
+	if diveSolver != nil {
+		prevFast := diveSolver.fastHeuristicPrimal
+		diveSolver.fastHeuristicPrimal = true
+		defer func() {
+			diveSolver.fastHeuristicPrimal = prevFast
+		}()
+	}
+
 	maxDiveSteps := min(maxDiveStepsCap, len(p.intCols))
 	for range maxDiveSteps {
 		if diveSolver != nil && diveSolver.timeExpired() {
@@ -1507,6 +1627,7 @@ func tryRootSubMIP(
 	maxNodesCap int,
 	maxIterCap int,
 	isContLinked []bool,
+	enableCuts bool,
 ) (sol []float64, objMin float64, nodesUsed, itersUsed int, ok bool) {
 	if isSubMIP || len(p.intCols) == 0 || maxNodesCap <= 0 || maxIterCap <= 0 {
 		return nil, 0, 0, 0, false
@@ -1596,7 +1717,11 @@ func tryRootSubMIP(
 		}
 	}
 
-	if nFrac == 0 || nFrac > heurSubMIPFreeFracCap || nFrac >= len(p.intCols) {
+	minFixed := max(2, len(p.intCols)/4)
+	if !enableCuts {
+		minFixed = max(minFixed, len(p.intCols)/2)
+	}
+	if nFrac == 0 || nFrac > heurSubMIPFreeFracCap || len(p.intCols)-nFrac < minFixed {
 		return nil, 0, 0, 0, false
 	}
 
@@ -1709,8 +1834,12 @@ func tryRootSubMIP(
 		subOpts.TimeLimit = min(subOpts.TimeLimit, rem)
 	}
 	subOpts.EnablePresolve = true
-	subOpts.EnableCuts = true
-	subOpts.MaxCutPasses = heurSubMIPCutPasses
+	subOpts.EnableCuts = enableCuts
+	if enableCuts {
+		subOpts.MaxCutPasses = heurSubMIPCutPasses
+	} else {
+		subOpts.MaxCutPasses = 0
+	}
 	subOpts.EnableHeuristics = true
 	if lpSolver != nil {
 		subOpts.DisableSIMD = lpSolver.DisableSIMD
