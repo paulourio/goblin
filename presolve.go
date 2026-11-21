@@ -237,7 +237,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	}
 
 	// 2. Iterative Savelsbergh activity bound tightening and redundant row dropping
-	actTight, actRem, infeas, timedOut := runActivityTightening(orig, rows, lb, ub, maxPasses, deadline, done)
+	actTight, actRem, infeas, timedOut := runActivityTighteningDirty(orig, rows, lb, ub, nil, maxPasses, deadline, done)
 	if infeas {
 		return PresolveResult{Infeasible: true}
 	}
@@ -249,6 +249,12 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 
 	// 3. Algebraic orbit symmetry breaking on symmetric group formulations
 	if orig.isMIP {
+		var prevLB, prevUB []float64
+		prevM := len(rows)
+		if m > 32 {
+			prevLB = slices.Clone(lb)
+			prevUB = slices.Clone(ub)
+		}
 		symTight, symRows, symTimedOut := applyOrbitSymmetryBreaking(orig, rows, lb, ub, deadline, done)
 		if symTimedOut {
 			return PresolveResult{Reduced: orig, TimedOut: true}
@@ -260,7 +266,21 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 		}
 		if symTight > 0 {
 			tightened += symTight
-			postTight, postRem, postInfeas, postTimedOut := runActivityTightening(orig, rows, lb, ub, maxPasses, deadline, done)
+			var postDirty []bool
+			if prevLB != nil {
+				postDirty = make([]bool, len(rows))
+				for j := range n {
+					if lb[j] != prevLB[j] || ub[j] != prevUB[j] {
+						for p := orig.colPtr[j]; p < orig.colPtr[j+1]; p++ {
+							postDirty[orig.rowIdx[p]] = true
+						}
+					}
+				}
+				for i := prevM; i < len(rows); i++ {
+					postDirty[i] = true
+				}
+			}
+			postTight, postRem, postInfeas, postTimedOut := runActivityTighteningDirty(orig, rows, lb, ub, postDirty, maxPasses, deadline, done)
 			if postInfeas {
 				return PresolveResult{Infeasible: true}
 			}
@@ -589,6 +609,8 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 	minAct, maxAct := 0.0, 0.0
 	absSum := absRHS
 	minInf, maxInf := 0, 0
+	minInfCol, maxInfCol := -1, -1
+	minInfA, maxInfA := 0.0, 0.0
 	maxSpan := 0.0
 	hasInfSpan := false
 	hasFracInt := false
@@ -606,55 +628,71 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 			return false
 		}
 		if orig.varCat[col] != Continuous {
-			if (!math.IsInf(l, 0) && l != math.Trunc(l)) || (!math.IsInf(u, 0) && u != math.Trunc(u)) {
+			if (l != 0 && !math.IsInf(l, 0) && l != math.Trunc(l)) || (u != 0 && !math.IsInf(u, 0) && u != math.Trunc(u)) {
 				hasFracInt = true
 			}
 		}
 		if a > 0 {
-			if math.IsInf(l, -1) {
-				minInf++
-			} else {
-				p := a * l
-				ap := math.Abs(p)
-				if ap > presolveFastMaxAbs {
-					return false
+			if l != 0 {
+				if math.IsInf(l, -1) {
+					minInf++
+					minInfCol = col
+					minInfA = a
+				} else {
+					p := a * l
+					ap := math.Abs(p)
+					if ap > presolveFastMaxAbs {
+						return false
+					}
+					minAct += p
+					absSum += ap
 				}
-				minAct += p
-				absSum += ap
 			}
-			if math.IsInf(u, 1) {
-				maxInf++
-			} else {
-				p := a * u
-				ap := math.Abs(p)
-				if ap > presolveFastMaxAbs {
-					return false
+			if u != 0 {
+				if math.IsInf(u, 1) {
+					maxInf++
+					maxInfCol = col
+					maxInfA = a
+				} else {
+					p := a * u
+					ap := math.Abs(p)
+					if ap > presolveFastMaxAbs {
+						return false
+					}
+					maxAct += p
+					absSum += ap
 				}
-				maxAct += p
-				absSum += ap
 			}
 		} else {
-			if math.IsInf(u, 1) {
-				minInf++
-			} else {
-				p := a * u
-				ap := math.Abs(p)
-				if ap > presolveFastMaxAbs {
-					return false
+			if u != 0 {
+				if math.IsInf(u, 1) {
+					minInf++
+					minInfCol = col
+					minInfA = a
+				} else {
+					p := a * u
+					ap := math.Abs(p)
+					if ap > presolveFastMaxAbs {
+						return false
+					}
+					minAct += p
+					absSum += ap
 				}
-				minAct += p
-				absSum += ap
 			}
-			if math.IsInf(l, -1) {
-				maxInf++
-			} else {
-				p := a * l
-				ap := math.Abs(p)
-				if ap > presolveFastMaxAbs {
-					return false
+			if l != 0 {
+				if math.IsInf(l, -1) {
+					maxInf++
+					maxInfCol = col
+					maxInfA = a
+				} else {
+					p := a * l
+					ap := math.Abs(p)
+					if ap > presolveFastMaxAbs {
+						return false
+					}
+					maxAct += p
+					absSum += ap
 				}
-				maxAct += p
-				absSum += ap
 			}
 		}
 		span := u - l
@@ -691,12 +729,42 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 		return false
 	}
 	if hasUpper && minInf <= 1 {
-		if minInf == 1 || hasInfSpan || hasFracInt || slackFast <= maxSpan+margin {
+		if hasFracInt {
+			return false
+		}
+		if minInf == 1 {
+			if minInfA > 0 {
+				uInf := ub[minInfCol]
+				if math.IsInf(uInf, 1) || slackFast-margin < minInfA*uInf {
+					return false
+				}
+			} else {
+				lInf := lb[minInfCol]
+				if math.IsInf(lInf, -1) || slackFast-margin < minInfA*lInf {
+					return false
+				}
+			}
+		} else if hasInfSpan || slackFast <= maxSpan+margin {
 			return false
 		}
 	}
 	if hasLower && maxInf <= 1 {
-		if maxInf == 1 || hasInfSpan || hasFracInt || -deficitFast <= maxSpan+margin {
+		if hasFracInt {
+			return false
+		}
+		if maxInf == 1 {
+			if maxInfA > 0 {
+				lInf := lb[maxInfCol]
+				if math.IsInf(lInf, -1) || deficitFast+margin > maxInfA*lInf {
+					return false
+				}
+			} else {
+				uInf := ub[maxInfCol]
+				if math.IsInf(uInf, 1) || deficitFast+margin > maxInfA*uInf {
+					return false
+				}
+			}
+		} else if hasInfSpan || -deficitFast <= maxSpan+margin {
 			return false
 		}
 	}
@@ -733,7 +801,49 @@ func runActivityTightening(
 	deadline time.Time,
 	done <-chan struct{},
 ) (tightened, removedRows int, infeas, timedOut bool) {
+	return runActivityTighteningDirty(orig, rows, lb, ub, nil, maxPasses, deadline, done)
+}
+
+// runActivityTighteningDirty executes Savelsbergh row-activity bound tightening using an optional initial dirty-row mask.
+func runActivityTighteningDirty(
+	orig *CompiledProblem,
+	rows []presolveWorkRow,
+	lb, ub []float64,
+	initDirty []bool,
+	maxPasses int,
+	deadline time.Time,
+	done <-chan struct{},
+) (tightened, removedRows int, infeas, timedOut bool) {
 	m := len(rows)
+	baseM := orig.numConstraints
+	hasCSC := len(orig.colPtr) == orig.numVars+1 && m >= baseM
+	var curDirty, nextDirty []bool
+	if initDirty != nil {
+		curDirty = initDirty
+	}
+	if hasCSC && maxPasses > 1 {
+		nextDirty = make([]bool, m)
+	}
+	markColDirty := func(col, curRow int) {
+		if !hasCSC || nextDirty == nil {
+			return
+		}
+		for p := orig.colPtr[col]; p < orig.colPtr[col+1]; p++ {
+			rr := orig.rowIdx[p]
+			if curDirty != nil && rr > curRow {
+				curDirty[rr] = true
+			} else {
+				nextDirty[rr] = true
+			}
+		}
+		for rr := baseM; rr < m; rr++ {
+			if curDirty != nil && rr > curRow {
+				curDirty[rr] = true
+			} else {
+				nextDirty[rr] = true
+			}
+		}
+	}
 	for range maxPasses {
 		if stopRequested(deadline, done) {
 			return tightened, removedRows, false, true
@@ -743,6 +853,9 @@ func runActivityTightening(
 		for i := range m {
 			if (i&63 == 0) && stopRequested(deadline, done) {
 				return tightened, removedRows, false, true
+			}
+			if curDirty != nil && !curDirty[i] {
+				continue
 			}
 			r := &rows[i]
 			if !r.active {
@@ -915,6 +1028,7 @@ func runActivityTightening(
 								tightened++
 								changedInPass = true
 								upperTightenedRow = true
+								markColDirty(col, i)
 							}
 						}
 					} else {
@@ -949,6 +1063,7 @@ func runActivityTightening(
 								tightened++
 								changedInPass = true
 								upperTightenedRow = true
+								markColDirty(col, i)
 							}
 						}
 					}
@@ -1007,6 +1122,7 @@ func runActivityTightening(
 								lb[col] = newLB
 								tightened++
 								changedInPass = true
+								markColDirty(col, i)
 							}
 						}
 					} else {
@@ -1040,6 +1156,7 @@ func runActivityTightening(
 								ub[col] = newUB
 								tightened++
 								changedInPass = true
+								markColDirty(col, i)
 							}
 						}
 					}
@@ -1049,6 +1166,15 @@ func runActivityTightening(
 
 		if !changedInPass {
 			break
+		}
+		if nextDirty != nil {
+			if curDirty == nil {
+				curDirty = nextDirty
+				nextDirty = make([]bool, m)
+			} else {
+				curDirty, nextDirty = nextDirty, curDirty
+				clear(nextDirty)
+			}
 		}
 	}
 	return tightened, removedRows, false, false
@@ -1085,9 +1211,16 @@ func evalRowActivitySummary(
 	}
 	for k, col := range cols {
 		a := vals[k]
+		if a == 0 {
+			continue
+		}
+		if isNonFinite(a) {
+			s.extreme = true
+			return s, false
+		}
 		l, u := lb[col], ub[col]
 		if a > 0 {
-			if hasUpper {
+			if hasUpper && l != 0 {
 				if math.IsInf(l, -1) {
 					s.minInfCount++
 				} else {
@@ -1097,7 +1230,7 @@ func evalRowActivitySummary(
 					}
 				}
 			}
-			if hasLower {
+			if hasLower && u != 0 {
 				if math.IsInf(u, 1) {
 					s.maxInfCount++
 				} else {
@@ -1107,8 +1240,8 @@ func evalRowActivitySummary(
 					}
 				}
 			}
-		} else if a < 0 {
-			if hasUpper {
+		} else {
+			if hasUpper && u != 0 {
 				if math.IsInf(u, 1) {
 					s.minInfCount++
 				} else {
@@ -1118,7 +1251,7 @@ func evalRowActivitySummary(
 					}
 				}
 			}
-			if hasLower {
+			if hasLower && l != 0 {
 				if math.IsInf(l, -1) {
 					s.maxInfCount++
 				} else {
@@ -1276,12 +1409,24 @@ func (s *rowActivitySummary) residualQuotient(
 	return divDDByFloat(top, rem, a, 0)
 }
 
+type orbitSortEntry struct {
+	idx    int
+	col    int
+	orbit  int // >= 0 when colGroup[col] == grp, else -1
+	deg    int
+	varCat VarCategory
+	val    float64
+	lb     float64
+	ub     float64
+}
+
 type orbitTrialScratch struct {
 	colOrbit      []int
 	colGroup      []int
 	rowState      []int
 	touchedRows   []int
 	orderBuf      []int
+	sortKeys      []orbitSortEntry
 	seedCols      []int
 	orbits        []int // flat: numOrbits * gCount
 	rowTuples     []int // flat: numTuples * gCount
@@ -1632,22 +1777,152 @@ func proposeAndVerifyOrbits(
 			sc.rowTuples = append(sc.rowTuples, tuple[:gCount]...)
 
 			rowLen := len(rr0.cols)
+			unassignedCnt := 0
+			unassignedIdx := -1
+			for k, c0 := range rr0.cols {
+				if colOrbit[c0] < 0 {
+					unassignedCnt++
+					unassignedIdx = k
+					if unassignedCnt > 1 {
+						break
+					}
+				}
+			}
+			if unassignedCnt <= 1 {
+				n := orig.numVars
+				if len(sc.expectedStamp) < n {
+					sc.expectedStamp = make([]int, n)
+					sc.expectedVal = make([]float64, n)
+					sc.stamp = 0
+				}
+				expectedStamp := sc.expectedStamp
+				expectedVal := sc.expectedVal
+				orbits := sc.orbits
+				fastMatched := true
+				var u0Col int
+				var u0Val float64
+				if unassignedCnt == 1 {
+					u0Col = rr0.cols[unassignedIdx]
+					u0Val = rr0.vals[unassignedIdx]
+					newOrb[0] = u0Col
+				}
+				allSameUnassigned := true
+				for g := 1; g < gCount; g++ {
+					rg := &rows[tuple[g]]
+					if sc.stamp == math.MaxInt {
+						clear(expectedStamp)
+						sc.stamp = 0
+					}
+					sc.stamp++
+					stamp := sc.stamp
+					hasDup := false
+					for k, c0 := range rr0.cols {
+						if k == unassignedIdx {
+							continue
+						}
+						cg := orbits[colOrbit[c0]*gCount+g]
+						if expectedStamp[cg] == stamp {
+							hasDup = true
+							break
+						}
+						expectedStamp[cg] = stamp
+						expectedVal[cg] = rr0.vals[k]
+					}
+					if hasDup {
+						fastMatched = false
+						break
+					}
+					unmatchedCol := -1
+					unmatchedVal := 0.0
+					unmatchedCount := 0
+					for k, cg := range rg.cols {
+						if expectedStamp[cg] == stamp {
+							if rg.vals[k] != expectedVal[cg] {
+								return 0, false, false
+							}
+							expectedStamp[cg] = 0
+						} else {
+							unmatchedCount++
+							if unmatchedCount > unassignedCnt {
+								return 0, false, false
+							}
+							unmatchedCol = cg
+							unmatchedVal = rg.vals[k]
+						}
+					}
+					if unmatchedCount != unassignedCnt {
+						return 0, false, false
+					}
+					if unassignedCnt == 1 {
+						if unmatchedVal != u0Val {
+							return 0, false, false
+						}
+						if unmatchedCol != u0Col {
+							allSameUnassigned = false
+						}
+						newOrb[g] = unmatchedCol
+					}
+				}
+				if fastMatched {
+					if unassignedCnt == 1 && !allSameUnassigned {
+						degC0 := colPtr[u0Col+1] - colPtr[u0Col]
+						for g := 1; g < gCount; g++ {
+							cg := newOrb[g]
+							if colOrbit[cg] != orbitUnassigned {
+								return 0, false, false
+							}
+							if orig.varCat[cg] != orig.varCat[u0Col] || !samePresolveBound(lb[cg], lb[u0Col]) || !samePresolveBound(ub[cg], ub[u0Col]) || colPtr[cg+1]-colPtr[cg] != degC0 {
+								return 0, false, false
+							}
+							for prev := range g {
+								if newOrb[prev] == cg {
+									return 0, false, false
+								}
+							}
+						}
+						orbID := len(sc.orbits) / gCount
+						for g := range gCount {
+							cg := newOrb[g]
+							colOrbit[cg] = orbID
+							colGroup[cg] = g
+						}
+						sc.orbits = append(sc.orbits, newOrb[:gCount]...)
+					}
+					continue
+				}
+			}
+
 			needOrd := gCount * rowLen
 			if cap(sc.orderBuf) < needOrd {
 				sc.orderBuf = make([]int, needOrd)
 			} else {
 				sc.orderBuf = sc.orderBuf[:needOrd]
 			}
+			if cap(sc.sortKeys) < rowLen {
+				sc.sortKeys = make([]orbitSortEntry, rowLen)
+			}
+			keys := sc.sortKeys[:rowLen]
 			for g := range gCount {
 				rg := &rows[tuple[g]]
 				ord := sc.orderBuf[g*rowLen : (g+1)*rowLen]
-				for idx := range rowLen {
-					ord[idx] = idx
+				for idx, col := range rg.cols {
+					orb := -1
+					if colGroup[col] == g {
+						orb = colOrbit[col]
+					}
+					keys[idx] = orbitSortEntry{
+						idx:    idx,
+						col:    col,
+						orbit:  orb,
+						deg:    colPtr[col+1] - colPtr[col],
+						varCat: orig.varCat[col],
+						val:    rg.vals[idx],
+						lb:     lb[col],
+						ub:     ub[col],
+					}
 				}
-				grp := g
-				slices.SortFunc(ord, func(a, b int) int {
-					ca, cb := rg.cols[a], rg.cols[b]
-					ga, gb := colGroup[ca] == grp, colGroup[cb] == grp
+				slices.SortFunc(keys, func(a, b orbitSortEntry) int {
+					ga, gb := a.orbit >= 0, b.orbit >= 0
 					if ga != gb {
 						if ga {
 							return -1
@@ -1655,25 +1930,28 @@ func proposeAndVerifyOrbits(
 						return 1
 					}
 					if ga {
-						return cmp.Compare(colOrbit[ca], colOrbit[cb])
+						return cmp.Compare(a.orbit, b.orbit)
 					}
-					if c := cmp.Compare(rg.vals[a], rg.vals[b]); c != 0 {
+					if c := cmp.Compare(a.val, b.val); c != 0 {
 						return c
 					}
-					if c := cmp.Compare(orig.varCat[ca], orig.varCat[cb]); c != 0 {
+					if c := cmp.Compare(a.varCat, b.varCat); c != 0 {
 						return c
 					}
-					if c := cmp.Compare(lb[ca], lb[cb]); c != 0 {
+					if c := cmp.Compare(a.lb, b.lb); c != 0 {
 						return c
 					}
-					if c := cmp.Compare(ub[ca], ub[cb]); c != 0 {
+					if c := cmp.Compare(a.ub, b.ub); c != 0 {
 						return c
 					}
-					if c := cmp.Compare(colPtr[ca+1]-colPtr[ca], colPtr[cb+1]-colPtr[cb]); c != 0 {
+					if c := cmp.Compare(a.deg, b.deg); c != 0 {
 						return c
 					}
-					return cmp.Compare(ca, cb)
+					return cmp.Compare(a.col, b.col)
 				})
+				for pos, e := range keys {
+					ord[pos] = e.idx
+				}
 			}
 
 			ord0 := sc.orderBuf[:rowLen]
