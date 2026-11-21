@@ -390,12 +390,14 @@ func TestLUPFIRangeSkippedBTRANAndLongUpdateChain(t *testing.T) {
 					mat[r][pivotRow] = aOrig[r]
 				}
 
-				// Verify bounding box metadata on newly pushed eta.
-				eta := lu.etas[len(lu.etas)-1]
-				if eta.start < eta.end {
-					for p := eta.start; p < eta.end; p++ {
-						if lu.etaIdx[p] < eta.minIdx || lu.etaIdx[p] > eta.maxIdx {
-							t.Fatalf("step %d: etaIdx[%d]=%d outside [%d, %d]", step, p, lu.etaIdx[p], eta.minIdx, eta.maxIdx)
+				// Verify bounding box metadata on newly pushed row-eta (when non-empty).
+				if len(lu.etas) > 0 {
+					eta := lu.etas[len(lu.etas)-1]
+					if eta.start < eta.end {
+						for p := eta.start; p < eta.end; p++ {
+							if lu.etaIdx[p] < eta.minIdx || lu.etaIdx[p] > eta.maxIdx {
+								t.Fatalf("step %d: etaIdx[%d]=%d outside [%d, %d]", step, p, lu.etaIdx[p], eta.minIdx, eta.maxIdx)
+							}
 						}
 					}
 				}
@@ -405,7 +407,7 @@ func TestLUPFIRangeSkippedBTRANAndLongUpdateChain(t *testing.T) {
 				}
 			}
 			if !lu.NeedsRefactor() {
-				t.Fatalf("expected NeedsRefactor() == true after %d updates (maxEtaUpdates=%d)", len(lu.etas), maxEtaUpdates)
+				t.Fatalf("expected NeedsRefactor() == true after %d updates (maxEtaUpdates=%d)", lu.numUpdates, maxEtaUpdates)
 			}
 		})
 	}
@@ -744,6 +746,7 @@ func TestLUPFIPivotGuardsAndExtremeExponents(t *testing.T) {
 		}
 	}
 	etasBefore := len(lu.etas)
+	updatesBefore := lu.numUpdates
 
 	badTiny := make([]float64, m)
 	badTiny[0] = 1e-13
@@ -761,8 +764,8 @@ func TestLUPFIPivotGuardsAndExtremeExponents(t *testing.T) {
 	if err := lu.PushEta(0, badInf); err == nil {
 		t.Fatal("expected error for Inf pivot")
 	}
-	if len(lu.etas) != etasBefore {
-		t.Fatalf("rejected updates mutated eta count: got %d, want %d", len(lu.etas), etasBefore)
+	if len(lu.etas) != etasBefore || lu.numUpdates != updatesBefore {
+		t.Fatalf("rejected updates mutated eta/update count: got (%d, %d), want (%d, %d)", len(lu.etas), lu.numUpdates, etasBefore, updatesBefore)
 	}
 	verifyAllSolvesAgainstBasis(t, lu, mat, rng, 99)
 
