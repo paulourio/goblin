@@ -869,6 +869,20 @@ func FuzzMADMediumDecomposed(f *testing.F) {
 		hasIncAlt := assertDecomposedMADSoundness(t, tag, altName, p, resAlt, inst.plantedObj)
 		assertTwoGoSolvesConsistent(t, tag, "go", resGo, hasIncGo, altName, resAlt, hasIncAlt)
 
+		if formalFuzzEnabled() && p.NumVars() <= 600 {
+			_, _ = verifyFormalPresolveRules(t, p)
+			verifyFormalRootLP(t, tag+"/rootLP", p)
+			sols := [][]float64{inst.buildPlantedPrimalVector(p)}
+			if hasIncGo {
+				sols = append(sols, resGo.Values)
+			}
+			verifyFormalSeparatedCuts(t, tag+"/cuts", p, sols)
+			if p.NumVars() <= 300 {
+				resTr, _ := verifyFormalVIPRTrace(t, tag+"/vipr", p, 40, 250*time.Millisecond)
+				_ = assertDecomposedMADSoundness(t, tag, "vipr", p, resTr, inst.plantedObj)
+			}
+		}
+
 		t.Logf("[%s] density=%.2f planted=%.1f | go=%v obj=%.1f bnd=%.1f nd=%d it=%d (%v) | %s=%v obj=%.1f bnd=%.1f",
 			tag, inst.density, inst.plantedObj,
 			resGo.Status, resGo.Objective, resGo.BestBound, resGo.Nodes, resGo.Iterations, goElapsed.Round(time.Millisecond),

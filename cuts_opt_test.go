@@ -74,7 +74,30 @@ func TestFinalizeSparseCutEquivalenceAndZeroAlloc(t *testing.T) {
 				rhs = act + 1.0
 			}
 
-			refCut, refOK := finalizeCut(p, dense, rhs, lpPrimal)
+			denseRHS := rhs
+			seenDup := make([]bool, n)
+			dupAcc := make([]float64, n)
+			for k, col := range idx {
+				v := val[k]
+				if !seenDup[col] {
+					seenDup[col] = true
+					dupAcc[col] = v
+					continue
+				}
+				sum, rem := twoSum(dupAcc[col], v)
+				dupAcc[col] = sum
+				if rem != 0 {
+					bnd := p.varUB[col]
+					if rem > 0 {
+						bnd = p.varLB[col]
+					}
+					if bnd != 0 {
+						denseRHS = nextUp(denseRHS - nextDown(rem*bnd))
+					}
+				}
+			}
+
+			refCut, refOK := finalizeCut(p, dense, denseRHS, lpPrimal)
 			gotCut, gotOK := finalizeSparseCut(p, idx, val, rhs, lpPrimal, 0, &ws)
 			if gotOK != refOK {
 				t.Fatalf("trial %d: ok=%v, want %v (ref=%+v got=%+v)", trial, gotOK, refOK, refCut, gotCut)

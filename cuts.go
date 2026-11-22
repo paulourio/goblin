@@ -308,7 +308,7 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 		}
 
 		// Detect VUB constraints (p - M*y <= 0) and disaggregated VUB constraints (sum_k a_k x_k - C*y <= 0).
-		if sense != LessEqual || p.rowRHS[i] > 0 || nnz < minPairNNZ {
+		if sense != LessEqual || !(p.rowRHS[i] <= 0) || math.IsInf(p.rowRHS[i], 0) || nnz < minPairNNZ {
 			continue
 		}
 		binCol := -1
@@ -319,6 +319,10 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 		for k := s; k < e; k++ {
 			col := p.colIdx[k]
 			val := p.rowVal[k]
+			if math.IsNaN(val) || math.IsInf(val, 0) {
+				allPosNonNeg = false
+				break
+			}
 			if val < 0 {
 				negCount++
 				if val < -cutCoeffZeroTol && p.varCat[col] == Binary && p.varLB[col] == 0 && p.varUB[col] == 1 {
@@ -326,13 +330,13 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 					capVal = -val
 				}
 			} else if val > 0 {
-				if p.varLB[col] < 0 {
+				if !(p.varLB[col] >= 0) {
 					allPosNonNeg = false
 				}
 			}
 		}
 
-		if negCount != 1 || binCol == -1 || !allPosNonNeg {
+		if negCount != 1 || binCol == -1 || !allPosNonNeg || math.IsInf(capVal, 0) || math.IsNaN(capVal) {
 			continue
 		}
 
@@ -358,8 +362,8 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 			if ak <= cutCoeffZeroTol {
 				continue
 			}
-			effUB := min(p.varUB[col], capVal/ak)
-			if math.IsInf(effUB, 1) || effUB <= 0 {
+			effUB := min(p.varUB[col], nextUp(capVal/ak))
+			if math.IsInf(effUB, 1) || !(effUB > 0) {
 				continue
 			}
 			cache.disaggVUBs = append(cache.disaggVUBs, disaggVUBTerm{
@@ -376,7 +380,7 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 	var invOutCount map[int]int
 
 	for i := range m {
-		if p.rowSense[i] != Equal || p.rowRHS[i] <= unitCoeffTol {
+		if p.rowSense[i] != Equal || !(p.rowRHS[i] > unitCoeffTol) || math.IsInf(p.rowRHS[i], 0) {
 			continue
 		}
 		s, e := p.rowPtr[i], p.rowPtr[i+1]
@@ -677,24 +681,30 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 	gmiMaxNNZ := maxCutNNZ(n)
 	var cuts []cutPlane
 
-	evalGMIInt := func(a float64, f0 float64) float64 {
+	evalGMIInt := func(a, f0Lo, f0Hi, oneMinusF0Lo float64) float64 {
 		fk := a - math.Floor(a)
-		var v float64
-		if fk <= f0 {
-			v = fk / f0
-		} else {
-			v = (1.0 - fk) / (1.0 - f0)
+		fkLo, fkHi := fk, fk
+		if a < 0 && fk > 0 {
+			fkLo = nextDown(fk)
+			fkHi = nextUp(fk)
 		}
-		return nextUp(v)
+		if fkHi <= f0Lo {
+			return nextUp(fkHi / f0Lo)
+		}
+		if fkLo >= f0Hi {
+			numHi := 1.0 - fkLo
+			if !math.IsInf(numHi, 0) && !math.IsNaN(numHi) {
+				numHi = nextUp(numHi)
+			}
+			return nextUp(numHi / oneMinusF0Lo)
+		}
+		return 1.0
 	}
-	evalGMICont := func(a float64, f0 float64) float64 {
-		var v float64
+	evalGMICont := func(a, f0Lo, oneMinusF0Lo float64) float64 {
 		if a >= 0 {
-			v = a / f0
-		} else {
-			v = (-a) / (1.0 - f0)
+			return nextUp(a / f0Lo)
 		}
-		return nextUp(v)
+		return nextUp((-a) / oneMinusF0Lo)
 	}
 
 	for _, fr := range fracRows {
@@ -705,6 +715,15 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 		}
 		f0 := exactXVal - math.Floor(exactXVal)
 		if f0 < minIntInfeas || f0 > 1.0-minIntInfeas {
+			continue
+		}
+		f0Lo, f0Hi := f0, f0
+		if exactXVal < 0 && f0 > 0 {
+			f0Lo = nextDown(f0)
+			f0Hi = nextUp(f0)
+		}
+		oneMinusF0Lo := nextDown(1.0 - f0Hi)
+		if !(f0Lo > 0) || !(oneMinusF0Lo > 0) {
 			continue
 		}
 
@@ -777,28 +796,28 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			var gamma float64
 			isIntVar := k < n && varCat[k] != Continuous
 			if isIntVar {
-				if math.Abs(bndVal-math.Round(bndVal)) > cutCompareTol {
+				if bndVal != math.Trunc(bndVal) {
 					isIntVar = false
 				}
 			}
 
 			if alphaErr == 0 {
 				if isIntVar {
-					gamma = evalGMIInt(alphaTilde, f0)
+					gamma = evalGMIInt(alphaTilde, f0Lo, f0Hi, oneMinusF0Lo)
 				} else {
-					gamma = evalGMICont(alphaTilde, f0)
+					gamma = evalGMICont(alphaTilde, f0Lo, oneMinusF0Lo)
 				}
 			} else {
 				loA := nextDown(alphaTilde - alphaErr)
 				hiA := nextUp(alphaTilde + alphaErr)
 				if isIntVar {
-					if hiA-loA >= 1.0 || math.Floor(hiA-f0) >= math.Ceil(loA-f0) {
+					if hiA-loA >= 1.0 || math.Floor(hiA-f0Lo) >= math.Ceil(loA-f0Hi) {
 						gamma = 1.0
 					} else {
-						gamma = max(evalGMIInt(loA, f0), evalGMIInt(hiA, f0))
+						gamma = max(evalGMIInt(loA, f0Lo, f0Hi, oneMinusF0Lo), evalGMIInt(hiA, f0Lo, f0Hi, oneMinusF0Lo))
 					}
 				} else {
-					gamma = max(evalGMICont(loA, f0), evalGMICont(hiA, f0))
+					gamma = max(evalGMICont(loA, f0Lo, oneMinusF0Lo), evalGMICont(hiA, f0Lo, oneMinusF0Lo))
 				}
 			}
 
@@ -876,7 +895,9 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 					break
 				}
 				extraLHSErr += nextUp(ce * maxB)
-				if math.IsInf(extraLHSErr, 0) || math.IsNaN(extraLHSErr) {
+				if !math.IsInf(extraLHSErr, 0) && !math.IsNaN(extraLHSErr) {
+					extraLHSErr = nextUp(extraLHSErr)
+				} else {
 					validRow = false
 					break
 				}
@@ -890,8 +911,12 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			continue
 		}
 
-		cutRHS := (-rhsVal + rhsErr) + extraLHSErr
-		if rhsErr+extraLHSErr > 0 && !math.IsInf(cutRHS, 0) && !math.IsNaN(cutRHS) {
+		errBound := rhsErr + extraLHSErr
+		if errBound > 0 && !math.IsInf(errBound, 0) && !math.IsNaN(errBound) {
+			errBound = nextUp(errBound)
+		}
+		cutRHS := -rhsVal + errBound
+		if errBound > 0 && !math.IsInf(cutRHS, 0) && !math.IsNaN(cutRHS) {
 			cutRHS = nextUp(cutRHS)
 		}
 
@@ -980,7 +1005,7 @@ func separateCoverFromSparseRow(
 	maxNNZ int,
 	ws *cutGenWorkspace,
 ) (cutPlane, bool) {
-	if len(cols) < 3 {
+	if len(cols) < 3 || math.IsNaN(rawRHS) || math.IsInf(rawRHS, 0) {
 		return cutPlane{}, false
 	}
 	var rhsAcc dot2Acc
@@ -991,18 +1016,21 @@ func separateCoverFromSparseRow(
 	minItemW := math.Inf(1)
 	for k, col := range cols {
 		a := sign * vals[k]
+		if math.IsNaN(a) || math.IsInf(a, 0) {
+			return cutPlane{}, false
+		}
 		if a == 0 {
 			continue
 		}
 		if p.varCat[col] != Binary || p.varLB[col] != 0 || p.varUB[col] != 1 || math.Abs(a) <= cutCoeffZeroTol {
 			if a > 0 {
-				if math.IsInf(p.varLB[col], -1) {
+				if math.IsInf(p.varLB[col], -1) || math.IsNaN(p.varLB[col]) {
 					validRelax = false
 					break
 				}
 				rhsAcc.addProd(-a, p.varLB[col])
 			} else {
-				if math.IsInf(p.varUB[col], 1) {
+				if math.IsInf(p.varUB[col], 1) || math.IsNaN(p.varUB[col]) {
 					validRelax = false
 					break
 				}
@@ -1033,7 +1061,10 @@ func separateCoverFromSparseRow(
 
 	rhsVal, rhsErr, okRHS := rhsAcc.result()
 	rhs := rhsVal + rhsErr
-	if !validRelax || !okRHS || len(items) < 3 || !(rhs > 0) || math.IsInf(rhs, 0) || rhsErr > 1e-4*minItemW {
+	if rhsErr > 0 && !math.IsInf(rhs, 0) && !math.IsNaN(rhs) {
+		rhs = nextUp(rhs)
+	}
+	if !validRelax || !okRHS || len(items) < 3 || !(rhs > 0) || math.IsInf(rhs, 0) || math.IsNaN(rhs) || rhsErr > 1e-4*minItemW {
 		return cutPlane{}, false
 	}
 
@@ -1050,6 +1081,7 @@ func separateCoverFromSparseRow(
 	inCover := ws.coverIn[:len(items)]
 	clear(inCover)
 
+	var coverAcc dot2Acc
 	coverWeight := 0.0
 	coverSize := 0
 	coverMargin := func(cw float64) float64 {
@@ -1060,13 +1092,22 @@ func separateCoverFromSparseRow(
 			break
 		}
 		inCover[idx] = true
-		coverWeight += it.weight
+		coverAcc.addVal(it.weight)
 		coverSize++
-		if coverWeight > rhs+coverMargin(coverWeight) {
+		cwVal, cwErr, okCW := coverAcc.result()
+		if !okCW {
+			return cutPlane{}, false
+		}
+		cwLo := cwVal - cwErr
+		if cwErr > 0 && !math.IsInf(cwLo, 0) && !math.IsNaN(cwLo) {
+			cwLo = nextDown(cwLo)
+		}
+		coverWeight = cwLo
+		if cwLo > rhs+coverMargin(cwVal) {
 			break
 		}
 	}
-	if coverWeight <= rhs+coverMargin(coverWeight) || coverSize < minPairNNZ {
+	if !(coverWeight > rhs+coverMargin(coverWeight)) || coverSize < minPairNNZ {
 		return cutPlane{}, false
 	}
 
@@ -1074,7 +1115,7 @@ func separateCoverFromSparseRow(
 		if !inCover[idx] {
 			continue
 		}
-		candW := coverWeight - items[idx].weight
+		candW := nextDown(coverWeight - items[idx].weight)
 		if candW > rhs+coverMargin(coverWeight) {
 			inCover[idx] = false
 			coverWeight = candW
@@ -1082,6 +1123,25 @@ func separateCoverFromSparseRow(
 		}
 	}
 	if coverSize < minPairNNZ {
+		return cutPlane{}, false
+	}
+
+	// Verify exact minimal cover weight sum_{j in C} w_j > rhs via compensated summation.
+	var verifyAcc dot2Acc
+	for idx, it := range items {
+		if inCover[idx] {
+			verifyAcc.addVal(it.weight)
+		}
+	}
+	cwVal, cwErr, okCW := verifyAcc.result()
+	if !okCW {
+		return cutPlane{}, false
+	}
+	cwLo := cwVal - cwErr
+	if cwErr > 0 && !math.IsInf(cwLo, 0) && !math.IsNaN(cwLo) {
+		cwLo = nextDown(cwLo)
+	}
+	if !(cwLo > rhs) {
 		return cutPlane{}, false
 	}
 
@@ -1103,11 +1163,15 @@ func separateCoverFromSparseRow(
 	minWeight[0] = 0
 	for v := 1; v < coverSize; v++ {
 		s := minWeight[v-1] + coverWeights[v-1]
-		minWeight[v] = max(0.0, s-8.0*unitRoundoff64*s)
+		if math.IsInf(s, 1) {
+			minWeight[v] = math.MaxFloat64
+		} else {
+			minWeight[v] = max(0.0, s-8.0*unitRoundoff64*s)
+		}
 	}
 
 	cutCap := float64(coverSize - 1)
-	finalRHS := cutCap
+	finalRHSInt := int64(coverSize - 1)
 	lhsStar := 0.0
 	idxBuf := ws.tmpIdx[:0]
 	valBuf := ws.tmpVal[:0]
@@ -1136,7 +1200,11 @@ func separateCoverFromSparseRow(
 				for v := coverSize - 1; v >= 1; v-- {
 					prev := max(0, v-alpha)
 					cand := minWeight[prev] + it.weight
-					cand = max(0.0, cand-8.0*unitRoundoff64*cand)
+					if math.IsInf(cand, 1) {
+						cand = math.MaxFloat64
+					} else {
+						cand = max(0.0, cand-8.0*unitRoundoff64*cand)
+					}
 					if cand < minWeight[v] {
 						minWeight[v] = cand
 					}
@@ -1153,13 +1221,17 @@ func separateCoverFromSparseRow(
 			valBuf = append(valBuf, fAlpha)
 		} else {
 			valBuf = append(valBuf, -fAlpha)
-			finalRHS -= fAlpha
+			finalRHSInt -= int64(alpha)
 		}
 	}
 	ws.tmpIdx = idxBuf
 	ws.tmpVal = valBuf
 	if lhsStar <= cutCap+minCutEfficacy {
 		return cutPlane{}, false
+	}
+	finalRHS := float64(finalRHSInt)
+	if int64(finalRHS) < finalRHSInt {
+		finalRHS = nextUp(finalRHS)
 	}
 
 	return finalizeSparseCut(p, idxBuf, valBuf, finalRHS, lpPrimal, maxNNZ, ws)
@@ -1192,6 +1264,7 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 
 	// 2. Barany-Van Roy-Wolsey (l, S) lot-sizing / flow-conservation cuts over cached chains.
 	var seenBins [maxFlowLookahead + 1]int
+	var remDemHi [maxFlowLookahead + 1]float64
 	var flowIdx [maxFlowLookahead + 2]int
 	var flowVal [maxFlowLookahead + 2]float64
 	for _, chain := range cache.flowChains {
@@ -1199,16 +1272,46 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 		for t := range T {
 			maxQ := min(T-1, t+maxFlowLookahead)
 			for q := t; q <= maxQ; q++ {
-				cumDem := 0.0
-				for s := t; s <= q; s++ {
-					cumDem += chain[s].demand
+				// Compute exact outward-bounded suffix sums backward from q to t:
+				// remDemHi[s-t] >= exact sum_{r=s..q} d_r and cumDemLo <= exact sum_{r=t..q} d_r.
+				var remAcc dot2Acc
+				remOK := true
+				for s := q; s >= t; s-- {
+					remAcc.addVal(chain[s].demand)
+					v, e, ok := remAcc.result()
+					if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+						remOK = false
+						break
+					}
+					hi := v + e
+					if e > 0 && !math.IsInf(hi, 0) && !math.IsNaN(hi) {
+						hi = nextUp(hi)
+					}
+					if !(hi > 0) || math.IsInf(hi, 0) || math.IsNaN(hi) {
+						remOK = false
+						break
+					}
+					remDemHi[s-t] = hi
+				}
+				if !remOK {
+					continue
+				}
+				cumVal, cumErr, okCum := remAcc.result()
+				if !okCum {
+					continue
+				}
+				cumDemLo := cumVal - cumErr
+				if cumErr > 0 && !math.IsInf(cumDemLo, 0) && !math.IsNaN(cumDemLo) {
+					cumDemLo = nextDown(cumDemLo)
+				}
+				if !(cumDemLo > 0) || math.IsInf(cumDemLo, 0) || math.IsNaN(cumDemLo) {
+					continue
 				}
 
 				lhsStar := 0.0
 				if chain[t].invIn != -1 {
 					lhsStar += lpPrimal[chain[t].invIn]
 				}
-				remDem := cumDem
 				anyInS := false
 				numSeen := 0
 				for tau := t; tau <= q; tau++ {
@@ -1221,10 +1324,9 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 						}
 					}
 					if alreadyInS {
-						remDem -= nd.demand
 						continue
 					}
-					yTerm := remDem * lpPrimal[nd.binCol]
+					yTerm := remDemHi[tau-t] * lpPrimal[nd.binCol]
 					pTerm := lpPrimal[nd.prodCol]
 					if yTerm < pTerm-cutCompareTol {
 						seenBins[numSeen] = nd.binCol
@@ -1234,10 +1336,9 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 					} else {
 						lhsStar += pTerm
 					}
-					remDem -= nd.demand
 				}
 
-				if !anyInS || lhsStar >= cumDem-minCutEfficacy {
+				if !anyInS || lhsStar >= cumDemLo-minCutEfficacy {
 					continue
 				}
 
@@ -1247,7 +1348,6 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 					flowVal[nf] = -1.0
 					nf++
 				}
-				remDem = cumDem
 				numSeen = 0
 				for tau := t; tau <= q; tau++ {
 					nd := chain[tau]
@@ -1259,26 +1359,25 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 						}
 					}
 					if alreadyInS {
-						remDem -= nd.demand
 						continue
 					}
-					yTerm := remDem * lpPrimal[nd.binCol]
+					rem := remDemHi[tau-t]
+					yTerm := rem * lpPrimal[nd.binCol]
 					pTerm := lpPrimal[nd.prodCol]
 					if yTerm < pTerm-cutCompareTol {
 						seenBins[numSeen] = nd.binCol
 						numSeen++
 						flowIdx[nf] = nd.binCol
-						flowVal[nf] = -remDem
+						flowVal[nf] = -rem
 						nf++
 					} else {
 						flowIdx[nf] = nd.prodCol
 						flowVal[nf] = -1.0
 						nf++
 					}
-					remDem -= nd.demand
 				}
 
-				if cut, ok := finalizeSparseCut(p, flowIdx[:nf], flowVal[:nf], -cumDem, lpPrimal, 0, ws); ok {
+				if cut, ok := finalizeSparseCut(p, flowIdx[:nf], flowVal[:nf], -cumDemLo, lpPrimal, 0, ws); ok {
 					cuts = append(cuts, cut)
 				}
 			}
@@ -1347,17 +1446,32 @@ func separateCMIRFromSparseRow(
 	}
 
 	rhs := sign * rawRHS
+	if math.IsNaN(rhs) || math.IsInf(rhs, 0) {
+		return cuts
+	}
 	act := 0.0
 	for k, col := range cols {
 		if uint(col) >= uint(n) {
 			return cuts
 		}
-		if math.IsInf(varLB[col], -1) && math.IsInf(varUB[col], 1) {
+		v := vals[k]
+		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return cuts
 		}
-		act += sign * vals[k] * lpPrimal[col]
+		l, u := varLB[col], varUB[col]
+		if math.IsNaN(l) || math.IsNaN(u) || (math.IsInf(l, -1) && math.IsInf(u, 1)) {
+			return cuts
+		}
+		if varCat[col] != Continuous {
+			l = math.Ceil(l)
+			u = math.Floor(u)
+			if l > u {
+				return cuts
+			}
+		}
+		act += sign * v * lpPrimal[col]
 	}
-	if rhs-act > 1.0+mirMaxRelSlack*math.Abs(rhs) {
+	if !(rhs-act <= 1.0+mirMaxRelSlack*math.Abs(rhs)) {
 		return cuts
 	}
 
@@ -1403,6 +1517,10 @@ func separateCMIRFromSparseRow(
 			for k, col := range cols {
 				a := sign * vals[k]
 				l, u := varLB[col], varUB[col]
+				if varCat[col] != Continuous {
+					l = math.Ceil(l)
+					u = math.Floor(u)
+				}
 				if mirUseLower(lpPrimal[col], l, u) {
 					betaAcc.addProd(-a, l)
 				} else {
@@ -1419,13 +1537,25 @@ func separateCMIRFromSparseRow(
 			continue
 		}
 
-		betaHat := (betaVal + betaErr) / delta
-		betaHat += 4.0 * unitRoundoff64 * math.Abs(betaHat)
+		betaNum := betaVal + betaErr
+		if betaErr > 0 && !math.IsInf(betaNum, 0) && !math.IsNaN(betaNum) {
+			betaNum = nextUp(betaNum)
+		}
+		betaHat := betaNum / delta
+		if math.IsNaN(betaHat) || math.IsInf(betaHat, 0) {
+			continue
+		}
+		betaHat = nextUp(betaHat)
 		if math.IsNaN(betaHat) || math.IsInf(betaHat, 0) {
 			continue
 		}
 		b0 := math.Floor(betaHat)
 		f0 := betaHat - b0
+		// When -0.5 < betaHat < 0 (b0 == -1), fl(betaHat - b0) can round down by up to 0.5 ulp,
+		// making b0 + f0 < betaHat; bump f0 upward so b0 + f0 >= betaHat >= exactBeta holds exactly.
+		if b0+f0 < betaHat {
+			f0 = nextUp(f0)
+		}
 		if !(f0 >= minMIRFrac && f0 <= 1.0-minMIRFrac) {
 			continue
 		}
@@ -1447,9 +1577,14 @@ func separateCMIRFromSparseRow(
 		idxBuf := ws.tmpIdx[:needCols]
 		valBuf := ws.tmpVal[:needCols]
 		outLen := 0
+		validCut := true
 		for k, col := range cols {
 			a := sign * vals[k]
 			l, u := varLB[col], varUB[col]
+			if varCat[col] != Continuous {
+				l = math.Ceil(l)
+				u = math.Floor(u)
+			}
 			if l == u {
 				continue
 			}
@@ -1461,6 +1596,10 @@ func separateCMIRFromSparseRow(
 						continue
 					}
 					g := nextUp(a / contDenLo)
+					if math.IsInf(g, 0) || math.IsNaN(g) {
+						validCut = false
+						break
+					}
 					if g != 0 && outLen < len(idxBuf) {
 						idxBuf[outLen] = col
 						valBuf[outLen] = g
@@ -1472,6 +1611,10 @@ func separateCMIRFromSparseRow(
 						continue
 					}
 					g := nextUp((-a) / contDenLo)
+					if math.IsInf(g, 0) || math.IsNaN(g) {
+						validCut = false
+						break
+					}
 					if g != 0 && outLen < len(idxBuf) {
 						idxBuf[outLen] = col
 						valBuf[outLen] = -g
@@ -1486,11 +1629,22 @@ func separateCMIRFromSparseRow(
 					num = -a
 				}
 				alpha := num / delta
-				if alpha != 0 {
+				if math.IsInf(alpha, 0) || math.IsNaN(alpha) {
+					validCut = false
+					break
+				}
+				if alpha != 0 || num < 0 {
 					alpha = nextDown(alpha)
+					if math.IsInf(alpha, 0) || math.IsNaN(alpha) {
+						validCut = false
+						break
+					}
 				}
 				flA := math.Floor(alpha)
 				fj := alpha - flA
+				if alpha < 0 && fj > 0 {
+					fj = nextDown(fj)
+				}
 				coeff := flA
 				if fj > f0 {
 					numLo := nextDown(fj - f0)
@@ -1522,7 +1676,7 @@ func separateCMIRFromSparseRow(
 		valBuf = valBuf[:outLen]
 		ws.tmpIdx = idxBuf
 		ws.tmpVal = valBuf
-		if outLen == 0 {
+		if !validCut || outLen == 0 {
 			continue
 		}
 		cutRHSVal, cutRHSErr, okCutRHS := cutRHSAcc.result()
@@ -2174,9 +2328,31 @@ func finalizeSparseCut(
 			prevCol = col
 			uniq = append(uniq, col)
 		} else {
-			acc[col] += v
-			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
+			sum, rem := twoSum(acc[col], v)
+			if math.IsNaN(sum) || math.IsInf(sum, 0) {
 				return cutPlane{}, false
+			}
+			acc[col] = sum
+			if rem != 0 {
+				var bnd float64
+				if rem > 0 {
+					bnd = varLB[col]
+				} else {
+					bnd = varUB[col]
+				}
+				if math.IsInf(bnd, 0) || math.IsNaN(bnd) {
+					return cutPlane{}, false
+				}
+				if bnd != 0 {
+					lo := nextDown(rem * bnd)
+					if math.IsInf(lo, 0) || math.IsNaN(lo) {
+						return cutPlane{}, false
+					}
+					rhs = nextUp(rhs - lo)
+					if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
+						return cutPlane{}, false
+					}
+				}
 			}
 		}
 	}
@@ -2208,15 +2384,24 @@ func finalizeSparseCut(
 			nnz++
 		} else if v != 0 {
 			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
-			p1 := nextDown(v * varLB[j])
-			p2 := nextDown(v * varUB[j])
-			lo := min(p1, p2)
-			if math.IsInf(lo, 0) || math.IsNaN(lo) {
+			var bnd float64
+			if v > 0 {
+				bnd = varLB[j]
+			} else {
+				bnd = varUB[j]
+			}
+			if math.IsInf(bnd, 0) || math.IsNaN(bnd) {
 				return cutPlane{}, false
 			}
-			rhs = nextUp(rhs - lo)
-			if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
-				return cutPlane{}, false
+			if bnd != 0 {
+				lo := nextDown(v * bnd)
+				if math.IsInf(lo, 0) || math.IsNaN(lo) {
+					return cutPlane{}, false
+				}
+				rhs = nextUp(rhs - lo)
+				if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
+					return cutPlane{}, false
+				}
 			}
 		}
 	}
@@ -2261,20 +2446,35 @@ func finalizeSparseCut(
 				return cutPlane{}, false
 			}
 			subScaleErr += nextUp(math.SmallestNonzeroFloat64 * maxB)
+			if math.IsInf(subScaleErr, 0) || math.IsNaN(subScaleErr) {
+				return cutPlane{}, false
+			}
+			subScaleErr = nextUp(subScaleErr)
 		}
 		acc[j] = sv
 		act += sv * lpPrimal[j]
 	}
 	rawRHS := math.Ldexp(rhs, -normExp)
+	if math.IsInf(rawRHS, 0) || math.IsNaN(rawRHS) {
+		return cutPlane{}, false
+	}
 	if rhs != 0 && math.Ldexp(rawRHS, normExp) != rhs {
 		rawRHS = nextUp(rawRHS)
 	}
-	scaledRHS := (rawRHS + subScaleErr) + rhsSafetyMargin*scaledNorm
+	rhsWithErr := rawRHS
+	if subScaleErr > 0 {
+		rhsWithErr = rawRHS + subScaleErr
+		if math.IsInf(rhsWithErr, 0) || math.IsNaN(rhsWithErr) {
+			return cutPlane{}, false
+		}
+		rhsWithErr = nextUp(rhsWithErr)
+	}
+	scaledRHS := rhsWithErr + rhsSafetyMargin*scaledNorm
 	if math.IsNaN(scaledRHS) || math.IsInf(scaledRHS, 0) || math.IsNaN(act) || math.IsInf(act, 0) {
 		return cutPlane{}, false
 	}
 	efficacy := (act - scaledRHS) / scaledNorm
-	if !(efficacy >= minCutEfficacy) {
+	if math.IsNaN(efficacy) || math.IsInf(efficacy, 0) || !(efficacy >= minCutEfficacy) {
 		return cutPlane{}, false
 	}
 
@@ -2316,15 +2516,24 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 			nnz++
 		} else if v != 0 {
 			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
-			p1 := nextDown(v * p.varLB[j])
-			p2 := nextDown(v * p.varUB[j])
-			lo := min(p1, p2)
-			if math.IsInf(lo, 0) || math.IsNaN(lo) {
+			var bnd float64
+			if v > 0 {
+				bnd = p.varLB[j]
+			} else {
+				bnd = p.varUB[j]
+			}
+			if math.IsInf(bnd, 0) || math.IsNaN(bnd) {
 				return cutPlane{}, false
 			}
-			rhs = nextUp(rhs - lo)
-			if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
-				return cutPlane{}, false
+			if bnd != 0 {
+				lo := nextDown(v * bnd)
+				if math.IsInf(lo, 0) || math.IsNaN(lo) {
+					return cutPlane{}, false
+				}
+				rhs = nextUp(rhs - lo)
+				if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
+					return cutPlane{}, false
+				}
 			}
 		}
 	}
@@ -2366,6 +2575,10 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 					return cutPlane{}, false
 				}
 				subScaleErr += nextUp(math.SmallestNonzeroFloat64 * maxB)
+				if math.IsInf(subScaleErr, 0) || math.IsNaN(subScaleErr) {
+					return cutPlane{}, false
+				}
+				subScaleErr = nextUp(subScaleErr)
 			}
 			colIdx = append(colIdx, j)
 			val = append(val, sv)
@@ -2373,15 +2586,26 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 		}
 	}
 	rawRHS := math.Ldexp(rhs, -normExp)
+	if math.IsInf(rawRHS, 0) || math.IsNaN(rawRHS) {
+		return cutPlane{}, false
+	}
 	if rhs != 0 && math.Ldexp(rawRHS, normExp) != rhs {
 		rawRHS = nextUp(rawRHS)
 	}
-	scaledRHS := (rawRHS + subScaleErr) + rhsSafetyMargin*scaledNorm
+	rhsWithErr := rawRHS
+	if subScaleErr > 0 {
+		rhsWithErr = rawRHS + subScaleErr
+		if math.IsInf(rhsWithErr, 0) || math.IsNaN(rhsWithErr) {
+			return cutPlane{}, false
+		}
+		rhsWithErr = nextUp(rhsWithErr)
+	}
+	scaledRHS := rhsWithErr + rhsSafetyMargin*scaledNorm
 	if math.IsNaN(scaledRHS) || math.IsInf(scaledRHS, 0) || math.IsNaN(act) || math.IsInf(act, 0) {
 		return cutPlane{}, false
 	}
 	efficacy := (act - scaledRHS) / scaledNorm
-	if !(efficacy >= minCutEfficacy) {
+	if math.IsNaN(efficacy) || math.IsInf(efficacy, 0) || !(efficacy >= minCutEfficacy) {
 		return cutPlane{}, false
 	}
 

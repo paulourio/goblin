@@ -3,6 +3,7 @@ package goblin
 import (
 	"cmp"
 	"math"
+	"math/big"
 	"math/bits"
 	"slices"
 	"strconv"
@@ -35,6 +36,7 @@ type presolveWorkRow struct {
 	cols   []int
 	vals   []float64
 	rhs    float64
+	rhsRat *big.Rat
 	sense  ConstraintSense
 	active bool
 	shared bool
@@ -149,11 +151,23 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					break
 				}
 				cVal := r.vals[k]
+				if isNonFinite(cVal) {
+					allInt = false
+					break
+				}
 				rc := math.Round(cVal)
 				diff := math.Abs(cVal - rc)
 				if diff > presolveGCDIntTol || math.Abs(rc) > presolveGCDMaxCoeff {
 					allInt = false
 					break
+				}
+				ic := int64(math.Abs(rc))
+				if ic == 0 {
+					if cVal != 0 {
+						allInt = false
+						break
+					}
+					continue
 				}
 				if diff > 0 {
 					maxDom := max(math.Abs(lb[col]), math.Abs(ub[col]))
@@ -167,10 +181,6 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						break
 					}
 				}
-				ic := int64(math.Abs(rc))
-				if ic == 0 {
-					continue
-				}
 				g = gcdInt64(g, ic)
 			}
 			if allInt && g > 1 {
@@ -182,28 +192,40 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					}
 				}
 				if math.Abs(r.rhs) <= 0x1p52 {
-					r.ensureOwned()
-					fg := float64(g)
-					for k := range r.vals {
-						r.vals[k] = math.Round(r.vals[k]) / fg
-					}
-					switch r.sense {
-					case LessEqual:
-						ubInt := int64(math.Floor(r.rhs + maxRoundErr + presolveIntTol))
-						r.rhs = float64(divFloorInt64(ubInt, g))
-					case GreaterEqual:
-						lbInt := int64(math.Ceil(r.rhs - maxRoundErr - presolveIntTol))
-						r.rhs = float64(divCeilInt64(lbInt, g))
-					case Equal:
+					if r.sense == Equal {
 						loInt := int64(math.Ceil(r.rhs - presolveFeasTol - maxRoundErr))
 						hiInt := int64(math.Floor(r.rhs + presolveFeasTol + maxRoundErr))
 						q := divCeilInt64(loInt, g)
 						if q*g > hiInt {
 							return PresolveResult{Infeasible: true}
 						}
+						// Do not round a sub-tolerance non-multiple equality RHS
+						// (such as 2x - 2y = 5e-7) into a falsely feasible integer multiple.
+						if maxRoundErr == 0 && r.rhs != float64(q*g) {
+							continue
+						}
+						r.ensureOwned()
+						fg := float64(g)
+						for k := range r.vals {
+							r.vals[k] = math.Round(r.vals[k]) / fg
+						}
 						r.rhs = float64(q)
+						strengthened++
+					} else {
+						r.ensureOwned()
+						fg := float64(g)
+						for k := range r.vals {
+							r.vals[k] = math.Round(r.vals[k]) / fg
+						}
+						if r.sense == LessEqual {
+							ubInt := int64(math.Floor(r.rhs + maxRoundErr + presolveIntTol))
+							r.rhs = float64(divFloorInt64(ubInt, g))
+						} else {
+							lbInt := int64(math.Ceil(r.rhs - maxRoundErr - presolveIntTol))
+							r.rhs = float64(divCeilInt64(lbInt, g))
+						}
+						strengthened++
 					}
-					strengthened++
 				}
 			} else if allInt && g == 1 && math.Abs(r.rhs) <= 0x1p52 {
 				if maxRoundErr > 0 {
@@ -230,7 +252,9 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					if math.Abs(r.rhs-nearest) > presolveFeasTol+maxRoundErr {
 						return PresolveResult{Infeasible: true}
 					}
-					r.rhs = nearest
+					if maxRoundErr > 0 {
+						r.rhs = nearest
+					}
 				}
 			}
 		}
@@ -973,17 +997,17 @@ func runActivityTighteningDirty(
 				return tightened, removedRows, true, false
 			}
 
-			if r.sense == LessEqual && s.maxInfCount == 0 && s.deficitLo >= -presolveBoundChangeTol {
+			if r.sense == LessEqual && s.maxInfCount == 0 && s.deficitLo >= 0 {
 				r.active = false
 				removedRows++
 				continue
 			}
-			if r.sense == GreaterEqual && s.minInfCount == 0 && s.slackHi <= presolveBoundChangeTol {
+			if r.sense == GreaterEqual && s.minInfCount == 0 && s.slackHi <= 0 {
 				r.active = false
 				removedRows++
 				continue
 			}
-			if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && s.slackHi <= presolveBoundChangeTol && s.deficitLo >= -presolveBoundChangeTol {
+			if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && s.slackHi <= 0 && s.deficitLo >= 0 {
 				r.active = false
 				removedRows++
 				continue
@@ -1189,11 +1213,23 @@ type rowActivitySummary struct {
 	slackLo, slackHi     float64
 	deficitLo, deficitHi float64
 	l1Min, l1Max         float64
+	domMaxA              float64
+	rowMaxA              float64
 	minInfCount          int
 	maxInfCount          int
 	useWideSlack         bool
 	useWideDeficit       bool
 	extreme              bool
+}
+
+func (s *rowActivitySummary) domainMaxAbs() float64 {
+	if s.domMaxA > 0 {
+		return s.domMaxA
+	}
+	if s.rowMaxA > 0 {
+		return s.rowMaxA
+	}
+	return 1.0
 }
 
 //go:noinline
@@ -1288,7 +1324,6 @@ func handleExtremeRowTightening(
 	}
 	errS := 0x1p-45 * (l1Scaled + math.Abs(slackS) + math.Abs(defS))
 	tolS := max(math.Ldexp(presolveFeasTol, -shift), presolveRelScaleTol*l1Scaled) + errS
-	chgS := math.Ldexp(presolveBoundChangeTol, -shift)
 	if hasUpper && minInfCount == 0 && slackS+errS < -tolS {
 		return true, false
 	}
@@ -1301,7 +1336,7 @@ func handleExtremeRowTightening(
 	if r.sense == GreaterEqual && minInfCount == 0 && slackS+errS <= 0 {
 		return false, true
 	}
-	if r.sense == Equal && minInfCount == 0 && maxInfCount == 0 && math.Abs(slackS)+errS <= chgS && math.Abs(defS)+errS <= chgS {
+	if r.sense == Equal && minInfCount == 0 && maxInfCount == 0 && slackS+errS <= 0 && defS-errS >= 0 {
 		return false, true
 	}
 	return false, false
@@ -1345,7 +1380,14 @@ func evalRowActivitySummaryInto(
 			s.extreme = true
 			return false
 		}
+		av := math.Abs(a)
+		if av > s.rowMaxA {
+			s.rowMaxA = av
+		}
 		l, u := lb[col], ub[col]
+		if (l != 0 || u != 0) && av > s.domMaxA {
+			s.domMaxA = av
+		}
 		if a > 0 {
 			if hasUpper && l != 0 {
 				if math.IsInf(l, -1) {
@@ -1401,47 +1443,58 @@ func evalRowActivitySummaryInto(
 
 	if hasUpper {
 		if val, eb, ok := s.slackAcc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
-			s.slackLo = val - eb
-			s.slackHi = val + eb
+			lo := val - eb
+			hi := val + eb
+			if eb > 0 || s.slackAcc.errL1 > 0 || s.slackAcc.lowCount > 0 {
+				lo = nextDown(lo)
+				hi = nextUp(hi)
+			}
+			s.slackLo = lo
+			s.slackHi = hi
 		} else {
 			s.useWideSlack = true
-			val, ok := evalRowActivityWide(cols, vals, lb, ub, rhs, true)
+			lo, hi, ok := evalRowActivityWide(cols, vals, lb, ub, rhs, true)
 			if !ok {
 				s.extreme = true
 				return false
 			}
-			ulp := 0x1p-50 * math.Abs(val)
-			s.slackLo = val - ulp
-			s.slackHi = val + ulp
+			s.slackLo = lo
+			s.slackHi = hi
 		}
 	}
 
 	if hasLower {
 		if val, eb, ok := s.deficitAcc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
-			s.deficitLo = val - eb
-			s.deficitHi = val + eb
+			lo := val - eb
+			hi := val + eb
+			if eb > 0 || s.deficitAcc.errL1 > 0 || s.deficitAcc.lowCount > 0 {
+				lo = nextDown(lo)
+				hi = nextUp(hi)
+			}
+			s.deficitLo = lo
+			s.deficitHi = hi
 		} else {
 			s.useWideDeficit = true
-			val, ok := evalRowActivityWide(cols, vals, lb, ub, rhs, false)
+			lo, hi, ok := evalRowActivityWide(cols, vals, lb, ub, rhs, false)
 			if !ok {
 				s.extreme = true
 				return false
 			}
-			ulp := 0x1p-50 * math.Abs(val)
-			s.deficitLo = val - ulp
-			s.deficitHi = val + ulp
+			s.deficitLo = lo
+			s.deficitHi = hi
 		}
 	}
 
 	return false
 }
 
-// evalRowActivityWide isolates wideDotAcc stack allocation off evalRowActivitySummaryInto.
+// evalRowActivityWide isolates wideDotAcc stack allocation off evalRowActivitySummaryInto
+// and returns a sound [lo, hi] enclosure including subnormal and underflow margins.
 //
 //go:noinline
-func evalRowActivityWide(cols []int, vals, lb, ub []float64, rhs float64, upper bool) (float64, bool) {
+func evalRowActivityWide(cols []int, vals, lb, ub []float64, rhs float64, upper bool) (lo, hi float64, ok bool) {
 	if len(vals) < len(cols) {
-		return 0, false
+		return 0, 0, false
 	}
 	vals = vals[:len(cols)]
 	var w wideDotAcc
@@ -1465,11 +1518,42 @@ func evalRowActivityWide(cols []int, vals, lb, ub []float64, rhs float64, upper 
 			}
 		}
 	}
-	val := w.finish(math.NaN())
-	if math.IsNaN(val) || math.IsInf(val, 0) {
-		return 0, false
+	top, rem, wOK := w.finishDD()
+	if !wOK {
+		return 0, 0, false
 	}
-	return val, true
+	val := top + rem
+	if math.IsNaN(val) {
+		val = top
+	}
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return 0, 0, false
+	}
+	if w.isEmpty() {
+		return 0, 0, true
+	}
+	if val == 0 {
+		if w.loLen == 0 {
+			return 0, 0, true
+		}
+		return -math.SmallestNonzeroFloat64, math.SmallestNonzeroFloat64, true
+	}
+	ulp := 0x1p-50 * math.Abs(val)
+	lo = val - ulp
+	if lo >= val {
+		lo = nextDown(val)
+	}
+	if rem < 0 || w.loLen > 0 {
+		lo = nextDown(lo)
+	}
+	hi = val + ulp
+	if hi <= val {
+		hi = nextUp(val)
+	}
+	if rem > 0 || w.loLen > 0 {
+		hi = nextUp(hi)
+	}
+	return lo, hi, true
 }
 
 //go:noinline
@@ -1820,6 +1904,52 @@ func filterAndSortOrbitSeeds(rows []presolveWorkRow, colPtr, seedRows []int) []i
 	return filtered
 }
 
+func sameWorkRowRHS(a, b *presolveWorkRow) bool {
+	if a.rhsRat == nil && b.rhsRat == nil {
+		return a.rhs == b.rhs
+	}
+	if a.rhsRat == nil || b.rhsRat == nil {
+		return false
+	}
+	return a.rhsRat.Cmp(b.rhsRat) == 0
+}
+
+func hashBigRat(r *big.Rat) uint64 {
+	h := presolveSplitmix64(uint64(r.Sign()+2) ^ 0x9e3779b97f4a7c15)
+	for _, w := range r.Num().Bits() {
+		h = presolveSplitmix64(h ^ uint64(w))
+	}
+	h = presolveSplitmix64(h ^ 0xbf58476d1ce4e5b9)
+	for _, w := range r.Denom().Bits() {
+		h = presolveSplitmix64(h ^ uint64(w))
+	}
+	return h
+}
+
+func evalFixedRowResidualRat(cols []int, vals, x []float64, isFree []bool, rhs float64) (*big.Rat, bool) {
+	sum := new(big.Rat).SetFloat64(rhs)
+	if sum == nil {
+		return nil, false
+	}
+	var aRat, xRat, prod big.Rat
+	for k, col := range cols {
+		if isFree != nil && isFree[col] {
+			continue
+		}
+		v := vals[k]
+		xv := x[col]
+		if v == 0 || xv == 0 {
+			continue
+		}
+		if aRat.SetFloat64(v) == nil || xRat.SetFloat64(xv) == nil {
+			return nil, false
+		}
+		prod.Mul(&aRat, &xRat)
+		sum.Sub(sum, &prod)
+	}
+	return sum, true
+}
+
 func computeOrbitRowHashes(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64, colPtr []int) []uint64 {
 	rowHash := make([]uint64, len(rows))
 	for i := range rows {
@@ -1827,7 +1957,11 @@ func computeOrbitRowHashes(orig *CompiledProblem, rows []presolveWorkRow, lb, ub
 		if !r.active {
 			continue
 		}
-		h := presolveSplitmix64(uint64(r.sense) ^ (canonicalFloatBits(r.rhs) << 3) ^ uint64(len(r.cols))*0x517cc1b727220a95)
+		rhsHash := canonicalFloatBits(r.rhs) << 3
+		if r.rhsRat != nil {
+			rhsHash = hashBigRat(r.rhsRat)
+		}
+		h := presolveSplitmix64(uint64(r.sense) ^ rhsHash ^ uint64(len(r.cols))*0x517cc1b727220a95)
 		var sumH, xorH uint64
 		for k, col := range r.cols {
 			th := presolveSplitmix64(canonicalFloatBits(r.vals[k]))
@@ -2135,10 +2269,37 @@ func detectDynamicNodeOrbit(
 			}
 		}
 		if validSeed && freeCnt >= 2 {
-			effRHS, eb, ok := rhsAcc.result()
-			if ok && eb == 0 && effRHS == 1.0 {
-				hasCandidateSeed = true
-				break
+			if !rhsAcc.nonFin && rhsAcc.lowCount == 0 && rhsAcc.errL1 == 0 && rhsAcc.c == 0 {
+				if rhsAcc.s == 1.0 {
+					hasCandidateSeed = true
+					break
+				}
+			} else if effRHS, _, ok := rhsAcc.result(); !ok || math.Abs(effRHS-1.0) <= 1e-6 {
+				var sum big.Rat
+				if sum.SetFloat64(p.rowRHS[r]) != nil {
+					var aRat, xRat, prod big.Rat
+					allFin := true
+					for k := p.rowPtr[r]; k < p.rowPtr[r+1]; k++ {
+						col := p.colIdx[k]
+						if curLB[col] != curUB[col] {
+							continue
+						}
+						v, xv := p.rowVal[k], curLB[col]
+						if v == 0 || xv == 0 {
+							continue
+						}
+						if aRat.SetFloat64(v) == nil || xRat.SetFloat64(xv) == nil {
+							allFin = false
+							break
+						}
+						prod.Mul(&aRat, &xRat)
+						sum.Sub(&sum, &prod)
+					}
+					if allFin && sum.IsInt() && sum.Num().IsInt64() && sum.Num().Int64() == 1 {
+						hasCandidateSeed = true
+						break
+					}
+				}
 			}
 		}
 	}
@@ -2166,8 +2327,20 @@ func detectDynamicNodeOrbit(
 		if freeCnt == 0 {
 			continue
 		}
-		remRHS, ok := evalFixedRowResidual(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
-		if !ok {
+		remRHS, exact, ok := evalFixedRowResidualExact(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
+		var rhsRat *big.Rat
+		if !exact {
+			rat, ratOK := evalFixedRowResidualRat(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
+			if !ratOK {
+				return out
+			}
+			if f, fExact := rat.Float64(); fExact && !math.IsInf(f, 0) && !math.IsNaN(f) {
+				remRHS = f
+			} else {
+				remRHS, _ = rat.Float64()
+				rhsRat = rat
+			}
+		} else if !ok {
 			return out
 		}
 		cols := make([]int, 0, freeCnt)
@@ -2188,10 +2361,11 @@ func detectDynamicNodeOrbit(
 			cols:   cols,
 			vals:   vals,
 			rhs:    remRHS,
+			rhsRat: rhsRat,
 			sense:  p.rowSense[i],
 			active: true,
 		})
-		if touchesBVar && freeCnt >= 2 && freeCnt <= maxOrbitGroupSize && (p.rowSense[i] == Equal || p.rowSense[i] == LessEqual) && remRHS == 1.0 {
+		if touchesBVar && freeCnt >= 2 && freeCnt <= maxOrbitGroupSize && (p.rowSense[i] == Equal || p.rowSense[i] == LessEqual) && rhsRat == nil && remRHS == 1.0 {
 			unitBin := true
 			for k, col := range cols {
 				if vals[k] != 1.0 || p.varCat[col] != Binary || curLB[col] != 0 || curUB[col] != 1 {
@@ -2351,7 +2525,7 @@ func proposeAndVerifyOrbits(
 						continue
 					}
 					rrg := &rows[rg]
-					if rrg.sense != rr0.sense || len(rrg.cols) != len(rr0.cols) || rrg.rhs != rr0.rhs {
+					if rrg.sense != rr0.sense || len(rrg.cols) != len(rr0.cols) || !sameWorkRowRHS(rrg, rr0) {
 						continue
 					}
 					dup := false
@@ -2702,7 +2876,7 @@ func verifyOrbitSymmetry(
 		for g := 1; g < gCount; g++ {
 			rgIdx := rowTuples[tBase+g]
 			rg := &rows[rgIdx]
-			if !rg.active || rowState[rgIdx] != g || rg.sense != r0.sense || len(rg.cols) != len(r0.cols) || rg.rhs != r0.rhs {
+			if !rg.active || rowState[rgIdx] != g || rg.sense != r0.sense || len(rg.cols) != len(r0.cols) || !sameWorkRowRHS(rg, r0) {
 				return false
 			}
 			if sc.stamp == math.MaxInt {
@@ -3500,6 +3674,33 @@ func evalOrigColDualMin(orig *CompiledProblem, col int, yMin []float64) float64 
 	return w.finish(orig.objMin[col])
 }
 
+//go:noinline
+func evalOrigRowSlackWide(orig *CompiledProblem, row int, x []float64) float64 {
+	var w wideDotAcc
+	w.addVal(-orig.rowRHS[row])
+	for p := orig.rowPtr[row]; p < orig.rowPtr[row+1]; p++ {
+		w.addProd(orig.rowVal[p], x[orig.colIdx[p]])
+	}
+	return w.finish(0)
+}
+
+func evalOrigRowSlack(orig *CompiledProblem, row int, x []float64) (slack, rowL1 float64) {
+	var actAcc dot2Acc
+	rhs := orig.rowRHS[row]
+	actAcc.addVal(-rhs)
+	rowL1 = math.Abs(rhs)
+	for p := orig.rowPtr[row]; p < orig.rowPtr[row+1]; p++ {
+		a := orig.rowVal[p]
+		xv := x[orig.colIdx[p]]
+		actAcc.addProd(a, xv)
+		rowL1 += math.Abs(a * xv)
+	}
+	if s, _, ok := actAcc.result(); ok {
+		return s, rowL1
+	}
+	return evalOrigRowSlackWide(orig, row, x), rowL1
+}
+
 // postsolveLP reconstructs original-model Duals and ReducedCosts from a solved reduced LP,
 // unwinds absorbed singleton bounds in reverse order, and verifies primal/dual KKT conditions.
 func postsolveLP(orig *CompiledProblem, pre *LPPresolveResult, res *Result) bool {
@@ -3530,6 +3731,13 @@ func postsolveLP(orig *CompiledProblem, pre *LPPresolveResult, res *Result) bool
 	}
 
 	for _, s := range slices.Backward(pre.Singletons) {
+		if s.sense != Equal {
+			slack, rowL1 := evalOrigRowSlack(orig, s.origRow, res.Values)
+			activeTol := max(presolveFeasTol*math.Abs(s.coeff)*max(1.0, math.Abs(res.Values[s.col])), 1e-11*rowL1)
+			if (s.sense == LessEqual && slack < -activeTol) || (s.sense == GreaterEqual && slack > activeTol) {
+				continue
+			}
+		}
 		rcCol := evalOrigColDualMin(orig, s.col, yMin)
 		if math.IsNaN(rcCol) || math.IsInf(rcCol, 0) {
 			return false
@@ -3558,33 +3766,28 @@ func postsolveLP(orig *CompiledProblem, pre *LPPresolveResult, res *Result) bool
 		if math.IsNaN(yi) || math.IsInf(yi, 0) {
 			return false
 		}
-		var actAcc dot2Acc
-		actAcc.addVal(-orig.rowRHS[i])
-		for p := orig.rowPtr[i]; p < orig.rowPtr[i+1]; p++ {
-			actAcc.addProd(orig.rowVal[p], res.Values[orig.colIdx[p]])
-		}
-		slack, _, ok := actAcc.result()
-		if !ok {
-			var w wideDotAcc
-			w.addVal(-orig.rowRHS[i])
-			for p := orig.rowPtr[i]; p < orig.rowPtr[i+1]; p++ {
-				w.addProd(orig.rowVal[p], res.Values[orig.colIdx[p]])
-			}
-			slack = w.finish(0)
-		}
+		slack, rowL1 := evalOrigRowSlack(orig, i, res.Values)
 		switch orig.rowSense[i] {
 		case LessEqual:
 			if yi > dualSignTol*max(1.0, math.Abs(yi)) {
 				return false
 			}
-			if slack < -1e-5 && math.Abs(yi*slack) > compTol*max(1.0, max(math.Abs(yi), math.Abs(orig.rowRHS[i]))) {
+			if yi > 0 {
+				yi = 0
+				yMin[i] = 0
+			}
+			if slack < -1e-5*rowL1 && math.Abs(yi*slack) > compTol*max(1.0, math.Abs(orig.rowRHS[i])) {
 				return false
 			}
 		case GreaterEqual:
 			if yi < -dualSignTol*max(1.0, math.Abs(yi)) {
 				return false
 			}
-			if slack > 1e-5 && math.Abs(yi*slack) > compTol*max(1.0, max(math.Abs(yi), math.Abs(orig.rowRHS[i]))) {
+			if yi < 0 {
+				yi = 0
+				yMin[i] = 0
+			}
+			if slack > 1e-5*rowL1 && math.Abs(yi*slack) > compTol*max(1.0, math.Abs(orig.rowRHS[i])) {
 				return false
 			}
 		}

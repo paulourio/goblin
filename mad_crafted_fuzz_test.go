@@ -590,7 +590,16 @@ func FuzzMADExactOptimum(f *testing.F) {
 		}
 		const maxNodes = 1500
 
-		resGo := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+		wFull := [3]int{1, 2, 4}[int(seed)%3]
+		resGo := mustSolveCompiled(t, p,
+			gb.WithPureGo(),
+			gb.WithPresolve(true),
+			gb.WithCuts(true),
+			gb.WithHeuristics(true),
+			gb.WithWorkers(wFull),
+			gb.WithTimeLimit(timeLimit),
+			gb.WithMaxNodes(maxNodes),
+		)
 		hasIncGo := assertExactOptMADSoundness(t, tag, "go", p, resGo, inst.exactLP, inst.exactMILP, false)
 
 		var altName string
@@ -618,6 +627,30 @@ func FuzzMADExactOptimum(f *testing.F) {
 		resAlt := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes), altOpt)
 		hasIncAlt := assertExactOptMADSoundness(t, tag, altName, p, resAlt, inst.exactLP, inst.exactMILP, noPre)
 		assertTwoGoSolvesConsistent(t, tag, "go", resGo, hasIncGo, altName, resAlt, hasIncAlt)
+
+		if formalFuzzEnabled() && p.NumVars() <= 600 {
+			_, _ = verifyFormalPresolveRules(t, p)
+			verifyFormalRootLP(t, tag+"/rootLP", p)
+			sols := [][]float64{inst.buildWitness(p, inst.plantedMG, inst.plantedNG)}
+			if hasIncGo {
+				sols = append(sols, resGo.Values)
+			}
+			verifyFormalSeparatedCuts(t, tag+"/cuts", p, sols)
+			if p.NumVars() <= 240 {
+				resTr, tr := verifyFormalVIPRTrace(
+					t,
+					tag+"/vipr",
+					p,
+					50,
+					250*time.Millisecond,
+					gb.WithPresolve(false),
+					gb.WithCuts(true),
+					gb.WithHeuristics(true),
+				)
+				_ = assertExactOptMADSoundness(t, tag, "vipr", p, resTr, inst.exactLP, inst.exactMILP, true)
+				assertFullFeatureVsVIPR(t, tag+"/full_vs_vipr", p, resGo, resTr, tr, 1e-6, 1e-6)
+			}
+		}
 	})
 }
 
@@ -1012,7 +1045,16 @@ func FuzzMADAdversarialRegimes(f *testing.F) {
 		}
 		const maxNodes = 1500
 
-		resGo := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+		wFull := [3]int{1, 2, 4}[int(seed)%3]
+		resGo := mustSolveCompiled(t, p,
+			gb.WithPureGo(),
+			gb.WithPresolve(true),
+			gb.WithCuts(true),
+			gb.WithHeuristics(true),
+			gb.WithWorkers(wFull),
+			gb.WithTimeLimit(timeLimit),
+			gb.WithMaxNodes(maxNodes),
+		)
 		hasIncGo := assertDecomposedMADSoundness(t, tag, "go", p, resGo, inst.plantedObj)
 
 		var altName string
@@ -1044,6 +1086,30 @@ func FuzzMADAdversarialRegimes(f *testing.F) {
 		resAlt := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes), altOpt)
 		hasIncAlt := assertDecomposedMADSoundness(t, tag, altName, p, resAlt, inst.plantedObj)
 		assertTwoGoSolvesConsistent(t, tag, "go", resGo, hasIncGo, altName, resAlt, hasIncAlt)
+
+		if formalFuzzEnabled() && p.NumVars() <= 600 {
+			_, _ = verifyFormalPresolveRules(t, p)
+			verifyFormalRootLP(t, tag+"/rootLP", p)
+			sols := [][]float64{inst.buildWitness(p)}
+			if hasIncGo {
+				sols = append(sols, resGo.Values)
+			}
+			verifyFormalSeparatedCuts(t, tag+"/cuts", p, sols)
+			if p.NumVars() <= 240 {
+				resTr, tr := verifyFormalVIPRTrace(
+					t,
+					tag+"/vipr",
+					p,
+					40,
+					250*time.Millisecond,
+					gb.WithPresolve(false),
+					gb.WithCuts(true),
+					gb.WithHeuristics(true),
+				)
+				_ = assertDecomposedMADSoundness(t, tag, "vipr", p, resTr, inst.plantedObj)
+				assertFullFeatureVsVIPR(t, tag+"/full_vs_vipr", p, resGo, resTr, tr, 1e-6, 1e-6)
+			}
+		}
 	})
 }
 
@@ -1108,7 +1174,7 @@ func shiftDesignatedWeights(rng *rand.Rand, w [][]float64, nG int, roundingBase 
 //
 //	go test -run=^$ -fuzz=^FuzzMADMetamorphicAndLimits$ -fuzztime=30s .
 func FuzzMADMetamorphicAndLimits(f *testing.F) {
-	for seed := range uint64(8) {
+	for seed := range uint64(4) {
 		for xform := range uint8(4) {
 			f.Add(seed, uint8(seed%4), uint16(seed*7000), xform)
 		}
@@ -1144,6 +1210,27 @@ func FuzzMADMetamorphicAndLimits(f *testing.F) {
 		const baseTime = 350 * time.Millisecond
 		const maxNodes = 1500
 
+		var resTrMeta gb.Result
+		var trMeta *gb.VIPRTrace
+		if formalFuzzEnabled() && pBase.NumVars() <= 300 {
+			_, _ = verifyFormalPresolveRules(t, pBase)
+			verifyFormalRootLP(t, tag+"/rootLP", pBase)
+			verifyFormalSeparatedCuts(t, tag+"/cuts", pBase, [][]float64{inst.buildWitness(pBase, inst.plantedMG, inst.plantedNG)})
+			if pBase.NumVars() <= 180 {
+				resTrMeta, trMeta = verifyFormalVIPRTrace(
+					t,
+					tag+"/vipr",
+					pBase,
+					20,
+					200*time.Millisecond,
+					gb.WithPresolve(false),
+					gb.WithCuts(true),
+					gb.WithHeuristics(true),
+				)
+				_ = assertExactOptMADSoundness(t, tag, "vipr", pBase, resTrMeta, inst.exactLP, inst.exactMILP, true)
+			}
+		}
+
 		if xform == 3 {
 			// Early-stop and interrupt-boundary fuzzing across 3 distinct limit modes.
 			ms := time.Duration(1+rng.IntN(25)) * time.Millisecond
@@ -1174,8 +1261,20 @@ func FuzzMADMetamorphicAndLimits(f *testing.F) {
 			return
 		}
 
-		resBase := mustSolveCompiled(t, pBase, gb.WithTimeLimit(baseTime), gb.WithMaxNodes(maxNodes))
+		wBase := [3]int{1, 2, 4}[int(seed)%3]
+		resBase := mustSolveCompiled(t, pBase,
+			gb.WithPureGo(),
+			gb.WithPresolve(true),
+			gb.WithCuts(true),
+			gb.WithHeuristics(true),
+			gb.WithWorkers(wBase),
+			gb.WithTimeLimit(baseTime),
+			gb.WithMaxNodes(maxNodes),
+		)
 		hasIncBase := assertExactOptMADSoundness(t, tag, "base", pBase, resBase, inst.exactLP, inst.exactMILP, false)
+		if trMeta != nil {
+			assertFullFeatureVsVIPR(t, tag+"/base_vs_vipr", pBase, resBase, resTrMeta, trMeta, 1e-6, 1e-6)
+		}
 
 		var wTrans [][]float64
 		var bTrans float64

@@ -75,6 +75,7 @@ type Options struct {
 	isSubMIP             bool
 	defaultMaxNodesUsed  bool
 	defaultCutPassesUsed bool
+	viprTrace            *VIPRTrace
 }
 
 const (
@@ -120,6 +121,9 @@ func ApplyOptions(opts ...Option) Options {
 	}
 	if cfg.AbsGapTol < 0 || math.IsNaN(cfg.AbsGapTol) {
 		cfg.AbsGapTol = 0
+	}
+	if cfg.viprTrace != nil {
+		cfg.Workers = 1
 	}
 	return cfg
 }
@@ -219,6 +223,16 @@ func WithTimeLimit(d time.Duration) Option {
 	return func(cfg *Options) { cfg.TimeLimit = d }
 }
 
+// WithVIPRTrace enables single-threaded rational Mini-VIPR proof tracing into tr on BackendGo.
+func WithVIPRTrace(tr *VIPRTrace) Option {
+	return func(cfg *Options) {
+		cfg.viprTrace = tr
+		if tr != nil {
+			cfg.Workers = 1
+		}
+	}
+}
+
 func stopRequested(deadline time.Time, done <-chan struct{}) bool {
 	if done != nil {
 		select {
@@ -305,6 +319,9 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			return Result{}, err
 		}
 	}
+	if opt.viprTrace != nil {
+		opt.viprTrace.reset(p)
+	}
 	if p == nil {
 		return Result{
 			Backend:   opt.Backend,
@@ -385,6 +402,9 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			}
 		}
 		if preRes.Infeasible {
+			if opt.viprTrace != nil {
+				opt.viprTrace.recordPresolveInfeasible(p, opt.DisableSIMD)
+			}
 			return Result{
 				modelID:   p.modelID,
 				Backend:   backend,
@@ -409,6 +429,9 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			}
 		}
 		if lpPre.Infeasible {
+			if opt.viprTrace != nil {
+				opt.viprTrace.recordPresolveInfeasible(p, opt.DisableSIMD)
+			}
 			return Result{
 				modelID:   p.modelID,
 				Backend:   backend,
@@ -434,7 +457,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			} else if res.Status == StatusOptimal && (len(res.Values) != p.numVars || !postsolveLP(p, &lpPre, &res)) {
 				needFallback = true
 			}
-		} else if res.Status == StatusNumericalError {
+		} else if res.Status == StatusUnbounded || res.Status == StatusNumericalError {
 			needFallback = true
 		} else if len(res.Values) == p.numVars {
 			bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
@@ -443,6 +466,9 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			}
 		}
 		if needFallback {
+			if opt.viprTrace != nil {
+				opt.viprTrace.reset(p)
+			}
 			fallbackOpt := opt
 			fallbackOpt.EnablePresolve = false
 			if fallbackOpt.MaxIter > 0 {
@@ -485,6 +511,9 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 		if len(res.Values) == p.numVars {
 			res.Objective = p.EvaluateObjective(res.Values)
 			if res.Status == StatusOptimal && (math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) || math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0)) {
+				if opt.viprTrace != nil {
+					opt.viprTrace.reset(p)
+				}
 				return Result{
 					modelID:    p.modelID,
 					Backend:    backend,
@@ -494,6 +523,11 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 					CutsAdded:  res.CutsAdded,
 					SolveTime:  time.Since(start),
 				}
+			}
+			if usedLPPresolve && res.Status == StatusOptimal {
+				res.BestBound = res.Objective
+				res.RootLPBound = res.Objective
+				res.RootCutBound = res.Objective
 			}
 		}
 	}

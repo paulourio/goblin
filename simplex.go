@@ -152,11 +152,9 @@ func (s *LPSolver) feasTol(k int) float64 {
 	if k < len(s.colTol) {
 		return s.colTol[k]
 	}
-	if s.scaled {
-		r := k - len(s.colTol)
-		if uint(r) < uint(len(s.slackTol)) {
-			return s.slackTol[r]
-		}
+	r := k - len(s.colTol)
+	if uint(r) < uint(len(s.slackTol)) {
+		return s.slackTol[r]
 	}
 	return primalTol
 }
@@ -172,7 +170,7 @@ func (s *LPSolver) syncVarTol(tot int) []float64 {
 		ws.varTol = ws.varTol[:tot]
 	}
 	n := copy(ws.varTol, s.colTol)
-	if s.scaled {
+	if len(s.slackTol) > 0 {
 		n += copy(ws.varTol[n:], s.slackTol)
 	}
 	for k := n; k < tot; k++ {
@@ -1068,10 +1066,16 @@ func (s *LPSolver) CopyRootBasisFrom(src *LPSolver) {
 	if s == nil || src == nil || s.prob == nil || src.prob == nil || s.ws == nil || src.ws == nil {
 		return
 	}
-	if len(src.extraRows) > 0 || len(s.extraRows) > 0 || s.scaled != src.scaled {
+	if len(src.extraRows) > 0 || len(s.extraRows) > 0 {
 		return
 	}
 	if s.prob.numVars != src.prob.numVars || s.prob.numConstraints != src.prob.numConstraints {
+		return
+	}
+	if s.scaled && !src.scaled {
+		s.unscaleToOriginal()
+	}
+	if s.scaled != src.scaled {
 		return
 	}
 	n := s.prob.numVars
@@ -2348,6 +2352,9 @@ func (s *LPSolver) Solve() LPResult {
 			if res, ok := s.finalizeOptimalResult(totalIter, pFresh, dFresh); ok {
 				return res
 			}
+			if res, ok := s.retryWithDomainSlackTols(&totalIter); ok {
+				return res
+			}
 			// Primal residual failed after dual termination; fall through to primal recovery.
 		case StatusInfeasible, StatusIterationLimit, StatusTimeLimit:
 			s.dualValid = false
@@ -2411,6 +2418,9 @@ func (s *LPSolver) Solve() LPResult {
 	if status == StatusOptimal {
 		s.dualValid = true
 		if res, ok := s.finalizeOptimalResult(totalIter, pFresh, dFresh); ok {
+			return res
+		}
+		if res, ok := s.retryWithDomainSlackTols(&totalIter); ok {
 			return res
 		}
 		status = StatusNumericalError
@@ -2683,9 +2693,11 @@ func (s *LPSolver) cleanInfiniteNonBasicStatus() {
 	}
 }
 
-// verifiedDualBound returns a valid lower bound on the minimization objective (without objConstant)
+// verifiedDualBoundWithShift returns a valid lower bound on shift + sum_j objMin[j]*x[j]
 // when the current working iterate is dual feasible, well-conditioned, and primal-dual consistent.
-func (s *LPSolver) verifiedDualBound() (float64, bool) {
+// Accumulating shift inside the compensated dot products prevents float64 cancellation when
+// ObjConstant offsets large linear objective terms.
+func (s *LPSolver) verifiedDualBoundWithShift(shift float64) (float64, bool) {
 	ws := s.ws
 	n := s.prob.numVars
 	m := s.TotalRows()
@@ -2696,7 +2708,18 @@ func (s *LPSolver) verifiedDualBound() (float64, bool) {
 	if !ws.lu.UpdatePivotsWellConditioned(optRefactorPivotInvMax) {
 		return math.NaN(), false
 	}
+	scaledShift := shift
+	if s.scaled && shift != 0 {
+		scaledShift = shift / s.objScale
+		if isNonFinite(scaledShift) || scaledShift*s.objScale != shift {
+			return math.NaN(), false
+		}
+	}
 	var pAcc, dAcc dot2Acc
+	if scaledShift != 0 {
+		pAcc.addVal(scaledShift)
+		dAcc.addVal(scaledShift)
+	}
 	cost := ws.cost[:n]
 	x := ws.x[:tot]
 	for j := range n {
@@ -2753,21 +2776,28 @@ func (s *LPSolver) verifiedDualBound() (float64, bool) {
 			}
 		}
 	}
-	pObj, _, pOK := pAcc.result()
-	dObj, _, dOK := dAcc.result()
-	if !pOK || !dOK || math.IsNaN(pObj) || math.IsInf(pObj, 0) || math.IsNaN(dObj) || math.IsInf(dObj, 0) {
+	pObj, pErr, pOK := pAcc.result()
+	dObj, dErr, dOK := dAcc.result()
+	if !pOK || !dOK || isNonFinite(pObj) || isNonFinite(dObj) {
 		return math.NaN(), false
 	}
-	tol := 1e-5 * max(1.0, max(math.Abs(pObj), math.Abs(dObj)))
-	if math.Abs(pObj-dObj) > tol {
+	pUnscaled, dUnscaled := pObj, dObj
+	pErrUnscaled, dErrUnscaled := pErr, dErr
+	if s.scaled {
+		pUnscaled = pObj * s.objScale
+		dUnscaled = dObj * s.objScale
+		pErrUnscaled = pErr * s.objScale
+		dErrUnscaled = dErr * s.objScale
+	}
+	if isNonFinite(pUnscaled) || isNonFinite(dUnscaled) || isNonFinite(pErrUnscaled) || isNonFinite(dErrUnscaled) {
 		return math.NaN(), false
 	}
-	workBound := min(pObj, dObj)
-	if !s.scaled {
-		return workBound, true
+	tol := 1e-5 * max(1.0, max(math.Abs(pUnscaled), math.Abs(dUnscaled)))
+	if pErrUnscaled > tol || dErrUnscaled > tol || math.Abs(pUnscaled-dUnscaled) > tol {
+		return math.NaN(), false
 	}
-	bound := workBound * s.objScale
-	if math.IsNaN(bound) || math.IsInf(bound, 0) {
+	bound := min(pUnscaled-pErrUnscaled, dUnscaled-dErrUnscaled)
+	if isNonFinite(bound) {
 		return math.NaN(), false
 	}
 	return bound, true
@@ -2778,6 +2808,10 @@ func (s *LPSolver) verifiedDualBound() (float64, bool) {
 // objective (ObjectiveMin) on StatusOptimal and on dual-feasible StatusIterationLimit exits;
 // it is NaN whenever dual feasibility cannot be certified.
 func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64, iters int) {
+	return s.solveBoundOnlyWithShift(maxIter, 0)
+}
+
+func (s *LPSolver) solveBoundOnlyWithShift(maxIter int, shift float64) (status Status, dualBound float64, iters int) {
 	if s == nil || s.prob == nil || s.prob.invalidErr != nil || s.ws == nil || s.invalidBounds || s.invalidCut {
 		return StatusUndefined, math.NaN(), 0
 	}
@@ -2817,10 +2851,13 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 				return StatusInfeasible, math.NaN(), 0
 			}
 		}
-		return StatusOptimal, 0, 0
+		return StatusOptimal, shift, 0
 	}
 	if m == 0 {
 		var acc dot2Acc
+		if shift != 0 {
+			acc.addVal(shift)
+		}
 		for j := range n {
 			c := p.objMin[j]
 			lbj := s.unscaledBound(j, false)
@@ -2837,11 +2874,11 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 				acc.addProd(c, ubj)
 			}
 		}
-		val, _, ok := acc.result()
-		if !ok || math.IsNaN(val) || math.IsInf(val, 0) {
+		val, eb, ok := acc.result()
+		if !ok || math.IsNaN(val) || math.IsInf(val, 0) || isNonFinite(eb) {
 			return StatusNumericalError, math.NaN(), 0
 		}
-		return StatusOptimal, val, 0
+		return StatusOptimal, val - eb, 0
 	}
 
 	savedMaxIter := s.MaxIter
@@ -2884,7 +2921,7 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 		switch st {
 		case StatusOptimal:
 			if !anyPinned {
-				if bound, ok := s.verifiedDualBound(); ok {
+				if bound, ok := s.verifiedDualBoundWithShift(shift); ok {
 					s.dualValid = true
 					return StatusOptimal, bound, it
 				}
@@ -2917,12 +2954,12 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 	switch st {
 	case StatusOptimal:
 		s.dualValid = true
-		if bound, ok := s.verifiedDualBound(); ok {
+		if bound, ok := s.verifiedDualBoundWithShift(shift); ok {
 			return StatusOptimal, bound, it
 		}
 		return StatusOptimal, math.NaN(), it
 	case StatusIterationLimit:
-		if bound, ok := s.verifiedDualBound(); ok {
+		if bound, ok := s.verifiedDualBoundWithShift(shift); ok {
 			s.dualValid = true
 			return StatusIterationLimit, bound, it
 		}
@@ -5092,6 +5129,9 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64, dualFresh, allowPerturb bo
 				}
 			}
 			if hadSubTolBlocking {
+				if !s.dualShiftActive && s.verifyDualInfeasibleRow(leaveRow, leaveDir) {
+					return StatusInfeasible, iter, false, false
+				}
 				return StatusNumericalError, iter, false, false
 			}
 			if s.dualShiftActive {
@@ -5176,6 +5216,9 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64, dualFresh, allowPerturb bo
 				return StatusNumericalError, iter, false, false
 			}
 			if hadSubTolBlocking {
+				if !s.dualShiftActive && s.verifyDualInfeasibleRow(leaveRow, leaveDir) {
+					return StatusInfeasible, iter, false, false
+				}
 				return StatusNumericalError, iter, false, false
 			}
 			if s.dualShiftActive {
@@ -6769,7 +6812,150 @@ func (s *LPSolver) priceCompensatedPhase2Fallback(bland bool) (int, float64) {
 	return enterVar, enterDir
 }
 
+// fastCertifyUnboundedRay checks with zero heap allocations whether the concrete dyadic-rational
+// float64 edge ray derived from (enterVar, enterDir, fCol) satisfies all variable bounds, row
+// recession signs (including extra cut rows), and a strictly negative objective slope over Q via
+// compensated dot2Acc outward enclosures. Returning false delegates cleanly to exact *big.Rat
+// verification (verifyExactUnboundedEdge) so cancellation-sensitive or equality-tight bases never
+// suffer false unboundedness.
+func (s *LPSolver) fastCertifyUnboundedRay(enterVar int, enterDir float64, fCol []float64) bool {
+	p := s.prob
+	ws := s.ws
+	n := p.numVars
+	m := s.TotalRows()
+	if n == 0 || len(fCol) < m || enterDir == 0 || isNonFinite(enterDir) {
+		return false
+	}
+	dirSign := 1.0
+	if enterDir < 0 {
+		dirSign = -1.0
+	}
+	ray := ensureFloat64Slice(&ws.refineBuf1, n, true)
+	colSc := func(j int) float64 {
+		if s.scaled && j < len(s.colScale) {
+			return s.colScale[j]
+		}
+		return 1.0
+	}
+	if enterVar >= 0 && enterVar < n {
+		ray[enterVar] = dirSign * colSc(enterVar)
+	}
+	for i := range m {
+		bVar := ws.basis[i]
+		if bVar >= 0 && bVar < n {
+			fi := fCol[i]
+			if isNonFinite(fi) {
+				return false
+			}
+			ray[bVar] = -dirSign * fi * colSc(bVar)
+		}
+	}
+	anyNonZero := false
+	for j, rj := range ray {
+		if isNonFinite(rj) {
+			return false
+		}
+		if rj == 0 {
+			continue
+		}
+		anyNonZero = true
+		if rj > 0 && !math.IsInf(s.unscaledBound(j, true), 1) {
+			return false
+		}
+		if rj < 0 && !math.IsInf(s.unscaledBound(j, false), -1) {
+			return false
+		}
+	}
+	if !anyNonZero {
+		return false
+	}
+	for i := range p.numConstraints {
+		st, en := p.rowPtr[i], p.rowPtr[i+1]
+		var acc dot2Acc
+		for k := st; k < en; k++ {
+			a := p.rowVal[k]
+			rj := ray[p.colIdx[k]]
+			if a != 0 && rj != 0 {
+				acc.addProd(a, rj)
+			}
+		}
+		val, eb, ok := acc.result()
+		if !ok {
+			return false
+		}
+		exactZeroErr := eb == 0 && acc.errL1 == 0 && acc.lowCount == 0
+		lo, hi := val-eb, val+eb
+		if !exactZeroErr {
+			lo = nextDown(lo)
+			hi = nextUp(hi)
+		}
+		switch p.rowSense[i] {
+		case LessEqual:
+			if !(hi <= 0) {
+				return false
+			}
+		case GreaterEqual:
+			if !(lo >= 0) {
+				return false
+			}
+		case Equal:
+			if !exactZeroErr || val != 0 {
+				return false
+			}
+		}
+	}
+	for _, dr := range s.extraRows {
+		vals := dr.Val
+		if s.scaled && dr.OrigVal != nil {
+			vals = dr.OrigVal
+		}
+		if len(vals) < len(dr.ColIdx) {
+			return false
+		}
+		var acc dot2Acc
+		for k, col := range dr.ColIdx {
+			a := vals[k]
+			rj := ray[col]
+			if a != 0 && rj != 0 {
+				acc.addProd(a, rj)
+			}
+		}
+		val, eb, ok := acc.result()
+		if !ok {
+			return false
+		}
+		hi := val + eb
+		if eb > 0 || acc.errL1 > 0 || acc.lowCount > 0 {
+			hi = nextUp(hi)
+		}
+		if !(hi <= 0) {
+			return false
+		}
+	}
+	var objAcc dot2Acc
+	for j, rj := range ray {
+		if rj != 0 && p.objMin[j] != 0 {
+			objAcc.addProd(p.objMin[j], rj)
+		}
+	}
+	val, eb, ok := objAcc.result()
+	if !ok {
+		return false
+	}
+	hi := val + eb
+	if eb > 0 || objAcc.errL1 > 0 || objAcc.lowCount > 0 {
+		hi = nextUp(hi)
+	}
+	return hi < 0
+}
+
 func (s *LPSolver) verifyUnboundedRay(enterVar int, enterDir float64, fCol []float64) bool {
+	if s.fastCertifyUnboundedRay(enterVar, enterDir, fCol) {
+		return true
+	}
+	if verified, exactKnown := verifyExactUnboundedEdge(s, enterVar, enterDir); exactKnown {
+		return verified
+	}
 	p := s.prob
 	ws := s.ws
 	n := p.numVars
@@ -6777,7 +6963,7 @@ func (s *LPSolver) verifyUnboundedRay(enterVar int, enterDir float64, fCol []flo
 	if n == 0 || len(fCol) < m {
 		return false
 	}
-	ray := make([]float64, n)
+	ray := ensureFloat64Slice(&ws.refineBuf1, n, true)
 	colSc := func(j int) float64 {
 		if s.scaled && j < len(s.colScale) {
 			return s.colScale[j]
@@ -7871,6 +8057,14 @@ func (s *LPSolver) primalResidualsWithinTol(primal []float64) bool {
 			if (needLo && res < -rTolLo) || (needHi && res > rTolHi) {
 				return false
 			}
+		} else if (!math.IsInf(p.rowLB[i], -1) && res < 0) || (!math.IsInf(p.rowUB[i], 1) && res > 0) {
+			domMaxA := rowDomainMaxAbsAtMost1(p.colIdx[st:en], p.rowVal[st:en], unscaledLB, unscaledUB)
+			if domMaxA < 1.0 {
+				domTol := max(verifyFeasTol*domMaxA, 1e-8*evalRowActiveL1(p, i, primal))
+				if math.Abs(res) > domTol {
+					return false
+				}
+			}
 		}
 	}
 	for _, dr := range s.extraRows {
@@ -7895,6 +8089,148 @@ func (s *LPSolver) primalResidualsWithinTol(primal []float64) bool {
 		}
 	}
 	return true
+}
+
+// tryTightenDomainSlackTols inspects violated base rows whose active domain norm is below 1.0
+// and lowers s.slackTol on those rows so basic slacks cannot mask domain-scale infeasibilities.
+func (s *LPSolver) tryTightenDomainSlackTols() ([]float64, bool) {
+	p := s.prob
+	ws := s.ws
+	n := p.numVars
+	baseM := p.numConstraints
+	if baseM == 0 || ws == nil {
+		return nil, false
+	}
+	unscaledLB, unscaledUB := ws.lb[:n], ws.ub[:n]
+	if s.scaled {
+		unscaledLB, unscaledUB = s.origLB, s.origUB
+	}
+	primal := make([]float64, n)
+	for j := range n {
+		v := ws.x[j]
+		if s.scaled {
+			v *= s.colScale[j]
+		}
+		if isNonFinite(v) {
+			return nil, false
+		}
+		if unscaledLB[j] == unscaledUB[j] && !isNonFinite(unscaledLB[j]) {
+			v = unscaledLB[j]
+		}
+		primal[j] = v
+	}
+
+	var origSlack []float64
+	var nextSlack []float64
+	changed := false
+	for i := range baseM {
+		rhs := p.rowRHS[i]
+		if isNonFinite(rhs) {
+			continue
+		}
+		st, en := p.rowPtr[i], p.rowPtr[i+1]
+		cols := p.colIdx[st:en]
+		vals := p.rowVal[st:en]
+		res := evalSparseRowResidual(cols, vals, primal, rhs)
+		if isNonFinite(res) {
+			continue
+		}
+		viol := 0.0
+		if !math.IsInf(p.rowLB[i], -1) && res < 0 {
+			viol = max(viol, -res)
+		}
+		if !math.IsInf(p.rowUB[i], 1) && res > 0 {
+			viol = max(viol, res)
+		}
+		if viol == 0 {
+			continue
+		}
+		domMaxA := rowDomainMaxAbsAtMost1(cols, vals, unscaledLB, unscaledUB)
+		if domMaxA >= 1.0 {
+			continue
+		}
+		rowL1 := evalRowActiveL1(p, i, primal)
+		domTol := max(verifyFeasTol*domMaxA, 1e-8*rowL1)
+		if viol <= domTol {
+			continue
+		}
+		rs := s.rowScaleOf(i)
+		wantTol := max(primalTol*rs*domMaxA, 16.0*unitRoundoff64*rs*rowL1)
+		if wantTol <= 0 || isNonFinite(wantTol) {
+			wantTol = math.SmallestNonzeroFloat64
+		}
+		curTol := primalTol
+		if i < len(s.slackTol) {
+			curTol = s.slackTol[i]
+		}
+		if wantTol >= curTol {
+			continue
+		}
+		if nextSlack == nil {
+			origSlack = s.slackTol
+			totRows := s.TotalRows()
+			nextSlack = make([]float64, totRows)
+			for r := range totRows {
+				if r < len(s.slackTol) {
+					nextSlack[r] = s.slackTol[r]
+				} else {
+					nextSlack[r] = primalTol
+				}
+			}
+		}
+		nextSlack[i] = wantTol
+		changed = true
+	}
+	if !changed {
+		return nil, false
+	}
+	s.slackTol = nextSlack
+	s.varTolValid = false
+	s.basicBoundsValid = false
+	return origSlack, true
+}
+
+// retryWithDomainSlackTols tightens slack tolerances on rows with small active-domain norms
+// and re-runs dual simplex once from the dual-feasible basis.
+func (s *LPSolver) retryWithDomainSlackTols(totalIter *int) (LPResult, bool) {
+	origSlack, changed := s.tryTightenDomainSlackTols()
+	if !changed {
+		return LPResult{}, false
+	}
+	defer func() {
+		s.slackTol = origSlack
+		s.varTolValid = false
+		s.basicBoundsValid = false
+	}()
+	rem := s.MaxIter - *totalIter
+	if rem <= 0 {
+		return LPResult{}, false
+	}
+	ws := s.ws
+	copy(ws.workCost, ws.cost)
+	s.computeDualsAndReducedCosts(ws.workCost)
+	s.dualValid = true
+	if !s.stabilizeNonBasicBounds() {
+		return LPResult{}, false
+	}
+	savedMax := s.MaxIter
+	s.MaxIter = rem
+	s.computePrimalValues()
+	st, it, pF, dF := s.runDualSimplexLoop(ws.workCost, true, true)
+	s.MaxIter = savedMax
+	*totalIter += it
+	s.lastDualIters += it
+	switch st {
+	case StatusOptimal:
+		s.dualValid = true
+		if res, ok := s.finalizeOptimalResult(*totalIter, pF, dF); ok {
+			return res, true
+		}
+	case StatusInfeasible, StatusIterationLimit, StatusTimeLimit:
+		s.dualValid = false
+		return LPResult{Status: st, Iterations: *totalIter}, true
+	}
+	return LPResult{}, false
 }
 
 func twoSum(a, b float64) (s, err float64) {

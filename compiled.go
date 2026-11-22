@@ -70,6 +70,7 @@ type scaledLPData struct {
 type compiledLazyCache struct {
 	cbc        *cbcMatrixData
 	scaled     *scaledLPData
+	rowMaxAbs  []float64 // Precomputed max_k |A[i,k]| per row for O(1) incumbent tolerance scaling
 	cbcOnce    sync.Once
 	scaledOnce sync.Once
 }
@@ -161,6 +162,11 @@ func buildCSCFromCSR(p *CompiledProblem) {
 	p.colPtr = make([]int, n+1)
 	p.rowIdx = make([]int, nnz)
 	p.colVal = make([]float64, nnz)
+	var rowMaxAbs []float64
+	if p.lazy != nil {
+		rowMaxAbs = make([]float64, mc)
+		p.lazy.rowMaxAbs = rowMaxAbs
+	}
 	if nnz == 0 {
 		return
 	}
@@ -171,12 +177,20 @@ func buildCSCFromCSR(p *CompiledProblem) {
 		p.colPtr[j+1] += p.colPtr[j]
 	}
 	for i := range mc {
+		maxA := 0.0
 		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
 			col := p.colIdx[k]
 			pos := p.colPtr[col]
+			val := p.rowVal[k]
 			p.rowIdx[pos] = i
-			p.colVal[pos] = p.rowVal[k]
+			p.colVal[pos] = val
 			p.colPtr[col] = pos + 1
+			if av := math.Abs(val); av > maxA {
+				maxA = av
+			}
+		}
+		if rowMaxAbs != nil {
+			rowMaxAbs[i] = maxA
 		}
 	}
 	copy(p.colPtr[1:], p.colPtr[:n])
