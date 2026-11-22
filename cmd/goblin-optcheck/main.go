@@ -36,6 +36,18 @@ const (
 	amdahlFactor20x     = 2.0
 	inlineBudgetDefault = 80
 	nearInlineCostLimit = 160
+	largeFrameBytes     = 512
+	hexRadix            = 16
+	hexAlphaBase        = 10
+	maxHexDigits        = 7
+	minRuntimeFlatPct   = 0.5
+	minRuntimeCumPct    = 1.5
+	maxRuntimeHot       = 8
+	maxTopCallers       = 3
+	peekCallerMaxFields = 2
+	peekTargetMinFields = 4
+	pprofTopMinFields   = 6
+	msPerSec            = 1000.0
 	reportPerm          = 0o644
 	tableWidth          = 124
 )
@@ -79,9 +91,11 @@ type hotLineSample struct {
 
 type disasmMetrics struct {
 	InstCount        int      `json:"inst_count"`
+	FrameBytes       int      `json:"frame_bytes"`
 	PanicBoundsCalls int      `json:"panic_bounds_calls"`
 	GrowSliceCalls   int      `json:"grow_slice_calls"`
 	WriteBarriers    int      `json:"write_barriers"`
+	DeferReturnCalls int      `json:"defer_return_calls"`
 	AllocCalls       int      `json:"alloc_calls"`
 	StackSpillRefs   int      `json:"stack_spill_refs"`
 	ScalarFPOps      int      `json:"scalar_fp_ops"`
@@ -121,14 +135,42 @@ type nearInlineCandidate struct {
 	RawReason string `json:"raw_reason"`
 }
 
+type runtimeHotFunc struct {
+	Symbol     string   `json:"symbol"`
+	FlatMS     float64  `json:"flat_ms"`
+	FlatPct    float64  `json:"flat_pct"`
+	CumMS      float64  `json:"cum_ms"`
+	CumPct     float64  `json:"cum_pct"`
+	Inlined    bool     `json:"inlined,omitempty"`
+	TopCallers []string `json:"top_callers,omitempty"`
+}
+
+type vectorHazard struct {
+	Func string `json:"func"`
+	Addr string `json:"addr"`
+	Kind string `json:"kind"`
+	Insn string `json:"insn"`
+}
+
+type vectorAuditReport struct {
+	Available       bool           `json:"available"`
+	EVEXFuncCount   int            `json:"evex_func_count"`
+	VEXYMMFuncCount int            `json:"vex_ymm_func_count"`
+	EVEXFuncs       []string       `json:"evex_funcs,omitempty"`
+	UnguardedEVEX   []string       `json:"unguarded_evex,omitempty"`
+	Hazards         []vectorHazard `json:"hazards,omitempty"`
+}
+
 type suiteReport struct {
-	Suite          string          `json:"suite"`
-	Package        string          `json:"package"`
-	BenchRegex     string          `json:"bench_regex"`
-	SIMDEnabled    bool            `json:"simd_enabled"`
-	TotalSamplesS  float64         `json:"total_samples_sec"`
-	HotFunctions   []hotFuncReport `json:"hot_functions"`
-	TopAllocations []string        `json:"top_allocations,omitempty"`
+	Suite            string             `json:"suite"`
+	Package          string             `json:"package"`
+	BenchRegex       string             `json:"bench_regex"`
+	SIMDEnabled      bool               `json:"simd_enabled"`
+	TotalSamplesS    float64            `json:"total_samples_sec"`
+	HotFunctions     []hotFuncReport    `json:"hot_functions"`
+	RuntimeStdlibHot []runtimeHotFunc   `json:"runtime_stdlib_hot,omitempty"`
+	VectorAudit      *vectorAuditReport `json:"vector_audit,omitempty"`
+	TopAllocations   []string           `json:"top_allocations,omitempty"`
 }
 
 type fullReport struct {
@@ -141,17 +183,21 @@ type fullReport struct {
 }
 
 var (
-	reDiagLoc       = regexp.MustCompile(`^(\./)?([^:\s]+\.go):(\d+):(\d+):\s*(.+)$`)
-	reCannotInline  = regexp.MustCompile(`^cannot inline ([^:]+): (.+)$`)
-	reCanInline     = regexp.MustCompile(`^can inline ([^ ]+) with cost (\d+)`)
-	reCostBudget    = regexp.MustCompile(`cost (\d+) exceeds budget (\d+)`)
-	rePprofTopLine  = regexp.MustCompile(`^\s*([0-9.]+)(ms|s)\s+([0-9.]+)%\s+([0-9.]+)%\s+([0-9.]+)(ms|s)\s+([0-9.]+)%\s+(\S+)`)
-	rePprofTotal    = regexp.MustCompile(`Total samples = ([0-9.]+)(ms|s)`)
-	rePprofListRout = regexp.MustCompile(`^ROUTINE ======================== (\S+) in (.+)$`)
-	rePprofListLine = regexp.MustCompile(`^\s*([0-9.]+(?:ms|s)|\.)\s+([0-9.]+(?:ms|s)|\.)\s+(\d+):(.*)$`)
-	reObjdumpHeader = regexp.MustCompile(`^TEXT\s+(\S+)\(SB\)`)
-	reObjdumpInst   = regexp.MustCompile(`^\s*(?:\S+:\d+\s+)?0x[0-9a-f]+\s+[0-9a-f]+\s+([A-Z0-9_]+)\s*(.*)$`)
-	reCallTarget    = regexp.MustCompile(`CALL\s+([^\s(]+)\(SB\)`)
+	reDiagLoc         = regexp.MustCompile(`^(\./)?([^:\s]+\.go):(\d+):(\d+):\s*(.+)$`)
+	reCannotInline    = regexp.MustCompile(`^cannot inline ([^:]+): (.+)$`)
+	reCanInline       = regexp.MustCompile(`^can inline ([^ ]+) with cost (\d+)`)
+	reCostBudget      = regexp.MustCompile(`cost (\d+) exceeds budget (\d+)`)
+	rePprofTopLine    = regexp.MustCompile(`^\s*([0-9.]+)(ms|s)\s+([0-9.]+)%\s+([0-9.]+)%\s+([0-9.]+)(ms|s)\s+([0-9.]+)%\s+(\S+)`)
+	rePprofTotal      = regexp.MustCompile(`Total samples = ([0-9.]+)(ms|s)`)
+	rePprofListRout   = regexp.MustCompile(`^ROUTINE ======================== (\S+) in (.+)$`)
+	rePprofListLine   = regexp.MustCompile(`^\s*([0-9.]+(?:ms|s)|\.)\s+([0-9.]+(?:ms|s)|\.)\s+(\d+):(.*)$`)
+	reObjdumpHeader   = regexp.MustCompile(`^TEXT\s+(\S+)\(SB\)`)
+	reObjdumpInst     = regexp.MustCompile(`^\s*(?:\S+:\d+\s+)?0x[0-9a-f]+\s+[0-9a-f]+\s+([A-Z0-9_]+)\s*(.*)$`)
+	reCallTarget      = regexp.MustCompile(`CALL\s+([^\s(]+)\(SB\)`)
+	reSubSP           = regexp.MustCompile(`^\$(0x[0-9a-fA-F]+|[0-9]+),\s*SP\b`)
+	reObjdumpAddrFunc = regexp.MustCompile(`^([0-9a-f]+)\s+<([^>]+)>:$`)
+	reObjdumpInsn     = regexp.MustCompile(`^\s*([0-9a-f]+):\s+([a-z0-9]+)(?:\s+(.*))?$`)
+	reOpmaskReg       = regexp.MustCompile(`%k[0-7]\b`)
 )
 
 func main() {
@@ -166,8 +212,27 @@ func run() int {
 	topN := flag.Int("top", defaultTopFuncs, "maximum number of hot functions per suite")
 	minFlat := flag.Float64("min-flat", defaultMinFlatPct, "minimum flat CPU percentage for detailed analysis")
 	useSIMD := flag.Bool("simd", false, "enable GOEXPERIMENT=simd during compilation and profiling")
+	checkInvariants := flag.Bool("check-invariants", false, "verify inlining, BCE, frame/defer/growslice, and vector CFG locks without running benchmarks")
 	jsonOut := flag.String("json", "", "optional path to write structured JSON report")
 	flag.Parse()
+
+	if *checkInvariants {
+		ctx := context.Background()
+		res, err := checkCodegenInvariants(ctx, ".", *useSIMD)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invariant check failed: %v\n", err)
+			return 1
+		}
+		if len(res.Violations) > 0 {
+			for _, v := range res.Violations {
+				fmt.Fprintf(os.Stderr, "VIOLATION: %s\n", v)
+			}
+			return 1
+		}
+		fmt.Printf("goblin-optcheck invariants PASS (simd=%v): inline=%d noinline=%d bce_loops=%d disasm=%d vector_audits=%d\n",
+			*useSIMD, res.CheckedInline, res.CheckedNoinline, res.CheckedBCELoops, res.CheckedDisasm, res.VectorAudits)
+		return 0
+	}
 
 	if *topN < 0 {
 		fmt.Fprintf(os.Stderr, "-top must be non-negative (got %d)\n", *topN)
@@ -507,6 +572,9 @@ func analyzeSuite(
 	diagByFunc map[string]*staticFuncDiag,
 	spans []funcSpan,
 ) (suiteReport, error) {
+	if absTmp, err := filepath.Abs(tmpDir); err == nil {
+		tmpDir = absTmp
+	}
 	binPath := filepath.Join(tmpDir, sp.Name+".test")
 	cpuProf := filepath.Join(tmpDir, sp.Name+".cpu.prof")
 	memProf := filepath.Join(tmpDir, sp.Name+".mem.prof")
@@ -527,6 +595,9 @@ func analyzeSuite(
 		"-test.memprofile="+memProf,
 	)
 	runCmd.Env = buildEnv(useSIMD)
+	if runDir := resolveRunDir(sp.Pkg); runDir != "" && runDir != "." {
+		runCmd.Dir = runDir
+	}
 	if out, err := runCmd.CombinedOutput(); err != nil {
 		return suiteReport{}, fmt.Errorf("benchmark %s: %w\n%s", sp.Name, err, string(out))
 	}
@@ -538,6 +609,25 @@ func analyzeSuite(
 
 	topMemOut, _ := exec.CommandContext(ctx, "go", "tool", "pprof", "-top", "-alloc_space", "-nodecount=10", binPath, memProf).CombinedOutput()
 	allocLines := parseTopAllocLines(string(topMemOut))
+
+	runtimeHot := parseRuntimeStdlibHot(string(topCPUOut))
+	if len(runtimeHot) > 0 {
+		targets := make([]string, len(runtimeHot))
+		for i, rh := range runtimeHot {
+			targets[i] = rh.Symbol
+		}
+		callersByTarget := collectTopCallers(ctx, binPath, cpuProf, targets)
+		for i := range runtimeHot {
+			base := strings.TrimSuffix(runtimeHot[i].Symbol, " (inline)")
+			runtimeHot[i].TopCallers = callersByTarget[base]
+		}
+	}
+
+	var vectorAudit *vectorAuditReport
+	if useSIMD {
+		va := collectVectorAudit(ctx, binPath)
+		vectorAudit = &va
+	}
 
 	totalSec, entries := parsePprofTop(string(topCPUOut))
 	hotReports := make([]hotFuncReport, 0, topN)
@@ -592,13 +682,15 @@ func analyzeSuite(
 	}
 
 	return suiteReport{
-		Suite:          sp.Name,
-		Package:        sp.Pkg,
-		BenchRegex:     sp.Bench,
-		SIMDEnabled:    useSIMD,
-		TotalSamplesS:  totalSec,
-		HotFunctions:   hotReports,
-		TopAllocations: allocLines,
+		Suite:            sp.Name,
+		Package:          sp.Pkg,
+		BenchRegex:       sp.Bench,
+		SIMDEnabled:      useSIMD,
+		TotalSamplesS:    totalSec,
+		HotFunctions:     hotReports,
+		RuntimeStdlibHot: runtimeHot,
+		VectorAudit:      vectorAudit,
+		TopAllocations:   allocLines,
 	}, nil
 }
 
@@ -799,18 +891,71 @@ func collectHotLines(
 	return samples, hotBCEMisses
 }
 
+func resolveRunDir(pkg string) string {
+	p := strings.TrimSpace(pkg)
+	if p == "" {
+		return "."
+	}
+	p = strings.TrimSuffix(p, "/...")
+	if p == "" || p == "." || p == "..." {
+		return "."
+	}
+	const modPrefix = "github.com/paulourio/goblin"
+	if after, ok := strings.CutPrefix(p, modPrefix); ok {
+		after = strings.TrimPrefix(after, "/")
+		if after == "" {
+			return "."
+		}
+		return filepath.Clean(after)
+	}
+	return filepath.Clean(p)
+}
+
+func parseImmBytes(s string) (int, bool) {
+	if hexStr, ok := strings.CutPrefix(s, "0x"); ok {
+		if hexStr == "" || len(hexStr) > maxHexDigits {
+			return 0, false
+		}
+		val := 0
+		for i := range len(hexStr) {
+			c := hexStr[i]
+			var digit int
+			switch {
+			case c >= '0' && c <= '9':
+				digit = int(c - '0')
+			case c >= 'a' && c <= 'f':
+				digit = int(c-'a') + hexAlphaBase
+			case c >= 'A' && c <= 'F':
+				digit = int(c-'A') + hexAlphaBase
+			default:
+				return 0, false
+			}
+			val = val*hexRadix + digit
+		}
+		return val, true
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 func collectDisasmMetrics(ctx context.Context, binPath, shortSym string) disasmMetrics {
 	pattern := regexp.QuoteMeta(symbolTail(shortSym)) + "$"
 	out, err := exec.CommandContext(ctx, "go", "tool", "objdump", "-s", pattern, binPath).CombinedOutput()
 	if err != nil {
 		return disasmMetrics{}
 	}
+	return parseDisasmMetrics(string(out), shortSym)
+}
 
+func parseDisasmMetrics(raw, shortSym string) disasmMetrics {
 	var m disasmMetrics
 	seenCalls := make(map[string]bool)
 	inTarget := false
 
-	for line := range strings.SplitSeq(string(out), "\n") {
+	for line := range strings.SplitSeq(raw, "\n") {
 		if hm := reObjdumpHeader.FindStringSubmatch(line); hm != nil {
 			inTarget = strings.HasSuffix(hm[1], "."+shortSym)
 			continue
@@ -823,8 +968,16 @@ func collectDisasmMetrics(ctx context.Context, binPath, shortSym string) disasmM
 			continue
 		}
 		op := im[1]
-		args := im[2]
+		args := strings.TrimSpace(im[2])
 		m.InstCount++
+
+		if op == "SUBQ" {
+			if sm := reSubSP.FindStringSubmatch(args); sm != nil {
+				if nb, ok := parseImmBytes(sm[1]); ok && nb > m.FrameBytes {
+					m.FrameBytes = nb
+				}
+			}
+		}
 
 		if strings.Contains(args, "(SP)") {
 			m.StackSpillRefs++
@@ -850,6 +1003,8 @@ func collectDisasmMetrics(ctx context.Context, binPath, shortSym string) disasmM
 				m.GrowSliceCalls++
 			case strings.HasPrefix(target, "runtime.gcWriteBarrier"):
 				m.WriteBarriers++
+			case strings.HasPrefix(target, "runtime.deferreturn"):
+				m.DeferReturnCalls++
 			case strings.HasPrefix(target, "runtime.newobject"),
 				strings.HasPrefix(target, "runtime.makeslice"),
 				strings.HasPrefix(target, "runtime.mallocgc"):
@@ -865,6 +1020,480 @@ func collectDisasmMetrics(ctx context.Context, binPath, shortSym string) disasmM
 		}
 	}
 	return m
+}
+
+func parseSampleTokenMS(tok string) float64 {
+	if tok == "." || tok == "" || tok == "0" {
+		return 0
+	}
+	if v, ok := strings.CutSuffix(tok, "ms"); ok {
+		f, _ := strconv.ParseFloat(v, 64)
+		return f
+	}
+	if v, ok := strings.CutSuffix(tok, "s"); ok {
+		f, _ := strconv.ParseFloat(v, 64)
+		return f * msPerSec
+	}
+	return 0
+}
+
+func parseRuntimeStdlibHot(pprofTopOut string) []runtimeHotFunc {
+	const modPrefix = "github.com/paulourio/goblin"
+	var out []runtimeHotFunc
+	seen := make(map[string]bool)
+
+	for line := range strings.SplitSeq(pprofTopOut, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < pprofTopMinFields {
+			continue
+		}
+		if !strings.HasSuffix(fields[1], "%") || !strings.HasSuffix(fields[4], "%") {
+			continue
+		}
+		flatPct, err1 := strconv.ParseFloat(strings.TrimSuffix(fields[1], "%"), 64)
+		cumPct, err2 := strconv.ParseFloat(strings.TrimSuffix(fields[4], "%"), 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if flatPct < minRuntimeFlatPct && cumPct < minRuntimeCumPct {
+			continue
+		}
+		sym := strings.Join(fields[5:], " ")
+		if strings.HasPrefix(sym, modPrefix) || strings.HasPrefix(sym, "testing.") {
+			continue
+		}
+		baseSym, inlined := strings.CutSuffix(sym, " (inline)")
+		if seen[baseSym] {
+			continue
+		}
+		seen[baseSym] = true
+		out = append(out, runtimeHotFunc{
+			Symbol:  sym,
+			FlatMS:  parseSampleTokenMS(fields[0]),
+			FlatPct: flatPct,
+			CumMS:   parseSampleTokenMS(fields[3]),
+			CumPct:  cumPct,
+			Inlined: inlined,
+		})
+	}
+
+	slices.SortFunc(out, func(a, b runtimeHotFunc) int {
+		if a.FlatPct != b.FlatPct {
+			if a.FlatPct > b.FlatPct {
+				return -1
+			}
+			return 1
+		}
+		if a.CumPct != b.CumPct {
+			if a.CumPct > b.CumPct {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Symbol, b.Symbol)
+	})
+	if len(out) > maxRuntimeHot {
+		out = out[:maxRuntimeHot]
+	}
+	return out
+}
+
+func formatCallerLabel(rawSym, pctStr string) string {
+	const modDot = "github.com/paulourio/goblin."
+	const modSlash = "github.com/paulourio/goblin/"
+	s := strings.TrimSpace(rawSym)
+	s = strings.TrimPrefix(s, modDot)
+	s = strings.TrimPrefix(s, modSlash)
+	return s + " (" + pctStr + ")"
+}
+
+func parsePprofPeekCallers(peekOut string) map[string][]string {
+	result := make(map[string][]string)
+
+	var blockCallers []string
+	targetBase := ""
+
+	flushBlock := func() {
+		if targetBase != "" && len(blockCallers) > 0 {
+			existing := result[targetBase]
+			for _, c := range blockCallers {
+				if len(existing) >= maxTopCallers {
+					break
+				}
+				if !slices.Contains(existing, c) {
+					existing = append(existing, c)
+				}
+			}
+			result[targetBase] = existing
+		}
+		blockCallers = nil
+		targetBase = ""
+	}
+
+	for line := range strings.SplitSeq(peekOut, "\n") {
+		if strings.Contains(line, "---+---") {
+			flushBlock()
+			continue
+		}
+		left, right, ok := strings.Cut(line, "|")
+		if !ok {
+			continue
+		}
+		lFields := strings.Fields(left)
+		sym := strings.TrimSpace(right)
+		if sym == "" || strings.HasPrefix(sym, "calls") {
+			continue
+		}
+		if len(lFields) >= peekTargetMinFields {
+			targetBase = strings.TrimSuffix(sym, " (inline)")
+			continue
+		}
+		if targetBase == "" && len(lFields) == peekCallerMaxFields {
+			blockCallers = append(blockCallers, formatCallerLabel(sym, lFields[1]))
+		}
+	}
+	flushBlock()
+	return result
+}
+
+func collectTopCallers(ctx context.Context, binPath, cpuProf string, targets []string) map[string][]string {
+	if len(targets) == 0 {
+		return nil
+	}
+	quoted := make([]string, 0, len(targets))
+	for _, t := range targets {
+		base := strings.TrimSuffix(t, " (inline)")
+		quoted = append(quoted, regexp.QuoteMeta(base))
+	}
+	pattern := "^(" + strings.Join(quoted, "|") + ")( \\(inline\\))?$"
+	out, err := exec.CommandContext(ctx, "go", "tool", "pprof", "-peek="+pattern, binPath, cpuProf).CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	return parsePprofPeekCallers(string(out))
+}
+
+type objdumpInsn struct {
+	addr string
+	op   string
+	args string
+	raw  string
+}
+
+func normalizeHexAddr(addr string) string {
+	s := strings.TrimLeft(strings.ToLower(strings.TrimSpace(addr)), "0")
+	if s == "" {
+		return "0"
+	}
+	return s
+}
+
+func isEVEXInsn(op, args string) bool {
+	if strings.Contains(args, "%zmm") ||
+		reOpmaskReg.MatchString(args) ||
+		strings.Contains(args, "{1to") ||
+		strings.Contains(args, "{rn-") ||
+		strings.Contains(args, "{rz-") ||
+		strings.Contains(args, "{rd-") ||
+		strings.Contains(args, "{ru-") ||
+		strings.Contains(args, "{sae}") {
+		return true
+	}
+	return strings.HasPrefix(op, "vpternlog") ||
+		strings.HasPrefix(op, "vpermi2") ||
+		strings.HasPrefix(op, "vpermt2") ||
+		strings.HasPrefix(op, "vcompress") ||
+		strings.HasPrefix(op, "vexpand")
+}
+
+func isVEXYMMInsn(op, args string) bool {
+	if isEVEXInsn(op, args) {
+		return false
+	}
+	if op == "vzeroupper" || op == "vzeroall" {
+		return false
+	}
+	return strings.HasPrefix(op, "v") && strings.Contains(args, "%ymm")
+}
+
+func isLegacySSEInsn(op, args string) bool {
+	return !strings.HasPrefix(op, "v") && strings.Contains(args, "%xmm")
+}
+
+func dirtiesUpperVector(op, args string) bool {
+	if !strings.HasPrefix(op, "v") || op == "vzeroupper" || op == "vzeroall" {
+		return false
+	}
+	return strings.Contains(args, "%ymm") || strings.Contains(args, "%zmm") || isEVEXInsn(op, args)
+}
+
+func isNoreturnRuntimeCall(raw string) bool {
+	return strings.Contains(raw, "runtime.panic") || strings.Contains(raw, "runtime.gopanic")
+}
+
+func parseJumpTargetHex(args string) string {
+	tok, _, _ := strings.Cut(strings.TrimSpace(args), " ")
+	if tok == "" || strings.HasPrefix(tok, "*") || strings.HasPrefix(tok, "%") {
+		return ""
+	}
+	for i := range len(tok) {
+		c := tok[i]
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
+			return ""
+		}
+	}
+	return normalizeHexAddr(tok)
+}
+
+func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAuditReport) {
+	hasEVEX := false
+	hasVEXYMM := false
+	for _, ins := range insns {
+		if isEVEXInsn(ins.op, ins.args) {
+			hasEVEX = true
+		} else if isVEXYMMInsn(ins.op, ins.args) {
+			hasVEXYMM = true
+		}
+	}
+	if !hasEVEX && !hasVEXYMM {
+		return
+	}
+	if hasEVEX {
+		report.EVEXFuncCount++
+		report.EVEXFuncs = append(report.EVEXFuncs, funcName)
+	}
+	if hasVEXYMM {
+		report.VEXYMMFuncCount++
+	}
+
+	addrToIdx := make(map[string]int, len(insns))
+	for i, ins := range insns {
+		addrToIdx[ins.addr] = i
+	}
+
+	if hasEVEX && !strings.Contains(strings.ToLower(funcName), "avx512") {
+		if checkUnguardedEVEX(insns, addrToIdx) {
+			report.UnguardedEVEX = append(report.UnguardedEVEX, funcName)
+		}
+	}
+
+	seen := make([]bool, len(insns)*2)
+	type cfgState struct {
+		idx   int
+		dirty bool
+	}
+	queue := make([]cfgState, 0, len(insns))
+	push := func(idx int, dirty bool) {
+		if idx < 0 || idx >= len(insns) {
+			return
+		}
+		key := idx * 2
+		if dirty {
+			key++
+		}
+		if !seen[key] {
+			seen[key] = true
+			queue = append(queue, cfgState{idx: idx, dirty: dirty})
+		}
+	}
+	push(0, false)
+
+	recorded := make(map[string]bool)
+	addHazard := func(ins objdumpInsn, kind string) {
+		k := ins.addr + ":" + kind
+		if recorded[k] {
+			return
+		}
+		recorded[k] = true
+		report.Hazards = append(report.Hazards, vectorHazard{
+			Func: funcName,
+			Addr: ins.addr,
+			Kind: kind,
+			Insn: ins.op + " " + ins.args,
+		})
+	}
+
+	for head := 0; head < len(queue); {
+		st := queue[head]
+		head++
+		ins := insns[st.idx]
+		dirty := st.dirty
+
+		nextDirty := dirty
+		switch {
+		case ins.op == "vzeroupper" || ins.op == "vzeroall":
+			nextDirty = false
+		case dirtiesUpperVector(ins.op, ins.args):
+			nextDirty = true
+		case dirty && isLegacySSEInsn(ins.op, ins.args):
+			addHazard(ins, "LEGACY_SSE_WHILE_DIRTY")
+		}
+
+		if ins.op == "ret" || ins.op == "retq" {
+			if nextDirty {
+				addHazard(ins, "DIRTY_RET")
+			}
+			continue
+		}
+		if ins.op == "ud2" || ins.op == "int3" {
+			continue
+		}
+		if ins.op == "call" || ins.op == "callq" {
+			if isNoreturnRuntimeCall(ins.raw) {
+				continue
+			}
+			if nextDirty && !strings.Contains(ins.raw, "runtime.morestack") {
+				addHazard(ins, "DIRTY_CALL")
+			}
+			push(st.idx+1, nextDirty)
+			continue
+		}
+		if ins.op == "jmp" || ins.op == "jmpq" {
+			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
+				if tgtIdx, ok := addrToIdx[tgt]; ok {
+					push(tgtIdx, nextDirty)
+				} else if nextDirty && !strings.Contains(ins.raw, "runtime.morestack") {
+					addHazard(ins, "DIRTY_RET")
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(ins.op, "j") {
+			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
+				if tgtIdx, ok := addrToIdx[tgt]; ok {
+					push(tgtIdx, nextDirty)
+				}
+			}
+			push(st.idx+1, nextDirty)
+			continue
+		}
+		push(st.idx+1, nextDirty)
+	}
+}
+
+func checkUnguardedEVEX(insns []objdumpInsn, addrToIdx map[string]int) bool {
+	visited := make([]bool, len(insns))
+	queue := make([]int, 0, len(insns))
+	enqueue := func(idx int) {
+		if idx >= 0 && idx < len(insns) && !visited[idx] {
+			visited[idx] = true
+			queue = append(queue, idx)
+		}
+	}
+	enqueue(0)
+
+	for head := 0; head < len(queue); {
+		idx := queue[head]
+		head++
+		ins := insns[idx]
+		if isEVEXInsn(ins.op, ins.args) {
+			return true
+		}
+		if ins.op == "ret" || ins.op == "retq" || ins.op == "ud2" || ins.op == "int3" {
+			continue
+		}
+		if ins.op == "jmp" || ins.op == "jmpq" {
+			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
+				if tgtIdx, ok := addrToIdx[tgt]; ok {
+					enqueue(tgtIdx)
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(ins.op, "j") {
+			// Stop before conditional branches; this path requires a runtime guard.
+			continue
+		}
+		enqueue(idx + 1)
+	}
+	return false
+}
+
+func auditObjdumpVectorCFG(raw string) vectorAuditReport {
+	const modPrefix = "github.com/paulourio/goblin"
+	report := vectorAuditReport{Available: true}
+
+	curFunc := ""
+	var insns []objdumpInsn
+	flushFunc := func() {
+		if curFunc != "" && strings.Contains(curFunc, modPrefix) && len(insns) > 0 {
+			auditFuncVectorCFG(curFunc, insns, &report)
+		}
+		curFunc = ""
+		insns = insns[:0]
+	}
+
+	for line := range strings.SplitSeq(raw, "\n") {
+		if hm := reObjdumpAddrFunc.FindStringSubmatch(line); hm != nil {
+			flushFunc()
+			curFunc = hm[2]
+			continue
+		}
+		if curFunc == "" || !strings.Contains(curFunc, modPrefix) {
+			continue
+		}
+		codePart := line
+		if before, _, hasComment := strings.Cut(line, "#"); hasComment {
+			codePart = before
+		}
+		if im := reObjdumpInsn.FindStringSubmatch(codePart); im != nil {
+			insns = append(insns, objdumpInsn{
+				addr: normalizeHexAddr(im[1]),
+				op:   im[2],
+				args: strings.TrimSpace(im[3]),
+				raw:  line,
+			})
+		}
+	}
+	flushFunc()
+	return report
+}
+
+func collectVectorAudit(ctx context.Context, binPath string) vectorAuditReport {
+	if _, err := exec.LookPath("objdump"); err != nil {
+		return vectorAuditReport{Available: false}
+	}
+	out, err := exec.CommandContext(ctx, "objdump", "-d", "--no-show-raw-insn", binPath).Output()
+	if err != nil {
+		return vectorAuditReport{Available: false}
+	}
+	return auditObjdumpVectorCFG(string(out))
+}
+
+func printRuntimeAndVectorSections(s suiteReport, thin string) {
+	if len(s.RuntimeStdlibHot) > 0 {
+		fmt.Println(thin)
+		fmt.Println("RUNTIME / STDLIB HOTSPOTS (non-goblin CPU consumers):")
+		for _, rh := range s.RuntimeStdlibHot {
+			tag := ""
+			if rh.Inlined {
+				tag = " [inline]"
+			}
+			fmt.Printf("  %-48s flat=%5.2f%% (%.1fms) cum=%5.2f%% (%.1fms)%s\n",
+				rh.Symbol, rh.FlatPct, rh.FlatMS, rh.CumPct, rh.CumMS, tag)
+			if len(rh.TopCallers) > 0 {
+				fmt.Printf("     top callers: %s\n", strings.Join(rh.TopCallers, "; "))
+			}
+		}
+	}
+	if s.VectorAudit != nil {
+		fmt.Println(thin)
+		fmt.Println("VECTOR ISA AUDIT (GNU objdump CFG):")
+		va := s.VectorAudit
+		if !va.Available {
+			fmt.Println("  status: unavailable (GNU objdump not found or failed)")
+			return
+		}
+		fmt.Printf("  EVEX funcs=%d  VEX-YMM funcs=%d  Unguarded EVEX=%d  CFG hazards=%d\n",
+			va.EVEXFuncCount, va.VEXYMMFuncCount, len(va.UnguardedEVEX), len(va.Hazards))
+		if len(va.UnguardedEVEX) > 0 {
+			fmt.Printf("  unguarded EVEX funcs: %s\n", strings.Join(va.UnguardedEVEX, ", "))
+		}
+		for _, hz := range va.Hazards {
+			fmt.Printf("  HAZARD [%s] %s @ %s: %s\n", hz.Kind, hz.Func, hz.Addr, hz.Insn)
+		}
+	}
 }
 
 func isScalarFPOp(op string) bool {
@@ -944,6 +1573,18 @@ func synthesizeFindings(r hotFuncReport) []string {
 			r.Static.InlineCost, inlineBudgetDefault, r.Static.InlineCost-inlineBudgetDefault,
 		))
 	}
+	if r.Disasm.DeferReturnCalls > 0 {
+		findings = append(findings, fmt.Sprintf(
+			"%d runtime.deferreturn call(s) on hot path (consider scoping or removing defer)",
+			r.Disasm.DeferReturnCalls,
+		))
+	}
+	if r.Disasm.FrameBytes >= largeFrameBytes {
+		findings = append(findings, fmt.Sprintf(
+			"large stack frame (%d bytes); inspect stack spills (%d (SP) refs)",
+			r.Disasm.FrameBytes, r.Disasm.StackSpillRefs,
+		))
+	}
 	if len(r.Disasm.NonInlinedCalls) > 0 {
 		findings = append(findings, fmt.Sprintf(
 			"%d non-inlined call target(s): %s",
@@ -1010,6 +1651,7 @@ func printTerminalReport(rep fullReport) {
 			)
 		}
 
+		printRuntimeAndVectorSections(sr, thin)
 		fmt.Println(thin)
 		fmt.Println("HOT-PATH COMPILER & DISASSEMBLY DIAGNOSTICS:")
 		for _, hf := range sr.HotFunctions {
