@@ -3,6 +3,8 @@
 package goblin_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -242,25 +244,47 @@ func buildDiffMADBoundaryExtreme(rng *rand.Rand, tag string) *gb.Model {
 	return bench.BuildMADFromWeights(tag, nG, nI, nT, roundingBase, w)
 }
 
-func verifyOptionalIncumbent(t *testing.T, label string, p *gb.CompiledProblem, res gb.Result) bool {
-	t.Helper()
-	if len(res.Values) != p.NumVars() {
-		return false
+// cbcOracleReliable reports whether upstream C++ COIN-OR CBC produced a clean,
+// model-feasible reference result suitable for differential cross-checking against
+// pure-Go goblin.
+//
+// Why we do not fail fuzz tests on CBC's own numerical issues:
+// During multi-hour GCP Spot fuzz campaigns (e.g. mad_diff_r4_287, mad_diff_r4_507,
+// mad_adv_cbc_g8_i30_t4_r3_107), upstream C++ CBC under Debian BLAS/GCC abandoned
+// extreme-scale regime-3/4 MAD instances with StatusNumericalError or returned primal
+// vectors whose internally scaled 1e-7 tolerance unscaled to bound=1e-5 / row=5e-4,
+// while pure-Go goblin solved the exact same instances strictly within 1e-5.
+// Differential fuzzers exist to verify pure-Go goblin (never to fail on upstream C++
+// CBC quirks), so we always assert full invariants on pure-Go and only compare against
+// CBC when CBC itself produced a numerically clean reference.
+func cbcOracleReliable(p *gb.CompiledProblem, res gb.Result) (reliable, hasIncumbent bool) {
+	switch res.Status {
+	case gb.StatusInfeasible, gb.StatusUnbounded, gb.StatusNumericalError, gb.StatusUndefined:
+		return false, false
 	}
-	bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
-	if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
-		t.Fatalf("[%s] incumbent (status=%v) violates model: bound=%.2e row=%.2e int=%.2e",
-			label, res.Status, bV, rV, iV)
+	if len(res.Values) == p.NumVars() {
+		bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
+		if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
+			return false, false
+		}
+		evalObj := p.EvaluateObjective(res.Values)
+		if math.Abs(evalObj-res.Objective) > 1e-5*max(1.0, math.Abs(res.Objective)) {
+			return false, false
+		}
+		hasIncumbent = true
+	} else if res.Status == gb.StatusOptimal {
+		return false, false
 	}
-	evalObj := p.EvaluateObjective(res.Values)
-	if math.Abs(evalObj-res.Objective) > 1e-5*max(1.0, math.Abs(res.Objective)) {
-		t.Fatalf("[%s] incumbent EvaluateObjective=%.8f != res.Objective=%.8f", label, evalObj, res.Objective)
+	if res.Status == gb.StatusOptimal {
+		boundTol := 1e-5 * max(1.0, math.Abs(res.Objective))
+		if p.Sense() == gb.Minimize && res.BestBound > res.Objective+boundTol {
+			return false, false
+		}
+		if p.Sense() == gb.Maximize && res.BestBound < res.Objective-boundTol {
+			return false, false
+		}
 	}
-	return true
-}
-
-func hasFiniteBound(v float64) bool {
-	return !math.IsNaN(v) && !math.IsInf(v, 0)
+	return true, hasIncumbent
 }
 
 func assertMADDifferentialEquivalence(t *testing.T, tag, goName string, p *gb.CompiledProblem, resGo, resCBC gb.Result) {
@@ -273,31 +297,28 @@ func assertMADDifferentialEquivalence(t *testing.T, tag, goName string, p *gb.Co
 		t.Fatalf("[%s] expected CBC backend, got %v", tag, resCBC.Backend)
 	}
 
-	// Every MAD instance built by BuildMADFromWeights is guaranteed feasible and bounded below by 0.
-	for _, entry := range []struct {
-		name string
-		res  gb.Result
-	}{
-		{goName, resGo},
-		{"cbc", resCBC},
-	} {
-		switch entry.res.Status {
-		case gb.StatusInfeasible, gb.StatusUnbounded:
-			t.Fatalf("[%s/%s] impossible status %v on guaranteed-feasible MAD model (go=%v obj=%.6f nodes=%d iters=%d; cbc=%v obj=%.6f nodes=%d iters=%d)",
-				tag, entry.name, entry.res.Status,
-				resGo.Status, resGo.Objective, resGo.Nodes, resGo.Iterations,
-				resCBC.Status, resCBC.Objective, resCBC.Nodes, resCBC.Iterations)
-		case gb.StatusNumericalError, gb.StatusUndefined:
-			t.Fatalf("[%s/%s] solver failure status %v (vars=%d rows=%d; go=%v obj=%.6f bound=%.6f nodes=%d iters=%d; cbc=%v obj=%.6f bound=%.6f nodes=%d iters=%d)",
-				tag, entry.name, entry.res.Status, p.NumVars(), p.NumConstraints(),
-				resGo.Status, resGo.Objective, resGo.BestBound, resGo.Nodes, resGo.Iterations,
-				resCBC.Status, resCBC.Objective, resCBC.BestBound, resCBC.Nodes, resCBC.Iterations)
-		}
-		verifyMILPInvariants(t, tag+"/"+entry.name, p, entry.res)
+	// Always enforce strict invariants on pure-Go goblin; every MAD instance built by
+	// BuildMADFromWeights is guaranteed feasible and bounded below by 0.
+	switch resGo.Status {
+	case gb.StatusInfeasible, gb.StatusUnbounded:
+		t.Fatalf("[%s/%s] impossible status %v on guaranteed-feasible MAD model (go=%v obj=%.6f nodes=%d iters=%d; cbc=%v obj=%.6f nodes=%d iters=%d)",
+			tag, goName, resGo.Status,
+			resGo.Status, resGo.Objective, resGo.Nodes, resGo.Iterations,
+			resCBC.Status, resCBC.Objective, resCBC.Nodes, resCBC.Iterations)
+	case gb.StatusNumericalError, gb.StatusUndefined:
+		t.Fatalf("[%s/%s] solver failure status %v (vars=%d rows=%d; go=%v obj=%.6f bound=%.6f nodes=%d iters=%d; cbc=%v obj=%.6f bound=%.6f nodes=%d iters=%d)",
+			tag, goName, resGo.Status, p.NumVars(), p.NumConstraints(),
+			resGo.Status, resGo.Objective, resGo.BestBound, resGo.Nodes, resGo.Iterations,
+			resCBC.Status, resCBC.Objective, resCBC.BestBound, resCBC.Nodes, resCBC.Iterations)
 	}
-
+	verifyMILPInvariants(t, tag+"/"+goName, p, resGo)
 	goHasInc := verifyOptionalIncumbent(t, tag+"/"+goName, p, resGo)
-	cbcHasInc := verifyOptionalIncumbent(t, tag+"/cbc", p, resCBC)
+
+	// Only cross-check against upstream C++ CBC when CBC itself produced a reliable oracle.
+	cbcOK, cbcHasInc := cbcOracleReliable(p, resCBC)
+	if !cbcOK {
+		return
+	}
 
 	// 1. Both proven optimal: objectives must agree within relative tolerance.
 	if resGo.Status == gb.StatusOptimal && resCBC.Status == gb.StatusOptimal {
@@ -409,5 +430,247 @@ func FuzzMADDifferentialCBC(f *testing.F) {
 			altOpt,
 		)
 		assertMADDifferentialEquivalence(t, tag, altName, p, resAlt, resCBC)
+	})
+}
+
+// FuzzMADMediumDecomposedCBC differential-fuzzes the pure-Go solver against COIN-OR CBC
+// on medium-size decomposed time-series MAD models (4..10 groups, 60..2000 items, varying
+// sparsity and group-series variance). Each case checks cross-backend objective and bound
+// consistency together with the exact feasible plantedObj upper bound.
+//
+//	taskset -c 26-29 go test -tags cbc -run=^$ -fuzz=^FuzzMADMediumDecomposedCBC$ -fuzztime=5m -parallel=4 .
+func FuzzMADMediumDecomposedCBC(f *testing.F) {
+	for _, s := range decomposedMADSeeds() {
+		f.Add(s.seed, s.gByte, s.sizeRaw, s.regime, s.sparsity)
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, gByte uint8, sizeRaw uint16, regimeByte, sparsityByte uint8) {
+		spec := decodeDecomposedMADSpec(seed, gByte, sizeRaw, regimeByte, sparsityByte)
+		if raceEnabled && testing.Short() && spec.nI > 250 {
+			t.Skipf("skipping large %d-item decomposed MAD CBC seed under -race -short", spec.nI)
+		}
+
+		tag := fmt.Sprintf("mad_med_cbc_g%d_i%d_t%d_r%d_s%d_%d",
+			spec.nG, spec.nI, spec.nT, spec.regime, spec.sparsity, seed)
+		inst := buildDecomposedMediumMAD(spec, tag)
+
+		p, err := inst.model.CompileChecked()
+		if err != nil {
+			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+		}
+
+		timeLimit := 500 * time.Millisecond
+		if spec.nI > 400 {
+			timeLimit = 1000 * time.Millisecond
+		}
+		const maxNodes = 1500
+
+		tCBC := time.Now()
+		resCBC := mustSolveCompiled(t, p,
+			gb.WithCBC(),
+			gb.WithTimeLimit(timeLimit),
+			gb.WithMaxNodes(maxNodes),
+		)
+		cbcElapsed := time.Since(tCBC)
+
+		tGo := time.Now()
+		resGo := mustSolveCompiled(t, p,
+			gb.WithTimeLimit(timeLimit),
+			gb.WithMaxNodes(maxNodes),
+		)
+		goElapsed := time.Since(tGo)
+
+		// Always enforce strict soundness on pure-Go; only validate CBC directly when
+		// upstream C++ CBC did not hit its own extreme-scale numerical tolerance drift
+		// (see cbcOracleReliable).
+		assertDecomposedMADSoundness(t, tag, "go", p, resGo, inst.plantedObj)
+		if cbcOK, _ := cbcOracleReliable(p, resCBC); cbcOK {
+			assertDecomposedMADSoundness(t, tag, "cbc", p, resCBC, inst.plantedObj)
+		}
+		assertMADDifferentialEquivalence(t, tag, "go", p, resGo, resCBC)
+
+		t.Logf("[%s] vars=%d rows=%d density=%.2f planted=%.1f | go=%v obj=%.1f bnd=%.1f nd=%d it=%d (%v) | cbc=%v obj=%.1f bnd=%.1f nd=%d it=%d (%v)",
+			tag, p.NumVars(), p.NumConstraints(), inst.density, inst.plantedObj,
+			resGo.Status, resGo.Objective, resGo.BestBound, resGo.Nodes, resGo.Iterations, goElapsed.Round(time.Millisecond),
+			resCBC.Status, resCBC.Objective, resCBC.BestBound, resCBC.Nodes, resCBC.Iterations, cbcElapsed.Round(time.Millisecond))
+	})
+}
+
+// FuzzMADExactOptimumCBC differential-fuzzes pure-Go against COIN-OR CBC on medium-to-large
+// MAD models with analytically exact Root LP and integer MILP optima.
+//
+//	taskset -c 26-29 go test -tags cbc -run=^$ -fuzz=^FuzzMADExactOptimumCBC$ -fuzztime=30s -parallel=4 .
+func FuzzMADExactOptimumCBC(f *testing.F) {
+	for _, s := range exactOptMADSeeds() {
+		f.Add(s.seed, s.gByte, s.size, s.modeSp, s.base)
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, gByte uint8, sizeRaw uint16, modeSparsityByte, baseByte uint8) {
+		spec := decodeExactOptMADSpec(seed, gByte, sizeRaw, modeSparsityByte, baseByte)
+		if raceEnabled && testing.Short() && spec.nI > 250 {
+			t.Skipf("skipping large %d-item exact-opt MAD CBC seed under -race -short", spec.nI)
+		}
+
+		tag := fmt.Sprintf("mad_exopt_cbc_g%d_i%d_t%d_m%d_s%d_%d",
+			spec.nG, spec.nI, spec.nT, spec.mode, spec.sparsity, seed)
+		inst := buildExactOptimumMAD(spec, tag)
+		p, err := inst.model.CompileChecked()
+		if err != nil {
+			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+		}
+
+		timeLimit := 500 * time.Millisecond
+		if spec.nI > 350 {
+			timeLimit = 900 * time.Millisecond
+		}
+		const maxNodes = 1500
+
+		resCBC := mustSolveCompiled(t, p, gb.WithCBC(), gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+		resGo := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+
+		assertExactOptMADSoundness(t, tag, "cbc", p, resCBC, inst.exactLP, inst.exactMILP, false)
+		assertExactOptMADSoundness(t, tag, "go", p, resGo, inst.exactLP, inst.exactMILP, false)
+		assertMADDifferentialEquivalence(t, tag, "go", p, resGo, resCBC)
+	})
+}
+
+// FuzzMADAdversarialCBC differential-fuzzes pure-Go against COIN-OR CBC across the five
+// adversarial MAD regimes (whales+krill, near-collinear twins, staircase horizons,
+// symmetry-orbit clones, and extreme-base cut stress).
+//
+//	taskset -c 26-29 go test -tags cbc -run=^$ -fuzz=^FuzzMADAdversarialCBC$ -fuzztime=30s -parallel=4 .
+func FuzzMADAdversarialCBC(f *testing.F) {
+	for _, s := range advMADSeeds() {
+		f.Add(s.seed, s.gByte, s.size, s.regime)
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, gByte uint8, sizeRaw uint16, regimeByte uint8) {
+		spec := decodeAdvMADSpec(seed, gByte, sizeRaw, regimeByte)
+		if raceEnabled && testing.Short() && spec.nI > 180 {
+			t.Skipf("skipping large %d-item adversarial MAD CBC seed under -race -short", spec.nI)
+		}
+
+		tag := fmt.Sprintf("mad_adv_cbc_g%d_i%d_t%d_r%d_%d",
+			spec.nG, spec.nI, spec.nT, spec.regime, seed)
+		inst := buildAdversarialMAD(spec, tag)
+		p, err := inst.model.CompileChecked()
+		if err != nil {
+			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+		}
+
+		timeLimit := 500 * time.Millisecond
+		if spec.nI > 250 || spec.nT > 10 {
+			timeLimit = 900 * time.Millisecond
+		}
+		const maxNodes = 1500
+
+		resCBC := mustSolveCompiled(t, p, gb.WithCBC(), gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+		resGo := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+
+		// Always enforce strict soundness on pure-Go; only validate CBC directly when
+		// upstream C++ CBC did not hit its own extreme-scale numerical tolerance drift
+		// (see cbcOracleReliable).
+		assertDecomposedMADSoundness(t, tag, "go", p, resGo, inst.plantedObj)
+		if cbcOK, _ := cbcOracleReliable(p, resCBC); cbcOK {
+			assertDecomposedMADSoundness(t, tag, "cbc", p, resCBC, inst.plantedObj)
+		}
+		assertMADDifferentialEquivalence(t, tag, "go", p, resGo, resCBC)
+	})
+}
+
+// FuzzMADLimitsCBC exercises early-stop boundaries (short TimeLimit, MaxNodes in {0,1,2},
+// MaxIter, and context.WithTimeout) across both BackendCBC and BackendGo to catch
+// bound-reporting corruption when solving aborts before branching or root LP completion.
+//
+//	taskset -c 26-29 go test -tags cbc -run=^$ -fuzz=^FuzzMADLimitsCBC$ -fuzztime=30s -parallel=4 .
+func FuzzMADLimitsCBC(f *testing.F) {
+	for seed := range uint64(8) {
+		f.Add(seed, uint8(seed%5), uint16(8000+seed*6000), uint8(seed%3))
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, gByte uint8, sizeRaw uint16, limitMode uint8) {
+		rng := rand.New(rand.NewPCG(seed^0x510e527fade682d1, seed^0x9b05688c2b3e6c1f))
+		nI := logUniformItems(sizeRaw, 40, 600)
+		if raceEnabled && testing.Short() && nI > 180 {
+			t.Skipf("skipping %d-item limits CBC seed under -race -short", nI)
+		}
+		nG := 3 + int(gByte%5)
+		periods := []int{4, 5, 6, 8}
+		nT := periods[rng.IntN(len(periods))]
+
+		var p *gb.CompiledProblem
+		var plantedObj float64
+		var exactLP float64
+		var isExact bool
+		tag := fmt.Sprintf("mad_lim_cbc_m%d_g%d_i%d_t%d_%d", limitMode%3, nG, nI, nT, seed)
+
+		if rng.IntN(2) == 0 {
+			spec := exactOptMADSpec{
+				seed:     seed,
+				nG:       nG,
+				nI:       nI,
+				nT:       nT,
+				mode:     uint8(nT % 2),
+				sparsity: uint8(rng.IntN(4)),
+				baseIdx:  2 + rng.IntN(4),
+			}
+			inst := buildExactOptimumMAD(spec, tag)
+			var err error
+			p, err = inst.model.CompileChecked()
+			if err != nil {
+				t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+			}
+			plantedObj = inst.exactMILP
+			exactLP = inst.exactLP
+			isExact = true
+		} else {
+			spec := decomposedMADSpec{
+				seed:     seed,
+				nG:       max(decomposedMADMinGroups, nG),
+				nI:       max(decomposedMADMinItems, nI),
+				nT:       nT,
+				regime:   uint8(rng.IntN(4)),
+				sparsity: uint8(rng.IntN(4)),
+			}
+			inst := buildDecomposedMediumMAD(spec, tag)
+			var err error
+			p, err = inst.model.CompileChecked()
+			if err != nil {
+				t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+			}
+			plantedObj = inst.plantedObj
+		}
+
+		var limitOpt gb.Option
+		switch limitMode % 3 {
+		case 0:
+			limitOpt = gb.WithTimeLimit(time.Duration(1+rng.IntN(30)) * time.Millisecond)
+		case 1:
+			limitOpt = gb.WithMaxNodes([]int{0, 1, 2}[rng.IntN(3)])
+		default:
+			limitOpt = gb.WithMaxIter([]int{10, 40, 120, 250}[rng.IntN(4)])
+		}
+
+		resCBC := mustSolveCompiled(t, p, gb.WithCBC(), limitOpt, gb.WithTimeLimit(400*time.Millisecond))
+		resGo := mustSolveCompiled(t, p, limitOpt, gb.WithTimeLimit(400*time.Millisecond))
+
+		if isExact {
+			assertExactOptMADSoundness(t, tag, "cbc", p, resCBC, exactLP, plantedObj, false)
+			assertExactOptMADSoundness(t, tag, "go", p, resGo, exactLP, plantedObj, false)
+		} else {
+			assertDecomposedMADSoundness(t, tag, "cbc", p, resCBC, plantedObj)
+			assertDecomposedMADSoundness(t, tag, "go", p, resGo, plantedObj)
+		}
+		assertMADDifferentialEquivalence(t, tag, "go", p, resGo, resCBC)
+
+		// Also exercise short context deadline cancellation against CBC.
+		ctx, cancel := context.WithTimeout(t.Context(), time.Duration(2+rng.IntN(20))*time.Millisecond)
+		defer cancel()
+		rCtx, ctxErr := gb.SolveCompiled(ctx, p, gb.WithCBC())
+		if ctxErr == nil {
+			assertDecomposedMADSoundness(t, tag, "cbc-ctx", p, rCtx, plantedObj)
+		} else if !errors.Is(ctxErr, context.DeadlineExceeded) {
+			t.Fatalf("[%s] unexpected CBC context error: %v", tag, ctxErr)
+		}
 	})
 }

@@ -299,7 +299,13 @@ func verifyMILPInvariants(t *testing.T, label string, p *gb.CompiledProblem, res
 		t.Fatalf("[%s] Optimal status with len(Values)=%d, want %d", label, len(res.Values), p.NumVars())
 	}
 	bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
-	if bV > 1e-5 || rV > 1e-5 || iV > 1e-5 {
+	rowTol := 1e-5
+	if res.Backend == gb.BackendCBC {
+		// Match cbcPrimalWithinTol (1e-4 abs) so scaled CBC row residuals (~1e-9 rel on
+		// large-activity adversarial MAD rows) do not false-fail differential fuzzers.
+		rowTol = 1e-4
+	}
+	if bV > 1e-5 || rV > rowTol || iV > 1e-5 {
 		t.Fatalf("[%s] Optimal solution violates model: bound=%.2e row=%.2e int=%.2e", label, bV, rV, iV)
 	}
 	evalObj := p.EvaluateObjective(res.Values)

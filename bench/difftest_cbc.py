@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Differential test of goblin against COIN-OR CBC on randomly generated MILPs.
 
-Each run generates problems from four families: mixed general MILPs, big-M
-depot siting, equation-constrained integer knapsacks, and badly scaled MILPs.
+Each run generates problems from five families: mixed general MILPs, big-M
+depot siting, equation-constrained integer knapsacks, badly scaled MILPs, and
+extreme-scale/cancellation MILPs.
 The script solves each model with CBC via PuLP and with goblin in three flag
 modes via `go run ./cmd/goblin-difftest`, then compares the outcomes.
 
@@ -241,7 +242,56 @@ def fam_scaled(rng: random.Random, k: int) -> Any:
     return prob
 
 
-FAMILIES = [fam_general, fam_general, fam_bigm, fam_eqknap, fam_scaled]
+def fam_extreme_scale(rng: random.Random, k: int) -> Any:
+    """Extreme-scale and cancellation MILP spanning 1e-6 to 1e9 without sub-intTol traps."""
+    n = rng.randint(4, 7)
+    prob = pulp.LpProblem(f"xscl{k}", pulp.LpMinimize)
+    big = float(rng.choice([10**6, 10**7, 10**8, 10**9]))
+    small = rng.choice([1e-5, 1e-6])
+    z = add_var(prob, "z", 0, 1, cat="Binary")
+    x = [
+        add_var(
+            prob,
+            f"x{j}",
+            0,
+            rng.choice([1, 2, 4]) if j == 0 else rng.randint(1, 5),
+            cat="Integer" if j < 2 else "Continuous",
+        )
+        for j in range(n)
+    ]
+    c = [rng.randint(-4, 6) for _ in range(n)]
+    prob += (rng.choice([-1, 1]) * small) * z + pulp.lpSum(
+        c[j] * x[j] for j in range(n)
+    )
+    # Near-canceling large-coefficient integer link scaled above solver intTol.
+    step = big * 1e-4
+    cap = rng.randint(0, 2) * step
+    prob += big * x[0] - big * z + step * x[1] <= cap, "cancel"
+    if rng.random() < 0.7:
+        prob += (
+            pulp.lpSum(rng.randint(1, 5) * x[j] for j in range(n)) + small * z
+            >= rng.randint(1, 4),
+            "cover",
+        )
+    else:
+        prob += x[0] + x[1] >= 1 + z, "link"
+    for i in range(rng.randint(1, 3)):
+        prob += (
+            pulp.lpSum(rng.randint(-3, 5) * x[j] for j in range(n))
+            <= rng.randint(2, 12),
+            f"s{i}",
+        )
+    return prob
+
+
+FAMILIES = [
+    fam_general,
+    fam_general,
+    fam_bigm,
+    fam_eqknap,
+    fam_scaled,
+    fam_extreme_scale,
+]
 
 
 def solve_cbc(
