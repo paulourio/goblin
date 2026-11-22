@@ -1889,6 +1889,11 @@ func (f *LUFactorization) reachDAG(seeds []int32, ptr, adj []int32, limit int) (
 // defined by per-node (starts, lens) ranges into adj.
 func (f *LUFactorization) reachDAGRanges(seeds []int32, starts, lens, adj []int32, limit int) ([]int32, bool) {
 	m := f.m
+	if m <= 0 || len(starts) < m || len(lens) < m {
+		return nil, false
+	}
+	starts = starts[:m]
+	lens = lens[:m]
 	gen := f.nextDFSGen()
 	mark := f.dfsMark[:m]
 	stack := f.dfsStack[:m]
@@ -1898,7 +1903,7 @@ func (f *LUFactorization) reachDAGRanges(seeds []int32, starts, lens, adj []int3
 	visited := 0
 
 	for _, s := range seeds {
-		if s < 0 || int(s) >= len(mark) || mark[s] == gen {
+		if s < 0 || int(s) >= m || mark[s] == gen {
 			continue
 		}
 		mark[s] = gen
@@ -1912,23 +1917,27 @@ func (f *LUFactorization) reachDAGRanges(seeds []int32, starts, lens, adj []int3
 		for sp > 0 {
 			u := stack[sp-1]
 			p := cur[sp-1]
+			if u < 0 || int(u) >= m {
+				return nil, false
+			}
 			end := starts[u] + lens[u]
 			advanced := false
-			for p < end {
-				v := adj[p]
-				p++
-				if v >= 0 && int(v) < len(mark) && mark[v] != gen {
-					mark[v] = gen
-					visited++
-					if visited > limit {
-						return nil, false
+			if p >= 0 && int(end) <= len(adj) && p < end {
+				adjSpan := adj[p:end]
+				for off, v := range adjSpan {
+					if v >= 0 && int(v) < m && mark[v] != gen {
+						mark[v] = gen
+						visited++
+						if visited > limit {
+							return nil, false
+						}
+						cur[sp-1] = p + asInt32(off) + 1
+						stack[sp] = v
+						cur[sp] = starts[v]
+						sp++
+						advanced = true
+						break
 					}
-					cur[sp-1] = p
-					stack[sp] = v
-					cur[sp] = starts[v]
-					sp++
-					advanced = true
-					break
 				}
 			}
 			if !advanced {
@@ -1947,11 +1956,14 @@ func (f *LUFactorization) solveLDense(w []float64, firstNZ, lastNZ int, dropTol 
 		return lastNZ
 	}
 	m := len(w)
+	if m == 0 {
+		return lastNZ
+	}
 	lColPtr := f.lColPtr[:m+1]
 	lRowIdx := f.lRowIdx
 	lColVal := f.lColVal[:len(lRowIdx)]
-	startK := max(f.numColSing, firstNZ)
-	for k := startK; k <= lastNZ && uint(k) < uint(len(w)); k++ {
+	startK := max(f.numColSing, max(firstNZ, 0))
+	for k := startK; k <= lastNZ && k < m; k++ {
 		wk := w[k]
 		if wk == 0 {
 			continue
@@ -1961,15 +1973,18 @@ func (f *LUFactorization) solveLDense(w []float64, firstNZ, lastNZ int, dropTol 
 			continue
 		}
 		start, end := lColPtr[k], lColPtr[k+1]
-		if start < 0 || int(end) > len(lRowIdx) {
+		if start < 0 || end < start || int(end) > len(lRowIdx) {
 			continue
 		}
-		for p := start; p < end; p++ {
-			r := lRowIdx[p]
-			if r >= 0 && int(r) < len(w) {
-				w[r] -= lColVal[p] * wk
-				if int(r) > lastNZ {
-					lastNZ = int(r)
+		rows := lRowIdx[start:end]
+		vals := lColVal[start:end]
+		vals = vals[:len(rows)]
+		for q, r := range rows {
+			ri := int(r)
+			if ri >= 0 && ri < m {
+				w[ri] -= vals[q] * wk
+				if ri > lastNZ {
+					lastNZ = ri
 				}
 			}
 		}
@@ -1979,9 +1994,14 @@ func (f *LUFactorization) solveLDense(w []float64, firstNZ, lastNZ int, dropTol 
 
 func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol float64) (int, int) {
 	m := len(w)
-	uInvDiag := f.uInvDiag[:len(w)]
+	if m == 0 {
+		return firstNZ, lastNZ
+	}
+	uInvDiag := f.uInvDiag[:m]
 	if !f.hasU {
-		for j := firstNZ; j <= lastNZ; j++ {
+		lo := max(firstNZ, 0)
+		hi := min(lastNZ, m-1)
+		for j := lo; j <= hi; j++ {
 			wj := w[j]
 			if wj == 0 {
 				continue
@@ -2000,7 +2020,8 @@ func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol 
 	uColVal := f.uColVal[:len(uRowIdx)]
 	if !f.uPermuted {
 		minNZ := firstNZ
-		for j := lastNZ; j >= minNZ; j-- {
+		hi := min(lastNZ, m-1)
+		for j := hi; j >= minNZ && j >= 0; j-- {
 			wj := w[j]
 			if wj == 0 {
 				continue
@@ -2013,12 +2034,18 @@ func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol 
 			w[j] = wj
 			start := uColStart[j]
 			end := start + uColLen[j]
-			for p := start; p < end; p++ {
-				r := uRowIdx[p]
-				if r >= 0 && int(r) < len(w) {
-					w[r] -= uColVal[p] * wj
-					if int(r) < minNZ {
-						minNZ = int(r)
+			if start < 0 || end < start || int(end) > len(uRowIdx) {
+				continue
+			}
+			rows := uRowIdx[start:end]
+			vals := uColVal[start:end]
+			vals = vals[:len(rows)]
+			for q, r := range rows {
+				ri := int(r)
+				if ri >= 0 && ri < m {
+					w[ri] -= vals[q] * wj
+					if ri < minNZ {
+						minNZ = ri
 					}
 				}
 			}
@@ -2026,18 +2053,18 @@ func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol 
 		return minNZ, lastNZ
 	}
 	uOrder := f.uOrder[:m]
-	uMinMoved := f.uMinMoved
-	uMaxMoved := f.uMaxMoved
+	uMinMoved := max(f.uMinMoved, 0)
+	uMaxMoved := min(f.uMaxMoved, m-1)
 	minNZ := firstNZ
 	outMin := m
 	outMax := -1
 	if lastNZ >= uMinMoved {
-		posStart := max(lastNZ, uMaxMoved)
-		if posStart >= m {
-			posStart = m - 1
-		}
+		posStart := min(max(lastNZ, uMaxMoved), m-1)
 		for pos := posStart; pos >= uMinMoved; pos-- {
-			j := uOrder[pos]
+			j := int(uOrder[pos])
+			if j < 0 || j >= m {
+				continue
+			}
 			wj := w[j]
 			if wj == 0 {
 				continue
@@ -2048,27 +2075,33 @@ func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol 
 			}
 			wj *= uInvDiag[j]
 			w[j] = wj
-			if int(j) < outMin {
-				outMin = int(j)
+			if j < outMin {
+				outMin = j
 			}
-			if int(j) > outMax {
-				outMax = int(j)
+			if j > outMax {
+				outMax = j
 			}
 			start := uColStart[j]
 			end := start + uColLen[j]
-			for p := start; p < end; p++ {
-				r := uRowIdx[p]
-				if r >= 0 && int(r) < len(w) {
-					w[r] -= uColVal[p] * wj
-					if int(r) < minNZ {
-						minNZ = int(r)
+			if start < 0 || end < start || int(end) > len(uRowIdx) {
+				continue
+			}
+			rows := uRowIdx[start:end]
+			vals := uColVal[start:end]
+			vals = vals[:len(rows)]
+			for q, r := range rows {
+				ri := int(r)
+				if ri >= 0 && ri < m {
+					w[ri] -= vals[q] * wj
+					if ri < minNZ {
+						minNZ = ri
 					}
 				}
 			}
 		}
 	}
-	jStart := min(lastNZ, uMinMoved-1)
-	for j := jStart; j >= minNZ; j-- {
+	jStart := min(lastNZ, min(uMinMoved-1, m-1))
+	for j := jStart; j >= minNZ && j >= 0; j-- {
 		wj := w[j]
 		if wj == 0 {
 			continue
@@ -2087,12 +2120,18 @@ func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol 
 		}
 		start := uColStart[j]
 		end := start + uColLen[j]
-		for p := start; p < end; p++ {
-			r := uRowIdx[p]
-			if r >= 0 && int(r) < len(w) {
-				w[r] -= uColVal[p] * wj
-				if int(r) < minNZ {
-					minNZ = int(r)
+		if start < 0 || end < start || int(end) > len(uRowIdx) {
+			continue
+		}
+		rows := uRowIdx[start:end]
+		vals := uColVal[start:end]
+		vals = vals[:len(rows)]
+		for q, r := range rows {
+			ri := int(r)
+			if ri >= 0 && ri < m {
+				w[ri] -= vals[q] * wj
+				if ri < minNZ {
+					minNZ = ri
 				}
 			}
 		}
@@ -2102,9 +2141,14 @@ func (f *LUFactorization) solveUDense(w []float64, firstNZ, lastNZ int, dropTol 
 
 func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol float64) (int, int) {
 	m := len(w)
-	uInvDiag := f.uInvDiag[:len(w)]
+	if m == 0 {
+		return firstNZ, lastNZ
+	}
+	uInvDiag := f.uInvDiag[:m]
 	if !f.hasU {
-		for i := firstNZ; i <= lastNZ; i++ {
+		lo := max(firstNZ, 0)
+		hi := min(lastNZ, m-1)
+		for i := lo; i <= hi; i++ {
 			wi := w[i]
 			if wi == 0 {
 				continue
@@ -2122,7 +2166,8 @@ func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol
 	uColIdx := f.uColIdx
 	uRowVal := f.uRowVal[:len(uColIdx)]
 	if !f.uPermuted {
-		for i := firstNZ; i <= lastNZ && uint(i) < uint(len(w)); i++ {
+		lo := max(firstNZ, 0)
+		for i := lo; i <= lastNZ && i < m; i++ {
 			wi := w[i]
 			if wi == 0 {
 				continue
@@ -2135,12 +2180,18 @@ func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol
 			w[i] = wi
 			start := uRowStart[i]
 			end := start + uRowLen[i]
-			for p := start; p < end; p++ {
-				c := uColIdx[p]
-				if c >= 0 && int(c) < len(w) {
-					w[c] -= uRowVal[p] * wi
-					if int(c) > lastNZ {
-						lastNZ = int(c)
+			if start < 0 || end < start || int(end) > len(uColIdx) {
+				continue
+			}
+			cols := uColIdx[start:end]
+			vals := uRowVal[start:end]
+			vals = vals[:len(cols)]
+			for q, c := range cols {
+				ci := int(c)
+				if ci >= 0 && ci < m {
+					w[ci] -= vals[q] * wi
+					if ci > lastNZ {
+						lastNZ = ci
 					}
 				}
 			}
@@ -2148,11 +2199,12 @@ func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol
 		return firstNZ, lastNZ
 	}
 	uOrder := f.uOrder[:m]
-	uMinMoved := f.uMinMoved
-	uMaxMoved := f.uMaxMoved
+	uMinMoved := max(f.uMinMoved, 0)
+	uMaxMoved := min(f.uMaxMoved, m-1)
 	outMin := m
 	outMax := -1
-	for i := firstNZ; i <= lastNZ && i < uMinMoved; i++ {
+	lo := max(firstNZ, 0)
+	for i := lo; i <= lastNZ && i < uMinMoved && i < m; i++ {
 		wi := w[i]
 		if wi == 0 {
 			continue
@@ -2171,12 +2223,18 @@ func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol
 		}
 		start := uRowStart[i]
 		end := start + uRowLen[i]
-		for p := start; p < end; p++ {
-			c := uColIdx[p]
-			if c >= 0 && int(c) < len(w) {
-				w[c] -= uRowVal[p] * wi
-				if int(c) > lastNZ {
-					lastNZ = int(c)
+		if start < 0 || end < start || int(end) > len(uColIdx) {
+			continue
+		}
+		cols := uColIdx[start:end]
+		vals := uRowVal[start:end]
+		vals = vals[:len(cols)]
+		for q, c := range cols {
+			ci := int(c)
+			if ci >= 0 && ci < m {
+				w[ci] -= vals[q] * wi
+				if ci > lastNZ {
+					lastNZ = ci
 				}
 			}
 		}
@@ -2184,12 +2242,12 @@ func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol
 	if lastNZ < uMinMoved {
 		return outMin, outMax
 	}
-	posEnd := max(lastNZ, uMaxMoved)
-	if posEnd >= m {
-		posEnd = m - 1
-	}
+	posEnd := min(max(lastNZ, uMaxMoved), m-1)
 	for pos := uMinMoved; pos <= posEnd; pos++ {
-		i := uOrder[pos]
+		i := int(uOrder[pos])
+		if i < 0 || i >= m {
+			continue
+		}
 		wi := w[i]
 		if wi == 0 {
 			continue
@@ -2200,20 +2258,26 @@ func (f *LUFactorization) solveUTDense(w []float64, firstNZ, lastNZ int, dropTol
 		}
 		wi *= uInvDiag[i]
 		w[i] = wi
-		if int(i) < outMin {
-			outMin = int(i)
+		if i < outMin {
+			outMin = i
 		}
-		if int(i) > outMax {
-			outMax = int(i)
+		if i > outMax {
+			outMax = i
 		}
 		start := uRowStart[i]
 		end := start + uRowLen[i]
-		for p := start; p < end; p++ {
-			c := uColIdx[p]
-			if c >= 0 && int(c) < len(w) {
-				w[c] -= uRowVal[p] * wi
-				if int(c) > posEnd {
-					posEnd = int(c)
+		if start < 0 || end < start || int(end) > len(uColIdx) {
+			continue
+		}
+		cols := uColIdx[start:end]
+		vals := uRowVal[start:end]
+		vals = vals[:len(cols)]
+		for q, c := range cols {
+			ci := int(c)
+			if ci >= 0 && ci < m {
+				w[ci] -= vals[q] * wi
+				if ci > posEnd {
+					posEnd = ci
 					if posEnd >= m {
 						posEnd = m - 1
 					}
@@ -2230,11 +2294,15 @@ func (f *LUFactorization) solveLTDense(w []float64, firstNZ, lastNZ int, dropTol
 		return minNZ
 	}
 	m := len(w)
+	if m == 0 {
+		return minNZ
+	}
 	lRowPtr := f.lRowPtr[:m+1]
 	lColIdx := f.lColIdx
 	lRowVal := f.lRowVal[:len(lColIdx)]
-	stopI := max(f.numColSing, minNZ)
-	for i := lastNZ; i >= stopI; i-- {
+	stopI := max(f.numColSing, max(minNZ, 0))
+	startI := min(lastNZ, m-1)
+	for i := startI; i >= stopI; i-- {
 		wi := w[i]
 		if wi == 0 {
 			continue
@@ -2244,16 +2312,19 @@ func (f *LUFactorization) solveLTDense(w []float64, firstNZ, lastNZ int, dropTol
 			continue
 		}
 		start, end := lRowPtr[i], lRowPtr[i+1]
-		if start < 0 || int(end) > len(lColIdx) {
+		if start < 0 || end < start || int(end) > len(lColIdx) {
 			continue
 		}
-		for p := start; p < end; p++ {
-			c := lColIdx[p]
-			if c >= 0 && int(c) < len(w) {
-				w[c] -= lRowVal[p] * wi
-				if int(c) < minNZ {
-					minNZ = int(c)
-					stopI = max(f.numColSing, minNZ)
+		cols := lColIdx[start:end]
+		vals := lRowVal[start:end]
+		vals = vals[:len(cols)]
+		for q, c := range cols {
+			ci := int(c)
+			if ci >= 0 && ci < m {
+				w[ci] -= vals[q] * wi
+				if ci < minNZ {
+					minNZ = ci
+					stopI = max(f.numColSing, max(minNZ, 0))
 				}
 			}
 		}
@@ -2266,6 +2337,8 @@ func (f *LUFactorization) applyFTEtasFTRANDense(w []float64, firstNZ, lastNZ int
 	if len(etas) == 0 {
 		return firstNZ, lastNZ
 	}
+	m := len(w)
+	w = w[:m]
 	etaIdx := f.etaIdx
 	etaPool := f.etaPool[:len(etaIdx)]
 	for e := range etas {
@@ -2273,16 +2346,23 @@ func (f *LUFactorization) applyFTEtasFTRANDense(w []float64, firstNZ, lastNZ int
 		if eta.start >= eta.end || eta.maxIdx < asInt32(firstNZ) || eta.minIdx > asInt32(lastNZ) {
 			continue
 		}
+		start, end := int(eta.start), int(eta.end)
+		if start < 0 || end > len(etaIdx) {
+			continue
+		}
+		idxSlice := etaIdx[start:end]
+		valSlice := etaPool[start:end]
+		valSlice = valSlice[:len(idxSlice)]
 		sum := 0.0
-		for p := eta.start; p < eta.end; p++ {
-			idx := etaIdx[p]
-			if idx >= 0 && int(idx) < len(w) {
-				sum += etaPool[p] * w[idx]
+		for q, idx := range idxSlice {
+			ii := int(idx)
+			if ii >= 0 && ii < m {
+				sum += valSlice[q] * w[ii]
 			}
 		}
 		if sum != 0 {
 			pr := int(eta.pivotRow)
-			if uint(pr) < uint(len(w)) {
+			if pr >= 0 && pr < m {
 				v := w[pr] - sum
 				if dropTol > 0 && math.Abs(v) <= dropTol {
 					w[pr] = 0
@@ -2402,7 +2482,7 @@ func (f *LUFactorization) ftranSparseCore(dst, src []float64, inIdx, outIdx []in
 	if sparseInput {
 		invPerm := f.invPerm[:m]
 		for _, p := range inIdx {
-			if uint(p) >= uint(len(src)) {
+			if p < 0 || p >= len(src) {
 				continue
 			}
 			v := src[p]
@@ -2410,16 +2490,20 @@ func (f *LUFactorization) ftranSparseCore(dst, src []float64, inIdx, outIdx []in
 				if clearSrc {
 					src[p] = 0
 				}
-				i := invPerm[p]
+				i32 := invPerm[p]
+				i := int(i32)
+				if i < 0 || i >= m {
+					continue
+				}
 				if w[i] == 0 {
-					seeds = append(seeds, i)
+					seeds = append(seeds, i32)
 				}
 				w[i] = v
-				if int(i) < firstNZ {
-					firstNZ = int(i)
+				if i < firstNZ {
+					firstNZ = i
 				}
-				if int(i) > lastNZ {
-					lastNZ = int(i)
+				if i > lastNZ {
+					lastNZ = i
 				}
 			}
 		}
@@ -2468,13 +2552,19 @@ func (f *LUFactorization) ftranSparseCore(dst, src []float64, inIdx, outIdx []in
 		uOrder, ok := f.ftranHypersparseLU(w, seeds, recordSpike)
 		if ok {
 			for _, j := range uOrder {
-				if wj := w[j]; wj != 0 {
-					w[j] = 0
+				ji := int(j)
+				if ji < 0 || ji >= m {
+					continue
+				}
+				if wj := w[ji]; wj != 0 {
+					w[ji] = 0
 					if math.Abs(wj) > tol {
-						c := int(colPerm[j])
-						dst[c] = wj
-						outBuf[outW] = c
-						outW++
+						c := int(colPerm[ji])
+						if c >= 0 && c < len(dst) && outW < len(outBuf) {
+							dst[c] = wj
+							outBuf[outW] = c
+							outW++
+						}
 					}
 				}
 			}
@@ -2488,25 +2578,37 @@ func (f *LUFactorization) ftranSparseCore(dst, src []float64, inIdx, outIdx []in
 		firstNZ, lastNZ = f.applyFTEtasFTRANDense(w, firstNZ, lastNZ, luDropTol)
 	}
 	if recordSpike {
-		sIdx := f.spikeIdx[:0]
-		sVal := f.spikeVal[:0]
-		for k := firstNZ; k <= lastNZ; k++ {
-			if wk := w[k]; wk != 0 {
-				sIdx = append(sIdx, asInt32(k))
-				sVal = append(sVal, wk)
+		if cap(f.spikeIdx) < m {
+			f.spikeIdx = make([]int32, m)
+		}
+		if cap(f.spikeVal) < m {
+			f.spikeVal = make([]float64, m)
+		}
+		sIdx := f.spikeIdx[:m]
+		sVal := f.spikeVal[:m]
+		sn := 0
+		sLo := max(firstNZ, 0)
+		sHi := min(lastNZ, m-1)
+		for k := sLo; k <= sHi; k++ {
+			if wk := w[k]; wk != 0 && sn < len(sIdx) {
+				sIdx[sn] = asInt32(k)
+				sVal[sn] = wk
+				sn++
 			}
 		}
-		f.spikeIdx = sIdx
-		f.spikeVal = sVal
+		f.spikeIdx = sIdx[:sn]
+		f.spikeVal = sVal[:sn]
 		f.spikeValid = true
 	}
 	minNZ, maxNZ := f.solveUDense(w, firstNZ, lastNZ, luDropTol)
+	minNZ = max(minNZ, 0)
+	maxNZ = min(maxNZ, m-1)
 	for k := minNZ; k <= maxNZ; k++ {
 		if wk := w[k]; wk != 0 {
 			w[k] = 0
 			if math.Abs(wk) > tol {
 				c := int(colPerm[k])
-				if uint(c) < uint(len(dst)) {
+				if c >= 0 && c < len(dst) && outW < len(outBuf) {
 					dst[c] = wk
 					outBuf[outW] = c
 					outW++
@@ -2734,12 +2836,14 @@ func (f *LUFactorization) applyFTEtasBTRANDense(w []float64, firstNZ, lastNZ int
 	if len(etas) == 0 {
 		return firstNZ, lastNZ
 	}
+	m := len(w)
+	w = w[:m]
 	etaIdx := f.etaIdx
 	etaPool := f.etaPool[:len(etaIdx)]
 	for e := len(etas) - 1; e >= 0; e-- {
 		eta := &etas[e]
-		pr := eta.pivotRow
-		if pr < 0 || int(pr) >= len(w) {
+		pr := int(eta.pivotRow)
+		if pr < 0 || pr >= m {
 			continue
 		}
 		wp := w[pr]
@@ -2750,10 +2854,17 @@ func (f *LUFactorization) applyFTEtasBTRANDense(w []float64, firstNZ, lastNZ int
 			w[pr] = 0
 			continue
 		}
-		for p := eta.start; p < eta.end; p++ {
-			idx := etaIdx[p]
-			if idx >= 0 && int(idx) < len(w) {
-				w[idx] -= etaPool[p] * wp
+		start, end := int(eta.start), int(eta.end)
+		if start < 0 || end > len(etaIdx) {
+			continue
+		}
+		idxSlice := etaIdx[start:end]
+		valSlice := etaPool[start:end]
+		valSlice = valSlice[:len(idxSlice)]
+		for q, idx := range idxSlice {
+			ii := int(idx)
+			if ii >= 0 && ii < m {
+				w[ii] -= valSlice[q] * wp
 			}
 		}
 		if eta.start < eta.end {
@@ -2840,22 +2951,26 @@ func (f *LUFactorization) BTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []i
 	if sparseInput {
 		invColPerm := f.invColPerm[:m]
 		for _, c := range inIdx {
-			if uint(c) >= uint(len(rhs)) {
+			if c < 0 || c >= len(rhs) {
 				continue
 			}
 			v := rhs[c]
 			if v != 0 {
 				rhs[c] = 0
-				k := invColPerm[c]
+				k32 := invColPerm[c]
+				k := int(k32)
+				if k < 0 || k >= m {
+					continue
+				}
 				if w[k] == 0 {
-					uSeeds = append(uSeeds, k)
+					uSeeds = append(uSeeds, k32)
 				}
 				w[k] = v
-				if int(k) < wFirstNZ {
-					wFirstNZ = int(k)
+				if k < wFirstNZ {
+					wFirstNZ = k
 				}
-				if int(k) > wLastNZ {
-					wLastNZ = int(k)
+				if k > wLastNZ {
+					wLastNZ = k
 				}
 			}
 		}
@@ -2905,7 +3020,8 @@ func (f *LUFactorization) BTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []i
 		f.btranEMA = (1 - hyperEMAAlpha) * f.btranEMA
 		return outBuf[:0]
 	}
-	minNZ := f.solveLTDense(w, wFirstNZ, wLastNZ, luDropTol)
+	minNZ := max(f.solveLTDense(w, wFirstNZ, wLastNZ, luDropTol), 0)
+	wLastNZ = min(wLastNZ, m-1)
 
 	perm := f.perm[:m]
 	tol := luDropTol
@@ -2915,7 +3031,7 @@ func (f *LUFactorization) BTRANSparseHint(rhs []float64, inIdx, nzIdx []int) []i
 			w[i] = 0
 			if math.Abs(wi) > tol {
 				p := int(perm[i])
-				if uint(p) < uint(len(rhs)) {
+				if p >= 0 && p < len(rhs) && outW < len(outBuf) {
 					rhs[p] = wi
 					outBuf[outW] = p
 					outW++
@@ -3167,35 +3283,35 @@ func (f *LUFactorization) compactURows(extraNeed int32) {
 	f.uRowFree = compactUArena(f.m, f.uRowStart[:f.m], f.uRowLen[:f.m], f.uRowCap[:f.m], &f.uColIdx, &f.uRowVal, &f.uTmpIdx, &f.uTmpVal, extraNeed)
 }
 
+// removeURowEntry stays within the Go inline budget (cost <= 80) for hot U-matrix updates.
 func (f *LUFactorization) removeURowEntry(r, c int32) {
 	st := f.uRowStart[r]
 	l := f.uRowLen[r]
-	end := st + l
-	uColIdx := f.uColIdx
-	uRowVal := f.uRowVal
-	for p := st; p < end; p++ {
-		if uColIdx[p] == c {
-			last := end - 1
-			uColIdx[p] = uColIdx[last]
-			uRowVal[p] = uRowVal[last]
-			f.uRowLen[r] = l - 1
+	cols := f.uColIdx[st : st+l]
+	for i, v := range cols {
+		if v == c {
+			last := l - 1
+			cols[i] = cols[last]
+			vals := f.uRowVal[st : st+l]
+			vals[i] = vals[last]
+			f.uRowLen[r] = last
 			return
 		}
 	}
 }
 
+// removeUColEntry stays within the Go inline budget (cost <= 80) for hot U-matrix updates.
 func (f *LUFactorization) removeUColEntry(c, r int32) {
 	st := f.uColStart[c]
 	l := f.uColLen[c]
-	end := st + l
-	uRowIdx := f.uRowIdx
-	uColVal := f.uColVal
-	for p := st; p < end; p++ {
-		if uRowIdx[p] == r {
-			last := end - 1
-			uRowIdx[p] = uRowIdx[last]
-			uColVal[p] = uColVal[last]
-			f.uColLen[c] = l - 1
+	rows := f.uRowIdx[st : st+l]
+	for i, v := range rows {
+		if v == r {
+			last := l - 1
+			rows[i] = rows[last]
+			vals := f.uColVal[st : st+l]
+			vals[i] = vals[last]
+			f.uColLen[c] = last
 			return
 		}
 	}
@@ -3368,26 +3484,38 @@ func (f *LUFactorization) PushEtaSparse(pivotRow int, fCol []float64, fColIdx []
 	return f.pushFTFromSpike(pivotRow)
 }
 
+// pushFTFromSpike delegates to pushFTFromSpikeCore without defer so runtime.deferreturn stays off the hot path.
 func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
+	err := f.pushFTFromSpikeCore(pivotRow)
+	m := f.m
+	sw := f.spikeWork[:m]
+	for _, r := range f.spikeIdx {
+		if r >= 0 && int(r) < m {
+			sw[r] = 0
+		}
+	}
+	return err
+}
+
+func (f *LUFactorization) pushFTFromSpikeCore(pivotRow int) error {
 	m := f.m
 	sw := f.spikeWork[:m]
 	sIdx := f.spikeIdx
-	defer func() {
-		for _, r := range sIdx {
-			sw[r] = 0
-		}
-	}()
+	uPos := f.uPos[:m]
 
 	p := f.invColPerm[pivotRow]
 	posP := p
 	if f.uPermuted {
-		posP = f.uPos[p]
+		posP = uPos[p]
 	}
 
 	tol := luSolveDropTol
 	maxPos := int32(-1)
 	offDiagCount := int32(0)
 	for _, r := range sIdx {
+		if r < 0 || int(r) >= m {
+			continue
+		}
 		v := sw[r]
 		av := math.Abs(v)
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -3399,7 +3527,7 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 		}
 		rp := r
 		if f.uPermuted {
-			rp = f.uPos[r]
+			rp = uPos[r]
 		}
 		if rp > maxPos {
 			maxPos = rp
@@ -3428,9 +3556,8 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 
 	// General Forrest-Tomlin update: eliminate old off-diagonal row p of U into a row-eta R = I - e_p * r^T,
 	// replace column p with the spike, and move p to the end of uOrder (m-1).
+	uOrder := f.uOrder[:m]
 	if !f.uPermuted {
-		uOrder := f.uOrder[:m]
-		uPos := f.uPos[:m]
 		for i := range m {
 			i32 := asInt32(i)
 			uOrder[i] = i32
@@ -3446,30 +3573,37 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 	etaMin := int32(math.MaxInt32)
 	etaMax := int32(-1)
 
-	if f.uRowLen[p] > 0 {
+	uRowLen := f.uRowLen[:m]
+	uRowStart := f.uRowStart[:m]
+	if uRowLen[p] > 0 {
 		ftWork := f.ftWork[:m]
 		seeds := f.dfsSeeds[:0]
-		hSt := f.uRowStart[p]
-		hEnd := hSt + f.uRowLen[p]
+		hSt := uRowStart[p]
+		hEnd := hSt + uRowLen[p]
 		uColIdx := f.uColIdx
 		uRowVal := f.uRowVal
-		for q := hSt; q < hEnd; q++ {
-			c := uColIdx[q]
-			v := uRowVal[q]
-			if v != 0 {
-				ftWork[c] = v
-				seeds = append(seeds, c)
+		if hSt >= 0 && int(hEnd) <= len(uColIdx) {
+			hCols := uColIdx[hSt:hEnd]
+			hVals := uRowVal[hSt:hEnd]
+			hVals = hVals[:len(hCols)]
+			for q, c := range hCols {
+				v := hVals[q]
+				if v != 0 && c >= 0 && int(c) < m {
+					ftWork[c] = v
+					seeds = append(seeds, c)
+				}
 			}
 		}
 
 		if len(seeds) > 0 {
 			uInvDiag := f.uInvDiag[:m]
-			uRowStart := f.uRowStart[:m]
-			uRowLen := f.uRowLen[:m]
 			order, ok := f.reachDAGRanges(seeds, uRowStart, uRowLen, uColIdx, m/4)
 			if ok {
 				for t := len(order) - 1; t >= 0; t-- {
 					i := order[t]
+					if i < 0 || int(i) >= m {
+						continue
+					}
 					wi := ftWork[i]
 					if wi == 0 {
 						continue
@@ -3482,14 +3616,23 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 					ftWork[i] = wi
 					st := uRowStart[i]
 					end := st + uRowLen[i]
-					for q := st; q < end; q++ {
-						c := uColIdx[q]
-						ftWork[c] -= uRowVal[q] * wi
+					if st >= 0 && int(end) <= len(uColIdx) {
+						rCols := uColIdx[st:end]
+						rVals := uRowVal[st:end]
+						rVals = rVals[:len(rCols)]
+						for q, c := range rCols {
+							if c >= 0 && int(c) < m {
+								ftWork[c] -= rVals[q] * wi
+							}
+						}
 					}
 				}
 				etaIdx := f.etaIdx
 				etaPool := f.etaPool
 				for _, i := range order {
+					if i < 0 || int(i) >= m {
+						continue
+					}
 					ri := ftWork[i]
 					ftWork[i] = 0
 					ari := math.Abs(ri)
@@ -3522,11 +3665,13 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 				f.etaIdx = etaIdx
 				f.etaPool = etaPool
 			} else {
-				uOrder := f.uOrder[:m]
 				etaIdx := f.etaIdx
 				etaPool := f.etaPool
 				for pos := int(posP) + 1; pos < m; pos++ {
 					i := uOrder[pos]
+					if i < 0 || int(i) >= m {
+						continue
+					}
 					wi := ftWork[i]
 					ftWork[i] = 0
 					if wi == 0 {
@@ -3538,9 +3683,15 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 					wi *= uInvDiag[i]
 					st := uRowStart[i]
 					end := st + uRowLen[i]
-					for q := st; q < end; q++ {
-						c := uColIdx[q]
-						ftWork[c] -= uRowVal[q] * wi
+					if st >= 0 && int(end) <= len(uColIdx) {
+						rCols := uColIdx[st:end]
+						rVals := uRowVal[st:end]
+						rVals = rVals[:len(rCols)]
+						for q, c := range rCols {
+							if c >= 0 && int(c) < m {
+								ftWork[c] -= rVals[q] * wi
+							}
+						}
 					}
 					ari := math.Abs(wi)
 					if ari <= tol {
@@ -3586,14 +3737,16 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 
 	// Commit in-place mutation of U:
 	// 1. Delete old off-diagonal entries of row p from their columns in U CSC and clear row p.
-	if f.uRowLen[p] > 0 {
-		hSt := f.uRowStart[p]
-		hEnd := hSt + f.uRowLen[p]
-		for q := hSt; q < hEnd; q++ {
-			f.removeUColEntry(f.uColIdx[q], p)
+	if uRowLen[p] > 0 {
+		hSt := uRowStart[p]
+		hEnd := hSt + uRowLen[p]
+		if hSt >= 0 && int(hEnd) <= len(f.uColIdx) {
+			for _, c := range f.uColIdx[hSt:hEnd] {
+				f.removeUColEntry(c, p)
+			}
 		}
-		f.uLiveNNZ -= int(f.uRowLen[p])
-		f.uRowLen[p] = 0
+		f.uLiveNNZ -= int(uRowLen[p])
+		uRowLen[p] = 0
 	}
 
 	// 2. Replace column p with the off-diagonal entries of spike v.
@@ -3606,8 +3759,6 @@ func (f *LUFactorization) pushFTFromSpike(pivotRow int) error {
 	}
 
 	// 3. Move p from posP to dstPos (= maxPos) in uOrder and update uPos.
-	uOrder := f.uOrder[:m]
-	uPos := f.uPos[:m]
 	dstPos := int(maxPos)
 	if int(posP) < dstPos {
 		copy(uOrder[posP:dstPos], uOrder[int(posP)+1:dstPos+1])
