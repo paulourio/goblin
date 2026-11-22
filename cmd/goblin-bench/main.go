@@ -197,11 +197,7 @@ func warmWorker(corpusDir string, mpsBuf *bytes.Buffer, opts ...gb.Option) {
 			if err != nil {
 				continue
 			}
-			doc, err := format.ParsePuLPJSON(raw)
-			if err != nil {
-				continue
-			}
-			m, err := format.BuildModelFromPuLPJSON(doc)
+			m, err := format.FromPuLPJSONBytes(raw)
 			if err != nil {
 				continue
 			}
@@ -690,13 +686,13 @@ func measureRootLPRelaxation(
 			dt = time.Since(t0)
 			lpSolver.Close()
 		} else {
-			ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
 			t0 := time.Now()
+			ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
 			lpSolver := gb.NewLPSolver(cp, ws)
 			lpSolver.DisableSIMD = noSIMD
 			lpRes = lpSolver.Solve()
-			dt = time.Since(t0)
 			gb.ReleaseWorkspace(ws)
+			dt = time.Since(t0)
 		}
 		if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
 			panic(fmt.Sprintf("root LP relaxation failed on %s (backend=%v): status=%v", cp.Name(), backend, lpRes.Status))
@@ -759,16 +755,12 @@ func benchSingleCorpusCase(
 		}
 
 		t0 := time.Now()
-		doc, err := format.ParsePuLPJSON(rawBytes)
+		model, err := format.FromPuLPJSONBytes(rawBytes)
 		if err != nil {
 			panic(err)
 		}
 		t1 := time.Now()
-		model, err := format.BuildModelFromPuLPJSON(doc)
-		if err != nil {
-			panic(err)
-		}
-		t2 := time.Now()
+		t2 := t1
 		compiled := model.Compile()
 		t3 := time.Now()
 		res, err := gb.SolveCompiled(context.Background(), compiled, baseOpts...)
@@ -965,16 +957,12 @@ func benchPairedCorpusCase(
 
 	runPass := func(rawBytes []byte, opts []gb.Option) trialSample {
 		t0 := time.Now()
-		doc, pErr := format.ParsePuLPJSON(rawBytes)
+		model, pErr := format.FromPuLPJSONBytes(rawBytes)
 		if pErr != nil {
 			panic(pErr)
 		}
 		t1 := time.Now()
-		model, bErr := format.BuildModelFromPuLPJSON(doc)
-		if bErr != nil {
-			panic(bErr)
-		}
-		t2 := time.Now()
+		t2 := t1
 		compiled := model.Compile()
 		t3 := time.Now()
 		res, sErr := gb.SolveCompiled(context.Background(), compiled, opts...)
@@ -1064,13 +1052,13 @@ func benchPairedCorpusCase(
 	smLP := make([]time.Duration, 0, nTrials)
 	var scRootRes, smRootRes gb.LPResult
 	runOneLP := func(cp *gb.CompiledProblem, noSIMD bool) (time.Duration, gb.LPResult) {
-		ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
 		t0 := time.Now()
+		ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
 		lpSolver := gb.NewLPSolver(cp, ws)
 		lpSolver.DisableSIMD = noSIMD
 		lpRes := lpSolver.Solve()
-		dt := time.Since(t0)
 		gb.ReleaseWorkspace(ws)
+		dt := time.Since(t0)
 		if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
 			panic(fmt.Sprintf("paired root LP relaxation failed on %s (noSIMD=%v): status=%v", cp.Name(), noSIMD, lpRes.Status))
 		}
@@ -1253,7 +1241,7 @@ func printMILPBenchRow(
 	parityStr := "OK"
 
 	if ref, ok := pyRef[id]; ok {
-		pyPrepMS = ref.TParseMedianMS + ref.TBuildMedianMS + ref.TFormatMedianMS
+		pyPrepMS = ref.TParseMedianMS + ref.TBuildMedianMS
 		pySolveMS = ref.TSolveMedianMS
 		pyTotalMS = ref.TTotalMedianMS
 		if r.TTotalMS > 0 {

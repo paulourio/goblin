@@ -441,23 +441,41 @@ func relDiff(a, b float64) float64 { return math.Abs(a-b) / max(1.0, math.Abs(b)
 
 // provenance summarizes the code version and host kernel that produced all benchmark telemetry.
 type provenance struct {
-	commit         string
-	dirty          bool
-	goVersion      string
-	fingerprint    string
-	unameRelease   string
-	affinity       map[string]bool
-	goblinAffinity map[string]bool
+	commit           string
+	dirty            bool
+	defaultGoVersion string
+	simdGoVersion    string
+	fingerprint      string
+	unameRelease     string
+	affinity         map[string]bool
+	goblinAffinity   map[string]bool
+}
+
+func goVersionHasSIMD(v string) bool {
+	tok := v
+	if fields := strings.Fields(v); len(fields) > 0 {
+		tok = fields[0]
+	}
+	_, exp, ok := strings.Cut(tok, "-X:")
+	if !ok {
+		return false
+	}
+	for item := range strings.SplitSeq(exp, ",") {
+		if item == "simd" {
+			return true
+		}
+	}
+	return false
 }
 
 // telemetryProvenance requires every Python, SciPy, scalar, SIMD, CBC, and LSAP entry to carry
-// the same git commit, source fingerprint, and host kernel release.
+// the same git commit, source fingerprint, host kernel release, and matching default vs. SIMD toolchain.
 func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 	pv := provenance{
 		affinity:       map[string]bool{},
 		goblinAffinity: map[string]bool{},
 	}
-	checkRec := func(sourceLabel, id, commit, fp, uname, goVer, aff string, dirty, isGoblin bool) error {
+	checkRec := func(sourceLabel, id, commit, fp, uname, aff string, dirty, isGoblin bool) error {
 		if commit == "" || fp == "" {
 			return fmt.Errorf("%s entry %q lacks git_commit/source_fingerprint provenance (re-run benchmark suite)", sourceLabel, id)
 		}
@@ -465,9 +483,6 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 			pv.commit = commit
 			pv.fingerprint = fp
 			pv.unameRelease = uname
-		}
-		if goVer != "" && pv.goVersion == "" {
-			pv.goVersion = goVer
 		}
 		if commit != pv.commit || fp != pv.fingerprint {
 			return fmt.Errorf("%s mixes sources (%s/%s vs %s/%s, entry %q)",
@@ -488,47 +503,86 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 		}
 		return nil
 	}
+	checkGoBuild := func(sourceLabel, id, goVer string, simdEnabled, expectSIMD bool) error {
+		if goVer == "" {
+			return fmt.Errorf("%s entry %q lacks go_version provenance (re-run benchmark suite)", sourceLabel, id)
+		}
+		hasSIMDExp := goVersionHasSIMD(goVer)
+		if expectSIMD {
+			if !hasSIMDExp || !simdEnabled {
+				return fmt.Errorf("%s entry %q requires GOEXPERIMENT=simd and simd_enabled=true (got go_version=%q simd_enabled=%v)",
+					sourceLabel, id, goVer, simdEnabled)
+			}
+			if pv.simdGoVersion == "" {
+				pv.simdGoVersion = goVer
+			} else if goVer != pv.simdGoVersion {
+				return fmt.Errorf("%s mixes SIMD Go versions (%s vs %s, entry %q)",
+					sourceLabel, pv.simdGoVersion, goVer, id)
+			}
+			return nil
+		}
+		if hasSIMDExp || simdEnabled {
+			return fmt.Errorf("%s entry %q requires non-SIMD default build and simd_enabled=false (got go_version=%q simd_enabled=%v)",
+				sourceLabel, id, goVer, simdEnabled)
+		}
+		if pv.defaultGoVersion == "" {
+			pv.defaultGoVersion = goVer
+		} else if goVer != pv.defaultGoVersion {
+			return fmt.Errorf("%s mixes default Go versions (%s vs %s, entry %q)",
+				sourceLabel, pv.defaultGoVersion, goVer, id)
+		}
+		return nil
+	}
 
 	for id, py := range tb.Python {
-		if err := checkRec("python_baseline", id, py.GitCommit, py.SourceFingerprint, py.UnameRelease, "", py.CPUAffinity, py.GitDirty, false); err != nil {
+		if err := checkRec("python_baseline", id, py.GitCommit, py.SourceFingerprint, py.UnameRelease, py.CPUAffinity, py.GitDirty, false); err != nil {
 			return pv, err
 		}
 	}
 	for id, sp := range tb.SciPyAssign {
-		if err := checkRec("scipy_assign_baseline", id, sp.GitCommit, sp.SourceFingerprint, sp.UnameRelease, "", sp.CPUAffinity, sp.GitDirty, false); err != nil {
+		if err := checkRec("scipy_assign_baseline", id, sp.GitCommit, sp.SourceFingerprint, sp.UnameRelease, sp.CPUAffinity, sp.GitDirty, false); err != nil {
 			return pv, err
 		}
 	}
 
 	maps := []struct {
-		label string
-		m     map[string]ProblemBenchResult
+		label      string
+		expectSIMD bool
+		m          map[string]ProblemBenchResult
 	}{
-		{"goblin_scalar", tb.Scalar},
-		{"goblin_simd", tb.SIMD},
+		{"goblin_scalar", false, tb.Scalar},
+		{"goblin_simd", true, tb.SIMD},
 	}
 	if len(tb.Goblin) > 0 {
 		maps = append(maps, struct {
-			label string
-			m     map[string]ProblemBenchResult
-		}{"goblin_cbc", tb.Goblin})
+			label      string
+			expectSIMD bool
+			m          map[string]ProblemBenchResult
+		}{"goblin_cbc", false, tb.Goblin})
 	}
 	for _, item := range maps {
 		for id, r := range item.m {
-			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.GoVersion, r.CPUAffinity, r.GitDirty, true); err != nil {
+			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.CPUAffinity, r.GitDirty, true); err != nil {
+				return pv, err
+			}
+			if err := checkGoBuild(item.label, id, r.GoVersion, r.SIMDEnabled, item.expectSIMD); err != nil {
 				return pv, err
 			}
 		}
 	}
 	for _, item := range []struct {
-		label string
-		m     map[string]AssignBenchResult
+		label      string
+		expectSIMD bool
+		m          map[string]AssignBenchResult
 	}{
-		{"goblin_assign_scalar", tb.AssignScalar},
-		{"goblin_assign_simd", tb.AssignSIMD},
+		{"goblin_assign_scalar", false, tb.AssignScalar},
+		{"goblin_assign_simd", true, tb.AssignSIMD},
 	} {
 		for id, r := range item.m {
-			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.GoVersion, r.CPUAffinity, r.GitDirty, true); err != nil {
+			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.CPUAffinity, r.GitDirty, true); err != nil {
+				return pv, err
+			}
+			if err := checkGoBuild(item.label, id, r.GoVersion, r.SIMDEnabled, item.expectSIMD); err != nil {
 				return pv, err
 			}
 		}
@@ -960,7 +1014,7 @@ func renderMADPipelineTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 		}
 		py := tb.Python[c.ID]
 		sc := tb.Scalar[c.ID]
-		pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
+		pyPrep := py.TParseMedianMS + py.TBuildMedianMS
 		goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
 		gm, minR, maxR := familyTrialRatioRange(py, sc)
 		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | %d | %d | **%.1fx** [%.1fx-%.1fx] | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %.1f | %s |\n",
@@ -1082,7 +1136,7 @@ func renderFullPipelineTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryB
 	for _, c := range cases {
 		py := tb.Python[c.ID]
 		sc := tb.Scalar[c.ID]
-		pyPrep := py.TParseMedianMS + py.TBuildMedianMS + py.TFormatMedianMS
+		pyPrep := py.TParseMedianMS + py.TBuildMedianMS
 		goPrep := sc.TParseMS + sc.TBuildMS + sc.TCompileMS
 		gm, minR, maxR := familyTrialRatioRange(py, sc)
 		fmt.Fprintf(b, "| `%s` | %d | %d | **%.1fx** [%.1fx-%.1fx] | %.2f | %.2f | %.2f | %.2f | %.3f | %.3f | %s |\n",
@@ -1128,8 +1182,8 @@ func renderProvenance(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) 
 	if cbcHash == "" {
 		cbcHash = "unrecorded"
 	}
-	fmt.Fprintf(b, "- **Unified telemetry source**: fingerprint `%s` (%s), `%s`, Linux kernel `%s`; the documentation gate rejects any telemetry file whose commit, fingerprint, or kernel differs.\n",
-		pv.fingerprint, base, pv.goVersion, kernelStr)
+	fmt.Fprintf(b, "- **Unified telemetry source**: fingerprint `%s` (%s), Go toolchains default `%s` and SIMD `%s`, Linux kernel `%s`; the documentation gate rejects any telemetry file whose commit, fingerprint, toolchain SIMD mode, or kernel differs.\n",
+		pv.fingerprint, base, pv.defaultGoVersion, pv.simdGoVersion, kernelStr)
 	fmt.Fprintf(b, "- **CPU affinity**: goblin %s; Python + CBC %s; Python + SciPy %s.\n",
 		affinityList(pv.goblinAffinity),
 		affinityList(map[string]bool{anyPy.CPUAffinity: true}),
@@ -1237,7 +1291,13 @@ func assignSIMDReachable(ac AssignCorpusCase) bool {
 	if max(ac.Rows, ac.Cols) >= simdReachSize {
 		return true
 	}
-	return ac.Sense == assign.Minimize && ac.Rows <= ac.Cols && ac.Rows*ac.Cols >= 256
+	if ac.Rows == ac.Cols && ac.Sense == assign.Minimize && ac.Family != "sparse" {
+		return false
+	}
+	if ac.Rows > ac.Cols && ac.Rows >= 8 && ac.Cols >= 8 {
+		return true
+	}
+	return ac.Rows*ac.Cols >= simdReachSize
 }
 
 func renderAssignSIMDSummary(b *bytes.Buffer, tb *TelemetryBundle) {
@@ -1266,10 +1326,10 @@ func renderAssignSIMDSummary(b *bytes.Buffer, tb *TelemetryBundle) {
 			slower++
 		}
 	}
-	fmt.Fprintf(b, "- **Negative controls** (`max(rows, cols) < %d` and `rows * cols < 256`, no AVX2 kernel runs): %d of %d have a 95%% interval excluding 1.\n",
-		simdReachSize, controlsFlagged, controls)
-	fmt.Fprintf(b, "- **Instances where AVX2 kernels run** (`max(rows, cols) >= %d` or `AllAbsLE64` at `rows * cols >= 256`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
-		simdReachSize, faster, slower, reachable-faster-slower, reachable)
+	fmt.Fprintf(b, "- **Negative controls** (`max(rows, cols) < %d` with no `>= 8x8` tall transpose and either fused square `Minimize` non-sparse path or `rows * cols < %d`, so no AVX2 kernel runs): %d of %d have a 95%% interval excluding 1.\n",
+		simdReachSize, simdReachSize, controlsFlagged, controls)
+	fmt.Fprintf(b, "- **Instances where AVX2 kernels run** (`max(rows, cols) >= %d`, tall `rows > cols` with `>= 8x8`, or fallback `AllAbsLE64`/`ValidateAndNegate64` at `rows * cols >= %d`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
+		simdReachSize, simdReachSize, faster, slower, reachable-faster-slower, reachable)
 }
 
 func renderAssignSIMDTable(b *bytes.Buffer, tb *TelemetryBundle) {
@@ -1365,11 +1425,11 @@ func BuildFinalReportMarkdown(tb *TelemetryBundle) (string, error) {
 ` + "```bash\ngo run ./cmd/goblin-bench -check-docs\n```" + `
 
 - **CPU**: ` + "`13th Gen Intel(R) Core(TM) i9-13900K`" + ` (x86_64, 30 logical CPUs exposed by ` + "`lscpu`" + `, AVX2 + FMA).
-- **Default pure-Go backend**: ` + "`goblin`" + ` default (` + "`BackendGo`" + `, scalar kernels or ` + "`WithoutSIMD()`" + `). All headline ` + "`goblin (Go)`" + ` timings use that build.
+- **Default pure-Go backend**: default ` + "`go build`" + ` (` + "`BackendGo`" + `, scalar kernels). All headline ` + "`goblin (Go)`" + ` timings use that build.
 - **Experimental SIMD build**: ` + "`GOEXPERIMENT=simd`" + `, which dispatches AVX2 kernels for slices of length 32 or more; see section 4.
 - **Optional C++ backend**: ` + "`gb.WithCBC()`" + ` (` + "`BackendCBC`" + `, built with ` + "`-tags cbc`" + `), driving in-process COIN-OR CBC/CLP (` + "`c1c171ec`" + `) through ` + "`cgo`" + `.
 - **Python baseline**: Python + ` + "`PuLP`" + ` + ` + "`COIN-OR CBC`" + ` (` + "`c1c171ec`" + `, ` + "`threads=1`" + `, ` + "`ratioGap=1e-6`" + `, ` + "`allowableGap=1e-6`" + `) subprocess. Its solve time includes MPS writing, process spawn, and ` + "`.sol`" + ` parsing.
-- **Synthetic corpus and public validation**: 31 synthetic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 distinct randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state, complemented by 20 held-out public Netlib LP and MIPLIB 3.0 MILP instances solved to optimality plus a 25-node dual-bound check on ` + "`coinor_capplan1`" + ` (` + "`public_benchmarks_test.go`" + `).
+- **Synthetic corpus and public validation**: 31 synthetic LP and MILP families across 3 tiers (` + "`testdata/corpus/*.json`" + ` and ` + "`testdata/corpus/trials/*.jsonl`" + `; 11 distinct randomized trial instances per family for Tiers 1-2 and 5 for Tier 3, 293 instances in total), measured in warm state, complemented by 20 held-out public Netlib LP and MIPLIB 3.0 MILP instances solved to optimality plus a 25-node dual-bound check on ` + "`coinor_capplan1`" + ` with cuts and heuristics disabled (` + "`WithCuts(false)`" + `, ` + "`WithHeuristics(false)`" + `, ` + "`WithMaxNodes(25)`" + `, ` + "`public_benchmarks_test.go`" + `).
 
 <!-- BEGIN GENERATED:PROVENANCE -->
 <!-- END GENERATED:PROVENANCE -->
@@ -1384,7 +1444,7 @@ Tier 1 micro-models are dominated by Python subprocess spawn overhead, and the p
 ## 3. End-to-End Pipeline Comparison (` + "`JSON -> Solution`" + `)
 
 Pipeline stages measured per instance (median across randomized trials after warmup, plus paired per-trial speedup range):
-1. **Prep (` + "`t_parse + t_build + t_format/t_compile`" + `)**: JSON unmarshaling, model construction, and MPS formatting (Python) or ` + "`Model.Compile()`" + ` matrix assembly (Go).
+1. **Prep (` + "`t_parse + t_build`" + ` vs. ` + "`t_parse + t_compile`" + `)**: JSON unmarshaling and PuLP model construction in Python (MPS writing ` + "`t_format`" + ` is recorded separately and timed inside ` + "`t_solve`" + `) vs. streaming ` + "`FromPuLPJSONBytes`" + ` plus ` + "`Model.Compile()`" + ` matrix assembly in Go.
 2. **Solve (` + "`t_solve`" + `)**: CBC subprocess execution and ` + "`.sol`" + ` parsing (Python) vs. in-memory ` + "`gb.SolveCompiled`" + ` (Go).
 3. **Total (` + "`t_total`" + `)**: Complete end-to-end latency from raw JSON bytes to verified primal solution.
 
@@ -1409,7 +1469,7 @@ Progression across checkpoints on pre-compiled ` + "`CompiledProblem`" + ` insta
 - **CP2/3 (Root LP)**: Revised Dual and Two-Phase Primal Simplex.
 - **CP4 (Base B&B)**: Branch-and-Bound with pseudocost/strong branching (` + "`Presolve=off, Cuts=off, Heuristics=off`" + `).
 - **CP5 (+Presolve)**: Savelsbergh bound tightening, GCD reduction, and node propagation (` + "`Presolve=on, Cuts=off, Heuristics=off`" + `).
-- **CP6 (+Cuts)**: GMI, lifted 0-1 knapsack covers, flow/VUB and $(l, S)$ cuts, and single-row MIR cuts (` + "`Presolve=on, Cuts=on, Heuristics=off`" + `).
+- **CP6 (+Cuts)**: GMI, lifted 0-1 knapsack covers, flow/VUB and $(l, S)$ cuts, single-row and multi-row MIR cuts, and globally valid in-tree cuts (` + "`Presolve=on, Cuts=on, Heuristics=off`" + `).
 - **CP7 (Full ` + "`goblin`" + `)**: Full Branch-and-Cut with Propagated Rounding, Root Sub-MIP, and Fractional Diving (` + "`Presolve=on, Cuts=on, Heuristics=on`" + `).
 
 <!-- BEGIN GENERATED:FULL_CHECKPOINT_TABLE -->
@@ -1429,7 +1489,7 @@ The 22-family synthetic Linear Sum Assignment corpus (` + "`testdata/assign_corp
 <!-- BEGIN GENERATED:ASSIGN_PIPELINE_TABLE -->
 <!-- END GENERATED:ASSIGN_PIPELINE_TABLE -->
 
-### 6.3 LSAP Scalar vs. ` + "`GOEXPERIMENT=simd`" + ` (` + "`AllAbsLE64`" + `, ` + "`MinReducedSlice64`" + `, ` + "`InitReducedRow64`" + `, and ` + "`Min2ReducedRow64`" + `)
+### 6.3 LSAP Scalar vs. ` + "`GOEXPERIMENT=simd`" + ` (` + "`AllAbsLE64`" + `, ` + "`MinReducedSkip64`" + `, ` + "`InitReducedRow64`" + `, and ` + "`Min2ReducedRow64`" + `)
 
 <!-- BEGIN GENERATED:ASSIGN_SIMD_SUMMARY -->
 <!-- END GENERATED:ASSIGN_SIMD_SUMMARY -->

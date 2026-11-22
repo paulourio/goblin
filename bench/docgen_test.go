@@ -94,10 +94,79 @@ func TestCheckParityRejectsBrokenRootLPAndAssignSIMDReachability(t *testing.T) {
 		t.Fatalf("expected CheckParity to reject empty RootLPStatus, got %v", errsEmpty)
 	}
 
-	if assignSIMDReachable(AssignCorpusCase{Rows: 10, Cols: 10, Sense: assign.Minimize}) {
-		t.Fatal("assignSIMDReachable(10x10) = true, want false (max<32 and 100<256)")
+	if assignSIMDReachable(AssignCorpusCase{Rows: 10, Cols: 10, Sense: assign.Minimize, Family: "uniform"}) {
+		t.Fatal("assignSIMDReachable(10x10 Min uniform) = true, want false")
 	}
-	if !assignSIMDReachable(AssignCorpusCase{Rows: 20, Cols: 20, Sense: assign.Minimize}) {
-		t.Fatal("assignSIMDReachable(20x20) = false, want true (20*20 >= 256 exercises AllAbsLE64)")
+	if assignSIMDReachable(AssignCorpusCase{Rows: 20, Cols: 20, Sense: assign.Minimize, Family: "integer_ties"}) {
+		t.Fatal("assignSIMDReachable(20x20 Min integer_ties) = true, want false (square Minimize skips AllAbsLE64)")
+	}
+	if !assignSIMDReachable(AssignCorpusCase{Rows: 24, Cols: 24, Sense: assign.Minimize, Family: "sparse"}) {
+		t.Fatal("assignSIMDReachable(24x24 Min sparse) = false, want true")
+	}
+	if !assignSIMDReachable(AssignCorpusCase{Rows: 16, Cols: 16, Sense: assign.Maximize, Family: "maximize"}) {
+		t.Fatal("assignSIMDReachable(16x16 Max maximize) = false, want true")
+	}
+	if !assignSIMDReachable(AssignCorpusCase{Rows: 10, Cols: 8, Sense: assign.Minimize, Family: "tall"}) {
+		t.Fatal("assignSIMDReachable(10x8 Min tall) = false, want true (Transpose64 >= 8x8)")
+	}
+}
+
+func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
+	baseBundle := func() *TelemetryBundle {
+		return &TelemetryBundle{
+			Python: map[string]PythonBaselineEntry{
+				"p1": {ID: "p1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1"},
+			},
+			SciPyAssign: map[string]SciPyAssignEntry{
+				"a1": {ID: "a1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1"},
+			},
+			Scalar: map[string]ProblemBenchResult{
+				"p1": {ID: "p1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:nodwarf5", SIMDEnabled: false},
+			},
+			SIMD: map[string]ProblemBenchResult{
+				"p1": {ID: "p1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:simd", SIMDEnabled: true},
+			},
+			AssignScalar: map[string]AssignBenchResult{
+				"a1": {ID: "a1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:nodwarf5", SIMDEnabled: false},
+			},
+			AssignSIMD: map[string]AssignBenchResult{
+				"a1": {ID: "a1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:simd", SIMDEnabled: true},
+			},
+		}
+	}
+	if _, err := telemetryProvenance(baseBundle()); err != nil {
+		t.Fatalf("valid telemetryProvenance failed: %v", err)
+	}
+
+	bBadScalarVer := baseBundle()
+	s := bBadScalarVer.Scalar["p1"]
+	s.GoVersion = "go1.27.3-X:simd"
+	bBadScalarVer.Scalar["p1"] = s
+	if _, err := telemetryProvenance(bBadScalarVer); err == nil {
+		t.Fatal("expected error for scalar entry built with -X:simd")
+	}
+
+	bBadScalarFlag := baseBundle()
+	as := bBadScalarFlag.AssignScalar["a1"]
+	as.SIMDEnabled = true
+	bBadScalarFlag.AssignScalar["a1"] = as
+	if _, err := telemetryProvenance(bBadScalarFlag); err == nil {
+		t.Fatal("expected error for scalar assign entry with simd_enabled=true")
+	}
+
+	bBadSIMDVer := baseBundle()
+	m := bBadSIMDVer.SIMD["p1"]
+	m.GoVersion = "go1.27.3-X:nodwarf5"
+	bBadSIMDVer.SIMD["p1"] = m
+	if _, err := telemetryProvenance(bBadSIMDVer); err == nil {
+		t.Fatal("expected error for SIMD entry missing -X:simd")
+	}
+
+	bBadSIMDFlag := baseBundle()
+	am := bBadSIMDFlag.AssignSIMD["a1"]
+	am.SIMDEnabled = false
+	bBadSIMDFlag.AssignSIMD["a1"] = am
+	if _, err := telemetryProvenance(bBadSIMDFlag); err == nil {
+		t.Fatal("expected error for SIMD assign entry with simd_enabled=false")
 	}
 }
