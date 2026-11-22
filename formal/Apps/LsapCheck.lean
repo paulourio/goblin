@@ -18,15 +18,42 @@ private inductive Mode where
 private structure ParsedArgs where
   modeOverride : Option Mode := none
   tolOverride : Option Rat := none
+  printBound : Bool := false
+  jsonl : Bool := false
+  batchPath : Option String := none
   filePath : Option String := none
   showHelp : Bool := false
 
 private def usageText : String :=
-  "Usage: lsap-check [--exact | --safe] [--tol <rat>] <certificate.json>\n" ++
-  "  --exact       Verify exact complementary slackness (default unless JSON sets mode='safe')\n" ++
-  "  --safe        Verify rigorous dual lower bound via uSafe = min_j (C[i,j] - v[j])\n" ++
-  "  --tol <rat>   Override gap tolerance for safe mode (default 0)\n" ++
-  "  -h, --help    Show this help message"
+  "Usage: lsap-check [--exact | --safe] [--tol <rat>] [--print-bound] [--jsonl | --batch <array.json | ->] [<certificate.json | ->]\n" ++
+  "  --exact         Verify exact complementary slackness (default unless JSON sets mode='safe')\n" ++
+  "  --safe          Verify rigorous dual lower bound via uSafe = min_j (C[i,j] - v[j])\n" ++
+  "  --tol <rat>     Override gap tolerance for safe mode (default 0)\n" ++
+  "  --print-bound   Include certified bound in output\n" ++
+  "  --jsonl         Stream line-delimited JSON requests from stdin\n" ++
+  "  --batch <path>  Verify JSON array of certificates from file or '-'\n" ++
+  "  -h, --help      Show this help message"
+
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then Char.ofNat ('0'.toNat + n)
+  else Char.ofNat ('a'.toNat + (n - 10))
+
+private def jsonQuote (s : String) : String :=
+  let body := s.foldl (fun acc c =>
+    if c == '"' then acc ++ "\\\""
+    else if c == '\\' then acc ++ "\\\\"
+    else if c == '\n' then acc ++ "\\n"
+    else if c == '\r' then acc ++ "\\r"
+    else if c == '\t' then acc ++ "\\t"
+    else if c.toNat < 0x20 then
+      let b := c.toNat
+      acc.push '\\' |>.push 'u' |>.push '0' |>.push '0'
+        |>.push (hexDigit (b / 16)) |>.push (hexDigit (b % 16))
+    else acc.push c) ""
+  "\"" ++ body ++ "\""
+
+private def ratObjJson (r : Rat) : String :=
+  "{\"num\":\"" ++ toString r.num ++ "\",\"den\":\"" ++ toString r.den ++ "\"}"
 
 private def parseRatString (s : String) : Except String Rat :=
   (JsonVal.str s).asRat
@@ -37,12 +64,18 @@ private def parseArgs : List String → ParsedArgs → Except String ParsedArgs
   | "-h" :: rest, acc => parseArgs rest { acc with showHelp := true }
   | "--exact" :: rest, acc => parseArgs rest { acc with modeOverride := some .exact }
   | "--safe" :: rest, acc => parseArgs rest { acc with modeOverride := some .safe }
+  | "--print-bound" :: rest, acc => parseArgs rest { acc with printBound := true }
+  | "--jsonl" :: rest, acc => parseArgs rest { acc with jsonl := true }
+  | "--batch" :: raw :: rest, acc =>
+    if acc.batchPath.isSome then .error "duplicate --batch flag"
+    else parseArgs rest { acc with batchPath := some raw }
+  | ["--batch"], _ => .error "missing path after --batch"
   | "--tol" :: raw :: rest, acc => do
     let r ← parseRatString raw
     parseArgs rest { acc with tolOverride := some r }
   | ["--tol"], _ => .error "missing value after --tol"
   | arg :: rest, acc =>
-    if arg.startsWith "-" then
+    if arg.startsWith "-" && arg != "-" then
       .error s!"unknown flag '{arg}'"
     else
       match acc.filePath with
@@ -134,7 +167,6 @@ private def parseMode (root : JsonVal) (override : Option Mode) : Except String 
   | some m => .ok m
   | none =>
     match root.getField? "mode" with
-    | none => .ok .exact
     | some mv =>
       let s ← mv.asString
       let low := s.toLower
@@ -144,6 +176,19 @@ private def parseMode (root : JsonVal) (override : Option Mode) : Except String 
         .ok .safe
       else
         .error s!"invalid mode '{s}' (expected 'exact' or 'safe')"
+    | none =>
+      match root.getField? "safe" with
+      | none | some .null => .ok .exact
+      | some sv =>
+        let b ← sv.asBool
+        .ok (if b then .safe else .exact)
+
+private def effectivePrintBound (root : JsonVal) (cliFlag : Bool) : Except String Bool := do
+  if cliFlag then
+    return true
+  match root.getField? "printBound" with
+  | none | some .null => return false
+  | some pv => pv.asBool
 
 private def parsePrimalPairs (root : JsonVal) (rows cols : Nat) :
     Except String (Array Nat × Array Nat) := do
@@ -167,7 +212,8 @@ private def parsePrimalPairs (root : JsonVal) (rows cols : Nat) :
     | none => .error "missing required matching ('row_ind'/'col_ind' or 'p')"
   | _, _ => .error "both 'row_ind' and 'col_ind' must be provided together"
 
-private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit := do
+/-- Verifies a certificate and returns `(mode, certifiedBoundInOriginalSense)`. -/
+private def verifyCertCore (root : JsonVal) (args : ParsedArgs) : Except String (Mode × Rat) := do
   let (rows, cols) ← parseDims root
   let negate ← parseSense root
   let mode ← parseMode root args.modeOverride
@@ -176,8 +222,8 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
     | some t => .ok t
     | none =>
       match root.getField? "tol" with
+      | some .null | none => .ok 0
       | some tv => asRatOrBits tv
-      | none => .ok 0
   if tol < 0 then
     .error "tolerance must be non-negative"
 
@@ -189,15 +235,14 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
   let m := min rows cols
   let n := max rows cols
 
-  -- Parse dual arrays according to mode and transposition.
   let uRaw? ←
     match root.getField? "u" with
+    | none | some .null => .ok none
     | some uv => some <$> parseRatArray uv rows "u"
-    | none => .ok none
   let vRaw? ←
     match root.getField? "v" with
+    | none | some .null => .ok none
     | some vv => some <$> parseRatArray vv cols "v"
-    | none => .ok none
 
   let uArr : Array Rat ←
     if !transposed then
@@ -225,7 +270,6 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
       | some ua => .ok ua
       | none => .error "missing required JSON field 'u'"
 
-  -- Build normalized matching `pArr : Array (Fin n)` of size `m`.
   let mut pRaw : Array Nat := Array.replicate m 0
   for idx in [:m] do
     let r := rowInd[idx]!
@@ -235,7 +279,6 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
     else
       pRaw := pRaw.set! c r
 
-  -- Check optional `objective` field against original matched costs.
   let primalOrig : Rat := Id.run do
     let mut s : Rat := 0
     for idx in [:m] do
@@ -245,7 +288,7 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
     return s
 
   match root.getField? "objective" with
-  | none => pure ()
+  | none | some .null => pure ()
   | some ov =>
     let obj ← asRatOrBits ov
     match mode with
@@ -279,7 +322,7 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
   match mode with
   | .exact =>
     if checkLSAP m n C p u v then
-      .ok ()
+      .ok (.exact, primalOrig)
     else if !checkInjective m n p then
       .error "INVALID: primal assignment is not injective"
     else if !checkDualFeasible m n C u v then
@@ -291,16 +334,67 @@ private def verifyCert (root : JsonVal) (args : ParsedArgs) : Except String Unit
     else
       .error "INVALID: exact LSAP certificate check failed"
   | .safe =>
+    let lbNorm := safeLowerBound m n C v
     if checkLSAPSafe m n C p v tol then
-      .ok ()
+      let certBnd := if negate then -lbNorm else lbNorm
+      .ok (.safe, certBnd)
     else if !checkInjective m n p then
       .error "INVALID: primal assignment is not injective"
     else if m < n && !allFin n (fun j => decide (v j ≤ 0)) then
       .error "INVALID: rectangular dual invariant v[j] <= 0 violated in safe mode"
     else
       let primalNorm := finSum m (fun i => C i (p i))
-      let lb := safeLowerBound m n C v
-      .error s!"INVALID: safe duality gap {primalNorm - lb} exceeds tolerance {tol}"
+      .error s!"INVALID: safe duality gap {primalNorm - lbNorm} exceeds tolerance {tol}"
+
+private def readInput (path : String) : IO String := do
+  if path == "-" then
+    (← IO.getStdin).readToEnd
+  else
+    IO.FS.readFile path
+
+private def verifyJsonlObj (root : JsonVal) (args : ParsedArgs) : Except String String := do
+  let pb ← effectivePrintBound root args.printBound
+  let (mode, bnd) ← verifyCertCore root args
+  if mode == .safe || pb then
+    .ok ("{\"ok\":true,\"detail\":\"VERIFIED\",\"bound\":" ++ ratObjJson bnd ++ "}")
+  else
+    .ok "{\"ok\":true,\"detail\":\"VERIFIED\"}"
+
+private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (args : ParsedArgs) : IO UInt32 := do
+  let line ← stdin.getLine
+  if line.isEmpty then
+    return 0
+  let trimmed := line.trimAscii.toString
+  if !trimmed.isEmpty then
+    let resp :=
+      match GoblinFormal.parseJson trimmed >>= fun root => verifyJsonlObj root args with
+      | .ok okJson => okJson
+      | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
+    stdout.putStr resp
+    stdout.putStr "\n"
+    stdout.flush
+  runJsonlLoop stdin stdout args
+
+private def runBatch (path : String) (args : ParsedArgs) : IO UInt32 := do
+  let contents ←
+    try
+      readInput path
+    catch e =>
+      IO.eprintln s!"error reading '{path}': {e}"
+      return 1
+  match GoblinFormal.parseJson contents >>= JsonVal.asArray with
+  | .error msg =>
+    IO.eprintln s!"error parsing batch JSON '{path}': {msg}"
+    return 1
+  | .ok items =>
+    for i in [:items.size] do
+      match verifyCertCore items[i]! args with
+      | .ok _ => pure ()
+      | .error msg =>
+        IO.eprintln s!"BATCH FAIL at index {i}: {msg}"
+        return 1
+    IO.println s!"VERIFIED ({items.size} items)"
+    return 0
 
 end Apps.LsapCheck
 
@@ -311,18 +405,30 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln Apps.LsapCheck.usageText
     pure 1
   | .ok parsed =>
-    if parsed.showHelp || parsed.filePath.isNone then
-      if parsed.modeOverride.isSome || parsed.tolOverride.isSome then
-        if !parsed.showHelp then
-          IO.eprintln "error: missing certificate JSON path"
-          IO.eprintln Apps.LsapCheck.usageText
-          return 1
+    if parsed.showHelp then
+      IO.println Apps.LsapCheck.usageText
+      return 0
+    if parsed.jsonl then
+      if parsed.batchPath.isSome || parsed.filePath.isSome then
+        IO.eprintln "error: --jsonl cannot be combined with positional or --batch arguments"
+        return 1
+      return ← Apps.LsapCheck.runJsonlLoop (← IO.getStdin) (← IO.getStdout) parsed
+    if let some bPath := parsed.batchPath then
+      if parsed.filePath.isSome then
+        IO.eprintln "error: --batch cannot be combined with positional certificate path"
+        return 1
+      return ← Apps.LsapCheck.runBatch bPath parsed
+    if parsed.filePath.isNone then
+      if parsed.modeOverride.isSome || parsed.tolOverride.isSome || parsed.printBound then
+        IO.eprintln "error: missing certificate JSON path"
+        IO.eprintln Apps.LsapCheck.usageText
+        return 1
       IO.println Apps.LsapCheck.usageText
       return 0
     let path := parsed.filePath.getD ""
     let contents ←
       try
-        IO.FS.readFile path
+        Apps.LsapCheck.readInput path
       catch e =>
         IO.eprintln s!"error reading '{path}': {e}"
         return 1
@@ -332,9 +438,17 @@ def main (args : List String) : IO UInt32 := do
       | .error msg =>
         IO.eprintln s!"error parsing JSON '{path}': {msg}"
         return 1
-    match Apps.LsapCheck.verifyCert jsonVal parsed with
-    | .ok () =>
+    let pb ←
+      match Apps.LsapCheck.effectivePrintBound jsonVal parsed.printBound with
+      | .ok b => pure b
+      | .error msg =>
+        IO.eprintln msg
+        return 1
+    match Apps.LsapCheck.verifyCertCore jsonVal parsed with
+    | .ok (_, bnd) =>
       IO.println "VERIFIED"
+      if pb then
+        IO.println s!"BOUND {bnd.num}/{bnd.den}"
       pure 0
     | .error msg =>
       IO.eprintln msg

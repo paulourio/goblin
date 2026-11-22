@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local parallel fuzz soak runner for goblin (tuned for multi-core workstations).
-# Runs up to CONCURRENCY fuzzers simultaneously, each with -parallel=WORKERS_PER_TARGET,
-# leaving headroom for desktop responsiveness.
+# Local parallel fuzz soak runner for the solver suite.
+# Runs up to CONCURRENCY fuzzers in parallel, each with -parallel=WORKERS_PER_TARGET.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GOBLIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PHASE="assign"
+FORMAL="${GOBLIN_FORMAL:-0}"
 CONCURRENCY="${CONCURRENCY:-5}"
 WORKERS_PER_TARGET="${WORKERS_PER_TARGET:-6}"
 ASSIGN_TIME="${ASSIGN_TIME:-5m}"
@@ -18,6 +18,9 @@ RUN_ID="${RUN_ID:-local-$(date -u +%Y%m%d-%H%M%S)}"
 
 for arg in "$@"; do
     case "${arg}" in
+        --formal) FORMAL="1" ;;
+        --formal=1|--formal=true) FORMAL="1" ;;
+        --formal=0|--formal=false) FORMAL="0" ;;
         --phase=*) PHASE="${arg#*=}" ;;
         --concurrency=*) CONCURRENCY="${arg#*=}" ;;
         --workers=*) WORKERS_PER_TARGET="${arg#*=}" ;;
@@ -25,11 +28,18 @@ for arg in "$@"; do
         --sparse-time=*) SPARSE_TIME="${arg#*=}" ;;
         --mad-time=*) MAD_TIME="${arg#*=}" ;;
         *)
-            echo "usage: $0 [--phase=assign|mad|all] [--concurrency=4] [--workers=6] [--assign-time=5m] [--sparse-time=10m] [--mad-time=20m]" >&2
+            echo "usage: $0 [--formal] [--phase=assign|mad|all] [--concurrency=4] [--workers=6] [--assign-time=5m] [--sparse-time=10m] [--mad-time=20m]" >&2
             exit 2
             ;;
     esac
 done
+
+if [[ "${FORMAL}" == "1" ]]; then
+    export GOBLIN_FORMAL=1
+    if ! command -v lake >/dev/null 2>&1 && [[ -n "${HOME:-}" && -x "${HOME}/.elan/bin/lake" ]]; then
+        export PATH="${HOME}/.elan/bin:${PATH}"
+    fi
+fi
 
 LOG_DIR="${GOBLIN_ROOT}/.cache/local-fuzz/${RUN_ID}"
 mkdir -p "${LOG_DIR}"
@@ -37,6 +47,7 @@ mkdir -p "${LOG_DIR}"
 declare -a JOBS=()
 add_assign_jobs() {
     JOBS+=(
+        "./assign|FuzzAssignAdversarialFormal|${ASSIGN_TIME}"
         "./assign|FuzzAssignPlantedCancellationAndStage2|${ASSIGN_TIME}"
         "./assign|FuzzAssignCollinearAndRowDominated|${ASSIGN_TIME}"
         "./assign|FuzzAssignWideAccAndIEEE754Edges|${ASSIGN_TIME}"
@@ -48,6 +59,10 @@ add_assign_jobs() {
 }
 add_mad_jobs() {
     JOBS+=(
+        ".|FuzzAdversarialLPFormal|${MAD_TIME}"
+        ".|FuzzAdversarialMIPFormal|${MAD_TIME}"
+        ".|FuzzMIPSmall|${MAD_TIME}"
+        ".|FuzzLPSmall|${MAD_TIME}"
         ".|FuzzMADExactOptimum|${MAD_TIME}"
         ".|FuzzMADAdversarialRegimes|${MAD_TIME}"
         ".|FuzzMADMetamorphicAndLimits|${MAD_TIME}"
@@ -70,6 +85,7 @@ esac
 
 echo "=== Local Parallel Fuzz Soak (${RUN_ID}) ==="
 echo "  Phase:       ${PHASE} (${#JOBS[@]} targets)"
+echo "  Formal:      GOBLIN_FORMAL=${FORMAL}"
 echo "  Parallelism: ${CONCURRENCY} targets x ${WORKERS_PER_TARGET} workers = $((CONCURRENCY * WORKERS_PER_TARGET)) threads"
 echo "  Logs:        ${LOG_DIR}"
 

@@ -1,16 +1,37 @@
 /-
-cuts-check: CLI verifier for Track 2B cutting-plane soundness
-(`row-legal-mu`, `mir-use-lower`, `gmi-check`, `cmir-check`, `vub-check`).
+cuts-check: CLI verifier for Track 2B and Track 2C cutting-plane soundness
+(`row-legal-mu`, `mir-use-lower`, `gmi-check`, `cmir-check`, `vub-check`,
+`cover-check`, `lotsizing-check`, `agg-cmir-check`, `drop-check`).
 -/
 
 import GoblinFormal.Track2B
+import GoblinFormal.Track2C
 
 open GoblinFormal
 open GoblinFormal.Track2B
 
 private def usageText : String :=
-  "usage: cuts-check <subcommand> <input.json | ->\n" ++
-  "  subcommands: row-legal-mu, mir-use-lower, gmi-check, cmir-check, vub-check"
+  "usage: cuts-check [<subcommand>] [--jsonl | --batch <array.json | -> | <input.json | ->]\n" ++
+  "  subcommands: row-legal-mu, mir-use-lower, gmi-check, cmir-check, vub-check,\n" ++
+  "               cover-check, lotsizing-check, agg-cmir-check, drop-check"
+
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then Char.ofNat ('0'.toNat + n)
+  else Char.ofNat ('a'.toNat + (n - 10))
+
+private def jsonQuote (s : String) : String :=
+  let body := s.foldl (fun acc c =>
+    if c == '"' then acc ++ "\\\""
+    else if c == '\\' then acc ++ "\\\\"
+    else if c == '\n' then acc ++ "\\n"
+    else if c == '\r' then acc ++ "\\r"
+    else if c == '\t' then acc ++ "\\t"
+    else if c.toNat < 0x20 then
+      let b := c.toNat
+      acc.push '\\' |>.push 'u' |>.push '0' |>.push '0'
+        |>.push (hexDigit (b / 16)) |>.push (hexDigit (b % 16))
+    else acc.push c) ""
+  "\"" ++ body ++ "\""
 
 private def parseSense : JsonVal → Except String ConstraintSense
   | .str "le" | .str "<=" => .ok .le
@@ -286,6 +307,11 @@ private def handleVubCheck (v : JsonVal) : Except String String := do
     throw "vub-check requires 'a' (disaggregation mode) or 'cuts' (structural mode)"
   pure s!"VERIFIED ({checked} checks)"
 
+private def isKnownSubcmd (s : String) : Bool :=
+  s == "row-legal-mu" || s == "mir-use-lower" || s == "gmi-check" ||
+  s == "cmir-check" || s == "vub-check" || s == "cover-check" ||
+  s == "lotsizing-check" || s == "agg-cmir-check" || s == "drop-check"
+
 private def dispatchSubcmd (subcmd : String) (v : JsonVal) : Except String String :=
   match subcmd with
   | "row-legal-mu" => handleRowLegalMu v
@@ -293,7 +319,25 @@ private def dispatchSubcmd (subcmd : String) (v : JsonVal) : Except String Strin
   | "gmi-check" => handleGmiCheck v
   | "cmir-check" => handleCmirCheck v
   | "vub-check" => handleVubCheck v
+  | "cover-check" => Track2C.checkKnapsackCoverJson v
+  | "lotsizing-check" => Track2C.checkLotSizingCutJson v
+  | "agg-cmir-check" => Track2C.checkAggCMIRJson v
+  | "drop-check" => Track2C.checkFinalizedCutJson v
   | _ => .error s!"unknown subcommand '{subcmd}'"
+
+private def resolveSubcmd (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
+  match defaultSubcmd with
+  | some s => .ok s
+  | none =>
+    for key in ["subcommand", "op", "mode"] do
+      if let some fv := v.getField? key then
+        if fv != .null then
+          return ← fv.asString
+    .error "missing required 'op', 'subcommand', or 'mode' field"
+
+private def dispatchItem (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
+  let sub ← resolveSubcmd defaultSubcmd v
+  dispatchSubcmd sub v
 
 private def readInput (path : String) : IO String := do
   if path == "-" then
@@ -302,11 +346,71 @@ private def readInput (path : String) : IO String := do
   else
     IO.FS.readFile ⟨path⟩
 
+private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultSubcmd : Option String) : IO UInt32 := do
+  let line ← stdin.getLine
+  if line.isEmpty then
+    return 0
+  let trimmed := line.trimAscii.toString
+  if !trimmed.isEmpty then
+    let resp :=
+      match parseJson trimmed >>= dispatchItem defaultSubcmd with
+      | .ok detail => "{\"ok\":true,\"detail\":" ++ jsonQuote detail ++ "}"
+      | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
+    stdout.putStr resp
+    stdout.putStr "\n"
+    stdout.flush
+  runJsonlLoop stdin stdout defaultSubcmd
+
+private def runBatch (defaultSubcmd : Option String) (path : String) : IO UInt32 := do
+  try
+    let raw ← readInput path
+    match parseJson raw >>= JsonVal.asArray with
+    | .error err =>
+      IO.eprintln s!"JSON parse error: {err}"
+      pure 1
+    | .ok items =>
+      for i in [:items.size] do
+        match dispatchItem defaultSubcmd items[i]! with
+        | .ok _ => pure ()
+        | .error err =>
+          IO.eprintln s!"BATCH FAIL at index {i}: {err}"
+          return 1
+      IO.println s!"VERIFIED ({items.size} items)"
+      pure 0
+  catch e =>
+    IO.eprintln s!"I/O error: {e}"
+    pure 1
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] | ["help"] =>
     IO.println usageText
     pure 0
+  | ["--jsonl"] =>
+    runJsonlLoop (← IO.getStdin) (← IO.getStdout) none
+  | [subcmd, "--jsonl"] =>
+    if isKnownSubcmd subcmd then
+      runJsonlLoop (← IO.getStdin) (← IO.getStdout) (some subcmd)
+    else
+      IO.eprintln s!"FAIL: unknown subcommand '{subcmd}'"
+      pure 1
+  | ["--jsonl", subcmd] =>
+    if isKnownSubcmd subcmd then
+      runJsonlLoop (← IO.getStdin) (← IO.getStdout) (some subcmd)
+    else
+      IO.eprintln s!"FAIL: unknown subcommand '{subcmd}'"
+      pure 1
+  | ["--batch", path] =>
+    runBatch none path
+  | [subcmd, "--batch", path] =>
+    if isKnownSubcmd subcmd then
+      runBatch (some subcmd) path
+    else
+      IO.eprintln s!"FAIL: unknown subcommand '{subcmd}'"
+      pure 1
+  | ["--batch"] | [_, "--batch"] =>
+    IO.eprintln "FAIL: missing path after --batch"
+    pure 1
   | [subcmd, path] =>
     try
       let raw ← readInput path
@@ -326,23 +430,45 @@ def main (args : List String) : IO UInt32 := do
       IO.eprintln s!"I/O error: {e}"
       pure 1
   | [path] =>
-    try
-      let raw ← readInput path
-      match parseJson raw with
-      | .error err =>
-        IO.eprintln s!"JSON parse error: {err}"
-        pure 1
-      | .ok jv =>
-        match jv.getString "mode" >>= fun m => dispatchSubcmd m jv with
-        | .ok msg =>
-          IO.println msg
-          pure 0
+    if isKnownSubcmd path then
+      try
+        let raw ← readInput "-"
+        match parseJson raw with
         | .error err =>
-          IO.eprintln s!"FAIL: {err}"
+          IO.eprintln s!"JSON parse error: {err}"
           pure 1
-    catch e =>
-      IO.eprintln s!"I/O error: {e}"
-      pure 1
+        | .ok jv =>
+          match dispatchSubcmd path jv with
+          | .ok msg =>
+            IO.println msg
+            pure 0
+          | .error err =>
+            IO.eprintln s!"FAIL: {err}"
+            pure 1
+      catch e =>
+        IO.eprintln s!"I/O error: {e}"
+        pure 1
+    else
+      if path.startsWith "-" && path != "-" then
+        IO.eprintln usageText
+        return 1
+      try
+        let raw ← readInput path
+        match parseJson raw with
+        | .error err =>
+          IO.eprintln s!"JSON parse error: {err}"
+          pure 1
+        | .ok jv =>
+          match dispatchItem none jv with
+          | .ok msg =>
+            IO.println msg
+            pure 0
+          | .error err =>
+            IO.eprintln s!"FAIL: {err}"
+            pure 1
+      catch e =>
+        IO.eprintln s!"I/O error: {e}"
+        pure 1
   | _ =>
     IO.eprintln usageText
     pure 1

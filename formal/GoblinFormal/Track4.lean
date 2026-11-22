@@ -1469,11 +1469,14 @@ theorem stepGapClosed_exact_optimal {P : VIPRInstance} {s : BabState P.n} {xInc 
 
 /-! ## Section 3: Mini-VIPR Rational MILP Trace Checker & Soundness -/
 
-/-- Certificate target mode: global infeasibility or certified optimal incumbent. -/
+/-- Certificate target mode: global infeasibility, certified optimal incumbent, or certified lower bound. -/
 inductive CertMode (n : Nat) where
   | infeasible
   | optimal (incumbent : RatVec n)
+  | bound (targetLB : Rat)
   deriving Repr
+
+abbrev VIPRMode := CertMode
 
 /-- Weighted reference to a constraint in the derivation table. -/
 structure LinRef where
@@ -1515,6 +1518,9 @@ structure MiniVIPRCert where
   mode : CertMode inst.n
   steps : Array (ProofStep inst.n)
   rootStep : Nat
+  incumbent? : Option (RatVec inst.n) := none
+
+abbrev MiniVIPRCert.prob (cert : MiniVIPRCert) : VIPRInstance := cert.inst
 
 /-- Verified derived entry with its active assumption ID set. -/
 structure DerivedEntry (n : Nat) where
@@ -3143,17 +3149,31 @@ def checkMiniVIPR (cert : MiniVIPRCert) : Bool :=
              (rootEntry.con.coeffs.beq (RatVec.ofFn cert.inst.obj) &&
               (rootEntry.con.sense == .ge || rootEntry.con.sense == .eq) &&
               decide ((RatVec.ofFn cert.inst.obj).dotVec xStar ≤ rootEntry.con.rhs)))
+          | .bound targetLB =>
+            let okInc :=
+              match cert.incumbent? with
+              | none => true
+              | some xInc => checkIncumbentFeasible cert.inst xInc
+            okInc &&
+            (isUnsatCon rootEntry.con ||
+             (rootEntry.con.coeffs.beq (RatVec.ofFn cert.inst.obj) &&
+              (rootEntry.con.sense == .ge || rootEntry.con.sense == .eq) &&
+              decide (targetLB ≤ cert.inst.objConst + rootEntry.con.rhs)))
       else false
     else false
 
-/-- Top-level soundness theorem for `checkMiniVIPR` covering both `infeasible` and `optimal` modes. -/
+/-- Top-level soundness theorem for `checkMiniVIPR` covering `infeasible`, `optimal`, and `bound` modes. -/
 theorem checkMiniVIPR_sound (cert : MiniVIPRCert) (h : checkMiniVIPR cert = true) :
     match cert.mode with
     | .infeasible => ¬ ∃ x : Fin cert.inst.n → Rat, MILPFeasible cert.inst x
     | .optimal xStar =>
         MILPFeasible cert.inst xStar.get ∧
         ∀ x : Fin cert.inst.n → Rat, MILPFeasible cert.inst x →
-          LPObjective cert.inst xStar.get ≤ LPObjective cert.inst x := by
+          LPObjective cert.inst xStar.get ≤ LPObjective cert.inst x
+    | .bound targetLB =>
+        (∀ xInc, cert.incumbent? = some xInc → MILPFeasible cert.inst xInc.get) ∧
+        ∀ x : Fin cert.inst.n → Rat, MILPFeasible cert.inst x →
+          targetLB ≤ LPObjective cert.inst x := by
   unfold checkMiniVIPR at h
   dsimp only at h
   cases hrun : runSteps cert.inst cert.steps 0
@@ -3227,6 +3247,40 @@ theorem checkMiniVIPR_sound (cert : MiniVIPRCert) (h : checkMiniVIPR cert = true
                 Rat.le_trans hle_rhs (by rwa [← hdot])
               unfold LPObjective
               exact Rat.add_le_add_left.mpr hle_x
+          | bound targetLB =>
+            rw [hmode] at h
+            simp only [Bool.and_eq_true] at h
+            refine ⟨?_, fun x hx => ?_⟩
+            · intro xInc hxInc
+              have hinc := h.1
+              rw [hxInc] at hinc
+              exact checkIncumbentFeasible_sound cert.inst xInc hinc
+            · have hsat := hrootSat x hx
+              rcases Bool.or_eq_true _ _ |>.mp h.2 with hunsat | hbound
+              · exact absurd hsat (isUnsatCon_sound hunsat x)
+              · simp only [Bool.and_eq_true] at hbound
+                rcases hbound with ⟨⟨hcoeffs, hsense⟩, hrhs⟩
+                have hcEq : entries[cert.inst.baseRows.size + cert.rootStep].con.coeffs =
+                    RatVec.ofFn cert.inst.obj := RatVec.eq_of_beq hcoeffs
+                have hge : entries[cert.inst.baseRows.size + cert.rootStep].con.rhs ≤
+                    entries[cert.inst.baseRows.size + cert.rootStep].con.coeffs.dot x := by
+                  unfold LinCon.sat at hsat
+                  rcases Bool.or_eq_true _ _ |>.mp hsense with hs | hs
+                  · rw [beq_iff_eq.mp hs] at hsat; exact hsat
+                  · rw [beq_iff_eq.mp hs] at hsat; exact hsat ▸ Rat.le_refl
+                rw [hcEq] at hge
+                have hdot : (RatVec.ofFn cert.inst.obj).dot x =
+                    finSum cert.inst.n (fun j => cert.inst.obj j * x j) := by
+                  unfold RatVec.dot
+                  apply finSum_congr
+                  intro j
+                  simp
+                rw [hdot] at hge
+                have htarget : targetLB ≤
+                    cert.inst.objConst + entries[cert.inst.baseRows.size + cert.rootStep].con.rhs :=
+                  decide_eq_true_eq.mp hrhs
+                unfold LPObjective
+                exact Rat.le_trans htarget (Rat.add_le_add_left.mpr hge)
       · contradiction
     · contradiction
 
@@ -3243,6 +3297,14 @@ theorem checkMiniVIPR_optimal_sound (cert : MiniVIPRCert) (xStar : RatVec cert.i
       LPObjective cert.inst xStar.get ≤ LPObjective cert.inst x := by
   have hs := checkMiniVIPR_sound cert h
   rwa [hmode] at hs
+
+theorem checkMiniVIPR_bound_sound (cert : MiniVIPRCert) {targetLB : Rat}
+    (h : checkMiniVIPR cert = true) (hmode : cert.mode = .bound targetLB) :
+    ∀ x : Fin cert.prob.n → Rat, MILPFeasible cert.prob x →
+      targetLB ≤ LPObjective cert.prob x := by
+  have hs := checkMiniVIPR_sound cert h
+  rw [hmode] at hs
+  exact hs.2
 
 
 /-! ## Section 4: JSON Decoding & Verification Entry Point -/
@@ -3452,7 +3514,7 @@ def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
   let n ← v.getNat "n"
   let objConst ←
     match v.getField? "objConst" with
-    | none => .ok (0 : Rat)
+    | none | some .null => .ok (0 : Rat)
     | some ov => ov.asRat
   let objVal ← v.getField "obj"
   let objVec ← decodeRatVec n objVal
@@ -3474,13 +3536,20 @@ def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
     ub := fun j => ubVec.1[j.1]'(by rw [ubVec.2]; exact j.2)
   }
   let modeStr ← v.getString "mode"
-  let mode : CertMode inst.n ←
+  let (mode, optInc) : CertMode inst.n × Option (RatVec inst.n) ←
     match modeStr with
-    | "infeasible" => .ok .infeasible
+    | "infeasible" => .ok (.infeasible, none)
     | "optimal" =>
       let incVal ← v.getField "incumbent"
       let incVec ← decodeRatVec inst.n incVal
-      .ok (.optimal incVec)
+      .ok (.optimal incVec, some incVec)
+    | "bound" =>
+      let targetLB ← v.getRat "targetLB"
+      let incOpt ←
+        match v.getField? "incumbent" with
+        | none | some .null => .ok none
+        | some iv => some <$> decodeRatVec inst.n iv
+      .ok (.bound targetLB, incOpt)
     | _ => .error s!"invalid Mini-VIPR mode '{modeStr}'"
   let stepsArr ← v.getArray "steps"
   let mut steps : Array (ProofStep inst.n) := Array.mkEmpty stepsArr.size
@@ -3493,15 +3562,20 @@ def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
     | none =>
       if steps.size > 0 then .ok (steps.size - 1)
       else .error "missing rootStep and steps is empty"
-  .ok { inst := inst, mode := mode, steps := steps, rootStep := rootStep }
+  .ok { inst := inst, mode := mode, steps := steps, rootStep := rootStep, incumbent? := optInc }
+
+/-- Decodes and verifies a parsed `JsonVal` Mini-VIPR certificate. -/
+def verifyMiniVIPRJsonVal (jv : JsonVal) : Except String MiniVIPRCert := do
+  let cert ← decodeMiniVIPRCert jv
+  if checkMiniVIPR cert then
+    .ok cert
+  else
+    .error "Mini-VIPR trace failed verification"
 
 /-- Parses and verifies a JSON-encoded Mini-VIPR certificate. -/
 def verifyMiniVIPRJson (raw : String) : Except String Unit := do
   let jv ← parseJson raw
-  let cert ← decodeMiniVIPRCert jv
-  if checkMiniVIPR cert then
-    .ok ()
-  else
-    .error "Mini-VIPR trace failed verification"
+  let _ ← verifyMiniVIPRJsonVal jv
+  .ok ()
 
 end GoblinFormal.Track4

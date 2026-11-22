@@ -26,20 +26,55 @@ check_verified() {
     local out
     out="$("${exe}" "${fixture}")"
     printf '%s\n' "${out}"
-    if ! printf '%s\n' "${out}" | grep -q '^VERIFIED$'; then
+    if ! printf '%s\n' "${out}" | grep -q '^VERIFIED'; then
         printf 'ERROR: %s %s did not print VERIFIED.\n' "${exe}" "${fixture}" >&2
         exit 1
     fi
 }
 
-log_step "1/4 Building Lean 4 proofs and axiom audit..."
+check_subcmd_pos_neg() {
+    local exe="$1"
+    local subcmd="$2"
+    local pos_json="$3"
+    local neg_json="$4"
+    local expect_re="$5"
+    local out jsonl_out
+
+    out="$(printf '%s\n' "${pos_json}" | "${exe}" "${subcmd}" -)"
+    if ! printf '%s\n' "${out}" | grep -Eq "${expect_re}"; then
+        printf 'ERROR: %s %s positive CLI check failed: %s\n' "${exe}" "${subcmd}" "${out}" >&2
+        exit 1
+    fi
+
+    jsonl_out="$(printf '%s\n' "${pos_json}" | "${exe}" "${subcmd}" --jsonl)"
+    if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":true'; then
+        printf 'ERROR: %s %s --jsonl positive check failed: %s\n' "${exe}" "${subcmd}" "${jsonl_out}" >&2
+        exit 1
+    fi
+
+    if printf '%s\n' "${neg_json}" | "${exe}" "${subcmd}" - >/dev/null 2>&1; then
+        printf 'ERROR: %s %s accepted negative payload.\n' "${exe}" "${subcmd}" >&2
+        exit 1
+    fi
+
+    jsonl_out="$(printf '%s\n' "${neg_json}" | "${exe}" "${subcmd}" --jsonl)"
+    if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":false'; then
+        printf 'ERROR: %s %s --jsonl accepted negative payload: %s\n' "${exe}" "${subcmd}" "${jsonl_out}" >&2
+        exit 1
+    fi
+
+    printf '  [OK] %s %s (CLI + --jsonl positive and negative)\n' "$(basename "${exe}")" "${subcmd}"
+}
+
+export LEAN_NUM_THREADS="${LEAN_NUM_THREADS:-16}"
+log_step "1/5 Building Lean 4 proofs and axiom audit (LEAN_NUM_THREADS=${LEAN_NUM_THREADS})..."
 if command -v flock >/dev/null 2>&1; then
-    (cd formal && flock /tmp/goblin-formal-lake.lock lake build)
+    (cd formal && flock /tmp/goblin-formal-lake.lock lake build --wfail)
 else
-    (cd formal && lake build)
+    (cd formal && lake build --wfail)
 fi
 
-log_step "2/4 Running CLI positive, negative, and help smoke checks..."
+log_step "2/5 Running CLI positive, negative, subcommand, and help smoke checks..."
 BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
 (
     cd formal
@@ -56,12 +91,55 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
         "${BIN_DIR}/${cli}" --help >/dev/null
         "${BIN_DIR}/${cli}" >/dev/null
     done
+
+    check_subcmd_pos_neg "${BIN_DIR}/cuts-check" "cover-check" \
+        '{"op":"cover-check","numVars":3,"lb":["0/1","0/1","0/1"],"ub":["1/1","1/1","1/1"],"row":{"terms":[{"col":0,"val":"3/1"},{"col":1,"val":"3/1"},{"col":2,"val":"2/1"}],"sense":"le","rhs":"4/1"},"sign":"1/1","items":[{"col":0,"weight":"3/1","comp":false,"inCover":true,"alpha":1},{"col":1,"weight":"3/1","comp":false,"inCover":true,"alpha":1},{"col":2,"weight":"2/1","comp":false,"inCover":false,"alpha":0}],"knapRHS":"4/1","scale":"1/1","cut":{"terms":[{"col":0,"val":"1/1"},{"col":1,"val":"1/1"}],"rhs":"1/1"}}' \
+        '{"op":"cover-check","numVars":3,"lb":["0/1","0/1","0/1"],"ub":["1/1","1/1","1/1"],"row":{"terms":[{"col":0,"val":"3/1"},{"col":1,"val":"3/1"},{"col":2,"val":"2/1"}],"sense":"le","rhs":"4/1"},"sign":"1/1","items":[{"col":0,"weight":"3/1","comp":false,"inCover":true,"alpha":1},{"col":1,"weight":"3/1","comp":false,"inCover":true,"alpha":1},{"col":2,"weight":"2/1","comp":false,"inCover":false,"alpha":0}],"knapRHS":"4/1","scale":"1/1","cut":{"terms":[{"col":0,"val":"1/1"},{"col":1,"val":"1/1"}],"rhs":"0/1"}}' \
+        '^VERIFIED'
+
+    check_subcmd_pos_neg "${BIN_DIR}/cuts-check" "lotsizing-check" \
+        '{"op":"lotsizing-check","numVars":3,"invInCol":null,"nodes":[{"prodCol":0,"invOutCol":1,"binCol":2,"demand":"10/1","vubCap":"40/1","vubRHS":"0/1","inS":true,"coeffY":"10/1"}],"cutDem":"10/1","scale":"1/1","cut":{"terms":[{"col":2,"val":"-10/1"}],"rhs":"-10/1"}}' \
+        '{"op":"lotsizing-check","numVars":3,"invInCol":null,"nodes":[{"prodCol":0,"invOutCol":1,"binCol":2,"demand":"10/1","vubCap":"40/1","vubRHS":"0/1","inS":true,"coeffY":"10/1"}],"cutDem":"10/1","scale":"1/1","cut":{"terms":[{"col":2,"val":"-10/1"}],"rhs":"-11/1"}}' \
+        '^VERIFIED'
+
+    check_subcmd_pos_neg "${BIN_DIR}/cuts-check" "agg-cmir-check" \
+        '{"op":"agg-cmir-check","numVars":2,"isInt":[true,false],"lb":["0/1","0/1"],"ub":["5/1",null],"rows":[{"terms":[{"col":0,"val":"2/1"},{"col":1,"val":"1/1"}],"sense":"eq","rhs":"3/1","mu":"1/1"},{"terms":[{"col":1,"val":"-1/1"}],"sense":"le","rhs":"0/1","mu":"1/1"}],"aggTerms":[{"col":0,"val":"2/1"}],"aggRHS":"3/1","delta":"2/1","useLower":[true,true],"betaHat":"3/2","alphaHat":["1/1","0/1"],"cInt":["1/1","0/1"],"cCont":["0/1","0/1"],"scale":"1/1","cut":{"terms":[{"col":0,"val":"1/1"}],"rhs":"1/1"}}' \
+        '{"op":"agg-cmir-check","numVars":2,"isInt":[true,false],"lb":["0/1","0/1"],"ub":["5/1",null],"rows":[{"terms":[{"col":0,"val":"2/1"},{"col":1,"val":"1/1"}],"sense":"eq","rhs":"3/1","mu":"1/1"},{"terms":[{"col":1,"val":"-1/1"}],"sense":"le","rhs":"0/1","mu":"1/1"}],"aggTerms":[{"col":0,"val":"2/1"}],"aggRHS":"3/1","delta":"2/1","useLower":[true,true],"betaHat":"3/2","alphaHat":["1/1","0/1"],"cInt":["1/1","0/1"],"cCont":["0/1","0/1"],"scale":"1/1","cut":{"terms":[{"col":0,"val":"1/1"}],"rhs":"0/1"}}' \
+        '^VERIFIED'
+
+    check_subcmd_pos_neg "${BIN_DIR}/cuts-check" "drop-check" \
+        '{"op":"drop-check","numVars":2,"lb":["0/1",null],"ub":[null,"10/1"],"rawCut":{"terms":[{"col":0,"val":"1/1000"},{"col":1,"val":"1/1"}],"rhs":"5/1"},"scale":"1/1","finalCut":{"terms":[{"col":1,"val":"1/1"}],"rhs":"5/1"}}' \
+        '{"op":"drop-check","numVars":2,"lb":["0/1",null],"ub":[null,"10/1"],"rawCut":{"terms":[{"col":0,"val":"1/1000"},{"col":1,"val":"1/1"}],"rhs":"5/1"},"scale":"1/1","finalCut":{"terms":[{"col":1,"val":"1/1"}],"rhs":"4/1"}}' \
+        '^VERIFIED'
+
+    check_subcmd_pos_neg "${BIN_DIR}/rules-check" "gcd-div-check" \
+        '{"op":"gcd-div-check","coeffs":[6,-9],"sense":"le","rhs":"17/2","div_coeffs":[2,-3],"div_rhs":2}' \
+        '{"op":"gcd-div-check","coeffs":[6,-9],"sense":"le","rhs":"17/2","div_coeffs":[2,-3],"div_rhs":1}' \
+        '"gcd":3'
+
+    check_subcmd_pos_neg "${BIN_DIR}/lp-check" "unbounded" \
+        '{"mode":"unbounded","numVars":1,"numRows":1,"obj":["-1/1"],"lb":["0/1"],"ub":[null],"rows":[{"sense":"ge","rhs":"2/1","terms":[{"col":0,"coeff":"1/1"}]}],"x0":["2/1"],"d":["1/1"]}' \
+        '{"mode":"unbounded","numVars":1,"numRows":1,"obj":["1/1"],"lb":["0/1"],"ub":[null],"rows":[{"sense":"ge","rhs":"2/1","terms":[{"col":0,"coeff":"1/1"}]}],"x0":["2/1"],"d":["1/1"]}' \
+        '^VERIFIED$'
+
+    check_subcmd_pos_neg "${BIN_DIR}/lp-check" "milp-unbounded" \
+        '{"mode":"milp-unbounded","numVars":2,"numRows":1,"intCols":[0],"obj":["-2/1","0/1"],"lb":["2/1","0/1"],"ub":[null,null],"rows":[{"sense":"eq","rhs":"0/1","terms":[{"col":0,"coeff":"-1/1"},{"col":1,"coeff":"3/1"}]}],"x0":["3/1","1/1"],"d":["3/1","1/1"]}' \
+        '{"mode":"milp-unbounded","numVars":2,"numRows":1,"intCols":[0,1],"obj":["-2/1","0/1"],"lb":["2/1","0/1"],"ub":[null,null],"rows":[{"sense":"eq","rhs":"0/1","terms":[{"col":0,"coeff":"-1/1"},{"col":1,"coeff":"3/1"}]}],"x0":["3/1","1/1"],"d":["1/1","1/3"]}' \
+        '^VERIFIED$'
+
+    check_subcmd_pos_neg "${BIN_DIR}/lp-check" "lp-presolve" \
+        '{"mode":"lp-presolve","orig":{"numVars":2,"numRows":2,"objConst":"4/1","obj":["-2/1","-1/1"],"lb":["0/1","0/1"],"ub":["10/1","10/1"],"rows":[{"sense":"le","rhs":"6/1","terms":[{"col":0,"coeff":"2/1"}]},{"sense":"le","rhs":"8/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"reduced":{"numVars":2,"numRows":1,"objConst":"4/1","obj":["-2/1","-1/1"],"lb":["0/1","0/1"],"ub":["3/1","10/1"],"rows":[{"sense":"le","rhs":"8/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"step":{"kind":"singletonRow","origRow":0,"col":0,"origRowIdx":[1]},"xReduced":["3/1","5/1"],"yReduced":["-1/1"]}' \
+        '{"mode":"lp-presolve","orig":{"numVars":2,"numRows":2,"objConst":"4/1","obj":["-2/1","-1/1"],"lb":["0/1","0/1"],"ub":["10/1","10/1"],"rows":[{"sense":"le","rhs":"6/1","terms":[{"col":0,"coeff":"2/1"}]},{"sense":"le","rhs":"8/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"reduced":{"numVars":2,"numRows":1,"objConst":"4/1","obj":["-2/1","-1/1"],"lb":["0/1","0/1"],"ub":["3/1","10/1"],"rows":[{"sense":"le","rhs":"8/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"step":{"kind":"singletonRow","origRow":0,"col":0,"origRowIdx":[1]},"xReduced":["3/1","5/1"],"yReduced":["0/1"]}' \
+        '^VERIFIED$'
 )
 
-log_step "3/4 Running Go formal differential tests (default build)..."
-GOBLIN_FORMAL=1 go test -count=1 -v -run TestFormal . ./assign
+log_step "3/5 Running Go formal differential tests (default build)..."
+GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool)' . ./assign
 
-log_step "4/4 Running Go formal differential tests (GOEXPERIMENT=simd)..."
-GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -v -run TestFormal . ./assign
+log_step "4/5 Running Go formal differential tests (GOEXPERIMENT=simd)..."
+GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool)' . ./assign
+
+log_step "5/5 Running Go formal fuzz seed corpora (GOEXPERIMENT=simd)..."
+GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -run '^Fuzz' . ./assign
 
 printf '\nAll Lean 4 formal verification gates passed.\n'
