@@ -14,6 +14,7 @@ import (
 const (
 	eightSpaces       = 0x2020202020202020
 	fourSpaces        = 0x20202020
+	nullLE            = 0x6c6c756e
 	maxExactFloatInt  = (1 << 53) - 1
 	maxPoolVarHashCap = 32 * 1024
 	maxPoolEndsCap    = 16 * 1024
@@ -198,7 +199,7 @@ func (sc *pulpScanner) lookupVarName(raw []byte) (string, bool) {
 }
 
 func (sc *pulpScanner) skipWS() {
-	if sc.pos < len(sc.b) && sc.b[sc.pos] > ' ' {
+	if uint(sc.pos) < uint(len(sc.b)) && sc.b[sc.pos] > ' ' {
 		return
 	}
 	sc.skipWSSlow()
@@ -208,6 +209,11 @@ func (sc *pulpScanner) skipWSSlow() {
 	b := sc.b
 	i := sc.pos
 	n := len(b)
+	if i < 0 {
+		return
+	}
+	lim8 := n - 7
+	lim4 := n - 3
 	for i < n {
 		c := b[i]
 		if c != ' ' && c != '\n' && c != '\r' && c != '\t' {
@@ -218,10 +224,10 @@ func (sc *pulpScanner) skipWSSlow() {
 			sc.pos = i
 			return
 		}
-		for i+8 <= n && binary.LittleEndian.Uint64(b[i:i+8]) == eightSpaces {
+		for i < lim8 && binary.LittleEndian.Uint64(b[i:i+8]) == eightSpaces {
 			i += 8
 		}
-		if i+4 <= n && binary.LittleEndian.Uint32(b[i:i+4]) == fourSpaces {
+		if i < lim4 && binary.LittleEndian.Uint32(b[i:i+4]) == fourSpaces {
 			i += 4
 		}
 		for i < n && b[i] == ' ' {
@@ -235,24 +241,28 @@ func (sc *pulpScanner) skipWSSlow() {
 	sc.pos = i
 }
 
+// consumeByte stays within the Go inline budget (cost <= 80) across parser callsites.
 func (sc *pulpScanner) consumeByte(want byte) bool {
-	if sc.pos < len(sc.b) && sc.b[sc.pos] == want {
-		sc.pos++
-		return true
-	}
-	sc.skipWS()
-	if sc.pos < len(sc.b) && sc.b[sc.pos] == want {
-		sc.pos++
-		return true
+	b := sc.b
+	for i := sc.pos; uint(i) < uint(len(b)); i++ {
+		c := b[i]
+		if c == want {
+			sc.pos = i + 1
+			return true
+		}
+		if c != ' ' && c != '\n' && c != '\r' && c != '\t' {
+			sc.pos = i
+			return false
+		}
 	}
 	return false
 }
 
 func (sc *pulpScanner) consumeNull() bool {
 	sc.skipWS()
-	i := sc.pos
 	b := sc.b
-	if i+4 <= len(b) && b[i] == 'n' && b[i+1] == 'u' && b[i+2] == 'l' && b[i+3] == 'l' {
+	i := sc.pos
+	if i >= 0 && i < len(b)-3 && binary.LittleEndian.Uint32(b[i:i+4]) == nullLE {
 		sc.pos = i + 4
 		return true
 	}
@@ -266,7 +276,7 @@ func (sc *pulpScanner) readUnescapedSpan() (start, end int, ok bool) {
 	b := sc.b
 	i := sc.pos
 	n := len(b)
-	if i >= n || b[i] != '"' {
+	if i < 0 || i >= n || b[i] != '"' {
 		return 0, 0, false
 	}
 	i++
@@ -297,32 +307,31 @@ func (sc *pulpScanner) readUnescapedSpan() (start, end int, ok bool) {
 
 // readUnescapedBytes reads a JSON string containing no backslash escapes or control bytes.
 // Any escape sequence or invalid UTF-8 returns ok=false so the caller falls back to encoding/json/v2.
+// Keep this wrapper within the Go inline budget (cost <= 80) across parser callsites.
 func (sc *pulpScanner) readUnescapedBytes() ([]byte, bool) {
 	start, end, ok := sc.readUnescapedSpan()
-	if !ok {
-		return nil, false
-	}
-	return sc.b[start:end], true
+	return sc.b[start:end], ok
 }
 
 func (sc *pulpScanner) readInt() (int, bool) {
 	sc.skipWS()
 	b := sc.b
 	i := sc.pos
-	if i >= len(b) {
+	n := len(b)
+	if i < 0 || i >= n {
 		return 0, false
 	}
 	neg := false
 	if b[i] == '-' {
 		neg = true
 		i++
-		if i >= len(b) {
+		if i >= n {
 			return 0, false
 		}
 	}
 	if b[i] == '0' {
 		i++
-		if i < len(b) && ((b[i] >= '0' && b[i] <= '9') || b[i] == '.' || b[i] == 'e' || b[i] == 'E') {
+		if i < n && ((b[i] >= '0' && b[i] <= '9') || b[i] == '.' || b[i] == 'e' || b[i] == 'E') {
 			return 0, false
 		}
 		sc.pos = i
@@ -336,7 +345,7 @@ func (sc *pulpScanner) readInt() (int, bool) {
 	if neg {
 		limit = uint64(math.MaxInt) + 1
 	}
-	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+	for i < n && b[i] >= '0' && b[i] <= '9' {
 		d := uint64(b[i] - '0')
 		if u > (limit-d)/10 {
 			return 0, false
@@ -344,7 +353,7 @@ func (sc *pulpScanner) readInt() (int, bool) {
 		u = u*10 + d
 		i++
 	}
-	if i < len(b) && (b[i] == '.' || b[i] == 'e' || b[i] == 'E') {
+	if i < n && (b[i] == '.' || b[i] == 'e' || b[i] == 'E') {
 		return 0, false
 	}
 	sc.pos = i
@@ -362,7 +371,7 @@ func (sc *pulpScanner) readFloat() (float64, bool) {
 	b := sc.b
 	i := sc.pos
 	n := len(b)
-	if i >= n {
+	if i < 0 || i >= n {
 		return 0, false
 	}
 	numStart := i
