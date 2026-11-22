@@ -7233,6 +7233,73 @@ func (s *LPSolver) finalizeOptimalResult(totalIter int, primalFresh, dualFresh b
 	return LPResult{}, false
 }
 
+// solvePrimalObjective re-optimizes the current warm basis under an alternate
+// minimization objective vector costMin using Phase II primal simplex and restores
+// the underlying model objective and dual tolerances before returning.
+func (s *LPSolver) solvePrimalObjective(costMin []float64, maxIter int) (LPResult, int) {
+	if s == nil || s.prob == nil || s.ws == nil || len(costMin) < s.prob.numVars || maxIter <= 0 {
+		return LPResult{Status: StatusNotSolved}, 0
+	}
+	if s.invalidBounds || s.infeasibleCut {
+		return LPResult{Status: StatusInfeasible}, 0
+	}
+	n := s.prob.numVars
+	m := s.TotalRows()
+	tot := n + m
+	ws := s.ws
+
+	origEffDual := s.effDualTol
+	origFast := s.fastHeuristicPrimal
+	origMaxIter := s.MaxIter
+	defer func() {
+		copy(ws.cost[:n], s.mat.objMin[:n])
+		clear(ws.cost[n:tot])
+		s.effDualTol = origEffDual
+		s.fastHeuristicPrimal = origFast
+		s.MaxIter = origMaxIter
+		s.dualValid = false
+	}()
+
+	maxAbs := 0.0
+	for j := range n {
+		c := costMin[j]
+		if s.scaled {
+			c *= s.colScale[j]
+		}
+		if math.IsNaN(c) || math.IsInf(c, 0) {
+			return LPResult{Status: StatusNumericalError}, 0
+		}
+		ws.cost[j] = c
+		if a := math.Abs(c); a > maxAbs {
+			maxAbs = a
+		}
+	}
+	clear(ws.cost[n:tot])
+	if maxAbs > 0 {
+		_, exp := math.Frexp(maxAbs)
+		scaleExp := -exp
+		for j := range n {
+			if ws.cost[j] != 0 {
+				ws.cost[j] = math.Ldexp(ws.cost[j], scaleExp)
+			}
+		}
+	}
+
+	s.effDualTol = dualTol
+	s.fastHeuristicPrimal = true
+	s.MaxIter = maxIter
+	s.dualValid = false
+
+	st, iters, primalFresh, _ := s.solveTwoPhasePrimalWithLimit(maxIter)
+	if st == StatusOptimal {
+		if res, ok := s.buildFastPrimalResult(iters, primalFresh); ok {
+			return res, iters
+		}
+		return LPResult{Status: StatusNumericalError, Iterations: iters}, iters
+	}
+	return LPResult{Status: st, Iterations: iters}, iters
+}
+
 func (s *LPSolver) boundedRowSpan(cols []int, vals []float64) (float64, bool) {
 	span := 0.0
 	for k, c := range cols {

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,6 +141,7 @@ func TestUnifiedOptionsAndBackends(t *testing.T) {
 }
 
 func TestFullCorpusMILPParityWithCBC(t *testing.T) {
+	t.Parallel()
 	rawRef, err := os.ReadFile("bench/results/python_baseline.json")
 	if err != nil {
 		t.Skipf("skipping corpus parity test (no python_baseline.json): %v", err)
@@ -156,6 +158,7 @@ func TestFullCorpusMILPParityWithCBC(t *testing.T) {
 	cases := bench.BuildCorpus()
 	for _, c := range cases {
 		t.Run(c.ID, func(t *testing.T) {
+			t.Parallel()
 			ref, ok := pyRef[c.ID]
 			if !ok {
 				t.Fatalf("missing reference entry for %s", c.ID)
@@ -190,6 +193,7 @@ func TestFullCorpusMILPParityWithCBC(t *testing.T) {
 // and against goblin's in-process CBC run (goblin_cbc.json), and verifies primal and row bounds
 // on every result independently of both baselines.
 func TestAllTrialParity(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("solves all 293 trial instances; skipped with -short")
 	}
@@ -210,67 +214,72 @@ func TestAllTrialParity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	solved := 0
+	var solved atomic.Int64
+	t.Cleanup(func() {
+		if got := solved.Load(); got != 293 {
+			t.Errorf("solved %d trial instances, want 293", got)
+		}
+	})
 	for _, c := range bench.BuildCorpus() {
-		lines, err := os.ReadFile(filepath.Join("testdata", "corpus", "trials", c.ID+".jsonl"))
-		if err != nil {
-			t.Fatalf("%s: %v", c.ID, err)
-		}
-		py := pyRef[c.ID]
-		cbcRef := goblinRef[c.ID]
-		for k, line := range bytes.Split(bytes.TrimSpace(lines), []byte("\n")) {
-			doc, err := format.ParsePuLPJSON(line)
+		t.Run(c.ID, func(t *testing.T) {
+			t.Parallel()
+			lines, err := os.ReadFile(filepath.Join("testdata", "corpus", "trials", c.ID+".jsonl"))
 			if err != nil {
-				t.Fatalf("%s[%d]: %v", c.ID, k, err)
+				t.Fatalf("%s: %v", c.ID, err)
 			}
-			m, err := format.BuildModelFromPuLPJSON(doc)
-			if err != nil {
-				t.Fatalf("%s[%d]: %v", c.ID, k, err)
-			}
-			p, err := m.CompileChecked()
-			if err != nil {
-				t.Fatalf("%s[%d]: %v", c.ID, k, err)
-			}
-			trialLimit := 30 * time.Second
-			if raceEnabled {
-				trialLimit = 180 * time.Second
-			}
-			res := mustSolveCompiled(t, p, gb.WithTimeLimit(trialLimit))
-			solved++
+			py := pyRef[c.ID]
+			cbcRef := goblinRef[c.ID]
+			for k, line := range bytes.Split(bytes.TrimSpace(lines), []byte("\n")) {
+				doc, err := format.ParsePuLPJSON(line)
+				if err != nil {
+					t.Fatalf("%s[%d]: %v", c.ID, k, err)
+				}
+				m, err := format.BuildModelFromPuLPJSON(doc)
+				if err != nil {
+					t.Fatalf("%s[%d]: %v", c.ID, k, err)
+				}
+				p, err := m.CompileChecked()
+				if err != nil {
+					t.Fatalf("%s[%d]: %v", c.ID, k, err)
+				}
+				trialLimit := 30 * time.Second
+				if raceEnabled {
+					trialLimit = 180 * time.Second
+				}
+				res := mustSolveCompiled(t, p, gb.WithTimeLimit(trialLimit))
+				solved.Add(1)
 
-			if k >= len(py.TrialObjectives) {
-				t.Fatalf("%s[%d]: no CBC reference for this trial", c.ID, k)
-			}
-			wantStatus := py.Status
-			if k < len(py.TrialStatuses) && py.TrialStatuses[k] != "" {
-				wantStatus = py.TrialStatuses[k]
-			}
-			want := py.TrialObjectives[k]
-			if want == nil {
-				if res.Status.String() != wantStatus {
-					t.Errorf("%s[%d]: goblin status=%s, CBC status=%s", c.ID, k, res.Status, wantStatus)
+				if k >= len(py.TrialObjectives) {
+					t.Fatalf("%s[%d]: no CBC reference for this trial", c.ID, k)
 				}
-				continue
-			}
-			if res.Status != gb.StatusOptimal {
-				t.Errorf("%s[%d]: goblin %v, CBC Optimal %.8g", c.ID, k, res.Status, *want)
-				continue
-			}
-			if d := math.Abs(res.Objective-*want) / max(1.0, math.Abs(*want)); d > 1e-5 {
-				t.Errorf("%s[%d]: goblin %.8g, CBC %.8g (rel %.1e)", c.ID, k, res.Objective, *want, d)
-			}
-			if k < len(cbcRef.TrialObjectives) {
-				if d := math.Abs(res.Objective-cbcRef.TrialObjectives[k]) / max(1.0, math.Abs(cbcRef.TrialObjectives[k])); d > 1e-5 {
-					t.Errorf("%s[%d]: goblin %.8g, goblin_cbc %.8g (rel %.1e)", c.ID, k, res.Objective, cbcRef.TrialObjectives[k], d)
+				wantStatus := py.Status
+				if k < len(py.TrialStatuses) && py.TrialStatuses[k] != "" {
+					wantStatus = py.TrialStatuses[k]
+				}
+				want := py.TrialObjectives[k]
+				if want == nil {
+					if res.Status.String() != wantStatus {
+						t.Errorf("%s[%d]: goblin status=%s, CBC status=%s", c.ID, k, res.Status, wantStatus)
+					}
+					continue
+				}
+				if res.Status != gb.StatusOptimal {
+					t.Errorf("%s[%d]: goblin %v, CBC Optimal %.8g", c.ID, k, res.Status, *want)
+					continue
+				}
+				if d := math.Abs(res.Objective-*want) / max(1.0, math.Abs(*want)); d > 1e-5 {
+					t.Errorf("%s[%d]: goblin %.8g, CBC %.8g (rel %.1e)", c.ID, k, res.Objective, *want, d)
+				}
+				if k < len(cbcRef.TrialObjectives) {
+					if d := math.Abs(res.Objective-cbcRef.TrialObjectives[k]) / max(1.0, math.Abs(cbcRef.TrialObjectives[k])); d > 1e-5 {
+						t.Errorf("%s[%d]: goblin %.8g, goblin_cbc %.8g (rel %.1e)", c.ID, k, res.Objective, cbcRef.TrialObjectives[k], d)
+					}
+				}
+				if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP()); bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
+					t.Errorf("%s[%d]: infeasible solution: bound=%.1e row=%.1e int=%.1e", c.ID, k, bV, rV, iV)
 				}
 			}
-			if bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP()); bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
-				t.Errorf("%s[%d]: infeasible solution: bound=%.1e row=%.1e int=%.1e", c.ID, k, bV, rV, iV)
-			}
-		}
-	}
-	if solved != 293 {
-		t.Fatalf("solved %d trial instances, want 293", solved)
+		})
 	}
 }
 
@@ -540,6 +549,7 @@ func TestModelValidationForeignVarAndNaN(t *testing.T) {
 }
 
 func TestRandomMADNegativeControls(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		g, i int
@@ -583,9 +593,45 @@ func TestRandomMADNegativeControls(t *testing.T) {
 			t.Fatalf("[mad_rand_g4_i12] incumbent violation: bound=%.2e row=%.2e int=%.2e", bV, rV, iV)
 		}
 	}
+
+	// Verify zero-gap random-weight MAD trials (t2_mad_rand_g2_i8[6], t2_mad_rand_g3_i9[4])
+	// solve to exact optimality with OFP and RCF enabled.
+	for _, tc := range []struct {
+		id    string
+		g, i  int
+		base  uint64
+		trial int
+	}{
+		{"t2_mad_rand_g2_i8_t6", 2, 8, 7001, 6},
+		{"t2_mad_rand_g3_i9_t4", 3, 9, 7002, 4},
+	} {
+		lines, err := os.ReadFile(filepath.Join("testdata", "corpus", "trials", tc.id[:len(tc.id)-3]+".jsonl"))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		allLines := bytes.Split(bytes.TrimSpace(lines), []byte("\n"))
+		doc, err := format.ParsePuLPJSON(allLines[tc.trial])
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		mdl, err := format.BuildModelFromPuLPJSON(doc)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		comp := mdl.Compile()
+		res := mustSolveCompiled(t, comp)
+		if res.Status != gb.StatusOptimal {
+			t.Fatalf("[%s] got %v, want Optimal", tc.id, res.Status)
+		}
+		ref := mustSolveCompiled(t, comp, gb.WithHeuristics(false))
+		if math.Abs(res.Objective-ref.Objective) > 1e-5 {
+			t.Fatalf("[%s] obj=%.6f != no-heur ref=%.6f", tc.id, res.Objective, ref.Objective)
+		}
+	}
 }
 
 func TestAssignCorpusSciPyParity(t *testing.T) {
+	t.Parallel()
 	rawRef, err := os.ReadFile("bench/results/scipy_assign_baseline.json")
 	if err != nil {
 		t.Fatalf("failed to read bench/results/scipy_assign_baseline.json: %v", err)
@@ -597,39 +643,42 @@ func TestAssignCorpusSciPyParity(t *testing.T) {
 
 	cases := bench.BuildAssignCorpus()
 	for _, ac := range cases {
-		ref, ok := scipyRef[ac.ID]
-		if !ok {
-			t.Fatalf("missing %q in scipy_assign_baseline.json", ac.ID)
-		}
-		if len(ref.TrialObjectives) != ac.Trials {
-			t.Fatalf("[%s] expected %d trial objectives, got %d", ac.ID, ac.Trials, len(ref.TrialObjectives))
-		}
-		for k := range ac.Trials {
-			mat := bench.GenerateAssignMatrix(ac, k)
-			if k == 0 {
-				gotSHA := bench.MatrixSHA256(mat)
-				if gotSHA != ac.Trial0SHA {
-					t.Fatalf("[%s] Trial 0 SHA256 mismatch: got %s, want %s", ac.ID, gotSHA, ac.Trial0SHA)
+		t.Run(ac.ID, func(t *testing.T) {
+			t.Parallel()
+			ref, ok := scipyRef[ac.ID]
+			if !ok {
+				t.Fatalf("missing %q in scipy_assign_baseline.json", ac.ID)
+			}
+			if len(ref.TrialObjectives) != ac.Trials {
+				t.Fatalf("[%s] expected %d trial objectives, got %d", ac.ID, ac.Trials, len(ref.TrialObjectives))
+			}
+			for k := range ac.Trials {
+				mat := bench.GenerateAssignMatrix(ac, k)
+				if k == 0 {
+					gotSHA := bench.MatrixSHA256(mat)
+					if gotSHA != ac.Trial0SHA {
+						t.Fatalf("[%s] Trial 0 SHA256 mismatch: got %s, want %s", ac.ID, gotSHA, ac.Trial0SHA)
+					}
+				}
+				wantObj := ref.TrialObjectives[k]
+				for _, disableSIMD := range []bool{false, true} {
+					var opt assign.Option
+					if disableSIMD {
+						opt = assign.WithoutSIMD()
+					} else {
+						opt = assign.WithSIMD(true)
+					}
+					res, err := assign.LinearSumFlat(t.Context(), ac.Rows, ac.Cols, mat, ac.Sense, opt)
+					if err != nil {
+						t.Fatalf("[%s trial %d disableSIMD=%v] unexpected error: %v", ac.ID, k, disableSIMD, err)
+					}
+					rel := math.Abs(res.Objective-wantObj) / max(1.0, math.Abs(wantObj))
+					if rel > 1e-9 {
+						t.Fatalf("[%s trial %d disableSIMD=%v] objective mismatch: got %.10f, SciPy %.10f (rel=%.2e)",
+							ac.ID, k, disableSIMD, res.Objective, wantObj, rel)
+					}
 				}
 			}
-			wantObj := ref.TrialObjectives[k]
-			for _, disableSIMD := range []bool{false, true} {
-				var opt assign.Option
-				if disableSIMD {
-					opt = assign.WithoutSIMD()
-				} else {
-					opt = assign.WithSIMD(true)
-				}
-				res, err := assign.LinearSumFlat(t.Context(), ac.Rows, ac.Cols, mat, ac.Sense, opt)
-				if err != nil {
-					t.Fatalf("[%s trial %d disableSIMD=%v] unexpected error: %v", ac.ID, k, disableSIMD, err)
-				}
-				rel := math.Abs(res.Objective-wantObj) / max(1.0, math.Abs(wantObj))
-				if rel > 1e-9 {
-					t.Fatalf("[%s trial %d disableSIMD=%v] objective mismatch: got %.10f, SciPy %.10f (rel=%.2e)",
-						ac.ID, k, disableSIMD, res.Objective, wantObj, rel)
-				}
-			}
-		}
+		})
 	}
 }

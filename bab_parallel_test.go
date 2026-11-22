@@ -37,6 +37,7 @@ func checkMIPPrimalAndBound(t *testing.T, tag string, comp *CompiledProblem, sen
 }
 
 func TestParallelBranchAndBoundParity(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		id     string
 		public bool
@@ -53,6 +54,7 @@ func TestParallelBranchAndBoundParity(t *testing.T) {
 	workerCounts := []int{1, 2, 4}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
+			t.Parallel()
 			var m *Model
 			if tc.public {
 				m = loadPublicPuLPJSONForTest(t, tc.id)
@@ -259,6 +261,7 @@ func TestParallelBranchAndBoundEdgeAndLimits(t *testing.T) {
 }
 
 func TestSingleThreadedDeterminism(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		id     string
 		public bool
@@ -292,5 +295,203 @@ func TestSingleThreadedDeterminism(t *testing.T) {
 				t.Fatalf("%s non-deterministic single-threaded solve: r1=%+v r2=%+v", tc.id, r1, r2)
 			}
 		}
+	}
+}
+
+func TestReducedCostFixingMinimizeAndMaximize(t *testing.T) {
+	t.Parallel()
+	t.Run("minimize_signs_and_general_int", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("rcf_min", Minimize)
+		x0 := m.AddVar("x0", 0, 1, Binary)
+		x1 := m.AddVar("x1", 0, 1, Binary)
+		x2 := m.AddVar("x2", 0, 10, Integer)
+		x3 := m.AddVar("x3", 0, 1, Binary)
+		m.SetObjective(Expr{Terms: []Term{
+			{Var: x0, Coeff: 5},
+			{Var: x1, Coeff: -4},
+			{Var: x2, Coeff: 1.5},
+			{Var: x3, Coeff: 1e-7},
+		}})
+		comp := m.Compile()
+		curLB := []float64{0, 0, 0, 0}
+		curUB := []float64{1, 1, 10, 1}
+		res := LPResult{
+			Primal:       []float64{0, 1, 0, 0},
+			ReducedCosts: []float64{5, -4, 1.5, 1e-7},
+		}
+		deltas, infeas := applyReducedCostFixing(comp, res, 10.0, 13.0, 5.0, nil, curLB, curUB, nil)
+		// Gap = 3.0 + rcSafety (~1.3e-4).
+		// x0: 0 + 3.00013/5 -> floor = 0, fixed to 0.
+		// x1: 1 - 3.00013/4 -> ceil = 1, fixed to 1.
+		// x2: 0 + 3.00013/1.5 -> floor = 2, ub tightened to 2.
+		// x3: |dj| < minDual, unchanged.
+		if infeas || len(deltas) != 3 {
+			t.Fatalf("infeas=%v len(deltas) = %d, want 3: %+v", infeas, len(deltas), deltas)
+		}
+		if curUB[0] != 0 || curLB[1] != 1 || curUB[2] != 2 || curUB[3] != 1 {
+			t.Fatalf("unexpected bounds lb=%v ub=%v", curLB, curUB)
+		}
+	})
+
+	t.Run("maximize_sign_flip", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("rcf_max", Maximize)
+		y0 := m.AddVar("y0", 0, 1, Binary)
+		y1 := m.AddVar("y1", 0, 1, Binary)
+		m.SetObjective(Expr{Terms: []Term{{Var: y0, Coeff: -6}, {Var: y1, Coeff: 5}}})
+		comp := m.Compile()
+		curLB := []float64{0, 0}
+		curUB := []float64{1, 1}
+		// User ReducedCosts: y0 at lower bound reduces Maximize obj by -6; y1 at upper bound decreases Maximize obj if lowered (+5).
+		res := LPResult{
+			Primal:       []float64{0, 1},
+			ReducedCosts: []float64{-6, 5},
+		}
+		deltas, infeas := applyReducedCostFixing(comp, res, -20.0, -17.0, 6.0, nil, curLB, curUB, nil)
+		if infeas || len(deltas) != 2 {
+			t.Fatalf("infeas=%v len(deltas) = %d, want 2: %+v", infeas, len(deltas), deltas)
+		}
+		if curUB[0] != 0 || curLB[1] != 1 {
+			t.Fatalf("unexpected Maximize bounds lb=%v ub=%v", curLB, curUB)
+		}
+	})
+
+	t.Run("symmetry_orbit_preserving_fixing", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("rcf_sym", Minimize)
+		x0 := m.AddVar("x0", 0, 1, Binary)
+		x1 := m.AddVar("x1", 0, 1, Binary)
+		m.SetObjective(Expr{Terms: []Term{{Var: x0, Coeff: 4}, {Var: x1, Coeff: 4}}})
+		comp := m.Compile()
+		sym := nodeSymmetry{
+			symG:        2,
+			symOrbits:   []int{0, 1},
+			symColOrbit: []int{0, 0},
+			symColGroup: []int{0, 1},
+		}
+		curLB := []float64{0, 0}
+		curUB := []float64{1, 1}
+		res := LPResult{
+			Primal:       []float64{0, 0.25},
+			ReducedCosts: []float64{5, 0},
+		}
+		deltas, infeas := applyReducedCostFixing(comp, res, 10.0, 13.0, 4.0, &sym, curLB, curUB, nil)
+		if infeas || len(deltas) != 2 {
+			t.Fatalf("infeas=%v len(deltas) = %d, want 2: %+v", infeas, len(deltas), deltas)
+		}
+		if curUB[0] != 0 || curUB[1] != 0 {
+			t.Fatalf("expected both symmetric peers fixed to 0, got ub=%v", curUB)
+		}
+	})
+}
+
+func TestReducedCostFixingPreservesOptimalityAndBounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// Minimize problem with continuous linking so presolve alone does not fix everything.
+	mMin := NewModel("rcf_e2e_min", Minimize)
+	varsMin := make([]Var, 12)
+	termsMin := make([]Term, 13)
+	conTerms := make([]Term, 13)
+	for j := range 12 {
+		varsMin[j] = mMin.AddVar(fmt.Sprintf("b%d", j), 0, 1, Binary)
+		termsMin[j] = Term{Var: varsMin[j], Coeff: float64(3 + (j*5)%17)}
+		conTerms[j] = Term{Var: varsMin[j], Coeff: float64(2 + (j*3)%7)}
+	}
+	z := mMin.AddVar("z", 0, 100, Continuous)
+	termsMin[12] = Term{Var: z, Coeff: 1.5}
+	conTerms[12] = Term{Var: z, Coeff: 1}
+	mMin.SetObjective(Expr{Terms: termsMin})
+	mMin.AddConstraint("cover", Constraint{Expr: Expr{Terms: conTerms}, Sense: GreaterEqual, RHS: 18.5})
+
+	// Hard Maximize knapsack solved under both single-threaded and parallel search.
+	mMax := buildHardMKPModel(28, 4)
+
+	for _, tc := range []struct {
+		name string
+		mdl  *Model
+	}{
+		{"min", mMin},
+		{"max", mMax},
+	} {
+		comp := tc.mdl.Compile()
+		ref, err := SolveCompiled(ctx, comp, WithPresolve(false), WithCuts(false), WithHeuristics(false), WithWorkers(1))
+		if err != nil || ref.Status != StatusOptimal {
+			t.Fatalf("%s ref err=%v status=%v", tc.name, err, ref.Status)
+		}
+		for _, w := range []int{1, 4} {
+			res, err := SolveCompiled(ctx, comp, WithWorkers(w))
+			if err != nil || res.Status != StatusOptimal {
+				t.Fatalf("%s w=%d err=%v status=%v", tc.name, w, err, res.Status)
+			}
+			checkMIPPrimalAndBound(t, fmt.Sprintf("%s_w%d", tc.name, w), comp, tc.mdl.Sense(), res)
+			tol := 1e-6 * max(1.0, math.Abs(ref.Objective))
+			if math.Abs(res.Objective-ref.Objective) > tol {
+				t.Fatalf("%s w=%d Objective=%.8f != ref=%.8f", tc.name, w, res.Objective, ref.Objective)
+			}
+		}
+	}
+}
+
+func TestReliabilityBranchingProbesUnreliableDeepVars(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("rel_branch", Minimize)
+	x0 := m.AddBinaryVar("x0")
+	x1 := m.AddBinaryVar("x1")
+	y := m.AddContVar("y", 0, 10)
+	// x0 and x1 carry zero objective weight so depth > strongBranchMaxDepth relies on probing.
+	m.SetObjective(NewExpr(y.T(1)))
+	m.AddConstraint("c1", NewExpr(x0.T(5), y.T(-1)).Le(3))
+	m.AddConstraint("c2", NewExpr(x1.T(5), y.T(-1)).Le(2))
+	m.AddConstraint("c3", NewExpr(x0.T(1), x1.T(1), y.T(1)).Ge(1.5))
+	m.AddConstraint("c4", NewExpr(y.T(1)).Le(0.5))
+	p := m.Compile()
+
+	lp := NewLPSolver(p, nil)
+	defer lp.Close()
+	lpRes := lp.Solve()
+	if lpRes.Status != StatusOptimal {
+		t.Fatalf("root LP status = %v, want Optimal", lpRes.Status)
+	}
+
+	makeCosts := func(cnt int) []pseudoCost {
+		pc := make([]pseudoCost, p.numVars)
+		for _, col := range p.intCols {
+			pc[col] = pseudoCost{downSum: 0.1, upSum: 0.1, downCount: cnt, upCount: cnt}
+		}
+		return pc
+	}
+
+	// Depth 4 with unreliable pseudocosts and positive budget must probe candidates.
+	itersZeroBudget := 0
+	outZero := selectBranchVarCore(
+		p, lp, lpRes, p.varLB, p.varUB, makeCosts(0), 4,
+		&itersZeroBudget, func() int { return 1000 }, nil, false, sbConfig{sbBudgetLeft: 0},
+	)
+	if outZero.probeIters != 0 || itersZeroBudget != 0 || outZero.bestCol == -1 {
+		t.Fatalf("expected 0 probe iters when sbBudgetLeft=0, got %+v iters=%d", outZero, itersZeroBudget)
+	}
+
+	pcUnrel := makeCosts(0)
+	itersWithBudget := 0
+	outWithBudget := selectBranchVarCore(
+		p, lp, lpRes, p.varLB, p.varUB, pcUnrel, 4,
+		&itersWithBudget, func() int { return 1000 }, nil, false, sbConfig{sbBudgetLeft: 100},
+	)
+	if outWithBudget.bestCol == -1 || outWithBudget.probeIters <= 0 || outWithBudget.probeIters != itersWithBudget {
+		t.Fatalf("expected unreliable depth-4 probing to run, got %+v iters=%d", outWithBudget, itersWithBudget)
+	}
+
+	// Once counts meet reliability threshold, depth 4 must skip probing.
+	itersRel := 0
+	outRel := selectBranchVarCore(
+		p, lp, lpRes, p.varLB, p.varUB, makeCosts(strongBranchReliableCnt), 4,
+		&itersRel, func() int { return 1000 }, nil, false, sbConfig{sbBudgetLeft: 100},
+	)
+	if outRel.probeIters != 0 || itersRel != 0 || outRel.bestCol == -1 {
+		t.Fatalf("expected reliable depth-4 candidate to skip probing, got %+v iters=%d", outRel, itersRel)
 	}
 }

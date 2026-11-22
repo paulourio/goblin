@@ -34,6 +34,24 @@ const (
 	propSlackGuardTolScale   = 0.25
 	ownerUnassigned          = -2
 	ownerPureEpigraph        = -1
+	fpMinVars                = 32
+	fpMaxVars                = 1024
+	fpMaxPasses              = 10
+	fpMinTotalIters          = 160
+	fpMaxTotalIters          = 500
+	fpPerPassMinIter         = 36
+	fpPerPassMaxIter         = 100
+	fpMaxTimeMillis          = 12
+	fpMinSlackTimeMillis     = 60
+	fpAlphaInit              = 0.8
+	fpAlphaDecay             = 0.78
+	fpAlphaFloor             = 1e-3
+	fpAlphaEarlyStop         = 0.3
+	fpFoundStopCap           = 2
+	fpMaxStallPassesWithInc  = 4
+	fpSplitmixSeedMult       = 0x9e3779b97f4a7c15
+	fpFnvOffset64            = 14695981039346656037
+	fpFnvPrime64             = 1099511628211
 )
 
 // canSkipBoundTightening reports whether slackLo, a certified lower bound on the row
@@ -1891,4 +1909,448 @@ func tryRootSubMIP(
 		return nil, 0, usedN, usedIt, false
 	}
 	return cand, obj, usedN, usedIt, true
+}
+
+func fpHashPrimaryInts(p *CompiledProblem, x []float64, isContLinked []bool) uint64 {
+	var h uint64 = fpFnvOffset64
+	for _, col := range p.intCols {
+		if isContLinked != nil && isContLinked[col] {
+			continue
+		}
+		bits := math.Float64bits(x[col] + 0.0)
+		h ^= bits
+		h *= fpFnvPrime64
+		h ^= bits >> 32
+		h *= fpFnvPrime64
+	}
+	return h
+}
+
+func fpHasHash(hashes []uint64, target uint64) bool {
+	return slices.Contains(hashes, target)
+}
+
+// fpRoundCandidate propagates nearest-integer fixings for primary integer columns,
+// falling back to direct clamped rounding on remaining columns if propagation stalls.
+func fpRoundCandidate(
+	p *CompiledProblem,
+	xLP, curLB, curUB, xInt, rlb, rub, snapLB, snapUB []float64,
+	rowQueue *[]int,
+	inQueue []bool,
+	isContLinked []bool,
+) (nFrac int, propagatedAll bool) {
+	type fpFracCand struct {
+		col  int
+		frac float64
+	}
+	copy(xInt, xLP)
+	copy(rlb, curLB)
+	copy(rub, curUB)
+	for j := range p.numVars {
+		if xInt[j] < curLB[j] {
+			xInt[j] = curLB[j]
+		} else if xInt[j] > curUB[j] {
+			xInt[j] = curUB[j]
+		}
+	}
+
+	var cands [64]fpFracCand
+	fracs := cands[:0]
+	for _, col := range p.intCols {
+		if isContLinked != nil && isContLinked[col] {
+			continue
+		}
+		v := min(max(xLP[col], rlb[col]), rub[col])
+		rv := min(max(math.Round(v), rlb[col]), rub[col])
+		f := math.Abs(v - rv)
+		if f <= intFeasTol {
+			rlb[col] = rv
+			rub[col] = rv
+			xInt[col] = rv
+		} else {
+			fracs = append(fracs, fpFracCand{col: col, frac: f})
+		}
+	}
+	nFrac = len(fracs)
+	if nFrac > 1 {
+		slices.SortFunc(fracs, func(a, b fpFracCand) int {
+			if c := cmp.Compare(a.frac, b.frac); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.col, b.col)
+		})
+	}
+	propagatedAll = true
+	for idx, fc := range fracs {
+		col := fc.col
+		if rlb[col] == rub[col] {
+			xInt[col] = rlb[col]
+			continue
+		}
+		v := min(max(xLP[col], rlb[col]), rub[col])
+		target := min(max(math.Round(v), rlb[col]), rub[col])
+		copy(snapLB, rlb)
+		copy(snapUB, rub)
+		rlb[col] = target
+		rub[col] = target
+		if propagateFromCol(p, rlb, rub, col, rowQueue, inQueue) {
+			xInt[col] = target
+			continue
+		}
+		copy(rlb, snapLB)
+		copy(rub, snapUB)
+		alt := math.Floor(v)
+		if target == alt {
+			alt = math.Ceil(v)
+		}
+		alt = min(max(alt, rlb[col]), rub[col])
+		rlb[col] = alt
+		rub[col] = alt
+		if propagateFromCol(p, rlb, rub, col, rowQueue, inQueue) {
+			xInt[col] = alt
+			continue
+		}
+		propagatedAll = false
+		for j := idx; j < len(fracs); j++ {
+			c := fracs[j].col
+			vj := min(max(xLP[c], curLB[c]), curUB[c])
+			xInt[c] = min(max(math.Round(vj), curLB[c]), curUB[c])
+		}
+		break
+	}
+	if propagatedAll {
+		for _, col := range p.intCols {
+			if isContLinked != nil && isContLinked[col] {
+				continue
+			}
+			if rlb[col] == rub[col] {
+				xInt[col] = rlb[col]
+			}
+		}
+	}
+	return nFrac, propagatedAll
+}
+
+func fpPerturbOnCycle(
+	p *CompiledProblem,
+	xLP, curLB, curUB, xInt []float64,
+	pass int,
+	seenHashes []uint64,
+	isContLinked []bool,
+) uint64 {
+	type flipCand struct {
+		col  int
+		dist float64
+	}
+	var fracCands, unfixedCands []flipCand
+	for _, col := range p.intCols {
+		if isContLinked != nil && isContLinked[col] {
+			continue
+		}
+		if curUB[col]-curLB[col] < 0.5 {
+			continue
+		}
+		v := min(max(xLP[col], curLB[col]), curUB[col])
+		d := math.Abs(v - xInt[col])
+		unfixedCands = append(unfixedCands, flipCand{col: col, dist: d})
+		if math.Abs(v-math.Round(v)) > intFeasTol {
+			fracCands = append(fracCands, flipCand{col: col, dist: d})
+		}
+	}
+	flipToAlt := func(col int) {
+		l, u := curLB[col], curUB[col]
+		v := min(max(xLP[col], l), u)
+		cur := xInt[col]
+		fl := min(max(math.Floor(v), l), u)
+		cl := min(max(math.Ceil(v), l), u)
+		switch {
+		case fl != cur:
+			xInt[col] = fl
+		case cl != cur:
+			xInt[col] = cl
+		case cur+1.0 <= u+intFeasTol && !math.IsInf(u, 1):
+			xInt[col] = cur + 1.0
+		case cur-1.0 >= l-intFeasTol && !math.IsInf(l, -1):
+			xInt[col] = cur - 1.0
+		}
+	}
+
+	if len(fracCands) > 0 {
+		slices.SortFunc(fracCands, func(a, b flipCand) int {
+			if c := cmp.Compare(b.dist, a.dist); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.col, b.col)
+		})
+		flipCnt := min(max(2, len(fracCands)/2), 10)
+		start := pass % len(fracCands)
+		for k := range flipCnt {
+			flipToAlt(fracCands[(start+k)%len(fracCands)].col)
+		}
+		h := fpHashPrimaryInts(p, xInt, isContLinked)
+		if !fpHasHash(seenHashes, h) {
+			return h
+		}
+	}
+
+	if len(unfixedCands) > 0 {
+		pertCnt := min(max(3, len(unfixedCands)/4), 12)
+		rng := (uint64(max(0, pass)) + 1) * fpSplitmixSeedMult
+		for range pertCnt {
+			rng ^= rng >> 30
+			rng *= 0xbf58476d1ce4e5b9
+			rng ^= rng >> 27
+			rng *= 0x94d049bb133111eb
+			rng ^= rng >> 31
+			idx := int(uint32(rng>>33)) % len(unfixedCands)
+			col := unfixedCands[idx].col
+			l, u := curLB[col], curUB[col]
+			if l == 0 && u == 1 {
+				xInt[col] = 1.0 - xInt[col]
+			} else {
+				flipToAlt(col)
+			}
+		}
+	}
+	return fpHashPrimaryInts(p, xInt, isContLinked)
+}
+
+func fpEvaluateCandidate(
+	p *CompiledProblem,
+	xCand, curLB, curUB, rlb, rub []float64,
+	propagatedOK bool,
+	isContLinked []bool,
+) (sol []float64, objMin float64, ok bool) {
+	if len(p.intCols) == p.numVars {
+		bV, rV, iV := p.MaxViolation(xCand, true)
+		if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
+			return nil, 0, false
+		}
+		obj := minObjective(p, xCand)
+		if math.IsNaN(obj) || math.IsInf(obj, 0) {
+			return nil, 0, false
+		}
+		return slices.Clone(xCand), obj, true
+	}
+	if !propagatedOK {
+		copy(rlb, curLB)
+		copy(rub, curUB)
+		for _, col := range p.intCols {
+			if isContLinked != nil && isContLinked[col] {
+				continue
+			}
+			v := min(max(xCand[col], rlb[col]), rub[col])
+			rlb[col] = v
+			rub[col] = v
+		}
+	}
+	return solveFixedIntContinuousLP(p, rlb, rub, nil, isContLinked)
+}
+
+// tryFeasibilityPump runs a budgeted Objective Feasibility Pump (OFP) alternating between
+// propagated rounding and warm Phase II primal simplex projections over primary integers.
+func tryFeasibilityPump(
+	p *CompiledProblem,
+	lpPrimal, curLB, curUB []float64,
+	heurSolver *LPSolver,
+	bestObjMin, lowerBoundMin, relGapTol, absGapTol float64,
+	deadline time.Time,
+	done <-chan struct{},
+	maxIterCap int,
+	isContLinked []bool,
+) (sol []float64, objMin float64, itersUsed int, ok bool) {
+	if p == nil || heurSolver == nil || len(p.intCols) < 2 || p.numVars > fpMaxVars || maxIterCap <= 0 {
+		return nil, 0, 0, false
+	}
+	if len(lpPrimal) < p.numVars || stopRequested(deadline, done) {
+		return nil, 0, 0, false
+	}
+	primaryFrac := 0
+	for _, col := range p.intCols {
+		if isContLinked != nil && isContLinked[col] {
+			continue
+		}
+		v := lpPrimal[col]
+		if math.Abs(v-math.Round(v)) > intFeasTol {
+			primaryFrac++
+		}
+	}
+	if primaryFrac == 0 {
+		return nil, 0, 0, false
+	}
+
+	now := time.Now()
+	fpDur := fpMaxTimeMillis * time.Millisecond
+	if !deadline.IsZero() {
+		rem := deadline.Sub(now)
+		if rem <= 0 {
+			return nil, 0, 0, false
+		}
+		if rem < fpMinSlackTimeMillis*time.Millisecond {
+			fpDur = min(fpDur, rem/4)
+		} else {
+			fpDur = min(fpDur, rem)
+		}
+	}
+	if fpDur <= 0 {
+		return nil, 0, 0, false
+	}
+	fpDeadline := now.Add(fpDur)
+	iterBudget := min(maxIterCap, min(fpMaxTotalIters, max(fpMinTotalIters, 4*p.numConstraints)))
+	perPassIter := max(fpPerPassMinIter, min(fpPerPassMaxIter, 2*p.numConstraints))
+
+	savedDeadline := heurSolver.Deadline
+	heurSolver.Deadline = fpDeadline
+	heurSolver.SetStructuralBounds(curLB, curUB)
+	defer func() {
+		heurSolver.Deadline = savedDeadline
+		heurSolver.SetStructuralBounds(p.varLB, p.varUB)
+	}()
+
+	n := p.numVars
+	cHat := make([]float64, n)
+	cNormSq := 0.0
+	for j := range n {
+		c := p.objMin[j]
+		cNormSq += c * c
+	}
+	alpha := 0.0
+	if cNormSq > 0 {
+		invCNorm := 1.0 / math.Sqrt(cNormSq)
+		for j := range n {
+			cHat[j] = p.objMin[j] * invCNorm
+		}
+		alpha = fpAlphaInit
+	}
+
+	xLP := slices.Clone(lpPrimal)
+	xInt := make([]float64, n)
+	rlb := make([]float64, n)
+	rub := make([]float64, n)
+	snapLB := make([]float64, n)
+	snapUB := make([]float64, n)
+	distVec := make([]float64, n)
+	fpCost := make([]float64, n)
+	rowQueue := make([]int, 0, p.numConstraints*rowQueueCapMult)
+	inQueue := make([]bool, p.numConstraints)
+	seenHashes := make([]uint64, 0, fpMaxPasses)
+	evalHashes := make([]uint64, 0, fpMaxPasses)
+
+	var bestSol []float64
+	curBestObjMin := bestObjMin
+	hasIncomingInc := !math.IsInf(bestObjMin, 1)
+	foundCount := 0
+	stallPasses := 0
+
+	for pass := 0; pass < fpMaxPasses && itersUsed < iterBudget && !stopRequested(fpDeadline, done); pass++ {
+		_, propOK := fpRoundCandidate(p, xLP, curLB, curUB, xInt, rlb, rub, snapLB, snapUB, &rowQueue, inQueue, isContLinked)
+		h := fpHashPrimaryInts(p, xInt, isContLinked)
+		cycled := fpHasHash(seenHashes, h)
+		if cycled {
+			h = fpPerturbOnCycle(p, xLP, curLB, curUB, xInt, pass, seenHashes, isContLinked)
+			propOK = false
+		}
+		seenHashes = append(seenHashes, h)
+
+		improvedThisPass := false
+		if !fpHasHash(evalHashes, h) {
+			evalHashes = append(evalHashes, h)
+			if cand, cObj, cOK := fpEvaluateCandidate(p, xInt, curLB, curUB, rlb, rub, propOK, isContLinked); cOK && cObj < curBestObjMin-heurIntBoundTol {
+				bestSol = cand
+				curBestObjMin = cObj
+				foundCount++
+				improvedThisPass = true
+				if isGapClosed(lowerBoundMin, curBestObjMin, relGapTol, absGapTol) {
+					return bestSol, curBestObjMin, itersUsed, true
+				}
+			}
+		}
+		if improvedThisPass {
+			stallPasses = 0
+		} else if pass > 0 && hasIncomingInc {
+			stallPasses++
+			if stallPasses >= fpMaxStallPassesWithInc && bestSol == nil {
+				break
+			}
+		}
+
+		clear(distVec)
+		dNormSq := 0.0
+		for _, col := range p.intCols {
+			if isContLinked != nil && isContLinked[col] {
+				continue
+			}
+			l, u := curLB[col], curUB[col]
+			if u-l < 0.5 {
+				continue
+			}
+			if !math.IsInf(l, -1) && xInt[col] <= l+0.5 {
+				distVec[col] = 1.0
+				dNormSq += 1.0
+			} else if !math.IsInf(u, 1) && xInt[col] >= u-0.5 {
+				distVec[col] = -1.0
+				dNormSq += 1.0
+			}
+		}
+		if dNormSq == 0 {
+			break
+		}
+		invDNorm := 1.0 / math.Sqrt(dNormSq)
+		for j := range n {
+			fpCost[j] = (1.0-alpha)*distVec[j]*invDNorm + alpha*cHat[j]
+		}
+
+		stepCap := min(perPassIter, iterBudget-itersUsed)
+		if stepCap <= 0 {
+			break
+		}
+		projRes, used := heurSolver.solvePrimalObjective(fpCost, stepCap)
+		itersUsed += used
+		if projRes.Status != StatusOptimal || len(projRes.Primal) < n {
+			break
+		}
+		copy(xLP, projRes.Primal)
+
+		if isIntegerFeasible(p, xLP) {
+			cand := slices.Clone(xLP)
+			snapToIntegers(p, cand)
+			if len(p.intCols) < n {
+				copy(rlb, curLB)
+				copy(rub, curUB)
+				for _, col := range p.intCols {
+					if isContLinked != nil && isContLinked[col] {
+						continue
+					}
+					v := min(max(cand[col], rlb[col]), rub[col])
+					rlb[col] = v
+					rub[col] = v
+				}
+				if pSol, pObj, pOK := solveFixedIntContinuousLP(p, rlb, rub, nil, isContLinked); pOK && pObj < curBestObjMin-heurIntBoundTol {
+					bestSol = pSol
+					curBestObjMin = pObj
+					foundCount++
+				}
+			}
+			if bV, rV, iV := p.MaxViolation(cand, true); bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol {
+				if cObj := minObjective(p, cand); !math.IsNaN(cObj) && !math.IsInf(cObj, 0) && cObj < curBestObjMin-heurIntBoundTol {
+					bestSol = cand
+					curBestObjMin = cObj
+					foundCount++
+				}
+			}
+			if bestSol != nil && (isGapClosed(lowerBoundMin, curBestObjMin, relGapTol, absGapTol) || foundCount >= fpFoundStopCap || alpha <= fpAlphaEarlyStop) {
+				return bestSol, curBestObjMin, itersUsed, true
+			}
+		}
+
+		alpha *= fpAlphaDecay
+		if alpha < fpAlphaFloor {
+			alpha = 0
+		}
+	}
+
+	if bestSol != nil {
+		return bestSol, curBestObjMin, itersUsed, true
+	}
+	return nil, 0, itersUsed, false
 }

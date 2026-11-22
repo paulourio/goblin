@@ -501,3 +501,99 @@ func TestTryFractionalDivingBranch1Reuse(t *testing.T) {
 		t.Fatalf("diving obj %.6f != optimal %.6f", objMin, optRes.Objective)
 	}
 }
+
+func TestFeasibilityPumpSolvesRandomMADAndRestoresState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mad_structure_and_maximize_binary", func(t *testing.T) {
+		t.Parallel()
+		mMax := NewModel("fp_max_bin", Maximize)
+		x := make([]Var, 6)
+		for j := range 6 {
+			x[j] = mMax.AddBinaryVar(fmt.Sprintf("x%d", j))
+		}
+		mMax.SetObjective(NewExpr(x[0].T(11), x[1].T(9), x[2].T(7), x[3].T(6), x[4].T(5), x[5].T(4)))
+		mMax.AddConstraint("c1", NewExpr(x[0].T(4), x[1].T(3), x[2].T(3), x[3].T(2), x[4].T(2), x[5].T(1)).Le(7))
+		mMax.AddConstraint("c2", NewExpr(x[0].T(1), x[1].T(1), x[2].T(1)).Le(2))
+		mMax.AddConstraint("c3", NewExpr(x[3].T(1), x[4].T(1), x[5].T(1)).Ge(1))
+		pMax := mMax.Compile()
+
+		lp := NewLPSolver(pMax, nil)
+		defer lp.Close()
+		root := lp.Solve()
+		if root.Status != StatusOptimal {
+			t.Fatalf("Maximize root LP failed: %v", root.Status)
+		}
+		hs := NewLPSolver(pMax, nil)
+		defer hs.Close()
+		hs.CopyRootBasisFrom(lp)
+		sol, objMin, usedIt, ok := tryFeasibilityPump(
+			pMax, root.Primal, pMax.varLB, pMax.varUB, hs, math.Inf(1), lpMinWithConst(pMax, root),
+			1e-6, 1e-6, time.Time{}, nil, 500, findContLinkedIntCols(pMax),
+		)
+		if !ok {
+			t.Fatalf("tryFeasibilityPump failed to find feasible point on Maximize MILP (iters=%d)", usedIt)
+		}
+		bV, rV, iV := pMax.MaxViolation(sol, true)
+		if bV > incumbentTol || rV > incumbentTol || iV > incumbentTol {
+			t.Fatalf("infeasible FP solution: b=%.2e r=%.2e i=%.2e", bV, rV, iV)
+		}
+		optMax, err := SolveCompiled(t.Context(), pMax, WithHeuristics(false))
+		if err != nil || optMax.Status != StatusOptimal {
+			t.Fatalf("reference Maximize solve failed: %v %v", optMax.Status, err)
+		}
+		if gotObj := pMax.EvaluateObjective(sol); gotObj > optMax.Objective+1e-6 || math.Abs(objMin-(-gotObj)) > 1e-6 {
+			t.Fatalf("Maximize FP obj=%.6f (min=%.6f) invalid vs opt=%.6f", gotObj, objMin, optMax.Objective)
+		}
+	})
+
+	t.Run("scaled_solver_state_restoration", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("fp_scaled_restore", Minimize)
+		x := make([]Var, 4)
+		for j := range 4 {
+			x[j] = m.AddBinaryVar(fmt.Sprintf("b%d", j))
+		}
+		y := m.AddContVar("y", 0, 1e9)
+		m.SetObjective(NewExpr(x[0].T(1e7), x[1].T(2e7), x[2].T(3e7), x[3].T(4e7), y.T(1e-7)))
+		m.AddConstraint("r0", NewExpr(x[0].T(1e-6), x[1].T(1), x[2].T(1)).Ge(1.5))
+		m.AddConstraint("r1", NewExpr(x[2].T(1), x[3].T(1e-6), y.T(1)).Ge(2.0))
+		p := m.Compile()
+
+		hs := NewLPSolver(p, nil)
+		defer hs.Close()
+		if !hs.scaled || hs.objScale <= 1e6 {
+			t.Fatalf("expected Ruiz scaling with objScale > 1e6, got scaled=%v objScale=%.3e", hs.scaled, hs.objScale)
+		}
+		origEffDual := hs.effDualTol
+		origFast := hs.fastHeuristicPrimal
+		origMaxIter := hs.MaxIter
+		origCost := slices.Clone(hs.ws.cost[:p.numVars+hs.TotalRows()])
+
+		root := hs.Solve()
+		if root.Status != StatusOptimal {
+			t.Fatalf("scaled root solve failed: %v", root.Status)
+		}
+		altCost := []float64{-1, 1, -1, 1, 0}
+		projRes, used := hs.solvePrimalObjective(altCost, 100)
+		if projRes.Status != StatusOptimal || used <= 0 {
+			t.Fatalf("solvePrimalObjective failed: status=%v iters=%d", projRes.Status, used)
+		}
+		if hs.effDualTol != origEffDual || hs.fastHeuristicPrimal != origFast || hs.MaxIter != origMaxIter || hs.dualValid {
+			t.Fatalf("LPSolver state not restored: effDual=%.3e fast=%v maxIter=%d dualValid=%v",
+				hs.effDualTol, hs.fastHeuristicPrimal, hs.MaxIter, hs.dualValid)
+		}
+		for k, want := range origCost {
+			if hs.ws.cost[k] != want {
+				t.Fatalf("ws.cost[%d]=%v != orig=%v", k, hs.ws.cost[k], want)
+			}
+		}
+		// Subsequent normal Solve() must still match the original optimal objective.
+		hs.SetStructuralBounds(p.varLB, p.varUB)
+		reRoot := hs.Solve()
+		if reRoot.Status != StatusOptimal || math.Abs(reRoot.Objective-root.Objective) > 1e-4*max(1.0, math.Abs(root.Objective)) {
+			t.Fatalf("post-projection normal Solve mismatch: status=%v obj=%.6f want=%.6f",
+				reRoot.Status, reRoot.Objective, root.Objective)
+		}
+	})
+}
