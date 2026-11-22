@@ -107,7 +107,9 @@ func SumVars(vars ...Var) Expr {
 }
 
 // Dot computes the inner product sum_i coeffs[i] * vars[i] up to min(len(vars), len(coeffs)),
-// skipping any entry whose coefficient is zero.
+// skipping any entry whose coefficient is zero. Mismatched slice lengths silently truncate
+// to min(len(vars), len(coeffs)), and duplicate variables or non-finite coefficients are
+// retained until Model.Compile merges or validates terms.
 func Dot(vars []Var, coeffs []float64) Expr {
 	n := min(len(vars), len(coeffs))
 	terms := make([]Term, 0, n)

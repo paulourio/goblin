@@ -89,6 +89,9 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	ub := slices.Clone(orig.varUB)
 	tightened := 0
 	for j := range n {
+		if lb[j] > ub[j] {
+			return PresolveResult{Infeasible: true}
+		}
 		if orig.varCat[j] != Continuous {
 			if !math.IsInf(lb[j], -1) {
 				cl := math.Ceil(lb[j] - presolveIntTol)
@@ -105,11 +108,8 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 				}
 			}
 		}
-		if lb[j] > ub[j]+presolveFeasTol {
-			return PresolveResult{Infeasible: true}
-		}
 		if lb[j] > ub[j] {
-			lb[j] = ub[j]
+			return PresolveResult{Infeasible: true}
 		}
 	}
 	if m == 0 && tightened == 0 {
@@ -308,27 +308,54 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			surplusHi := -s.deficitLo
 			if surplusLo > binTol {
 				for k, col := range r.cols {
-					if orig.varCat[col] == Binary && lb[col] == 0 && ub[col] == 1 {
-						a := r.vals[k]
-						if a > binTol && a-surplusHi > binTol {
-							delta := a - surplusHi
-							newVal := a - delta
-							newRHS := r.rhs - delta
-							tol := 1e-12 * max(1.0, math.Abs(delta))
-							if delta > 0 && math.Abs((a-newVal)-delta) <= tol && math.Abs((r.rhs-newRHS)-delta) <= tol {
-								r.ensureOwned()
-								r.vals[k] = newVal
-								r.rhs = newRHS
-								strengthened++
+					if orig.varCat[col] != Binary || lb[col] != 0 || ub[col] != 1 {
+						continue
+					}
+					a := r.vals[k]
+					if a > binTol && surplusHi < a-binTol {
+						newVal := surplusHi
+						var w wideDotAcc
+						w.addVal(r.rhs)
+						w.addVal(-a)
+						w.addVal(newVal)
+						top, rem, ok := w.finishDD()
+						if !ok || math.IsNaN(top) || math.IsInf(top, 0) {
+							continue
+						}
+						if rem > 0 {
+							top = math.Nextafter(top, math.Inf(1))
+						}
+						if newVal > 0 && newVal < a-binTol && top < r.rhs-binTol && !isNonFinite(top) {
+							r.ensureOwned()
+							r.vals[k] = newVal
+							r.rhs = top
+							strengthened++
+							s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+							if s.extreme || s.maxInfCount > 0 {
+								break
 							}
-						} else if a < -binTol && -a-surplusHi > binTol {
-							delta := -a - surplusHi
-							newVal := a + delta
-							tol := 1e-12 * max(1.0, math.Abs(delta))
-							if delta > 0 && math.Abs((newVal-a)-delta) <= tol {
-								r.ensureOwned()
-								r.vals[k] = newVal
-								strengthened++
+							binTol = max(presolveFeasTol, presolveRelScaleTol*max(1.0, s.l1Max))
+							surplusLo = -s.deficitHi
+							surplusHi = -s.deficitLo
+							if surplusLo <= binTol {
+								break
+							}
+						}
+					} else if a < -binTol && surplusHi < -a-binTol {
+						newVal := -surplusHi
+						if newVal > a+binTol && newVal < 0 {
+							r.ensureOwned()
+							r.vals[k] = newVal
+							strengthened++
+							s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+							if s.extreme || s.maxInfCount > 0 {
+								break
+							}
+							binTol = max(presolveFeasTol, presolveRelScaleTol*max(1.0, s.l1Max))
+							surplusLo = -s.deficitHi
+							surplusHi = -s.deficitLo
+							if surplusLo <= binTol {
+								break
 							}
 						}
 					}
@@ -908,6 +935,7 @@ func runActivityTighteningDirty(
 				s2 := shift - s1
 				var slackW, defW wideDotAcc
 				rhsS := math.Ldexp(r.rhs, -shift)
+				underflowed := r.rhs != 0 && rhsS == 0
 				slackW.addVal(rhsS)
 				defW.addVal(rhsS)
 				l1Scaled := math.Abs(rhsS)
@@ -915,36 +943,54 @@ func runActivityTighteningDirty(
 					a := r.vals[k]
 					l, u := lb[col], ub[col]
 					as := math.Ldexp(a, -s1)
+					if a != 0 && as == 0 {
+						underflowed = true
+					}
 					if a > 0 {
 						if !math.IsInf(l, -1) {
 							ls := math.Ldexp(l, -s2)
+							if (l != 0 && ls == 0) || (as != 0 && l != 0 && as*ls == 0) {
+								underflowed = true
+							}
 							slackW.addProd(-as, ls)
 							l1Scaled += math.Abs(as * ls)
 						}
 						if !math.IsInf(u, 1) {
 							us := math.Ldexp(u, -s2)
+							if (u != 0 && us == 0) || (as != 0 && u != 0 && as*us == 0) {
+								underflowed = true
+							}
 							defW.addProd(-as, us)
 							l1Scaled += math.Abs(as * us)
 						}
 					} else if a < 0 {
 						if !math.IsInf(u, 1) {
 							us := math.Ldexp(u, -s2)
+							if (u != 0 && us == 0) || (as != 0 && u != 0 && as*us == 0) {
+								underflowed = true
+							}
 							slackW.addProd(-as, us)
 							l1Scaled += math.Abs(as * us)
 						}
 						if !math.IsInf(l, -1) {
 							ls := math.Ldexp(l, -s2)
+							if (l != 0 && ls == 0) || (as != 0 && l != 0 && as*ls == 0) {
+								underflowed = true
+							}
 							defW.addProd(-as, ls)
 							l1Scaled += math.Abs(as * ls)
 						}
 					}
+				}
+				if underflowed {
+					continue
 				}
 				slackS := slackW.finish(math.NaN())
 				defS := defW.finish(math.NaN())
 				if math.IsNaN(slackS) || math.IsInf(slackS, 0) || math.IsNaN(defS) || math.IsInf(defS, 0) || math.IsNaN(l1Scaled) || math.IsInf(l1Scaled, 0) {
 					continue
 				}
-				errS := 0x1p-50 * (math.Abs(slackS) + math.Abs(defS))
+				errS := 0x1p-45 * (l1Scaled + math.Abs(slackS) + math.Abs(defS))
 				tolS := max(math.Ldexp(presolveFeasTol, -shift), presolveRelScaleTol*l1Scaled) + errS
 				chgS := math.Ldexp(presolveBoundChangeTol, -shift)
 				if hasUpper && s.minInfCount == 0 && slackS+errS < -tolS {
@@ -953,17 +999,17 @@ func runActivityTighteningDirty(
 				if hasLower && s.maxInfCount == 0 && defS-errS > tolS {
 					return tightened, removedRows, true, false
 				}
-				if r.sense == LessEqual && s.maxInfCount == 0 && defS-errS >= -chgS {
+				if r.sense == LessEqual && s.maxInfCount == 0 && defS-errS >= 0 {
 					r.active = false
 					removedRows++
 					continue
 				}
-				if r.sense == GreaterEqual && s.minInfCount == 0 && slackS+errS <= chgS {
+				if r.sense == GreaterEqual && s.minInfCount == 0 && slackS+errS <= 0 {
 					r.active = false
 					removedRows++
 					continue
 				}
-				if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && slackS+errS <= chgS && defS-errS >= -chgS {
+				if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && math.Abs(slackS)+errS <= chgS && math.Abs(defS)+errS <= chgS {
 					r.active = false
 					removedRows++
 					continue
@@ -2921,11 +2967,8 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 	lb := slices.Clone(orig.varLB)
 	ub := slices.Clone(orig.varUB)
 	for j := range n {
-		if lb[j] > ub[j]+presolveFeasTol {
-			return LPPresolveResult{Infeasible: true}
-		}
 		if lb[j] > ub[j] {
-			lb[j] = ub[j]
+			return LPPresolveResult{Infeasible: true}
 		}
 	}
 
@@ -2944,7 +2987,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 	}
 
 	colSubstDone := make([]bool, n)
+	colSkipped := make([]bool, n)
 	colDirMask := make([]uint8, n) // bit 0: blocks up (LE a>0 or GE a<0), bit 1: blocks down (LE a<0 or GE a>0), bit 2: touches EQ
+	var nzSubstIdx []int
 	var singletons []lpSingletonAction
 	fixedSubst := 0
 	tightened := 0
@@ -2954,10 +2999,24 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 		lpFixedMaxVal      = 1e12
 		lpFixedMaxTermRel  = 1e8
 		lpFixedMaxRHSMag   = 1e14
+		lpFixedMaxRHSErr   = 1e-11
 		lpSingletonMinCoef = 1e-9
 		lpSingletonMaxBnd  = 1e12
 		lpRedundMargin     = 1e-6
 	)
+
+	exactSingletonRes := func(a, xVal, rhs float64) float64 {
+		var acc dot2Acc
+		acc.addVal(-rhs)
+		acc.addProd(a, xVal)
+		if v, _, ok := acc.result(); ok {
+			return v
+		}
+		var w wideDotAcc
+		w.addVal(-rhs)
+		w.addProd(a, xVal)
+		return w.finish(math.NaN())
+	}
 
 	for range maxPasses {
 		if stopRequested(deadline, done) {
@@ -2974,43 +3033,68 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 			}
 		}
 		if hasNewFixed {
+			clear(colSkipped)
 			for i := range m {
 				r := &rows[i]
 				if !r.active || len(r.cols) == 0 {
 					continue
 				}
-				changedRow := false
-				newRHS := r.rhs
 				k := 0
 				for k < len(r.cols) {
 					col := r.cols[k]
-					if !colSubstDone[col] && lb[col] == ub[col] && !math.IsNaN(lb[col]) && math.Abs(lb[col]) <= lpFixedMaxVal {
-						v := lb[col]
-						a := r.vals[k]
-						term := a * v
-						scale := max(1.0, math.Abs(newRHS))
-						if v == 0 || (math.Abs(term) <= lpFixedMaxTermRel*scale && math.Abs(newRHS-term) <= lpFixedMaxRHSMag) {
-							r.ensureOwned()
-							newRHS -= term
-							last := len(r.cols) - 1
-							r.cols[k] = r.cols[last]
-							r.vals[k] = r.vals[last]
-							r.cols = r.cols[:last]
-							r.vals = r.vals[:last]
-							changedRow = true
-							fixedSubst++
-							progress = true
-							continue
-						}
+					if !colSubstDone[col] && lb[col] == 0 && ub[col] == 0 {
+						r.ensureOwned()
+						last := len(r.cols) - 1
+						r.cols[k] = r.cols[last]
+						r.vals[k] = r.vals[last]
+						r.cols = r.cols[:last]
+						r.vals = r.vals[:last]
+						fixedSubst++
+						progress = true
+						continue
 					}
 					k++
 				}
-				if changedRow {
-					r.rhs = newRHS
+				nzSubstIdx = nzSubstIdx[:0]
+				scale := max(1.0, math.Abs(r.rhs))
+				for k, col := range r.cols {
+					if !colSubstDone[col] && lb[col] == ub[col] && lb[col] != 0 && !math.IsNaN(lb[col]) && math.Abs(lb[col]) <= lpFixedMaxVal {
+						term := r.vals[k] * lb[col]
+						if !isNonFinite(term) && math.Abs(term) <= lpFixedMaxTermRel*scale {
+							nzSubstIdx = append(nzSubstIdx, k)
+						} else {
+							colSkipped[col] = true
+						}
+					}
+				}
+				if len(nzSubstIdx) > 0 {
+					var w wideDotAcc
+					w.addVal(r.rhs)
+					for _, idx := range nzSubstIdx {
+						w.addProd(-r.vals[idx], lb[r.cols[idx]])
+					}
+					top, rem, ok := w.finishDD()
+					if ok && !isNonFinite(top) && math.Abs(top) <= lpFixedMaxRHSMag && math.Abs(rem) <= lpFixedMaxRHSErr {
+						r.ensureOwned()
+						r.rhs = top
+						for _, pos := range slices.Backward(nzSubstIdx) {
+							last := len(r.cols) - 1
+							r.cols[pos] = r.cols[last]
+							r.vals[pos] = r.vals[last]
+							r.cols = r.cols[:last]
+							r.vals = r.vals[:last]
+							fixedSubst++
+						}
+						progress = true
+					} else {
+						for _, idx := range nzSubstIdx {
+							colSkipped[r.cols[idx]] = true
+						}
+					}
 				}
 			}
 			for j := range n {
-				if !colSubstDone[j] && lb[j] == ub[j] && !math.IsNaN(lb[j]) && math.Abs(lb[j]) <= lpFixedMaxVal {
+				if !colSubstDone[j] && !colSkipped[j] && lb[j] == ub[j] && !math.IsNaN(lb[j]) && math.Abs(lb[j]) <= lpFixedMaxVal {
 					colSubstDone[j] = true
 				}
 			}
@@ -3052,13 +3136,18 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 						// Convert negative-coefficient inequality into implied bound direction.
 						isUpper := (sense == LessEqual && a > 0) || (sense == GreaterEqual && a < 0)
 						isLower := (sense == GreaterEqual && a > 0) || (sense == LessEqual && a < 0)
+						colFeasTol := presolveFeasTol / max(1.0, math.Abs(a))
 						if sense == Equal {
-							if imp < lb[col]-presolveFeasTol || imp > ub[col]+presolveFeasTol {
+							if imp < lb[col]-colFeasTol || imp > ub[col]+colFeasTol {
 								return LPPresolveResult{Infeasible: true}
 							}
-							if lb[col] < imp-presolveBoundChangeTol || ub[col] > imp+presolveBoundChangeTol {
-								lb[col] = imp
-								ub[col] = imp
+							clamped := min(max(imp, lb[col]), ub[col])
+							if res := exactSingletonRes(a, clamped, r.rhs); math.IsNaN(res) || math.Abs(res) > presolveFeasTol {
+								return LPPresolveResult{Infeasible: true}
+							}
+							if lb[col] < clamped-presolveBoundChangeTol || ub[col] > clamped+presolveBoundChangeTol {
+								lb[col] = clamped
+								ub[col] = clamped
 								tightened++
 								singletons = append(singletons, lpSingletonAction{
 									origRow: i,
@@ -3074,12 +3163,20 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 							continue
 						}
 						if isUpper {
-							if imp < lb[col]-presolveFeasTol {
+							if imp < lb[col]-colFeasTol {
 								return LPPresolveResult{Infeasible: true}
 							}
 							if imp < ub[col]-presolveBoundChangeTol {
 								if imp < lb[col] {
 									imp = lb[col]
+									res := exactSingletonRes(a, imp, r.rhs)
+									viol := res
+									if sense == GreaterEqual {
+										viol = -res
+									}
+									if math.IsNaN(viol) || viol > presolveFeasTol {
+										return LPPresolveResult{Infeasible: true}
+									}
 								}
 								ub[col] = imp
 								tightened++
@@ -3102,12 +3199,20 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 								continue
 							}
 						} else if isLower {
-							if imp > ub[col]+presolveFeasTol {
+							if imp > ub[col]+colFeasTol {
 								return LPPresolveResult{Infeasible: true}
 							}
 							if imp > lb[col]+presolveBoundChangeTol {
 								if imp > ub[col] {
 									imp = ub[col]
+									res := exactSingletonRes(a, imp, r.rhs)
+									viol := res
+									if sense == GreaterEqual {
+										viol = -res
+									}
+									if math.IsNaN(viol) || viol > presolveFeasTol {
+										return LPPresolveResult{Infeasible: true}
+									}
 								}
 								lb[col] = imp
 								tightened++

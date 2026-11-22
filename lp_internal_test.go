@@ -805,7 +805,7 @@ func TestExtraRowCSCSyncAndColumnParity(t *testing.T) {
 		t.Fatalf("cut solve status=%v obj=%v, want Optimal 4", resCut.Status, resCut.ObjectiveMin)
 	}
 	for r := range s.TotalRows() {
-		if !s.computeExactTableauRow(r) {
+		if _, ok := s.computeExactTableauRow(r); !ok {
 			t.Fatalf("computeExactTableauRow(%d) failed after cuts", r)
 		}
 	}

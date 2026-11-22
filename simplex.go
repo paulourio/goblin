@@ -24,6 +24,8 @@ const (
 	pivotTieRelTol         = 1e-11
 	minDualPivotElem       = 1e-10
 	pivAgreeRelTol         = 1e-4
+	refactorSmallPivotTol  = 1e-5
+	refactorRelPivotTol    = 1e-6
 	minDSEWeight           = 1e-4
 	maxDSEWeight           = 1e12
 	minDSEColEntry         = 1e-14
@@ -2282,7 +2284,7 @@ func (s *LPSolver) Solve() LPResult {
 		if math.IsNaN(lbj) || math.IsNaN(ubj) || math.IsInf(lbj, 1) || math.IsInf(ubj, -1) {
 			return LPResult{Status: StatusUndefined}
 		}
-		if lbj > ubj+primalTol {
+		if lbj > ubj {
 			return LPResult{Status: StatusInfeasible}
 		}
 	}
@@ -2406,13 +2408,47 @@ func (s *LPSolver) Solve() LPResult {
 	status, iters, pFresh, dFresh := s.solveTwoPhasePrimalWithLimit(remIter)
 	totalIter += iters
 	s.lastPrimalIters += iters
-	if status != StatusOptimal {
+	if status == StatusOptimal {
+		s.dualValid = true
+		if res, ok := s.finalizeOptimalResult(totalIter, pFresh, dFresh); ok {
+			return res
+		}
+		status = StatusNumericalError
+	}
+	if status == StatusNumericalError && s.lastPerturbed {
+		if retryRem := s.MaxIter - totalIter; retryRem > 0 {
+			s.reinitCrashKeepingBounds()
+			if s.factorizeBasis() == nil {
+				copy(ws.workCost, ws.cost)
+				s.computeDualsAndReducedCosts(ws.workCost)
+				s.dualValid = true
+				if s.stabilizeNonBasicBounds() {
+					s.computePrimalValues()
+					savedMax := s.MaxIter
+					s.MaxIter = retryRem
+					dSt, dIt, pF, dF := s.runDualSimplexLoop(ws.workCost, true, false)
+					s.MaxIter = savedMax
+					totalIter += dIt
+					s.lastDualIters += dIt
+					switch dSt {
+					case StatusOptimal:
+						s.dualValid = true
+						if res, ok := s.finalizeOptimalResult(totalIter, pF, dF); ok {
+							return res
+						}
+					case StatusInfeasible, StatusIterationLimit, StatusTimeLimit:
+						s.dualValid = false
+						return LPResult{Status: dSt, Iterations: totalIter}
+					}
+				}
+			}
+			s.dualValid = false
+		}
+	}
+	if status != StatusNumericalError {
 		return LPResult{Status: status, Iterations: totalIter}
 	}
-	s.dualValid = true
-	if res, ok := s.finalizeOptimalResult(totalIter, pFresh, dFresh); ok {
-		return res
-	}
+	s.dualValid = false
 	return LPResult{Status: StatusNumericalError, Iterations: totalIter}
 }
 
@@ -2647,31 +2683,6 @@ func (s *LPSolver) cleanInfiniteNonBasicStatus() {
 	}
 }
 
-func (s *LPSolver) computeObjMinFromWorkingX() float64 {
-	p := s.prob
-	ws := s.ws
-	n := p.numVars
-	if !s.scaled {
-		return evalLinearSum(0, p.objMin, ws.x[:n], n)
-	}
-	var acc dot2Acc
-	for j := range n {
-		cj := p.objMin[j]
-		xj := ws.x[j]
-		if cj != 0 && xj != 0 {
-			acc.addProd(cj, xj*s.colScale[j])
-		}
-	}
-	if v, _, ok := acc.result(); ok {
-		return v
-	}
-	sum := 0.0
-	for j := range n {
-		sum += p.objMin[j] * (ws.x[j] * s.colScale[j])
-	}
-	return sum
-}
-
 // verifiedDualBound returns a valid lower bound on the minimization objective (without objConstant)
 // when the current working iterate is dual feasible, well-conditioned, and primal-dual consistent.
 func (s *LPSolver) verifiedDualBound() (float64, bool) {
@@ -2715,15 +2726,31 @@ func (s *LPSolver) verifiedDualBound() (float64, bool) {
 				dAcc.addProd(djk, lb[k])
 			} else if !math.IsInf(ub[k], 1) {
 				dAcc.addProd(djk, ub[k])
+			} else if djk < -1e-12 {
+				return math.NaN(), false
 			}
 		case statusAtUpper:
 			if djk < 0 {
 				dAcc.addProd(djk, ub[k])
 			} else if !math.IsInf(lb[k], -1) {
 				dAcc.addProd(djk, lb[k])
+			} else if djk > 1e-12 {
+				return math.NaN(), false
 			}
 		case statusSuperBasic:
-			// isDualFeasible already confirmed any nonzero djk here is within noise tolerance.
+			if djk > 0 {
+				if !math.IsInf(lb[k], -1) {
+					dAcc.addProd(djk, lb[k])
+				} else if djk > 1e-12 {
+					return math.NaN(), false
+				}
+			} else if djk < 0 {
+				if !math.IsInf(ub[k], 1) {
+					dAcc.addProd(djk, ub[k])
+				} else if djk < -1e-12 {
+					return math.NaN(), false
+				}
+			}
 		}
 	}
 	pObj, _, pOK := pAcc.result()
@@ -2771,7 +2798,7 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 		if math.IsNaN(lbj) || math.IsNaN(ubj) || math.IsInf(lbj, 1) || math.IsInf(ubj, -1) {
 			return StatusUndefined, math.NaN(), 0
 		}
-		if lbj > ubj+primalTol {
+		if lbj > ubj {
 			return StatusInfeasible, math.NaN(), 0
 		}
 	}
@@ -2820,7 +2847,7 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 	savedMaxIter := s.MaxIter
 	savedSkipFarkas := s.SkipExactFarkas
 	s.MaxIter = max(0, maxIter)
-	s.SkipExactFarkas = true
+	s.SkipExactFarkas = false
 	defer func() {
 		s.MaxIter = savedMaxIter
 		s.SkipExactFarkas = savedSkipFarkas
@@ -2893,11 +2920,7 @@ func (s *LPSolver) SolveBoundOnly(maxIter int) (status Status, dualBound float64
 		if bound, ok := s.verifiedDualBound(); ok {
 			return StatusOptimal, bound, it
 		}
-		objMin := s.computeObjMinFromWorkingX()
-		if math.IsNaN(objMin) || math.IsInf(objMin, 0) {
-			return StatusNumericalError, math.NaN(), it
-		}
-		return StatusOptimal, objMin, it
+		return StatusOptimal, math.NaN(), it
 	case StatusIterationLimit:
 		if bound, ok := s.verifiedDualBound(); ok {
 			s.dualValid = true
@@ -3563,15 +3586,15 @@ func (s *LPSolver) evalExactTableauFromRho() bool {
 }
 
 // computeExactTableauRow evaluates row r of B^{-1} [A I] using BTRANExact without intermediate
-// drop tolerances and verifies that the basis identity residual satisfies ||rho^T B - e_r|| <= 1e-11
-// before GMI cut generation consumes the row.
-func (s *LPSolver) computeExactTableauRow(r int) bool {
+// drop tolerances, verifies that the basis identity residual satisfies ||rho^T B - e_r|| <= 1e-11,
+// and recomputes and cross-checks the basic variable value from rho before GMI cut generation.
+func (s *LPSolver) computeExactTableauRow(r int) (float64, bool) {
 	p := s.mat
 	ws := s.ws
 	n := p.numVars
 	m := s.TotalRows()
 	if uint(r) >= uint(m) || !ws.lu.valid {
-		return false
+		return 0, false
 	}
 	tot := ws.totVar
 	rho := ws.rho[:m]
@@ -3601,7 +3624,7 @@ func (s *LPSolver) computeExactTableauRow(r int) bool {
 	ws.lu.BTRANExact(ws.rho)
 
 	if !s.evalExactTableauFromRho() {
-		return false
+		return 0, false
 	}
 
 	needRefine := false
@@ -3629,7 +3652,7 @@ func (s *LPSolver) computeExactTableauRow(r int) bool {
 			rho[i] += corr[i]
 		}
 		if !s.evalExactTableauFromRho() {
-			return false
+			return 0, false
 		}
 	}
 
@@ -3643,10 +3666,39 @@ func (s *LPSolver) computeExactTableauRow(r int) bool {
 			clear(tabRow)
 			clear(tabErr)
 			ws.tabRowIdx = ws.tabRowIdx[:0]
-			return false
+			return 0, false
 		}
 		tabRow[bCol] = want
 		tabErr[bCol] = 0
+	}
+
+	var rhsW wideDotAcc
+	for i := range m {
+		if rho[i] != 0 {
+			rhsW.addProd(rho[i], s.rowRHS(i))
+		}
+	}
+	for k := range tot {
+		if ws.status[k] != statusBasic && tabRow[k] != 0 && ws.x[k] != 0 {
+			rhsW.addProd(-tabRow[k], ws.x[k])
+		}
+	}
+	exactWorkXB := rhsW.finish(math.NaN())
+	if math.IsNaN(exactWorkXB) || math.IsInf(exactWorkXB, 0) ||
+		math.Abs(exactWorkXB-ws.xb[r]) > max(1e-7, 1e-9*max(1.0, math.Abs(exactWorkXB))) {
+		clear(tabRow)
+		clear(tabErr)
+		ws.tabRowIdx = ws.tabRowIdx[:0]
+		return 0, false
+	}
+
+	exactOrigXB := exactWorkXB
+	if s.scaled && exactWorkXB != 0 {
+		if bVar := basis[r]; bVar < len(s.colScale) {
+			exactOrigXB = exactWorkXB * s.colScale[bVar]
+		} else {
+			exactOrigXB = exactWorkXB / s.rowScaleOf(bVar-len(s.colScale))
+		}
 	}
 
 	chunks := ws.tabRowChunks[:0]
@@ -3655,7 +3707,7 @@ func (s *LPSolver) computeExactTableauRow(r int) bool {
 		chunks = append(chunks, ch)
 	}
 	ws.tabRowChunks = chunks
-	return true
+	return exactOrigXB, true
 }
 
 // ComputeTableauRow evaluates row r of B^{-1} [A I] into WS.Rho and WS.TabRow, tracking either sparse nonbasic support or 64-column chunks.
@@ -5061,10 +5113,42 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64, dualFresh, allowPerturb bo
 
 		pivElem := ws.fCol[leaveRow]
 		tabElem := tabRow[enterVar]
-		if (pivElem < minDualPivotElem && pivElem > -minDualPivotElem) ||
+		absPiv := math.Abs(pivElem)
+		staleSmallPiv := false
+		if ws.lu.numUpdates > 0 {
+			if absPiv < refactorSmallPivotTol {
+				staleSmallPiv = true
+			} else {
+				maxFCol := absPiv
+				for _, i := range ws.fColIdx {
+					if uint(i) < uint(m) {
+						if av := math.Abs(ws.fCol[i]); av > maxFCol {
+							maxFCol = av
+						}
+					}
+				}
+				staleSmallPiv = absPiv < refactorRelPivotTol*maxFCol
+			}
+		}
+		if staleSmallPiv ||
+			(pivElem < minDualPivotElem && pivElem > -minDualPivotElem) ||
 			pivElem*tabElem <= 0 ||
-			math.Abs(pivElem-tabElem) > pivAgreeRelTol*max(1.0, math.Abs(pivElem)) {
-			if leaveRow == lastRefLeave && enterVar == lastRefEnter {
+			math.Abs(pivElem-tabElem) > pivAgreeRelTol*max(1.0, absPiv) {
+			if !staleSmallPiv && leaveRow == lastRefLeave && enterVar == lastRefEnter && ws.lu.numUpdates == 0 {
+				if pertActive {
+					if err := unperturb(); err != nil {
+						return StatusNumericalError, iter, false, false
+					}
+					lastRefLeave, lastRefEnter = -1, -1
+					if s.isDualFeasible() {
+						continue
+					}
+					if s.stabilizeNonBasicBounds() {
+						s.computePrimalValues()
+						primalFresh = true
+						continue
+					}
+				}
 				return StatusNumericalError, iter, false, false
 			}
 			lastRefLeave, lastRefEnter = leaveRow, enterVar
@@ -5220,146 +5304,209 @@ func (s *LPSolver) solveTwoPhasePrimalWithLimit(maxIter int) (Status, int, bool,
 	isBland := func(streak int) bool {
 		return streak >= blandTrigger && ((streak-blandTrigger)&blandBurstMask) < blandBurstWindow
 	}
-	degenStreak := 0
 	retriedSmallCrash := false
-	for totalIter < maxIter {
-		if (totalIter&15 == 0) && s.timeExpired() {
-			return StatusTimeLimit, totalIter, false, false
+	tryCleanCrash := func() bool {
+		if retriedSmallCrash {
+			return false
 		}
-		if ws.lu.NeedsRefactor() {
-			if err := s.factorizeBasis(); err != nil {
-				return StatusNumericalError, totalIter, false, false
-			}
-			s.computePrimalValues()
-			primalFresh = true
+		retriedSmallCrash = true
+		s.reinitSmallestMagnitudeCrash()
+		if err := s.factorizeBasis(); err != nil {
+			return false
 		}
-
-		clear(ws.workCost)
-		anyInfeasible := false
-		basicLB := ws.basicLB[:m]
-		basicUB := ws.basicUB[:m]
-		basicTol := ws.basicTol[:m]
-		for i := range m {
-			val := ws.xb[i]
-			tol := basicTol[i]
-			if val < basicLB[i]-tol {
-				ws.workCost[ws.basis[i]] = -1.0
-				anyInfeasible = true
-			} else if val > basicUB[i]+tol {
-				ws.workCost[ws.basis[i]] = 1.0
-				anyInfeasible = true
-			}
-		}
-
-		if !anyInfeasible {
-			if ws.lu.numUpdates > 0 {
-				if err := s.factorizeBasis(); err != nil {
-					return StatusNumericalError, totalIter, false, false
-				}
-				s.computePrimalValues()
-				primalFresh = true
-				continue
-			}
-			break
-		}
-
-		s.computeDualsAndReducedCosts(ws.workCost)
-		stepStatus, stepLen := s.primalSimplexStep(true, isBland(degenStreak))
-		totalIter++
-		if stepLen > degenStepTol {
-			degenStreak = 0
-		} else {
-			degenStreak++
-		}
-		if stepStatus == StatusOptimal {
-			if ws.lu.numUpdates > 0 {
-				if err := s.factorizeBasis(); err != nil {
-					return StatusNumericalError, totalIter, false, false
-				}
-				s.computePrimalValues()
-				primalFresh = true
-				continue
-			}
-			if s.verifyPhase1Infeasible() {
-				return StatusInfeasible, totalIter, false, false
-			}
-			if !retriedSmallCrash {
-				retriedSmallCrash = true
-				s.reinitSmallestMagnitudeCrash()
-				if err := s.factorizeBasis(); err != nil {
-					return StatusNumericalError, totalIter, false, false
-				}
-				s.syncBasicBounds()
-				s.computePrimalValues()
-				primalFresh = true
-				degenStreak = 0
-				continue
-			}
-			return StatusNumericalError, totalIter, false, false
-		}
-		if stepStatus != StatusNotSolved {
-			return stepStatus, totalIter, false, false
-		}
-		primalFresh = false
+		s.syncBasicBounds()
+		s.computePrimalValues()
+		primalFresh = true
+		return true
 	}
 
-	degenStreak = 0
-	for totalIter < maxIter {
-		if (totalIter&15 == 0) && s.timeExpired() {
-			return StatusTimeLimit, totalIter, false, false
-		}
-		if ws.lu.NeedsRefactor() {
-			if err := s.factorizeBasis(); err != nil {
-				return StatusNumericalError, totalIter, false, false
+	for {
+		degenStreak := 0
+		needRestart := false
+		for totalIter < maxIter {
+			if (totalIter&15 == 0) && s.timeExpired() {
+				return StatusTimeLimit, totalIter, false, false
 			}
-			s.computePrimalValues()
-			primalFresh = true
-		}
-		s.computeDualsAndReducedCosts(ws.cost)
-		stepStatus, stepLen := s.primalSimplexStep(false, isBland(degenStreak))
-		totalIter++
-		if stepLen > degenStepTol {
-			degenStreak = 0
-		} else {
-			degenStreak++
-		}
-		if stepStatus == StatusOptimal {
-			if ws.lu.numUpdates > 0 {
+			if ws.lu.NeedsRefactor() {
 				if err := s.factorizeBasis(); err != nil {
+					if tryCleanCrash() {
+						needRestart = true
+						break
+					}
 					return StatusNumericalError, totalIter, false, false
 				}
 				s.computePrimalValues()
 				primalFresh = true
-				continue
 			}
+
+			clear(ws.workCost)
+			anyInfeasible := false
 			basicLB := ws.basicLB[:m]
 			basicUB := ws.basicUB[:m]
 			basicTol := ws.basicTol[:m]
 			for i := range m {
 				val := ws.xb[i]
 				tol := basicTol[i]
-				vTol := max(verifyFeasTol*min(1.0, tol/primalTol), tol)
-				if math.IsNaN(val) || val < basicLB[i]-vTol || val > basicUB[i]+vTol {
-					return StatusNumericalError, totalIter, false, false
+				if val < basicLB[i]-tol {
+					ws.workCost[ws.basis[i]] = -1.0
+					anyInfeasible = true
+				} else if val > basicUB[i]+tol {
+					ws.workCost[ws.basis[i]] = 1.0
+					anyInfeasible = true
 				}
 			}
-			return StatusOptimal, totalIter, primalFresh, true
-		}
-		if stepStatus == StatusUnbounded && ws.lu.numUpdates > 0 {
-			if err := s.factorizeBasis(); err != nil {
+
+			if !anyInfeasible {
+				if ws.lu.numUpdates > 0 {
+					if err := s.factorizeBasis(); err != nil {
+						if tryCleanCrash() {
+							needRestart = true
+							break
+						}
+						return StatusNumericalError, totalIter, false, false
+					}
+					s.computePrimalValues()
+					primalFresh = true
+					continue
+				}
+				break
+			}
+
+			s.computeDualsAndReducedCosts(ws.workCost)
+			stepStatus, stepLen := s.primalSimplexStep(true, isBland(degenStreak))
+			totalIter++
+			if stepLen > degenStepTol {
+				degenStreak = 0
+			} else {
+				degenStreak++
+			}
+			if stepStatus == StatusOptimal {
+				if ws.lu.numUpdates > 0 {
+					if err := s.factorizeBasis(); err != nil {
+						if tryCleanCrash() {
+							needRestart = true
+							break
+						}
+						return StatusNumericalError, totalIter, false, false
+					}
+					s.computePrimalValues()
+					primalFresh = true
+					continue
+				}
+				if s.verifyPhase1Infeasible() {
+					return StatusInfeasible, totalIter, false, false
+				}
+				if tryCleanCrash() {
+					needRestart = true
+					break
+				}
 				return StatusNumericalError, totalIter, false, false
 			}
-			s.computePrimalValues()
-			primalFresh = true
+			if stepStatus == StatusNumericalError {
+				if tryCleanCrash() {
+					needRestart = true
+					break
+				}
+				return StatusNumericalError, totalIter, false, false
+			}
+			if stepStatus != StatusNotSolved {
+				return stepStatus, totalIter, false, false
+			}
+			primalFresh = false
+		}
+		if needRestart {
 			continue
 		}
-		if stepStatus != StatusNotSolved {
-			return stepStatus, totalIter, false, false
-		}
-		primalFresh = false
-	}
 
-	return StatusIterationLimit, totalIter, false, false
+		degenStreak = 0
+		for totalIter < maxIter {
+			if (totalIter&15 == 0) && s.timeExpired() {
+				return StatusTimeLimit, totalIter, false, false
+			}
+			if ws.lu.NeedsRefactor() {
+				if err := s.factorizeBasis(); err != nil {
+					if tryCleanCrash() {
+						needRestart = true
+						break
+					}
+					return StatusNumericalError, totalIter, false, false
+				}
+				s.computePrimalValues()
+				primalFresh = true
+			}
+			s.computeDualsAndReducedCosts(ws.cost)
+			stepStatus, stepLen := s.primalSimplexStep(false, isBland(degenStreak))
+			totalIter++
+			if stepLen > degenStepTol {
+				degenStreak = 0
+			} else {
+				degenStreak++
+			}
+			if stepStatus == StatusOptimal {
+				if ws.lu.numUpdates > 0 {
+					if err := s.factorizeBasis(); err != nil {
+						if tryCleanCrash() {
+							needRestart = true
+							break
+						}
+						return StatusNumericalError, totalIter, false, false
+					}
+					s.computePrimalValues()
+					primalFresh = true
+					continue
+				}
+				basicLB := ws.basicLB[:m]
+				basicUB := ws.basicUB[:m]
+				basicTol := ws.basicTol[:m]
+				primalDrift := false
+				for i := range m {
+					val := ws.xb[i]
+					tol := basicTol[i]
+					vTol := max(verifyFeasTol*min(1.0, tol/primalTol), tol)
+					if math.IsNaN(val) || val < basicLB[i]-vTol || val > basicUB[i]+vTol {
+						primalDrift = true
+						break
+					}
+				}
+				if primalDrift {
+					if tryCleanCrash() {
+						needRestart = true
+						break
+					}
+					return StatusNumericalError, totalIter, false, false
+				}
+				return StatusOptimal, totalIter, primalFresh, true
+			}
+			if stepStatus == StatusUnbounded && ws.lu.numUpdates > 0 {
+				if err := s.factorizeBasis(); err != nil {
+					if tryCleanCrash() {
+						needRestart = true
+						break
+					}
+					return StatusNumericalError, totalIter, false, false
+				}
+				s.computePrimalValues()
+				primalFresh = true
+				continue
+			}
+			if stepStatus == StatusNumericalError {
+				if tryCleanCrash() {
+					needRestart = true
+					break
+				}
+				return StatusNumericalError, totalIter, false, false
+			}
+			if stepStatus != StatusNotSolved {
+				return stepStatus, totalIter, false, false
+			}
+			primalFresh = false
+		}
+		if needRestart {
+			continue
+		}
+
+		return StatusIterationLimit, totalIter, false, false
+	}
 }
 
 func (s *LPSolver) primalSimplexStep(phase1, bland bool) (Status, float64) {
@@ -5641,6 +5788,13 @@ runPrimalFTRAN:
 	if leaveRow == -1 {
 		if math.IsInf(maxTheta, 1) {
 			if phase1 || subTolBlocking {
+				if ws.lu.numUpdates > 0 {
+					if err := s.factorizeBasis(); err != nil {
+						return StatusNumericalError, 0
+					}
+					s.computePrimalValues()
+					return StatusNotSolved, 0
+				}
 				// An improving phase-1 ray or a phase-2 ray with sub-tolerance blocking pivots
 				// is not a valid certificate of infeasibility or unboundedness.
 				return StatusNumericalError, 0
@@ -5672,6 +5826,39 @@ runPrimalFTRAN:
 			ws.x[enterVar] = ws.lb[enterVar]
 		}
 		return StatusNotSolved, maxTheta
+	}
+
+	// Refactor an updated basis before accepting a tiny absolute or spike-relative pivot
+	// so Forrest-Tomlin roundoff dust cannot swap a linearly dependent column into the basis.
+	if ws.lu.numUpdates > 0 {
+		absPiv := math.Abs(fCol[leaveRow])
+		staleSmallPiv := absPiv < refactorSmallPivotTol
+		if !staleSmallPiv {
+			maxFCol := absPiv
+			if ws.fColSparse {
+				for _, i := range ws.fColIdx {
+					if uint(i) < uint(m) {
+						if av := math.Abs(fCol[i]); av > maxFCol {
+							maxFCol = av
+						}
+					}
+				}
+			} else {
+				for i := range m {
+					if av := math.Abs(fCol[i]); av > maxFCol {
+						maxFCol = av
+					}
+				}
+			}
+			staleSmallPiv = absPiv < refactorRelPivotTol*maxFCol
+		}
+		if staleSmallPiv {
+			if err := s.factorizeBasis(); err != nil {
+				return StatusNumericalError, 0
+			}
+			s.computePrimalValues()
+			return StatusNotSolved, 0
+		}
 	}
 
 	step := enterDir * bestTheta

@@ -419,13 +419,17 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 	if ctx != nil && ctx.Err() != nil {
 		return Result{}
 	}
-	if workProb != p && len(res.Values) == p.numVars {
+	if workProb != p {
 		needFallback := false
 		if usedLPPresolve {
-			if res.Status == StatusOptimal && !postsolveLP(p, &lpPre, &res) {
+			if res.Status == StatusUnbounded || res.Status == StatusNumericalError {
+				needFallback = true
+			} else if res.Status == StatusOptimal && (len(res.Values) != p.numVars || !postsolveLP(p, &lpPre, &res)) {
 				needFallback = true
 			}
-		} else {
+		} else if res.Status == StatusNumericalError {
+			needFallback = true
+		} else if len(res.Values) == p.numVars {
 			bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
 			if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) {
 				needFallback = true
@@ -471,16 +475,18 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			fbRes.Backend = backend
 			return fbRes
 		}
-		res.Objective = p.EvaluateObjective(res.Values)
-		if res.Status == StatusOptimal && (math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) || math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0)) {
-			return Result{
-				modelID:    p.modelID,
-				Backend:    backend,
-				Status:     StatusNumericalError,
-				Nodes:      res.Nodes,
-				Iterations: res.Iterations,
-				CutsAdded:  res.CutsAdded,
-				SolveTime:  time.Since(start),
+		if len(res.Values) == p.numVars {
+			res.Objective = p.EvaluateObjective(res.Values)
+			if res.Status == StatusOptimal && (math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) || math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0)) {
+				return Result{
+					modelID:    p.modelID,
+					Backend:    backend,
+					Status:     StatusNumericalError,
+					Nodes:      res.Nodes,
+					Iterations: res.Iterations,
+					CutsAdded:  res.CutsAdded,
+					SolveTime:  time.Since(start),
+				}
 			}
 		}
 	}

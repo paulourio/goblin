@@ -647,8 +647,13 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 	}
 
 	for _, fr := range fracRows {
-		r, bVar, f0 := fr.r, fr.bVar, fr.f0
-		if !solver.computeExactTableauRow(r) {
+		r, bVar := fr.r, fr.bVar
+		exactXVal, ok := solver.computeExactTableauRow(r)
+		if !ok {
+			continue
+		}
+		f0 := exactXVal - math.Floor(exactXVal)
+		if f0 < minIntInfeas || f0 > 1.0-minIntInfeas {
 			continue
 		}
 

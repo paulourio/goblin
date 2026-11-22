@@ -443,6 +443,7 @@ func (m *Model) SetVarBounds(v Var, lb, ub float64) {
 	}
 	if math.IsNaN(lb) || math.IsNaN(ub) || math.IsInf(lb, 1) || math.IsInf(ub, -1) {
 		m.recordErr(fmt.Errorf("variable %q has invalid bounds [%v, %v]", m.vars[idx].name, lb, ub))
+		return
 	}
 	lb, ub = roundBoundsForCategory(lb, ub, m.vars[idx].cat)
 	m.vars[idx].lb = lb
