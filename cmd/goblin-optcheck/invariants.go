@@ -102,6 +102,11 @@ func requiredBCEFreeLoops(useSIMD bool) []bceLoopTarget {
 		{file: assignFile, funcName: "ValidateAndNegate64Scalar"},
 		{file: assignFile, funcName: "ColReduceValidateRows64Scalar"},
 		{file: assignFile, funcName: "ColReduceRows64Scalar"},
+		{file: assignFile, funcName: "ScanNearTightRow64Scalar"},
+		{file: assignFile, funcName: "ScanNearTightMatrix64Scalar"},
+		{file: assignFile, funcName: "AllAbsLECheckInt64Scalar"},
+		{file: assignFile, funcName: "ValidateAndNegateCheckInt64Scalar"},
+		{file: assignFile, funcName: "ColReduceValidateCheckIntRows64Scalar"},
 	}
 }
 

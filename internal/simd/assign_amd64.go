@@ -183,6 +183,9 @@ func MinNoNaN64Scalar(x []float64) float64 {
 			res = x[i]
 		}
 	}
+	if res == 0 {
+		res = 0
+	}
 	return res
 }
 
@@ -239,6 +242,9 @@ func minNoNaN64AVX2(x []float64) float64 {
 		if v := *(*float64)(unsafe.Add(xp, j*8)); v < res {
 			res = v
 		}
+	}
+	if res == 0 {
+		res = 0
 	}
 	return res
 }
@@ -322,7 +328,7 @@ func CollectLE64With(x []float64, start int, limit float64, out []int, disableSI
 	} else {
 		j, count = collectLE64AVX2(x, start, limit, out)
 	}
-	if count == len(out) || j >= n {
+	if j >= n {
 		return j, count
 	}
 	for ; j < n; j++ {
@@ -1192,4 +1198,868 @@ func transpose64AVX2(dst, src []float64, rows, cols int, negate bool) {
 		}
 	}
 	archsimd.ClearAVXUpperBits()
+}
+
+const nearTightFiniteCap = 0x1p1020
+
+// ScanNearTightRow64Scalar scans columns j in [start, min(len(rowCost), len(v))) and writes up
+// to len(out) column indices where rowCost[j] != +Inf and !((rowCost[j]-ui)-v[j] > limit &&
+// (rowCost[j]-ui)-v[j] < 0x1p1020), returning the next unscanned index and the number written.
+func ScanNearTightRow64Scalar(rowCost, v []float64, start int, ui, limit float64, out []int) (next, count int) {
+	n := min(len(rowCost), len(v))
+	if start < 0 {
+		start = 0
+	}
+	if start >= n || len(out) == 0 {
+		return min(max(start, 0), n), 0
+	}
+	cSlice := rowCost[start:n]
+	vSlice := v[start:n]
+	vSlice = vSlice[:len(cSlice)]
+	outSlice := out
+	posInf := math.Inf(1)
+	cnt := 0
+	i := 0
+	for ; i <= len(cSlice)-4; i += 4 {
+		c0, c1, c2, c3 := cSlice[i], cSlice[i+1], cSlice[i+2], cSlice[i+3]
+		d0 := (c0 - ui) - vSlice[i]
+		d1 := (c1 - ui) - vSlice[i+1]
+		d2 := (c2 - ui) - vSlice[i+2]
+		d3 := (c3 - ui) - vSlice[i+3]
+		s0 := c0 == posInf || (d0 > limit && d0 < nearTightFiniteCap)
+		s1 := c1 == posInf || (d1 > limit && d1 < nearTightFiniteCap)
+		s2 := c2 == posInf || (d2 > limit && d2 < nearTightFiniteCap)
+		s3 := c3 == posInf || (d3 > limit && d3 < nearTightFiniteCap)
+		if !s0 || !s1 || !s2 || !s3 {
+			if !s0 {
+				if uint(cnt) >= uint(len(outSlice)) {
+					return start + i, cnt
+				}
+				outSlice[cnt] = start + i
+				cnt++
+			}
+			if !s1 {
+				if uint(cnt) >= uint(len(outSlice)) {
+					return start + i + 1, cnt
+				}
+				outSlice[cnt] = start + i + 1
+				cnt++
+			}
+			if !s2 {
+				if uint(cnt) >= uint(len(outSlice)) {
+					return start + i + 2, cnt
+				}
+				outSlice[cnt] = start + i + 2
+				cnt++
+			}
+			if !s3 {
+				if uint(cnt) >= uint(len(outSlice)) {
+					return start + i + 3, cnt
+				}
+				outSlice[cnt] = start + i + 3
+				cnt++
+			}
+		}
+	}
+	for ; i < len(cSlice); i++ {
+		c := cSlice[i]
+		if c == posInf {
+			continue
+		}
+		d := (c - ui) - vSlice[i]
+		if !(d > limit && d < nearTightFiniteCap) {
+			if uint(cnt) >= uint(len(outSlice)) {
+				return start + i, cnt
+			}
+			outSlice[cnt] = start + i
+			cnt++
+		}
+	}
+	return n, cnt
+}
+
+// ScanNearTightRow64With scans rowCost[start:n] against column duals v[start:n] and row dual ui,
+// writing up to len(out) indices j whose reduced cost cannot be proven > limit and finite without
+// exact compensation, dispatching to AVX-512 or AVX2 when enabled.
+func ScanNearTightRow64With(rowCost, v []float64, start int, ui, limit float64, out []int, disableSIMD bool) (next, count int) {
+	n := min(len(rowCost), len(v))
+	if start < 0 {
+		start = 0
+	}
+	if start >= n || len(out) == 0 {
+		return min(max(start, 0), n), 0
+	}
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n-start < minAVX2Len {
+		return ScanNearTightRow64Scalar(rowCost[:n], v[:n], start, ui, limit, out)
+	}
+	var j int
+	if tier == tierAVX512 && n-start >= minAVX512Len {
+		j, count = scanNearTightRow64AVX512(rowCost[:n], v[:n], start, ui, limit, out)
+	} else {
+		j, count = scanNearTightRow64AVX2(rowCost[:n], v[:n], start, ui, limit, out)
+	}
+	if j >= n {
+		return j, count
+	}
+	posInf := math.Inf(1)
+	for ; j < n; j++ {
+		c := rowCost[j]
+		if c == posInf {
+			continue
+		}
+		d := (c - ui) - v[j]
+		if !(d > limit && d < nearTightFiniteCap) {
+			if count == len(out) {
+				return j, count
+			}
+			out[count] = j
+			count++
+		}
+	}
+	return n, count
+}
+
+// ScanNearTightRow64 scans rowCost[start:n] for near-tight or potentially overflowing reduced-cost
+// columns using AVX-512 or AVX2 when enabled.
+func ScanNearTightRow64(rowCost, v []float64, start int, ui, limit float64, out []int) (next, count int) {
+	return ScanNearTightRow64With(rowCost, v, start, ui, limit, out, false)
+}
+
+//go:noinline
+func scanNearTightRow64AVX2(rowCost, v []float64, start int, ui, limit float64, out []int) (int, int) {
+	n := len(rowCost)
+	cp := unsafe.Pointer(&rowCost[0])
+	vp := unsafe.Pointer(&v[0])
+	vui := archsimd.BroadcastFloat64x4(ui)
+	vlim := archsimd.BroadcastFloat64x4(limit)
+	vInf := archsimd.BroadcastFloat64x4(math.Inf(1))
+	vCap := archsimd.BroadcastFloat64x4(nearTightFiniteCap)
+	capOut := len(out)
+	out = out[:capOut]
+	count := 0
+	j := start
+	for ; j+8 <= n; j += 8 {
+		vc0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(cp, j*8)))
+		vv0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(vp, j*8)))
+		vc1 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(cp, (j+4)*8)))
+		vv1 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(vp, (j+4)*8)))
+		vd0 := vc0.Sub(vui).Sub(vv0)
+		vd1 := vc1.Sub(vui).Sub(vv1)
+		skip0 := vc0.Equal(vInf).Or(vd0.Greater(vlim).And(vd0.Less(vCap)))
+		skip1 := vc1.Equal(vInf).Or(vd1.Greater(vlim).And(vd1.Less(vCap)))
+		if skip0.And(skip1).ToBits() != 0xF {
+			bm := ((^skip0.ToBits()) & 0xF) | (((^skip1.ToBits()) & 0xF) << 4)
+			for bm != 0 {
+				k := bits.TrailingZeros8(bm)
+				if uint(count) >= uint(capOut) {
+					archsimd.ClearAVXUpperBits()
+					return j + k, count
+				}
+				out[count] = j + k
+				count++
+				bm &= bm - 1
+			}
+		}
+	}
+	for ; j+4 <= n; j += 4 {
+		vc0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(cp, j*8)))
+		vv0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(vp, j*8)))
+		vd0 := vc0.Sub(vui).Sub(vv0)
+		skip0 := vc0.Equal(vInf).Or(vd0.Greater(vlim).And(vd0.Less(vCap)))
+		bm := (^skip0.ToBits()) & 0xF
+		for bm != 0 {
+			k := bits.TrailingZeros8(bm)
+			if uint(count) >= uint(capOut) {
+				archsimd.ClearAVXUpperBits()
+				return j + k, count
+			}
+			out[count] = j + k
+			count++
+			bm &= bm - 1
+		}
+	}
+	archsimd.ClearAVXUpperBits()
+	return j, count
+}
+
+// ScanNearTightMatrix64Scalar scans all m rows of the row-major m x n matrix cost against
+// row duals u[:m], column duals v[:n], per-row limits rowLimits[:m], and matched columns
+// col4row[:m]. For every cell (i, j) with j != col4row[i] where !((cost[i*n+j]-u[i])-v[j] > rowLimits[i]),
+// it appends (i, j) to (outRow, outCol). If output capacity is exceeded, it returns (count, true).
+func ScanNearTightMatrix64Scalar(m, n int, cost, u, v, rowLimits []float64, col4row, outRow, outCol []int) (count int, overflow bool) {
+	if m <= 0 || n <= 0 {
+		return 0, false
+	}
+	if len(cost) < m*n || len(u) < m || len(v) < n || len(rowLimits) < m || len(col4row) < m {
+		return 0, true
+	}
+	capOut := min(len(outRow), len(outCol))
+	outRow = outRow[:capOut]
+	outCol = outCol[:len(outRow)]
+	u = u[:m]
+	v = v[:n]
+	rowLimits = rowLimits[:m]
+	col4row = col4row[:m]
+	cnt := 0
+	for i := range m {
+		ui := u[i]
+		lim := rowLimits[i]
+		mj := col4row[i]
+		rOff := i * n
+		// Tie vSlice to len(rSlice) and use j <= len(rSlice)-4 so Go SSA prove eliminates loop BCE.
+		rSlice := cost[rOff : rOff+n]
+		vSlice := v[:len(rSlice)]
+		j := 0
+		for ; j <= len(rSlice)-4; j += 4 {
+			d0 := (rSlice[j] - ui) - vSlice[j]
+			d1 := (rSlice[j+1] - ui) - vSlice[j+1]
+			d2 := (rSlice[j+2] - ui) - vSlice[j+2]
+			d3 := (rSlice[j+3] - ui) - vSlice[j+3]
+			if !(d0 > lim) || !(d1 > lim) || !(d2 > lim) || !(d3 > lim) {
+				if !(d0 > lim) && j != mj {
+					if uint(cnt) >= uint(len(outRow)) {
+						return cnt, true
+					}
+					outRow[cnt] = i
+					outCol[cnt] = j
+					cnt++
+				}
+				if !(d1 > lim) && j+1 != mj {
+					if uint(cnt) >= uint(len(outRow)) {
+						return cnt, true
+					}
+					outRow[cnt] = i
+					outCol[cnt] = j + 1
+					cnt++
+				}
+				if !(d2 > lim) && j+2 != mj {
+					if uint(cnt) >= uint(len(outRow)) {
+						return cnt, true
+					}
+					outRow[cnt] = i
+					outCol[cnt] = j + 2
+					cnt++
+				}
+				if !(d3 > lim) && j+3 != mj {
+					if uint(cnt) >= uint(len(outRow)) {
+						return cnt, true
+					}
+					outRow[cnt] = i
+					outCol[cnt] = j + 3
+					cnt++
+				}
+			}
+		}
+		for ; j < len(rSlice); j++ {
+			if !((rSlice[j]-ui)-vSlice[j] > lim) && j != mj {
+				if uint(cnt) >= uint(len(outRow)) {
+					return cnt, true
+				}
+				outRow[cnt] = i
+				outCol[cnt] = j
+				cnt++
+			}
+		}
+	}
+	return cnt, false
+}
+
+// ScanNearTightMatrix64With scans an m x n cost matrix for non-matched cells whose reduced cost
+// cannot be proven > rowLimits[i], dispatching across the entire matrix with one VZEROUPPER.
+func ScanNearTightMatrix64With(m, n int, cost, u, v, rowLimits []float64, col4row, outRow, outCol []int, disableSIMD bool) (count int, overflow bool) {
+	if m <= 0 || n <= 0 {
+		return 0, false
+	}
+	if len(cost) < m*n || len(u) < m || len(v) < n || len(rowLimits) < m || len(col4row) < m {
+		return 0, true
+	}
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n < 8 {
+		return ScanNearTightMatrix64Scalar(m, n, cost, u, v, rowLimits, col4row, outRow, outCol)
+	}
+	capOut := min(len(outRow), len(outCol))
+	outRow = outRow[:capOut]
+	outCol = outCol[:capOut]
+	var vecEnd int
+	if tier == tierAVX512 && n >= minAVX512Len {
+		vecEnd = n &^ 7
+		count, overflow = scanNearTightMatrix64AVX512(m, n, cost, u, v, rowLimits, col4row, outRow, outCol)
+	} else {
+		vecEnd = n &^ 3
+		count, overflow = scanNearTightMatrix64AVX2(m, n, cost, u, v, rowLimits, col4row, outRow, outCol)
+	}
+	if overflow {
+		return count, true
+	}
+	if vecEnd < n {
+		for i := range m {
+			ui := u[i]
+			lim := rowLimits[i]
+			mj := col4row[i]
+			rowOff := i * n
+			for j := vecEnd; j < n; j++ {
+				if !((cost[rowOff+j]-ui)-v[j] > lim) && j != mj {
+					if uint(count) >= uint(capOut) {
+						return count, true
+					}
+					outRow[count] = i
+					outCol[count] = j
+					count++
+				}
+			}
+		}
+	}
+	return count, false
+}
+
+// ScanNearTightMatrix64 scans an m x n cost matrix for near-tight non-matched cells using AVX-512 or AVX2.
+func ScanNearTightMatrix64(m, n int, cost, u, v, rowLimits []float64, col4row, outRow, outCol []int) (count int, overflow bool) {
+	return ScanNearTightMatrix64With(m, n, cost, u, v, rowLimits, col4row, outRow, outCol, false)
+}
+
+//go:noinline
+func scanNearTightMatrix64AVX2(m, n int, cost, u, v, rowLimits []float64, col4row, outRow, outCol []int) (int, bool) {
+	vecEnd := n &^ 3
+	cpBase := unsafe.Pointer(&cost[0])
+	vp := unsafe.Pointer(&v[0])
+	up := unsafe.Pointer(&u[0])
+	lp := unsafe.Pointer(&rowLimits[0])
+	mp := unsafe.Pointer(&col4row[0])
+	capOut := len(outRow)
+	outRow = outRow[:capOut]
+	outCol = outCol[:capOut]
+	rowStride := uintptr(n) * 8
+	count := 0
+	for i := range m {
+		cp := unsafe.Add(cpBase, uintptr(i)*rowStride)
+		vui := archsimd.BroadcastUint64x4(*(*uint64)(unsafe.Add(up, uintptr(i)*8))).BitsToFloat64()
+		vlim := archsimd.BroadcastUint64x4(*(*uint64)(unsafe.Add(lp, uintptr(i)*8))).BitsToFloat64()
+		mj := *(*int)(unsafe.Add(mp, uintptr(i)*8))
+		j := 0
+		for ; j+8 <= vecEnd; j += 8 {
+			vc0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(cp, j*8)))
+			vv0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(vp, j*8)))
+			vc1 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(cp, (j+4)*8)))
+			vv1 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(vp, (j+4)*8)))
+			ok0 := vc0.Sub(vui).Sub(vv0).Greater(vlim)
+			ok1 := vc1.Sub(vui).Sub(vv1).Greater(vlim)
+			if ok0.And(ok1).ToBits() != 0xF {
+				bm := ((^ok0.ToBits()) & 0xF) | (((^ok1.ToBits()) & 0xF) << 4)
+				for bm != 0 {
+					k := bits.TrailingZeros8(bm)
+					col := j + k
+					if col != mj {
+						if uint(count) >= uint(capOut) {
+							archsimd.ClearAVXUpperBits()
+							return count, true
+						}
+						outRow[count] = i
+						outCol[count] = col
+						count++
+					}
+					bm &= bm - 1
+				}
+			}
+		}
+		for ; j+4 <= vecEnd; j += 4 {
+			vc0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(cp, j*8)))
+			vv0 := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(vp, j*8)))
+			bm := (^vc0.Sub(vui).Sub(vv0).Greater(vlim).ToBits()) & 0xF
+			for bm != 0 {
+				k := bits.TrailingZeros8(bm)
+				col := j + k
+				if col != mj {
+					if uint(count) >= uint(capOut) {
+						archsimd.ClearAVXUpperBits()
+						return count, true
+					}
+					outRow[count] = i
+					outCol[count] = col
+					count++
+				}
+				bm &= bm - 1
+			}
+		}
+	}
+	archsimd.ClearAVXUpperBits()
+	return count, false
+}
+
+// AllAbsLECheckInt64Scalar reports whether every element x[i] satisfies |x[i]| <= limit and
+// simultaneously whether every element is an exact integer with |x[i]| <= intLim.
+// Keep i <= len(x)-4 so Go SSA prove eliminates loop BCE.
+func AllAbsLECheckInt64Scalar(x []float64, limit, intLim float64) (valid, allInt bool) {
+	if !(0 <= limit) {
+		return false, false
+	}
+	allInt = 0 <= intLim
+	i := 0
+	for ; i <= len(x)-4; i += 4 {
+		c0, c1, c2, c3 := x[i], x[i+1], x[i+2], x[i+3]
+		a0, a1, a2, a3 := math.Abs(c0), math.Abs(c1), math.Abs(c2), math.Abs(c3)
+		if !(a0 <= limit && a1 <= limit && a2 <= limit && a3 <= limit) {
+			return false, false
+		}
+		if allInt && !(a0 <= intLim && math.Trunc(c0) == c0 &&
+			a1 <= intLim && math.Trunc(c1) == c1 &&
+			a2 <= intLim && math.Trunc(c2) == c2 &&
+			a3 <= intLim && math.Trunc(c3) == c3) {
+			allInt = false
+		}
+	}
+	for ; i < len(x); i++ {
+		c := x[i]
+		a := math.Abs(c)
+		if !(a <= limit) {
+			return false, false
+		}
+		if allInt && !(a <= intLim && math.Trunc(c) == c) {
+			allInt = false
+		}
+	}
+	return true, allInt
+}
+
+// AllAbsLECheckInt64With reports whether every element of x satisfies |x[i]| <= limit and whether
+// all entries are exact integers with |x[i]| <= intLim, dispatching to AVX-512 or AVX2 when enabled.
+func AllAbsLECheckInt64With(x []float64, limit, intLim float64, disableSIMD bool) (valid, allInt bool) {
+	tier := currentTier(disableSIMD)
+	n := len(x)
+	if tier == tierScalar || n < minAVX2Len {
+		return AllAbsLECheckInt64Scalar(x, limit, intLim)
+	}
+	if !(0 <= limit) {
+		return false, false
+	}
+	var vecEnd int
+	if tier == tierAVX512 && n >= minAVX512Len {
+		vecEnd = n &^ 7
+		valid, allInt = allAbsLECheckInt64AVX512(x[:vecEnd], limit, intLim)
+	} else {
+		vecEnd = n &^ 3
+		valid, allInt = allAbsLECheckInt64AVX2(x[:vecEnd], limit, intLim)
+	}
+	if !valid {
+		return false, false
+	}
+	for i := vecEnd; i < n; i++ {
+		c := x[i]
+		a := math.Abs(c)
+		if !(a <= limit) {
+			return false, false
+		}
+		if allInt && !(a <= intLim && math.Trunc(c) == c) {
+			allInt = false
+		}
+	}
+	return true, allInt
+}
+
+//go:noinline
+func allAbsLECheckInt64AVX2(x []float64, limit, intLim float64) (bool, bool) {
+	n := len(x)
+	xp := unsafe.Pointer(&x[0])
+	signMask := archsimd.BroadcastUint64x4(0x7fffffffffffffff)
+	vZero := signMask.Xor(signMask).BitsToFloat64()
+	vlim := archsimd.BroadcastFloat64x4(limit)
+	vIntLim := archsimd.BroadcastFloat64x4(intLim)
+	ok0 := vlim.GreaterEqual(vZero)
+	ok1 := ok0
+	int0 := vIntLim.GreaterEqual(vZero)
+	int1 := int0
+	i := 0
+	for ; i+8 <= n; i += 8 {
+		p0 := unsafe.Add(xp, i*8)
+		r0 := archsimd.LoadUint64x4Array((*[4]uint64)(p0))
+		r1 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(p0, 32)))
+		v0 := r0.BitsToFloat64()
+		v1 := r1.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		a1 := r1.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		ok1 = ok1.And(a1.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.Trunc()))
+		int1 = int1.And(a1.LessEqual(vIntLim)).And(v1.Equal(v1.Trunc()))
+	}
+	for ; i+4 <= n; i += 4 {
+		r0 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(xp, i*8)))
+		v0 := r0.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.Trunc()))
+	}
+	valid := ok0.And(ok1).ToBits() == 0xf
+	allInt := valid && int0.And(int1).ToBits() == 0xf
+	archsimd.ClearAVXUpperBits()
+	return valid, allInt
+}
+
+// ValidateAndNegateCheckInt64Scalar writes dst[i] = 0.0 - src[i] for every index i and reports
+// whether all entries satisfy |src[i]| <= limit and whether all entries are exact integers <= intLim.
+// Keep dSlice tied to len(sSlice) and use i <= len(sSlice)-4 so Go SSA prove eliminates loop BCE.
+func ValidateAndNegateCheckInt64Scalar(dst, src []float64, limit, intLim float64) (valid, allInt bool) {
+	n := min(len(dst), len(src))
+	if n == 0 {
+		v := !(limit < 0 || math.IsNaN(limit))
+		return v, v && 0 <= intLim
+	}
+	sSlice := src[:n]
+	dSlice := dst[:len(sSlice)]
+	valid = 0 <= limit
+	allInt = valid && 0 <= intLim
+	i := 0
+	for ; i <= len(sSlice)-4; i += 4 {
+		c0, c1, c2, c3 := sSlice[i], sSlice[i+1], sSlice[i+2], sSlice[i+3]
+		a0, a1, a2, a3 := math.Abs(c0), math.Abs(c1), math.Abs(c2), math.Abs(c3)
+		if !(a0 <= limit && a1 <= limit && a2 <= limit && a3 <= limit) {
+			valid = false
+			allInt = false
+		} else if allInt && !(a0 <= intLim && math.Trunc(c0) == c0 &&
+			a1 <= intLim && math.Trunc(c1) == c1 &&
+			a2 <= intLim && math.Trunc(c2) == c2 &&
+			a3 <= intLim && math.Trunc(c3) == c3) {
+			allInt = false
+		}
+		dSlice[i] = 0.0 - c0
+		dSlice[i+1] = 0.0 - c1
+		dSlice[i+2] = 0.0 - c2
+		dSlice[i+3] = 0.0 - c3
+	}
+	for ; i < len(sSlice); i++ {
+		c := sSlice[i]
+		a := math.Abs(c)
+		if !(a <= limit) {
+			valid = false
+			allInt = false
+		} else if allInt && !(a <= intLim && math.Trunc(c) == c) {
+			allInt = false
+		}
+		dSlice[i] = 0.0 - c
+	}
+	return valid, allInt
+}
+
+// ValidateAndNegateCheckInt64With writes dst[i] = 0.0 - src[i] and reports whether all entries satisfy
+// |src[i]| <= limit and whether all entries are exact integers <= intLim, dispatching to AVX-512 or AVX2.
+func ValidateAndNegateCheckInt64With(dst, src []float64, limit, intLim float64, disableSIMD bool) (valid, allInt bool) {
+	n := min(len(dst), len(src))
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n < minAVX2Len {
+		return ValidateAndNegateCheckInt64Scalar(dst, src, limit, intLim)
+	}
+	var vecEnd int
+	if tier == tierAVX512 && n >= minAVX512Len {
+		vecEnd = n &^ 7
+		valid, allInt = validateAndNegateCheckInt64AVX512(dst[:vecEnd], src[:vecEnd], limit, intLim)
+	} else {
+		vecEnd = n &^ 3
+		valid, allInt = validateAndNegateCheckInt64AVX2(dst[:vecEnd], src[:vecEnd], limit, intLim)
+	}
+	for i := vecEnd; i < n; i++ {
+		c := src[i]
+		a := math.Abs(c)
+		if !(a <= limit) {
+			valid = false
+			allInt = false
+		} else if allInt && !(a <= intLim && math.Trunc(c) == c) {
+			allInt = false
+		}
+		dst[i] = 0.0 - c
+	}
+	return valid, allInt
+}
+
+//go:noinline
+func validateAndNegateCheckInt64AVX2(dst, src []float64, limit, intLim float64) (bool, bool) {
+	n := len(src)
+	sp := unsafe.Pointer(&src[0])
+	dp := unsafe.Pointer(&dst[0])
+
+	signMask := archsimd.BroadcastUint64x4(0x7fffffffffffffff)
+	vZero := signMask.Xor(signMask).BitsToFloat64()
+	vlim := archsimd.BroadcastFloat64x4(limit)
+	vIntLim := archsimd.BroadcastFloat64x4(intLim)
+	ok0 := vlim.GreaterEqual(vZero)
+	ok1 := ok0
+	int0 := vIntLim.GreaterEqual(vZero)
+	int1 := int0
+
+	i := 0
+	for ; i+8 <= n; i += 8 {
+		p0 := unsafe.Add(sp, i*8)
+		r0 := archsimd.LoadUint64x4Array((*[4]uint64)(p0))
+		r1 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(p0, 32)))
+		v0 := r0.BitsToFloat64()
+		v1 := r1.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		a1 := r1.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		ok1 = ok1.And(a1.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.Trunc()))
+		int1 = int1.And(a1.LessEqual(vIntLim)).And(v1.Equal(v1.Trunc()))
+		vZero.Sub(v0).StoreArray((*[4]float64)(unsafe.Add(dp, i*8)))
+		vZero.Sub(v1).StoreArray((*[4]float64)(unsafe.Add(dp, (i+4)*8)))
+	}
+	for ; i+4 <= n; i += 4 {
+		r0 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(sp, i*8)))
+		v0 := r0.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.Trunc()))
+		vZero.Sub(v0).StoreArray((*[4]float64)(unsafe.Add(dp, i*8)))
+	}
+
+	valid := ok0.And(ok1).ToBits() == 0xf
+	allInt := valid && int0.And(int1).ToBits() == 0xf
+	archsimd.ClearAVXUpperBits()
+	return valid, allInt
+}
+
+// ColReduceValidateCheckIntRows64Scalar validates |cost| <= limit, checks whether all entries are
+// exact integers with |cost| <= intLim, and performs row-major column reduction over rows [rowStart, rowEnd).
+func ColReduceValidateCheckIntRows64Scalar(n, rowStart, rowEnd int, cost, v []float64, row4col []int, limit, intLim float64) (valid, allInt bool) {
+	if n <= 0 || rowEnd <= rowStart {
+		ok := !(limit < 0 || math.IsNaN(limit))
+		return ok, ok && 0 <= intLim
+	}
+	if rowStart < 0 || len(v) < n || len(row4col) < n || len(cost) < rowEnd*n || !(0 <= limit) {
+		return false, false
+	}
+	v = v[:n]
+	row4col = row4col[:n]
+	allInt = 0 <= intLim
+	i := rowStart
+	if i == 0 {
+		r0 := cost[:n]
+		for j, c := range r0 {
+			a := math.Abs(c)
+			if !(a <= limit) {
+				return false, false
+			}
+			if allInt && !(a <= intLim && math.Trunc(c) == c) {
+				allInt = false
+			}
+			v[j] = c
+			row4col[j] = 0
+		}
+		i = 1
+	}
+	for ; i < rowEnd; i++ {
+		rOff := i * n
+		// Keep vSlice and r4c tied to len(rSlice) with j <= len(rSlice)-4 so Go SSA prove eliminates loop BCE.
+		rSlice := cost[rOff : rOff+n]
+		vSlice := v[:len(rSlice)]
+		r4c := row4col[:len(rSlice)]
+		j := 0
+		for ; j <= len(rSlice)-4; j += 4 {
+			c0, c1, c2, c3 := rSlice[j], rSlice[j+1], rSlice[j+2], rSlice[j+3]
+			a0, a1, a2, a3 := math.Abs(c0), math.Abs(c1), math.Abs(c2), math.Abs(c3)
+			if !(a0 <= limit && a1 <= limit && a2 <= limit && a3 <= limit) {
+				return false, false
+			}
+			if allInt && !(a0 <= intLim && math.Trunc(c0) == c0 &&
+				a1 <= intLim && math.Trunc(c1) == c1 &&
+				a2 <= intLim && math.Trunc(c2) == c2 &&
+				a3 <= intLim && math.Trunc(c3) == c3) {
+				allInt = false
+			}
+			v0, v1, v2, v3 := vSlice[j], vSlice[j+1], vSlice[j+2], vSlice[j+3]
+			if c0 < v0 || c1 < v1 || c2 < v2 || c3 < v3 {
+				if c0 < v0 {
+					vSlice[j] = c0
+					r4c[j] = i
+				}
+				if c1 < v1 {
+					vSlice[j+1] = c1
+					r4c[j+1] = i
+				}
+				if c2 < v2 {
+					vSlice[j+2] = c2
+					r4c[j+2] = i
+				}
+				if c3 < v3 {
+					vSlice[j+3] = c3
+					r4c[j+3] = i
+				}
+			}
+		}
+		for ; j < len(rSlice); j++ {
+			c := rSlice[j]
+			a := math.Abs(c)
+			if !(a <= limit) {
+				return false, false
+			}
+			if allInt && !(a <= intLim && math.Trunc(c) == c) {
+				allInt = false
+			}
+			if c < vSlice[j] {
+				vSlice[j] = c
+				r4c[j] = i
+			}
+		}
+	}
+	return true, allInt
+}
+
+// ColReduceValidateCheckIntRows64With validates |cost| <= limit, checks exact-integer membership
+// within intLim, and performs row-major column reduction over rows [rowStart, rowEnd), honoring disableSIMD.
+func ColReduceValidateCheckIntRows64With(n, rowStart, rowEnd int, cost, v []float64, row4col []int, limit, intLim float64, disableSIMD bool) (valid, allInt bool) {
+	tier := currentTier(disableSIMD)
+	if tier == tierScalar || n < minAVX2Len || rowStart < 0 || rowEnd <= rowStart || len(v) < n || len(row4col) < n || len(cost) < rowEnd*n || !(0 <= limit) {
+		return ColReduceValidateCheckIntRows64Scalar(n, rowStart, rowEnd, cost, v, row4col, limit, intLim)
+	}
+	v = v[:n]
+	row4col = row4col[:n]
+	if rowStart == 0 {
+		clear(row4col)
+	}
+	var vecEnd int
+	if tier == tierAVX512 && n >= minAVX512Len {
+		valid, allInt = colReduceValidateCheckIntRows64AVX512(n, rowStart, rowEnd, cost, v, row4col, limit, intLim)
+		if !valid {
+			return false, false
+		}
+		vecEnd = n &^ 7
+	} else {
+		valid, allInt = colReduceValidateCheckIntRows64AVX2(n, rowStart, rowEnd, cost, v, row4col, limit, intLim)
+		if !valid {
+			return false, false
+		}
+		vecEnd = n &^ 3
+	}
+	if vecEnd < n {
+		r := rowStart
+		if r == 0 {
+			for j := vecEnd; j < n; j++ {
+				c := cost[j]
+				a := math.Abs(c)
+				if !(a <= limit) {
+					return false, false
+				}
+				if allInt && !(a <= intLim && math.Trunc(c) == c) {
+					allInt = false
+				}
+				v[j] = c
+			}
+			r = 1
+		}
+		for ; r < rowEnd; r++ {
+			rowOff := r * n
+			for j := vecEnd; j < n; j++ {
+				c := cost[rowOff+j]
+				a := math.Abs(c)
+				if !(a <= limit) {
+					return false, false
+				}
+				if allInt && !(a <= intLim && math.Trunc(c) == c) {
+					allInt = false
+				}
+				if c < v[j] {
+					v[j] = c
+					row4col[j] = r
+				}
+			}
+		}
+	}
+	return true, allInt
+}
+
+//go:noinline
+func colReduceValidateCheckIntRows64AVX2(n, rowStart, rowEnd int, cost, v []float64, row4col []int, limit, intLim float64) (bool, bool) {
+	vecEnd := n &^ 3
+	vp := unsafe.Pointer(&v[0])
+	rp := unsafe.Pointer(&row4col[0])
+
+	signMask := archsimd.BroadcastUint64x4(0x7fffffffffffffff)
+	vZero := signMask.Xor(signMask).BitsToFloat64()
+	vlim := archsimd.BroadcastFloat64x4(limit)
+	vIntLim := archsimd.BroadcastFloat64x4(intLim)
+	ok0 := vlim.GreaterEqual(vZero)
+	ok1 := ok0
+	int0 := vIntLim.GreaterEqual(vZero)
+	int1 := int0
+
+	i := rowStart
+	if i == 0 {
+		r0p := unsafe.Pointer(&cost[0])
+		j := 0
+		for ; j+8 <= vecEnd; j += 8 {
+			p0 := unsafe.Add(r0p, j*8)
+			r0 := archsimd.LoadUint64x4Array((*[4]uint64)(p0))
+			r1 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(p0, 32)))
+			vc0 := r0.BitsToFloat64()
+			vc1 := r1.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			a1 := r1.And(signMask).BitsToFloat64()
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			ok1 = ok1.And(a1.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.Trunc()))
+			int1 = int1.And(a1.LessEqual(vIntLim)).And(vc1.Equal(vc1.Trunc()))
+			vc0.StoreArray((*[4]float64)(unsafe.Add(vp, j*8)))
+			vc1.StoreArray((*[4]float64)(unsafe.Add(vp, (j+4)*8)))
+		}
+		for ; j+4 <= vecEnd; j += 4 {
+			r0 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(r0p, j*8)))
+			vc0 := r0.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.Trunc()))
+			vc0.StoreArray((*[4]float64)(unsafe.Add(vp, j*8)))
+		}
+		i = 1
+	}
+
+	for ; i < rowEnd; i++ {
+		rowPtr := unsafe.Pointer(&cost[i*n])
+		vrow := archsimd.BroadcastInt64x4(int64(i))
+		j := 0
+		for ; j+8 <= vecEnd; j += 8 {
+			p0 := unsafe.Add(rowPtr, j*8)
+			r0 := archsimd.LoadUint64x4Array((*[4]uint64)(p0))
+			r1 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(p0, 32)))
+			vc0 := r0.BitsToFloat64()
+			vc1 := r1.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			a1 := r1.And(signMask).BitsToFloat64()
+			vv0Ptr := (*[4]float64)(unsafe.Add(vp, j*8))
+			vv1Ptr := (*[4]float64)(unsafe.Add(vp, (j+4)*8))
+			vv0 := archsimd.LoadFloat64x4Array(vv0Ptr)
+			vv1 := archsimd.LoadFloat64x4Array(vv1Ptr)
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			ok1 = ok1.And(a1.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.Trunc()))
+			int1 = int1.And(a1.LessEqual(vIntLim)).And(vc1.Equal(vc1.Trunc()))
+			lt0 := vc0.Less(vv0)
+			lt1 := vc1.Less(vv1)
+			if lt0.Or(lt1).ToBits() != 0 {
+				vc0.IfElse(lt0, vv0).StoreArray(vv0Ptr)
+				vc1.IfElse(lt1, vv1).StoreArray(vv1Ptr)
+				r0Ptr := (*[4]int64)(unsafe.Add(rp, j*8))
+				r1Ptr := (*[4]int64)(unsafe.Add(rp, (j+4)*8))
+				vrow.IfElse(lt0, archsimd.LoadInt64x4Array(r0Ptr)).StoreArray(r0Ptr)
+				vrow.IfElse(lt1, archsimd.LoadInt64x4Array(r1Ptr)).StoreArray(r1Ptr)
+			}
+		}
+		for ; j+4 <= vecEnd; j += 4 {
+			r0 := archsimd.LoadUint64x4Array((*[4]uint64)(unsafe.Add(rowPtr, j*8)))
+			vc0 := r0.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			vv0Ptr := (*[4]float64)(unsafe.Add(vp, j*8))
+			vv0 := archsimd.LoadFloat64x4Array(vv0Ptr)
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.Trunc()))
+			lt0 := vc0.Less(vv0)
+			if lt0.ToBits() != 0 {
+				vc0.IfElse(lt0, vv0).StoreArray(vv0Ptr)
+				r0Ptr := (*[4]int64)(unsafe.Add(rp, j*8))
+				vrow.IfElse(lt0, archsimd.LoadInt64x4Array(r0Ptr)).StoreArray(r0Ptr)
+			}
+		}
+	}
+
+	valid := ok0.And(ok1).ToBits() == 0xf
+	allInt := valid && int0.And(int1).ToBits() == 0xf
+	archsimd.ClearAVXUpperBits()
+	return valid, allInt
 }

@@ -96,6 +96,9 @@ func minNoNaN64AVX512(x []float64) float64 {
 			res = v
 		}
 	}
+	if res == 0 {
+		res = 0
+	}
 	return res
 }
 
@@ -526,4 +529,310 @@ func transpose64AVX512(dst, src []float64, rows, cols int, negate bool) {
 		}
 	}
 	archsimd.ClearAVXUpperBits()
+}
+
+//go:noinline
+func scanNearTightRow64AVX512(rowCost, v []float64, start int, ui, limit float64, out []int) (int, int) {
+	n := len(rowCost)
+	cp := unsafe.Pointer(&rowCost[0])
+	vp := unsafe.Pointer(&v[0])
+	vui := archsimd.BroadcastFloat64x8(ui)
+	vlim := archsimd.BroadcastFloat64x8(limit)
+	vInf := archsimd.BroadcastFloat64x8(math.Inf(1))
+	vCap := archsimd.BroadcastFloat64x8(nearTightFiniteCap)
+	capOut := len(out)
+	out = out[:capOut]
+	count := 0
+	j := start
+	for ; j+16 <= n; j += 16 {
+		vc0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(cp, j*8)))
+		vv0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(vp, j*8)))
+		vc1 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(cp, (j+8)*8)))
+		vv1 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(vp, (j+8)*8)))
+		vd0 := vc0.Sub(vui).Sub(vv0)
+		vd1 := vc1.Sub(vui).Sub(vv1)
+		skip0 := vc0.Equal(vInf).Or(vd0.Greater(vlim).And(vd0.Less(vCap)))
+		skip1 := vc1.Equal(vInf).Or(vd1.Greater(vlim).And(vd1.Less(vCap)))
+		if skip0.And(skip1).ToBits() != 0xFF {
+			bm := uint16(^skip0.ToBits()) | (uint16(^skip1.ToBits()) << 8)
+			for bm != 0 {
+				k := bits.TrailingZeros16(bm)
+				if uint(count) >= uint(capOut) {
+					archsimd.ClearAVXUpperBits()
+					return j + k, count
+				}
+				out[count] = j + k
+				count++
+				bm &= bm - 1
+			}
+		}
+	}
+	for ; j+8 <= n; j += 8 {
+		vc0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(cp, j*8)))
+		vv0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(vp, j*8)))
+		vd0 := vc0.Sub(vui).Sub(vv0)
+		skip0 := vc0.Equal(vInf).Or(vd0.Greater(vlim).And(vd0.Less(vCap)))
+		bm := ^skip0.ToBits()
+		for bm != 0 {
+			k := bits.TrailingZeros8(bm)
+			if uint(count) >= uint(capOut) {
+				archsimd.ClearAVXUpperBits()
+				return j + k, count
+			}
+			out[count] = j + k
+			count++
+			bm &= bm - 1
+		}
+	}
+	archsimd.ClearAVXUpperBits()
+	return j, count
+}
+
+//go:noinline
+func scanNearTightMatrix64AVX512(m, n int, cost, u, v, rowLimits []float64, col4row, outRow, outCol []int) (int, bool) {
+	vecEnd := n &^ 7
+	cpBase := unsafe.Pointer(&cost[0])
+	vp := unsafe.Pointer(&v[0])
+	up := unsafe.Pointer(&u[0])
+	lp := unsafe.Pointer(&rowLimits[0])
+	mp := unsafe.Pointer(&col4row[0])
+	capOut := len(outRow)
+	outRow = outRow[:capOut]
+	outCol = outCol[:capOut]
+	rowStride := uintptr(n) * 8
+	count := 0
+	for i := range m {
+		cp := unsafe.Add(cpBase, uintptr(i)*rowStride)
+		vui := archsimd.BroadcastUint64x8(*(*uint64)(unsafe.Add(up, uintptr(i)*8))).BitsToFloat64()
+		vlim := archsimd.BroadcastUint64x8(*(*uint64)(unsafe.Add(lp, uintptr(i)*8))).BitsToFloat64()
+		mj := *(*int)(unsafe.Add(mp, uintptr(i)*8))
+		j := 0
+		for ; j+16 <= vecEnd; j += 16 {
+			vc0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(cp, j*8)))
+			vv0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(vp, j*8)))
+			vc1 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(cp, (j+8)*8)))
+			vv1 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(vp, (j+8)*8)))
+			ok0 := vc0.Sub(vui).Sub(vv0).Greater(vlim)
+			ok1 := vc1.Sub(vui).Sub(vv1).Greater(vlim)
+			if ok0.And(ok1).ToBits() != 0xFF {
+				bm := uint16(^ok0.ToBits()) | (uint16(^ok1.ToBits()) << 8)
+				for bm != 0 {
+					k := bits.TrailingZeros16(bm)
+					col := j + k
+					if col != mj {
+						if uint(count) >= uint(capOut) {
+							archsimd.ClearAVXUpperBits()
+							return count, true
+						}
+						outRow[count] = i
+						outCol[count] = col
+						count++
+					}
+					bm &= bm - 1
+				}
+			}
+		}
+		for ; j+8 <= vecEnd; j += 8 {
+			vc0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(cp, j*8)))
+			vv0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(vp, j*8)))
+			bm := ^vc0.Sub(vui).Sub(vv0).Greater(vlim).ToBits()
+			for bm != 0 {
+				k := bits.TrailingZeros8(bm)
+				col := j + k
+				if col != mj {
+					if uint(count) >= uint(capOut) {
+						archsimd.ClearAVXUpperBits()
+						return count, true
+					}
+					outRow[count] = i
+					outCol[count] = col
+					count++
+				}
+				bm &= bm - 1
+			}
+		}
+	}
+	archsimd.ClearAVXUpperBits()
+	return count, false
+}
+
+//go:noinline
+func allAbsLECheckInt64AVX512(x []float64, limit, intLim float64) (bool, bool) {
+	n := len(x)
+	xp := unsafe.Pointer(&x[0])
+	signMask := archsimd.BroadcastUint64x8(0x7fffffffffffffff)
+	vZero := signMask.Xor(signMask).BitsToFloat64()
+	vlim := archsimd.BroadcastFloat64x8(limit)
+	vIntLim := archsimd.BroadcastFloat64x8(intLim)
+	ok0 := vlim.GreaterEqual(vZero)
+	ok1 := ok0
+	int0 := vIntLim.GreaterEqual(vZero)
+	int1 := int0
+	i := 0
+	for ; i+16 <= n; i += 16 {
+		p0 := unsafe.Add(xp, i*8)
+		r0 := archsimd.LoadUint64x8Array((*[8]uint64)(p0))
+		r1 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(p0, 64)))
+		v0 := r0.BitsToFloat64()
+		v1 := r1.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		a1 := r1.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		ok1 = ok1.And(a1.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.TruncScaled(0)))
+		int1 = int1.And(a1.LessEqual(vIntLim)).And(v1.Equal(v1.TruncScaled(0)))
+	}
+	for ; i+8 <= n; i += 8 {
+		r0 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(xp, i*8)))
+		v0 := r0.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.TruncScaled(0)))
+	}
+	valid := ok0.And(ok1).ToBits() == 0xff
+	allInt := valid && int0.And(int1).ToBits() == 0xff
+	archsimd.ClearAVXUpperBits()
+	return valid, allInt
+}
+
+//go:noinline
+func validateAndNegateCheckInt64AVX512(dst, src []float64, limit, intLim float64) (bool, bool) {
+	n := len(src)
+	sp := unsafe.Pointer(&src[0])
+	dp := unsafe.Pointer(&dst[0])
+
+	signMask := archsimd.BroadcastUint64x8(0x7fffffffffffffff)
+	vZero := signMask.Xor(signMask).BitsToFloat64()
+	vlim := archsimd.BroadcastFloat64x8(limit)
+	vIntLim := archsimd.BroadcastFloat64x8(intLim)
+	ok0 := vlim.GreaterEqual(vZero)
+	ok1 := ok0
+	int0 := vIntLim.GreaterEqual(vZero)
+	int1 := int0
+
+	i := 0
+	for ; i+16 <= n; i += 16 {
+		p0 := unsafe.Add(sp, i*8)
+		r0 := archsimd.LoadUint64x8Array((*[8]uint64)(p0))
+		r1 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(p0, 64)))
+		v0 := r0.BitsToFloat64()
+		v1 := r1.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		a1 := r1.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		ok1 = ok1.And(a1.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.TruncScaled(0)))
+		int1 = int1.And(a1.LessEqual(vIntLim)).And(v1.Equal(v1.TruncScaled(0)))
+		vZero.Sub(v0).StoreArray((*[8]float64)(unsafe.Add(dp, i*8)))
+		vZero.Sub(v1).StoreArray((*[8]float64)(unsafe.Add(dp, (i+8)*8)))
+	}
+	for ; i+8 <= n; i += 8 {
+		r0 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(sp, i*8)))
+		v0 := r0.BitsToFloat64()
+		a0 := r0.And(signMask).BitsToFloat64()
+		ok0 = ok0.And(a0.LessEqual(vlim))
+		int0 = int0.And(a0.LessEqual(vIntLim)).And(v0.Equal(v0.TruncScaled(0)))
+		vZero.Sub(v0).StoreArray((*[8]float64)(unsafe.Add(dp, i*8)))
+	}
+
+	valid := ok0.And(ok1).ToBits() == 0xff
+	allInt := valid && int0.And(int1).ToBits() == 0xff
+	archsimd.ClearAVXUpperBits()
+	return valid, allInt
+}
+
+//go:noinline
+func colReduceValidateCheckIntRows64AVX512(n, rowStart, rowEnd int, cost, v []float64, row4col []int, limit, intLim float64) (bool, bool) {
+	vecEnd := n &^ 7
+	vp := unsafe.Pointer(&v[0])
+	rp := unsafe.Pointer(&row4col[0])
+
+	signMask := archsimd.BroadcastUint64x8(0x7fffffffffffffff)
+	vZero := signMask.Xor(signMask).BitsToFloat64()
+	vlim := archsimd.BroadcastFloat64x8(limit)
+	vIntLim := archsimd.BroadcastFloat64x8(intLim)
+	ok0 := vlim.GreaterEqual(vZero)
+	ok1 := ok0
+	int0 := vIntLim.GreaterEqual(vZero)
+	int1 := int0
+
+	i := rowStart
+	if i == 0 {
+		r0p := unsafe.Pointer(&cost[0])
+		j := 0
+		for ; j+16 <= vecEnd; j += 16 {
+			p0 := unsafe.Add(r0p, j*8)
+			r0 := archsimd.LoadUint64x8Array((*[8]uint64)(p0))
+			r1 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(p0, 64)))
+			vc0 := r0.BitsToFloat64()
+			vc1 := r1.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			a1 := r1.And(signMask).BitsToFloat64()
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			ok1 = ok1.And(a1.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.TruncScaled(0)))
+			int1 = int1.And(a1.LessEqual(vIntLim)).And(vc1.Equal(vc1.TruncScaled(0)))
+			vc0.StoreArray((*[8]float64)(unsafe.Add(vp, j*8)))
+			vc1.StoreArray((*[8]float64)(unsafe.Add(vp, (j+8)*8)))
+		}
+		for ; j+8 <= vecEnd; j += 8 {
+			r0 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(r0p, j*8)))
+			vc0 := r0.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.TruncScaled(0)))
+			vc0.StoreArray((*[8]float64)(unsafe.Add(vp, j*8)))
+		}
+		i = 1
+	}
+
+	for ; i < rowEnd; i++ {
+		rowPtr := unsafe.Pointer(&cost[i*n])
+		vrow := archsimd.BroadcastInt64x8(int64(i))
+		j := 0
+		for ; j+16 <= vecEnd; j += 16 {
+			p0 := unsafe.Add(rowPtr, j*8)
+			r0 := archsimd.LoadUint64x8Array((*[8]uint64)(p0))
+			r1 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(p0, 64)))
+			vc0 := r0.BitsToFloat64()
+			vc1 := r1.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			a1 := r1.And(signMask).BitsToFloat64()
+			vv0Ptr := (*[8]float64)(unsafe.Add(vp, j*8))
+			vv1Ptr := (*[8]float64)(unsafe.Add(vp, (j+8)*8))
+			vv0 := archsimd.LoadFloat64x8Array(vv0Ptr)
+			vv1 := archsimd.LoadFloat64x8Array(vv1Ptr)
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			ok1 = ok1.And(a1.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.TruncScaled(0)))
+			int1 = int1.And(a1.LessEqual(vIntLim)).And(vc1.Equal(vc1.TruncScaled(0)))
+			lt0 := vc0.Less(vv0)
+			lt1 := vc1.Less(vv1)
+			if lt0.Or(lt1).ToBits() != 0 {
+				vc0.StoreArrayMasked(vv0Ptr, lt0)
+				vc1.StoreArrayMasked(vv1Ptr, lt1)
+				vrow.StoreArrayMasked((*[8]int64)(unsafe.Add(rp, j*8)), lt0)
+				vrow.StoreArrayMasked((*[8]int64)(unsafe.Add(rp, (j+8)*8)), lt1)
+			}
+		}
+		for ; j+8 <= vecEnd; j += 8 {
+			r0 := archsimd.LoadUint64x8Array((*[8]uint64)(unsafe.Add(rowPtr, j*8)))
+			vc0 := r0.BitsToFloat64()
+			a0 := r0.And(signMask).BitsToFloat64()
+			vv0Ptr := (*[8]float64)(unsafe.Add(vp, j*8))
+			vv0 := archsimd.LoadFloat64x8Array(vv0Ptr)
+			ok0 = ok0.And(a0.LessEqual(vlim))
+			int0 = int0.And(a0.LessEqual(vIntLim)).And(vc0.Equal(vc0.TruncScaled(0)))
+			lt0 := vc0.Less(vv0)
+			if lt0.ToBits() != 0 {
+				vc0.StoreArrayMasked(vv0Ptr, lt0)
+				vrow.StoreArrayMasked((*[8]int64)(unsafe.Add(rp, j*8)), lt0)
+			}
+		}
+	}
+
+	valid := ok0.And(ok1).ToBits() == 0xff
+	allInt := valid && int0.And(int1).ToBits() == 0xff
+	archsimd.ClearAVXUpperBits()
+	return valid, allInt
 }
