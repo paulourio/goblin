@@ -1,0 +1,20 @@
+# index	binary	workdir	target	parallel
+0	/app/bin/assign.test	/app/work/assign	FuzzAssignPlantedCancellationAndStage2	14
+1	/app/bin/assign.test	/app/work/assign	FuzzAssignSparseCoreTraps	14
+2	/app/bin/assign.test	/app/work/assign	FuzzAssignCollinearAndRowDominated	14
+3	/app/bin/assign.test	/app/work/assign	FuzzAssignWideAccAndIEEE754Edges	14
+4	/app/bin/assign.test	/app/work/assign	FuzzAssignHallAndTopology	14
+5	/app/bin/assign.test	/app/work/assign	FuzzAssignMetamorphicAndDirtyWorkspace	14
+6	/app/bin/assign.test	/app/work/assign	FuzzLinearSum	14
+7	/app/bin/goblin.test	/app/work	FuzzMADExactOptimum	14
+8	/app/bin/goblin.test	/app/work	FuzzMADAdversarialRegimes	14
+9	/app/bin/goblin.test	/app/work	FuzzMADMetamorphicAndLimits	14
+10	/app/bin/goblin.test	/app/work	FuzzMADMediumDecomposed	14
+11	/app/bin/goblin.test	/app/work	FuzzMILPSolver	14
+12	/app/bin/goblin.test	/app/work	FuzzLPSolver	14
+13	/app/bin/goblin.test	/app/work	FuzzPuLPJSON	14
+14	/app/bin/goblin_cbc.test	/app/work	FuzzMADDifferentialCBC	10
+15	/app/bin/goblin_cbc.test	/app/work	FuzzMADMediumDecomposedCBC	10
+16	/app/bin/goblin_cbc.test	/app/work	FuzzMADExactOptimumCBC	10
+17	/app/bin/goblin_cbc.test	/app/work	FuzzMADAdversarialCBC	10
+18	/app/bin/goblin_cbc.test	/app/work	FuzzMADLimitsCBC	10
