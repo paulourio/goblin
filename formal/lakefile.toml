@@ -1,0 +1,43 @@
+name = "GoblinFormal"
+version = "0.1.0"
+defaultTargets = [
+  "GoblinFormal",
+  "lsap-check",
+  "rules-check",
+  "cuts-check",
+  "lp-check",
+  "vipr-check",
+  "bin-check",
+  "simd-cfg-check",
+]
+
+[[lean_lib]]
+name = "GoblinFormal"
+
+[[lean_exe]]
+name = "lsap-check"
+root = "Apps.LsapCheck"
+
+[[lean_exe]]
+name = "rules-check"
+root = "Apps.RulesCheck"
+
+[[lean_exe]]
+name = "cuts-check"
+root = "Apps.CutsCheck"
+
+[[lean_exe]]
+name = "lp-check"
+root = "Apps.LpCheck"
+
+[[lean_exe]]
+name = "vipr-check"
+root = "Apps.ViprCheck"
+
+[[lean_exe]]
+name = "bin-check"
+root = "Apps.BinCheck"
+
+[[lean_exe]]
+name = "simd-cfg-check"
+root = "Apps.SimdCfgCheck"

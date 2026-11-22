@@ -74,15 +74,15 @@ wait_jobs() {
 log_step "1/4 Checking repository hygiene, line endings, and path portability..."
 
 # Ensure no cache directories or compiled artifacts exist in the working tree.
-bad_artifacts="$(find . \( -name '.mypy_cache' -o -name '.ruff_cache' -o -name '__pycache__' -o -name '*.prof' -o -name '*.test' \) -not -path './.git/*' -not -path './third_party/*' || true)"
+bad_artifacts="$(find . \( -name '.mypy_cache' -o -name '.ruff_cache' -o -name '__pycache__' -o -name '*.prof' -o -name '*.test' \) -not -path './.git/*' -not -path './third_party/*' -not -path './formal/.lake/*' || true)"
 if [ -n "${bad_artifacts}" ]; then
     printf '%s\n' "${bad_artifacts}" >&2
     fail "Forbidden cache or build artifacts found in working tree."
 fi
 
 # Ensure no CRLF line endings in source or documentation files.
-if grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party $'\r' . >/dev/null 2>&1; then
-    grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party $'\r' . >&2 || true
+if grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >/dev/null 2>&1; then
+    grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >&2 || true
     fail "Files with CRLF line endings detected. Normalize to LF."
 fi
 
@@ -92,12 +92,12 @@ unprefixed_import='"gob'"lin"'(/|")'
 unaliased_root_import='^[[:space:]]*"github\.com/paulourio/gob'"lin"'"'
 unaliased_pkg_qual='gob'"lin"'\.[A-Z]'
 forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${unaliased_root_import}|${unaliased_pkg_qual})"
-if grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party -E "${forbidden_pattern}" . >/dev/null 2>&1; then
-    grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party -E "${forbidden_pattern}" . >&2 || true
+if grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >/dev/null 2>&1; then
+    grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >&2 || true
     fail "Forbidden legacy identifier or unprefixed module import detected."
 fi
-if [ -n "${HOME:-}" ] && grep -rnIF --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party -- "${HOME}" . >/dev/null 2>&1; then
-    grep -rnIF --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party -- "${HOME}" . >&2 || true
+if [ -n "${HOME:-}" ] && grep -rnIF --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >/dev/null 2>&1; then
+    grep -rnIF --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >&2 || true
     fail "Hardcoded home directory path detected."
 fi
 
@@ -171,10 +171,10 @@ root = pathlib.Path(".")
 go_c_files = sorted(
     p for ext in ("*.go", "*.cpp", "*.h")
     for p in root.rglob(ext)
-    if "third_party" not in p.parts
+    if "third_party" not in p.parts and ".lake" not in p.parts
 )
-py_files = sorted(p for p in root.rglob("*.py") if "third_party" not in p.parts)
-sh_files = sorted(p for p in root.rglob("*.sh") if "third_party" not in p.parts)
+py_files = sorted(p for p in root.rglob("*.py") if "third_party" not in p.parts and ".lake" not in p.parts)
+sh_files = sorted(p for p in root.rglob("*.sh") if "third_party" not in p.parts and ".lake" not in p.parts)
 
 def extract_go_c(path: pathlib.Path) -> str:
     blocks, cur, in_block = [], [], False

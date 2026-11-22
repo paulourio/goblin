@@ -26,3 +26,8 @@ __pycache__/
 .vscode/
 *.swp
 *~
+
+# Lean 4 Prove Lane build artifacts
+/formal/.lake/
+/formal/build/
+
