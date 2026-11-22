@@ -1,0 +1,124 @@
+{
+  "n": 3,
+  "objConst": 0,
+  "obj": [3, 2, 1],
+  "isInt": [true, true, false],
+  "lb": [0, 0, 0],
+  "ub": [3, 3, 2],
+  "baseRows": [
+    {"coeffs": [2, 2, 0], "sense": ">=", "rhs": 3},
+    {"coeffs": [2, -2, 0], "sense": "<=", "rhs": 1},
+    {"coeffs": [0, 1, 1], "sense": ">=", "rhs": 2}
+  ],
+  "mode": "optimal",
+  "incumbent": [0, 2, 0],
+  "steps": [
+    {
+      "rule": "lincomb",
+      "sense": ">=",
+      "refs": [{"id": 0, "mult": "1/2"}],
+      "con": {"coeffs": [1, 1, 0], "sense": ">=", "rhs": "3/2"},
+      "assumptions": []
+    },
+    {
+      "rule": "roundUp",
+      "ref": 3,
+      "con": {"coeffs": [1, 1, 0], "sense": ">=", "rhs": 2},
+      "assumptions": []
+    },
+    {
+      "rule": "lincomb",
+      "sense": "<=",
+      "refs": [{"id": 1, "mult": "1/2"}],
+      "con": {"coeffs": [1, -1, 0], "sense": "<=", "rhs": "1/2"},
+      "assumptions": []
+    },
+    {
+      "rule": "roundDown",
+      "ref": 5,
+      "con": {"coeffs": [1, -1, 0], "sense": "<=", "rhs": 0},
+      "assumptions": []
+    },
+    {
+      "rule": "assume",
+      "col": 1,
+      "sense": "<=",
+      "bound": 1,
+      "assumptions": [7]
+    },
+    {
+      "rule": "assume",
+      "col": 0,
+      "sense": "<=",
+      "bound": 0,
+      "assumptions": [8]
+    },
+    {
+      "rule": "farkas",
+      "refs": [
+        {"id": 4, "mult": -1},
+        {"id": 8, "mult": 1},
+        {"id": 7, "mult": 1}
+      ],
+      "con": {"coeffs": [0, 0, 0], "sense": "<=", "rhs": -1},
+      "assumptions": [7, 8]
+    },
+    {
+      "rule": "assume",
+      "col": 0,
+      "sense": ">=",
+      "bound": 1,
+      "assumptions": [10]
+    },
+    {
+      "rule": "safeDual",
+      "refs": [
+        {"id": 2, "mult": 1},
+        {"id": 6, "mult": -1}
+      ],
+      "boundAsms": [10],
+      "con": {"coeffs": [3, 2, 1], "sense": ">=", "rhs": 6},
+      "assumptions": [10]
+    },
+    {
+      "rule": "branch",
+      "col": 0,
+      "splitVal": 0,
+      "leftAsm": 8,
+      "rightAsm": 10,
+      "left": 9,
+      "right": 11,
+      "con": {"coeffs": [3, 2, 1], "sense": ">=", "rhs": 6},
+      "assumptions": [7]
+    },
+    {
+      "rule": "assume",
+      "col": 1,
+      "sense": ">=",
+      "bound": 2,
+      "assumptions": [13]
+    },
+    {
+      "rule": "dualBound",
+      "refs": [{"id": 13, "mult": 2}],
+      "bounds": [
+        {"col": 0, "kind": "lb", "mult": 3},
+        {"col": 2, "kind": "lb", "mult": 1}
+      ],
+      "con": {"coeffs": [3, 2, 1], "sense": ">=", "rhs": 4},
+      "assumptions": [13]
+    },
+    {
+      "rule": "branch",
+      "col": 1,
+      "splitVal": 1,
+      "leftAsm": 7,
+      "rightAsm": 13,
+      "left": 12,
+      "right": 14,
+      "con": {"coeffs": [3, 2, 1], "sense": ">=", "rhs": 4},
+      "assumptions": []
+    }
+  ],
+  "rootStep": 12
+}
