@@ -1,10 +1,12 @@
 package assign_test
 
 import (
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"math/bits"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -666,6 +668,9 @@ func FuzzAssignPlantedCancellationAndStage2(f *testing.F) {
 			t.Fatalf("[%s/scalar] unexpected error: %v", label, err)
 		}
 		verifyPlantedBigRat(t, label+"/scalar", rows, cols, cost, sense, resScalar, pRow, pCol, unique, bitExact)
+
+		verifyFormalAssignResult(t, label+"/simd", rows, cols, cost, sense, resSIMD, false)
+		verifyFormalAssignResult(t, label+"/scalar", rows, cols, cost, sense, resScalar, false)
 	})
 }
 
@@ -1075,6 +1080,8 @@ func FuzzAssignCollinearAndRowDominated(f *testing.F) {
 
 		verifyOptimalityCertificate(t, label+"/simd", n, n, cost, sense, resSIMD)
 		verifyOptimalityCertificate(t, label+"/scalar", n, n, cost, sense, resScalar)
+		verifyFormalAssignResult(t, label+"/simd", n, n, cost, sense, resSIMD, checkInt)
+		verifyFormalAssignResult(t, label+"/scalar", n, n, cost, sense, resScalar, checkInt)
 
 		maxAbs := 1.0
 		for _, v := range cost {
@@ -1257,6 +1264,8 @@ func FuzzAssignWideAccAndIEEE754Edges(f *testing.F) {
 			t.Fatalf("[%s/scalar] unexpected error: %v", label, err)
 		}
 		verifyPlantedBigRat(t, label+"/scalar", n, n, cost, sense, resScalar, pRow, pCol, true, true)
+		verifyFormalAssignResult(t, label+"/simd", n, n, cost, sense, resSIMD, false)
+		verifyFormalAssignResult(t, label+"/scalar", n, n, cost, sense, resScalar, false)
 	})
 }
 
@@ -1392,6 +1401,8 @@ func FuzzAssignHallAndTopology(f *testing.F) {
 		if pRow != nil {
 			verifyPlantedBigRat(t, label+"/simd", rows, cols, cost, sense, resSIMD, pRow, pCol, true, false)
 			verifyPlantedBigRat(t, label+"/scalar", rows, cols, cost, sense, resScalar, pRow, pCol, true, false)
+			verifyFormalAssignResult(t, label+"/simd", rows, cols, cost, sense, resSIMD, false)
+			verifyFormalAssignResult(t, label+"/scalar", rows, cols, cost, sense, resScalar, false)
 			return
 		}
 
@@ -1401,6 +1412,8 @@ func FuzzAssignHallAndTopology(f *testing.F) {
 		}
 		verifyOptimalityCertificate(t, label+"/simd", rows, cols, cost, sense, resSIMD)
 		verifyOptimalityCertificate(t, label+"/scalar", rows, cols, cost, sense, resScalar)
+		verifyFormalAssignResult(t, label+"/simd", rows, cols, cost, sense, resSIMD, false)
+		verifyFormalAssignResult(t, label+"/scalar", rows, cols, cost, sense, resScalar, false)
 		r1, ok1 := exactMatchedObjRat(rows, cols, cost, resSIMD.RowInd, resSIMD.ColInd)
 		r2, ok2 := exactMatchedObjRat(rows, cols, cost, resScalar.RowInd, resScalar.ColInd)
 		if !ok1 || !ok2 || r1.Cmp(r2) != 0 {
@@ -1465,6 +1478,8 @@ func FuzzAssignMetamorphicAndDirtyWorkspace(f *testing.F) {
 		}
 		verifyOptimalityCertificate(t, label+"/simd", rows, cols, cost, sense, resSIMD)
 		verifyOptimalityCertificate(t, label+"/scalar", rows, cols, cost, sense, resScalar)
+		verifyFormalAssignResult(t, label+"/simd", rows, cols, cost, sense, resSIMD, true)
+		verifyFormalAssignResult(t, label+"/scalar", rows, cols, cost, sense, resScalar, true)
 
 		ratBase, ok := exactMatchedObjRat(rows, cols, cost, resSIMD.RowInd, resSIMD.ColInd)
 		ratSc, okSc := exactMatchedObjRat(rows, cols, cost, resScalar.RowInd, resScalar.ColInd)
@@ -1635,6 +1650,395 @@ func checkReuseObj(wantRat *big.Rat, rows, cols int, cost []float64, rBuf, cBuf 
 		return fmt.Errorf("reused workspace scalar obj %.17g != %.17g", obj, wantF)
 	}
 	return nil
+}
+
+// =============================================================================
+// 7. Near-Rank-1 ULP Drift & Extreme Exponent Spread Formal Fuzzer
+// =============================================================================
+
+type lsapBitsNoObjReq struct {
+	Rows   int             `json:"rows"`
+	Cols   int             `json:"cols"`
+	Sense  string          `json:"sense"`
+	Mode   string          `json:"mode"`
+	Cost   [][]lsapBitsVal `json:"cost"`
+	RowInd []int           `json:"row_ind"`
+	ColInd []int           `json:"col_ind"`
+	U      []lsapBitsVal   `json:"u"`
+	V      []lsapBitsVal   `json:"v"`
+	Tol    *lsapBitsVal    `json:"tol,omitzero"`
+}
+
+func buildFormalLSAPNoObjJSON(rows, cols int, flatCost []float64, sense assign.Sense, res assign.Result, tol float64) ([]byte, bool) {
+	if len(flatCost) != rows*cols || math.IsNaN(tol) || math.IsInf(tol, 0) || tol < 0 {
+		return nil, false
+	}
+	costBits := make([][]lsapBitsVal, rows)
+	for r := range rows {
+		row := make([]lsapBitsVal, cols)
+		base := r * cols
+		for c := range cols {
+			v := flatCost[base+c]
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return nil, false
+			}
+			row[c] = lsapBitsVal{Bits: math.Float64bits(v)}
+		}
+		costBits[r] = row
+	}
+	uBits := make([]lsapBitsVal, len(res.U))
+	for i, v := range res.U {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, false
+		}
+		uBits[i] = lsapBitsVal{Bits: math.Float64bits(v)}
+	}
+	vBits := make([]lsapBitsVal, len(res.V))
+	for j, v := range res.V {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, false
+		}
+		vBits[j] = lsapBitsVal{Bits: math.Float64bits(v)}
+	}
+	senseStr := "min"
+	if sense == assign.Maximize {
+		senseStr = "max"
+	}
+	tVal := lsapBitsVal{Bits: math.Float64bits(tol)}
+	raw, err := json.Marshal(lsapBitsNoObjReq{
+		Rows:   rows,
+		Cols:   cols,
+		Sense:  senseStr,
+		Mode:   "safe",
+		Cost:   costBits,
+		RowInd: res.RowInd,
+		ColInd: res.ColInd,
+		U:      uBits,
+		V:      vBits,
+		Tol:    &tVal,
+	})
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func exactBitmaskLSAPRat(rows, cols int, cost []float64, sense assign.Sense) (*big.Rat, bool) {
+	if rows == 0 || cols == 0 {
+		return new(big.Rat), true
+	}
+	transposed := rows > cols
+	m := min(rows, cols)
+	n := max(rows, cols)
+	if n > 10 {
+		return nil, false
+	}
+	mat := make([][]*big.Rat, m)
+	for i := range m {
+		mat[i] = make([]*big.Rat, n)
+		for j := range n {
+			var v float64
+			if !transposed {
+				v = cost[i*cols+j]
+			} else {
+				v = cost[j*cols+i]
+			}
+			if math.IsInf(v, 0) || math.IsNaN(v) {
+				continue
+			}
+			mat[i][j] = new(big.Rat).SetFloat64(v)
+		}
+	}
+
+	numStates := 1 << n
+	dp := make([]*big.Rat, numStates)
+	dp[0] = new(big.Rat)
+	cand := new(big.Rat)
+	for mask := range numStates {
+		cur := dp[mask]
+		if cur == nil {
+			continue
+		}
+		i := bits.OnesCount(uint(mask))
+		if i >= m {
+			continue
+		}
+		for j := range n {
+			if mask&(1<<j) != 0 || mat[i][j] == nil {
+				continue
+			}
+			nxt := mask | (1 << j)
+			cand.Add(cur, mat[i][j])
+			if dp[nxt] == nil ||
+				(sense == assign.Minimize && cand.Cmp(dp[nxt]) < 0) ||
+				(sense == assign.Maximize && cand.Cmp(dp[nxt]) > 0) {
+				dp[nxt] = new(big.Rat).Set(cand)
+			}
+		}
+	}
+
+	var best *big.Rat
+	for mask := range numStates {
+		if bits.OnesCount(uint(mask)) != m || dp[mask] == nil {
+			continue
+		}
+		if best == nil ||
+			(sense == assign.Minimize && dp[mask].Cmp(best) < 0) ||
+			(sense == assign.Maximize && dp[mask].Cmp(best) > 0) {
+			best = dp[mask]
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	return best, true
+}
+
+func verifyAdversarialFormalLSAP(
+	tb testing.TB,
+	label string,
+	rows, cols int,
+	cost []float64,
+	sense assign.Sense,
+	res assign.Result,
+	wantOptRat *big.Rat,
+	requireZeroSafeGap bool,
+	safeTol float64,
+) {
+	tb.Helper()
+	gotRat, okGot := exactMatchedObjRat(rows, cols, cost, res.RowInd, res.ColInd)
+	if !okGot {
+		tb.Fatalf("[%s] invalid matched indices (%v, %v)", label, res.RowInd, res.ColInd)
+	}
+	if wantOptRat != nil && gotRat.Cmp(wantOptRat) != 0 {
+		gotF, _ := gotRat.Float64()
+		wantF, _ := wantOptRat.Float64()
+		gap := new(big.Rat).Sub(gotRat, wantOptRat)
+		tb.Fatalf("[%s] suboptimal primal assignment: got=%s (~%.17g) want=%s (~%.17g) gap=%s",
+			label, gotRat.RatString(), gotF, wantOptRat.RatString(), wantF, gap.RatString())
+	}
+	wantF, _ := gotRat.Float64()
+	if !math.IsInf(wantF, 0) {
+		ulp := math.Abs(math.Nextafter(wantF, math.Inf(1)) - wantF)
+		if diff := math.Abs(res.Objective - wantF); diff > max(4*math.SmallestNonzeroFloat64, 4*ulp) {
+			tb.Fatalf("[%s] res.Objective=%.17g differs from exact sum %.17g by %g",
+				label, res.Objective, wantF, diff)
+		}
+	}
+	if !formalAssignOracleEnabled() {
+		return
+	}
+	for _, v := range cost[:rows*cols] {
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return
+		}
+	}
+
+	if requireZeroSafeGap {
+		rawZero, okZ := buildFormalLSAPNoObjJSON(rows, cols, cost, sense, res, 0)
+		if !okZ {
+			tb.Fatalf("[%s] buildFormalLSAPNoObjJSON failed", label)
+		}
+		okCall, bndPair, detail := formalAssignOracleCall(tb, rawZero)
+		if !okCall {
+			tb.Fatalf("[%s] lsap-check --jsonl safe (tol=0) rejected: %s", label, detail)
+		}
+		bndRat, bErr := (formalAssignRat{Num: bndPair[0], Den: bndPair[1]}).bigRat()
+		if bErr != nil || bndRat.Cmp(gotRat) != 0 {
+			tb.Fatalf("[%s] lsap-check bound=%v (err=%v), want exact %s", label, bndPair, bErr, gotRat.RatString())
+		}
+	}
+
+	objTol := safeTol
+	if objRat := new(big.Rat).SetFloat64(res.Objective); objRat != nil {
+		diffRat := new(big.Rat).Sub(gotRat, objRat)
+		diffRat.Abs(diffRat)
+		df, exact := diffRat.Float64()
+		if !exact || new(big.Rat).SetFloat64(df).Cmp(diffRat) < 0 {
+			df = math.Nextafter(df, math.Inf(1))
+		}
+		if df > objTol {
+			objTol = df
+		}
+	}
+	if math.IsInf(objTol, 0) {
+		objTol = math.MaxFloat64
+	}
+	rawFull, okFull := buildFormalLSAPJSON(rows, cols, cost, sense, res, "safe", objTol)
+	if !okFull {
+		return
+	}
+	okCall, bndPair, detail := formalAssignOracleCall(tb, rawFull)
+	if !okCall {
+		tb.Fatalf("[%s] lsap-check --jsonl safe (tol=%g) rejected: %s", label, objTol, detail)
+	}
+	if bndPair[0] != "" && bndPair[1] != "" {
+		bndRat, bErr := (formalAssignRat{Num: bndPair[0], Den: bndPair[1]}).bigRat()
+		if bErr != nil {
+			tb.Fatalf("[%s] invalid bound %v: %v", label, bndPair, bErr)
+		}
+		if sense == assign.Minimize && bndRat.Cmp(gotRat) > 0 {
+			tb.Fatalf("[%s] safe lower bound %s > primal %s", label, bndRat.RatString(), gotRat.RatString())
+		}
+		if sense == assign.Maximize && bndRat.Cmp(gotRat) < 0 {
+			tb.Fatalf("[%s] safe upper bound %s < primal %s", label, bndRat.RatString(), gotRat.RatString())
+		}
+	}
+}
+
+// FuzzAssignAdversarialFormal tests near-rank-1 ULP drift (c[i][j] = A[i] + B[j] + k*ulp
+// across scales 1e-8, 1, 1e8, 1e15) and extreme exponent spread (1e-320..1e305) against
+// exact rational matching optima and lsap-check --jsonl certificates.
+func FuzzAssignAdversarialFormal(f *testing.F) {
+	for seed := range uint64(24) {
+		f.Add(seed, uint8(seed%3), uint8(seed%6), uint8((seed*3)%8))
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, regimeByte, dimByte, optByte uint8) {
+		rng := rand.New(rand.NewPCG(seed^0x517cc1b727220a95, seed^0x9e3779b97f4a7c15))
+		sense := assign.Minimize
+		if optByte&1 == 1 {
+			sense = assign.Maximize
+		}
+		regime := regimeByte % 3
+
+		if regime < 2 {
+			// Generator #7: c[i][j] = A[i] + B[j] + k*ulp across square and rectangular shapes.
+			var rows, cols int
+			switch dimByte % 3 {
+			case 0:
+				rows = 5 + int((dimByte/3)%5)
+				cols = rows
+			case 1:
+				rows = 3 + int((dimByte/3)%5)
+				cols = rows + 1 + rng.IntN(min(3, 10-rows))
+			default:
+				cols = 3 + int((dimByte/3)%5)
+				rows = cols + 1 + rng.IntN(min(3, 10-cols))
+			}
+			scales := []float64{1e-8, 1.0, 1e8, 1e15}
+			scIdx := int(optByte>>1) % len(scales)
+			scale := scales[scIdx]
+
+			a := make([]float64, rows)
+			b := make([]float64, cols)
+			singleOctave := regime == 0
+			for r := range rows {
+				if singleOctave {
+					if scIdx == 3 {
+						a[r] = scale * (0.60 + 0.42*rng.Float64())
+					} else {
+						a[r] = scale * (1.00 + 0.26*rng.Float64())
+					}
+				} else {
+					a[r] = scale * (1.0 + rng.Float64())
+				}
+			}
+			for c := range cols {
+				if singleOctave {
+					if scIdx == 3 {
+						b[c] = scale * (0.60 + 0.42*rng.Float64())
+					} else {
+						b[c] = scale * (1.00 + 0.26*rng.Float64())
+					}
+				} else {
+					b[c] = scale * (1.0 + rng.Float64())
+				}
+			}
+
+			forbid := math.Inf(1)
+			if sense == assign.Maximize {
+				forbid = math.Inf(-1)
+			}
+			injectInf := regime == 1 && (optByte&8 != 0)
+			cost := make([]float64, rows*cols)
+			maxULP := 0.0
+			for r := range rows {
+				for c := range cols {
+					if injectInf && rng.IntN(6) == 0 {
+						cost[r*cols+c] = forbid
+						continue
+					}
+					base := a[r] + b[c]
+					ulp := math.Abs(math.Nextafter(base, math.Inf(1)) - base)
+					if ulp > maxULP {
+						maxULP = ulp
+					}
+					k := rng.IntN(33) - 16
+					val := base + float64(k)*ulp
+					if sense == assign.Maximize && (optByte&16 != 0) {
+						val = -val
+					}
+					cost[r*cols+c] = val
+				}
+			}
+
+			wantRat, wantFeas := exactBitmaskLSAPRat(rows, cols, cost, sense)
+			label := fmt.Sprintf("adv_lsap_ulp_r%d_%dx%d_sc%g_%s_%d", regime, rows, cols, scale, sense, seed)
+
+			resSIMD, errSIMD := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, assign.WithSIMD(true))
+			resScalar, errScalar := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, assign.WithoutSIMD())
+			if !wantFeas {
+				if !errors.Is(errSIMD, assign.ErrInfeasible) || !errors.Is(errScalar, assign.ErrInfeasible) {
+					t.Fatalf("[%s] expected ErrInfeasible, got simd=%v scalar=%v", label, errSIMD, errScalar)
+				}
+				return
+			}
+			if errSIMD != nil || errScalar != nil {
+				t.Fatalf("[%s] unexpected error: simd=%v scalar=%v", label, errSIMD, errScalar)
+			}
+			safeTol := 0.0
+			if !singleOctave {
+				safeTol = float64(max(rows, cols)) * maxULP
+			}
+			verifyAdversarialFormalLSAP(t, label+"/simd", rows, cols, cost, sense, resSIMD, wantRat, singleOctave && !injectInf, safeTol)
+			verifyAdversarialFormalLSAP(t, label+"/scalar", rows, cols, cost, sense, resScalar, wantRat, singleOctave && !injectInf, safeTol)
+			return
+		}
+
+		// Generator #8: extreme exponent spread (1e-320..1e305) across 2..6 dimensions.
+		rows := 2 + int(dimByte%5)
+		cols := 2 + int((dimByte/5)%5)
+		cost := make([]float64, rows*cols)
+		maxAbs := 1.0
+		for i := range cost {
+			var v float64
+			switch rng.IntN(4) {
+			case 0:
+				v = math.Ldexp(float64(1+rng.IntN(63)), -1070+rng.IntN(40))
+			case 1:
+				v = float64(1+rng.IntN(32)) * 0.25
+			case 2:
+				v = math.Ldexp(1.0+rng.Float64(), 965+rng.IntN(45))
+			default:
+				v = math.Ldexp(1.0+rng.Float64(), -400+rng.IntN(800))
+			}
+			if rng.IntN(3) == 0 {
+				v = -v
+			}
+			cost[i] = v
+			if a := math.Abs(v); a > maxAbs {
+				maxAbs = a
+			}
+		}
+
+		wantRat, wantFeas := exactBitmaskLSAPRat(rows, cols, cost, sense)
+		if !wantFeas {
+			return
+		}
+		label := fmt.Sprintf("adv_lsap_exp_%dx%d_%s_%d", rows, cols, sense, seed)
+		resSIMD, errSIMD := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, assign.WithSIMD(true))
+		resScalar, errScalar := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, assign.WithoutSIMD())
+		if errSIMD != nil || errScalar != nil {
+			t.Fatalf("[%s] unexpected error: simd=%v scalar=%v", label, errSIMD, errScalar)
+		}
+		tol := max(1e-300, maxAbs*0x1p-48*float64(max(rows, cols)))
+		if math.IsInf(tol, 0) {
+			tol = math.MaxFloat64
+		}
+		verifyAdversarialFormalLSAP(t, label+"/simd", rows, cols, cost, sense, resSIMD, wantRat, false, tol)
+		verifyAdversarialFormalLSAP(t, label+"/scalar", rows, cols, cost, sense, resScalar, wantRat, false, tol)
+	})
 }
 
 // =============================================================================

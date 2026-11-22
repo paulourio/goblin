@@ -545,109 +545,631 @@ func computeMatchedObjective(m, n int, cost []float64, col4row []int, allowFast 
 	return computeMatchedObjectiveWide(m, n, cost, col4row)
 }
 
-func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int, obj float64) bool {
+// exactReducedCost computes c - ui - vj with exact sign for finite inputs via
+// four TwoSum steps, returning ok=false if any intermediate sum overflows.
+func exactReducedCost(c, ui, vj float64) (rc float64, ok bool) {
+	s1, e1 := twoSumAssign(c, -ui)
+	s2, e2 := twoSumAssign(s1, -vj)
+	q1, r1 := twoSumAssign(e1, e2)
+	q2, r2 := twoSumAssign(s2, q1)
+	if math.IsInf(s1, 0) || math.IsInf(s2, 0) || math.IsInf(q1, 0) || math.IsInf(q2, 0) {
+		return 0, false
+	}
+	return q2 + (r1 + r2), true
+}
+
+const (
+	cancelDualFiniteCap = 0x1p1016
+	cancelRowLimitCap   = 0x1p1020
+	exactIntDualCap     = 0x1p50
+)
+
+// exactSmallIntLimit returns the largest integer cost magnitude M such that every
+// intermediate sum/difference in Stage-1 Jonker-Volgenant / Bijsterbosch-Volgenant
+// (bounded by (142*n + 34)*M < (256*n + 256)*M <= 2^52 < 2^53) executes bit-exactly
+// in IEEE-754 float64 with zero rounding error.
+func exactSmallIntLimit(n int) float64 {
+	if n <= 0 {
+		return 0
+	}
+	return min(0x1p40, math.Floor(0x1p52/float64(256*n+256)))
+}
+
+func isExactSmallInt(c, intLim float64) bool {
+	return math.Abs(c) <= intLim && math.Trunc(c) == c
+}
+
+// probeExactSmallInt checks three representative entries (first, second, last) in O(1)
+// so floating-point cost matrices skip exact-integer tracking in ~1 ns.
+func probeExactSmallInt(cost []float64, intLim float64, negate bool) bool {
+	n := len(cost)
+	if n == 0 || !(0 <= intLim) {
+		return false
+	}
+	forbid := math.Inf(1)
+	if negate {
+		forbid = math.Inf(-1)
+	}
+	c0 := cost[0]
+	if c0 != forbid && !isExactSmallInt(c0, intLim) {
+		return false
+	}
+	if n > 1 {
+		c1 := cost[1]
+		if c1 != forbid && !isExactSmallInt(c1, intLim) {
+			return false
+		}
+		cl := cost[n-1]
+		if cl != forbid && !isExactSmallInt(cl, intLim) {
+			return false
+		}
+	}
+	return true
+}
+
+// verifyExactSmallIntStage1 verifies in O(m + n) that Stage 1 produced exact integer
+// potentials (u, v) and an exact zero-slack primal matching on a validated exact
+// small-integer cost matrix (all finite entries integers with |c| <= intLim).
+// Because every Stage-1 operation (+, -, <, <=) stays strictly below 2^52 and executes
+// bit-exactly in IEEE-754 float64, dual feasibility u[i] + v[j] <= c[i,j] holds over Q
+// identically and no O(m*n) cancellation scan is needed.
+func verifyExactSmallIntStage1(m, n int, normCost, u, v []float64, col4row, row4col []int, intLim float64) (float64, bool) {
+	for j, vj := range v[:n] {
+		if !(math.Abs(vj) <= exactIntDualCap) || math.Trunc(vj) != vj {
+			return 0, false
+		}
+		if m < n && (vj > 0 || (row4col[j] < 0 && vj != 0)) {
+			return 0, false
+		}
+	}
+	obj := 0.0
+	for i := range m {
+		mj := col4row[i]
+		if uint(mj) >= uint(n) || row4col[mj] != i {
+			return 0, false
+		}
+		ui := u[i]
+		if !(math.Abs(ui) <= exactIntDualCap) || math.Trunc(ui) != ui {
+			return 0, false
+		}
+		cm := normCost[i*n+mj]
+		if !(math.Abs(cm) <= intLim) || math.Trunc(cm) != cm {
+			return 0, false
+		}
+		if (cm-ui)-v[mj] != 0 {
+			return 0, false
+		}
+		obj += cm
+	}
+	return obj, true
+}
+
+// hasPotentialCancellation certifies exact primal optimality and dual feasibility of the
+// Stage-1 solution (col4row, u, v) over Q with zero heap allocations.
+//
+// For each row i, viol_i = max(0, max_j (u[i] + v[j] - c[i,j])) and
+// slack_i = max(0, c[i,col4row[i]] - u[i] - v[col4row[i]]). Shifting u'[i] = u[i] - viol_i
+// yields an exact dual-feasible potential with total duality gap G = sum_i (slack_i + viol_i).
+// A preliminary O(m + n) matched-edge scan establishes a conservative upper bound candThresh
+// on G, allowing a single fused matrix SIMD sweep (ScanNearTightMatrix64With) to gather all
+// near-tight DAG edges and violating cells into preallocated workspace scratch so Kahn
+// acyclicity and downward u[i] projection touch only O(m) cached candidates instead of
+// rescanning m*n entries.
+func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row, row4col []int, ws *Workspace, disableSIMD bool) bool {
 	if m <= 1 {
 		return false
 	}
-	minU, maxU := u[0], u[0]
-	maxPot := 0.0
-	minNonZeroPot := math.Inf(1)
-	for _, ui := range u[:m] {
-		if ui < minU {
-			minU = ui
+	vMaxAbs := 0.0
+	for j, vj := range v[:n] {
+		if math.IsNaN(vj) || math.IsInf(vj, 0) {
+			return true
 		}
-		if ui > maxU {
-			maxU = ui
+		av := math.Abs(vj)
+		if av > cancelDualFiniteCap {
+			return true
 		}
-		a := math.Abs(ui)
-		if a > maxPot {
-			maxPot = a
+		if av > vMaxAbs {
+			vMaxAbs = av
 		}
-		if a > 0 && a < minNonZeroPot {
-			minNonZeroPot = a
+		if m < n && (vj > 0 || (row4col[j] < 0 && vj != 0)) {
+			return true
 		}
 	}
-	minV, maxV := v[0], v[0]
-	for _, vj := range v[:n] {
-		if vj < minV {
-			minV = vj
-		}
-		if vj > maxV {
-			maxV = vj
-		}
-		a := math.Abs(vj)
-		if a > maxPot {
-			maxPot = a
-		}
-		if a > 0 && a < minNonZeroPot {
-			minNonZeroPot = a
-		}
-	}
-	if maxPot == 0 {
-		return false
-	}
-	oppSign := (maxU > 0 && minV < 0) || (minU < 0 && maxV > 0) ||
-		(maxU > 0 && minU < 0) || (maxV > 0 && minV < 0)
-	globalCancel := oppSign && math.Abs(obj) <= 0x1p-12*maxPot
-	suspect := minNonZeroPot <= 0x1p-30*maxPot || globalCancel
-	if !suspect {
+
+	rowViol := ws.d[:m]
+	clear(rowViol)
+	hubMinRC := ws.dQueue[:m]
+	if m < n {
+		posInf := math.Inf(1)
 		for i := range m {
-			j := col4row[i]
-			if uint(j) >= uint(n) {
-				continue
+			hubMinRC[i] = posInf
+		}
+	}
+
+	matchedGap := 0.0
+	maxPossViolSum := 0.0
+	anyGap := false
+	anyViol := false
+	candCap := 2 * m
+	violRow := ws.violRow[:candCap]
+	violCol := ws.violCol[:candCap]
+	violCount := 0
+	violOverflow := false
+
+	for i := range m {
+		mj := col4row[i]
+		if uint(mj) >= uint(n) {
+			return true
+		}
+		ui := u[i]
+		if math.IsNaN(ui) || math.IsInf(ui, 0) {
+			return true
+		}
+		aui := math.Abs(ui)
+		if aui > cancelDualFiniteCap {
+			return true
+		}
+		cm := normCost[i*n+mj]
+		if math.IsInf(cm, 0) || math.IsNaN(cm) || math.Abs(cm) > cancelDualFiniteCap {
+			return true
+		}
+		vmj := v[mj]
+		rcM, okM := exactReducedCost(cm, ui, vmj)
+		if !okM || math.IsNaN(rcM) {
+			return true
+		}
+		mScale := math.Abs(cm) + aui + math.Abs(vmj)
+		if math.Abs(cm) > 0 && aui+math.Abs(vmj) > 0x1p20*math.Abs(cm) {
+			return true
+		}
+		if math.Abs(rcM) > 16.0*0x1p-53*mScale {
+			return true
+		}
+		if rcM < 0 {
+			rowViol[i] = -rcM
+			anyViol = true
+			anyGap = true
+			if violCount < len(violRow) {
+				violRow[violCount] = i
+				violCol[violCount] = mj
+				violCount++
+			} else {
+				violOverflow = true
 			}
-			c := normCost[i*n+j]
+		} else if rcM > 0 {
+			anyGap = true
+			matchedGap += rcM * (1.0 + 0x1p-48)
+		}
+		maxPossViolSum += 33.0 * 0x1p-53 * (aui + vMaxAbs)
+	}
+
+	candThresh := 2.0*(matchedGap+maxPossViolSum) + 64.0*float64(m)*math.SmallestNonzeroFloat64
+	if math.IsInf(candThresh, 0) || math.IsNaN(candThresh) {
+		return true
+	}
+
+	rowLimits := ws.rowLimits[:m]
+	for i := range m {
+		rl := (candThresh+0x1p-48*(math.Abs(u[i])+vMaxAbs))*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+		if math.IsInf(rl, 0) || math.IsNaN(rl) || rl > cancelRowLimitCap {
+			return true
+		}
+		rowLimits[i] = rl
+	}
+
+	candRow := ws.candRow[:candCap]
+	candCol := ws.candCol[:candCap]
+	candRC := ws.candRC[:candCap]
+	candCount := 0
+	candOverflow := false
+	scanBuf := ws.scanBuf[:cancelScanBufLen]
+
+	scanCap := max(cancelScanBufLen, 4*m)
+	scanRow := ws.scanRow[:scanCap]
+	scanCol := ws.scanCol[:scanCap]
+	scanCnt, scanOverflow := simd.ScanNearTightMatrix64With(m, n, normCost, u, v, rowLimits, col4row, scanRow, scanCol, disableSIMD)
+
+	if !scanOverflow {
+		for k := range scanCnt {
+			i := scanRow[k]
+			j := scanCol[k]
 			ui := u[i]
+			aui := math.Abs(ui)
+			c := normCost[i*n+j]
 			vj := v[j]
-			ac := math.Abs(c)
-			auv := math.Abs(ui) + math.Abs(vj)
-			if ac > 0 && auv > 0x1p20*ac {
-				suspect = true
-				break
+			rc, ok := exactReducedCost(c, ui, vj)
+			if !ok || math.IsNaN(rc) {
+				return true
 			}
-			s1, e1 := twoSumAssign(c, -ui)
-			s2, e2 := twoSumAssign(s1, -vj)
-			if math.Abs(s2+(e1+e2)) > 64.0*0x1p-53*(ac+auv) {
-				suspect = true
-				break
+			if rc < 0 {
+				vMag := -rc
+				if vMag > 16.0*0x1p-53*(math.Abs(c)+aui+math.Abs(vj)) {
+					return true
+				}
+				if vMag > rowViol[i] {
+					rowViol[i] = vMag
+				}
+				anyViol = true
+				anyGap = true
+				if violCount < len(violRow) {
+					violRow[violCount] = i
+					violCol[violCount] = j
+					violCount++
+				} else {
+					violOverflow = true
+				}
+			}
+			if rc <= candThresh {
+				dst := row4col[j]
+				if dst < 0 {
+					if m == n {
+						return true
+					}
+					if rc < hubMinRC[i] {
+						hubMinRC[i] = rc
+					}
+				} else if dst == i {
+					return true
+				} else if candCount < len(candRow) {
+					candRow[candCount] = i
+					candCol[candCount] = dst
+					candRC[candCount] = rc
+					candCount++
+				} else {
+					candOverflow = true
+				}
+			}
+		}
+	} else {
+		var okScan bool
+		candCount, violCount, candOverflow, violOverflow, anyViol, okScan = scanCancelRowsFallback(
+			m, n, normCost, u, v, rowLimits, col4row, row4col,
+			rowViol, hubMinRC, candRow, candCol, candRC, violRow, violCol, scanBuf,
+			violCount, violOverflow, anyViol, candThresh, disableSIMD,
+		)
+		if !okScan {
+			return true
+		}
+		if anyViol {
+			anyGap = true
+		}
+	}
+	if !anyGap {
+		return false
+	}
+
+	gapBound := matchedGap
+	if anyViol {
+		for i := range m {
+			vi := rowViol[i]
+			if vi > 0 {
+				if vi < 0x1p-60*math.Abs(u[i]) {
+					return true
+				}
+				gapBound += vi * (1.0 + 0x1p-48)
 			}
 		}
 	}
-	if !suspect {
-		return false
+
+	gapBound = gapBound*(1.0+float64(m)*0x1p-48) + float64(m)*math.SmallestNonzeroFloat64
+	if math.IsInf(gapBound, 0) || math.IsNaN(gapBound) {
+		return true
 	}
-	for i := range m {
-		ui := u[i]
-		aui := math.Abs(ui)
-		rowSlice := normCost[i*n : (i+1)*n]
-		mj := col4row[i]
-		for j, c := range rowSlice {
-			if math.IsInf(c, 1) {
+
+	// Build near-tight residual graph H on vertices 0..V-1 (V = m for square, m+1 for rectangular)
+	// using preallocated workspace slices and test acyclicity with zero-allocation Kahn topo sort.
+	numVerts := m
+	if m < n {
+		numVerts = m + 1
+	}
+	edgeFrom := ws.freeRows[:m]
+	edgeTo := ws.auxRows[:m]
+	numEdges := 0
+	edgeThresh := gapBound*(1.0+0x1p-48) + 4.0*math.SmallestNonzeroFloat64
+	if edgeThresh > candThresh {
+		return true
+	}
+
+	if !candOverflow {
+		for k := range candCount {
+			src := candRow[k]
+			if candRC[k]+rowViol[src] > edgeThresh {
 				continue
 			}
-			vj := v[j]
-			s1, e1 := twoSumAssign(c, -ui)
-			s2, e2 := twoSumAssign(s1, -vj)
-			rc := s2 + (e1 + e2)
-			ac := math.Abs(c)
-			avj := math.Abs(vj)
-			auv := aui + avj
-			severeCancel := auv > 0x1p20*ac ||
-				(avj > 0 && ac+aui > 0x1p20*avj) ||
-				(aui > 0 && ac+avj > 0x1p20*aui)
-			if severeCancel || globalCancel {
-				if (j == mj && rc > 0) || rc < 0 {
-					return true
-				}
-			} else {
-				tol := 16.0 * 0x1p-53 * (ac + auv)
-				if (j == mj && rc > tol) || rc < -tol {
-					return true
+			if numEdges >= m {
+				return true
+			}
+			edgeFrom[numEdges] = src
+			edgeTo[numEdges] = candCol[k]
+			numEdges++
+		}
+		if m < n {
+			for i := range m {
+				if hubMinRC[i]+rowViol[i] <= edgeThresh {
+					if numEdges >= m {
+						return true
+					}
+					edgeFrom[numEdges] = i
+					edgeTo[numEdges] = m
+					numEdges++
 				}
 			}
+		}
+	} else {
+		var ok bool
+		numEdges, ok = buildCancelEdgesFallback(m, n, normCost, u, v, col4row, row4col, rowViol, edgeFrom, edgeTo, scanBuf, vMaxAbs, edgeThresh, disableSIMD)
+		if !ok {
+			return true
+		}
+	}
+
+	head := ws.pred[:numVerts]
+	inDeg := ws.remaining[:numVerts]
+	for idx := range numVerts {
+		head[idx] = -1
+		inDeg[idx] = 0
+	}
+	for e := range numEdges {
+		src := edgeFrom[e]
+		dst := edgeTo[e]
+		edgeFrom[e] = head[src]
+		head[src] = e
+		inDeg[dst]++
+	}
+	if m < n {
+		for k := range m {
+			if -v[col4row[k]] <= edgeThresh {
+				inDeg[k]++
+			}
+		}
+	}
+
+	qHead := -1
+	for idx := range numVerts {
+		if inDeg[idx] == 0 {
+			inDeg[idx] = -(qHead + 2)
+			qHead = idx
+		}
+	}
+	visited := 0
+	for qHead >= 0 {
+		cur := qHead
+		qHead = -inDeg[cur] - 2
+		visited++
+		if m < n && cur == m {
+			for k := range m {
+				if -v[col4row[k]] <= edgeThresh {
+					inDeg[k]--
+					if inDeg[k] == 0 {
+						inDeg[k] = -(qHead + 2)
+						qHead = k
+					}
+				}
+			}
+			continue
+		}
+		for e := head[cur]; e >= 0; e = edgeFrom[e] {
+			dst := edgeTo[e]
+			inDeg[dst]--
+			if inDeg[dst] == 0 {
+				inDeg[dst] = -(qHead + 2)
+				qHead = dst
+			}
+		}
+	}
+	if visited != numVerts {
+		return true
+	}
+
+	if anyViol {
+		if !violOverflow {
+			candUArr := ws.dQueue[:m]
+			steppedRow := ws.remaining[:m]
+			for i := range m {
+				vi := rowViol[i]
+				if vi > 0 {
+					candUArr[i] = clampFinite(u[i] - vi)
+					steppedRow[i] = 0
+				}
+			}
+			for k := range violCount {
+				i := violRow[k]
+				j := violCol[k]
+				c := normCost[i*n+j]
+				vj := v[j]
+				cu := candUArr[i]
+				rc, ok := exactReducedCost(c, cu, vj)
+				if !ok || math.IsNaN(rc) {
+					return true
+				}
+				if rc < 0 {
+					if steppedRow[i] != 0 {
+						return true
+					}
+					cu = clampFinite(math.Nextafter(cu, math.Inf(-1)))
+					candUArr[i] = cu
+					steppedRow[i] = 1
+					if rc2, ok2 := exactReducedCost(c, cu, vj); !ok2 || math.IsNaN(rc2) || rc2 < 0 {
+						return true
+					}
+				}
+			}
+			for i := range m {
+				if rowViol[i] > 0 {
+					u[i] = candUArr[i]
+				}
+			}
+		} else if !projectCancelViolFallback(m, n, normCost, u, v, rowViol, scanBuf, vMaxAbs, disableSIMD) {
+			return true
 		}
 	}
 	return false
+}
+
+//go:noinline
+func scanCancelRowsFallback(
+	m, n int,
+	normCost, u, v, rowLimits []float64,
+	col4row, row4col []int,
+	rowViol, hubMinRC []float64,
+	candRow, candCol []int,
+	candRC []float64,
+	violRow, violCol, scanBuf []int,
+	violCount int,
+	violOverflow, anyViol bool,
+	candThresh float64,
+	disableSIMD bool,
+) (candCount, outViolCount int, candOverflow, outViolOverflow, outAnyViol, ok bool) {
+	outViolCount = violCount
+	outViolOverflow = violOverflow
+	outAnyViol = anyViol
+	for i := range m {
+		ui := u[i]
+		aui := math.Abs(ui)
+		mj := col4row[i]
+		vi := rowViol[i]
+		rowLimit := rowLimits[i]
+		rowSlice := normCost[i*n : (i+1)*n]
+		for pos := 0; pos < n; {
+			next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, ui, rowLimit, scanBuf, disableSIMD)
+			for k := range cnt {
+				j := scanBuf[k]
+				if j == mj {
+					continue
+				}
+				c := rowSlice[j]
+				vj := v[j]
+				rc, okRC := exactReducedCost(c, ui, vj)
+				if !okRC || math.IsNaN(rc) {
+					return 0, 0, false, false, false, false
+				}
+				if rc < 0 {
+					vMag := -rc
+					if vMag > 16.0*0x1p-53*(math.Abs(c)+aui+math.Abs(vj)) {
+						return 0, 0, false, false, false, false
+					}
+					if vMag > vi {
+						vi = vMag
+					}
+					outAnyViol = true
+					if outViolCount < len(violRow) {
+						violRow[outViolCount] = i
+						violCol[outViolCount] = j
+						outViolCount++
+					} else {
+						outViolOverflow = true
+					}
+				}
+				if rc <= candThresh {
+					dst := row4col[j]
+					if dst < 0 {
+						if m == n {
+							return 0, 0, false, false, false, false
+						}
+						if rc < hubMinRC[i] {
+							hubMinRC[i] = rc
+						}
+					} else if dst == i {
+						return 0, 0, false, false, false, false
+					} else if candCount < len(candRow) {
+						candRow[candCount] = i
+						candCol[candCount] = dst
+						candRC[candCount] = rc
+						candCount++
+					} else {
+						candOverflow = true
+					}
+				}
+			}
+			pos = next
+		}
+		rowViol[i] = vi
+	}
+	return candCount, outViolCount, candOverflow, outViolOverflow, outAnyViol, true
+}
+
+//go:noinline
+func buildCancelEdgesFallback(m, n int, normCost, u, v []float64, col4row, row4col []int, rowViol []float64, edgeFrom, edgeTo, scanBuf []int, vMaxAbs, edgeThresh float64, disableSIMD bool) (int, bool) {
+	numEdges := 0
+	for i := range m {
+		ui := u[i]
+		aui := math.Abs(ui)
+		mj := col4row[i]
+		vi := rowViol[i]
+		addedHub := false
+		rowLimit := (edgeThresh+0x1p-48*(aui+vMaxAbs))*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+		rowSlice := normCost[i*n : (i+1)*n]
+		for pos := 0; pos < n; {
+			next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, ui, rowLimit, scanBuf, disableSIMD)
+			for k := range cnt {
+				j := scanBuf[k]
+				if j == mj {
+					continue
+				}
+				rc, ok := exactReducedCost(rowSlice[j], ui, v[j])
+				if !ok || math.IsNaN(rc) {
+					return 0, false
+				}
+				if rc+vi > edgeThresh {
+					continue
+				}
+				dst := row4col[j]
+				if dst < 0 {
+					if addedHub {
+						continue
+					}
+					addedHub = true
+					dst = m
+				}
+				if dst == i || numEdges >= m {
+					return 0, false
+				}
+				edgeFrom[numEdges] = i
+				edgeTo[numEdges] = dst
+				numEdges++
+			}
+			pos = next
+		}
+	}
+	return numEdges, true
+}
+
+//go:noinline
+func projectCancelViolFallback(m, n int, normCost, u, v, rowViol []float64, scanBuf []int, vMaxAbs float64, disableSIMD bool) bool {
+	for i := range m {
+		vi := rowViol[i]
+		if vi <= 0 {
+			continue
+		}
+		candU := clampFinite(u[i] - vi)
+		rowLimit := 0x1p-48*(math.Abs(candU)+vMaxAbs)*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+		rowSlice := normCost[i*n : (i+1)*n]
+		stepped := false
+		for pos := 0; pos < n; {
+			next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, candU, rowLimit, scanBuf, disableSIMD)
+			for k := range cnt {
+				j := scanBuf[k]
+				c := rowSlice[j]
+				rc, ok := exactReducedCost(c, candU, v[j])
+				if !ok || math.IsNaN(rc) {
+					return false
+				}
+				if rc < 0 {
+					if stepped {
+						return false
+					}
+					candU = clampFinite(math.Nextafter(candU, math.Inf(-1)))
+					stepped = true
+					if rc2, ok2 := exactReducedCost(c, candU, v[j]); !ok2 || math.IsNaN(rc2) || rc2 < 0 {
+						return false
+					}
+				}
+			}
+			pos = next
+		}
+		u[i] = candU
+	}
+	return true
 }
 
 func compareAssignmentObj(m, n int, candCol4Row, baseCol4Row []int, unscaledCost []float64) int {
@@ -696,32 +1218,42 @@ func downscaleSlice(orig, dst []float64, downExp int) bool {
 	return lostSub
 }
 
-func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (m, n int, normCost, unscaledCost []float64, transposed, lostSubnormal bool, scaleExp int, err error) {
+func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (m, n int, normCost, unscaledCost []float64, transposed, lostSubnormal, allSmallInt bool, scaleExp int, err error) {
 	negate := sense == Maximize
 	transposed = rows > cols
 	m = min(rows, cols)
 	n = max(rows, cols)
 	maxAbsFinite := 0.0
+	intLim := exactSmallIntLimit(n)
+	checkInt := probeExactSmallInt(cost[:rows*cols], intLim, negate)
 
 	if !transposed && !negate {
-		if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD) {
-			return m, n, cost, cost, false, false, 0, nil
+		if checkInt {
+			if ok, allInt := simd.AllAbsLECheckInt64With(cost, hugeCostThreshold, intLim, disableSIMD); ok {
+				return m, n, cost, cost, false, false, allInt, 0, nil
+			}
+		} else if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD) {
+			return m, n, cost, cost, false, false, false, 0, nil
 		}
+		allInt := checkInt
 		for _, c := range cost {
 			if !(math.Abs(c) <= hugeCostThreshold) {
 				if math.IsNaN(c) || math.IsInf(c, -1) {
-					return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
+					return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
 				}
 				if !math.IsInf(c, 1) {
+					allInt = false
 					if ac := math.Abs(c); ac > maxAbsFinite {
 						maxAbsFinite = ac
 					}
 				}
+			} else if allInt && !isExactSmallInt(c, intLim) {
+				allInt = false
 			}
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
 		if downExp == 0 {
-			return m, n, cost, cost, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(cost), 0, nil
+			return m, n, cost, cost, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(cost), allInt && !(maxAbsFinite > hugeCostThreshold), 0, nil
 		}
 		orig := cost
 		var dst []float64
@@ -732,7 +1264,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 			dst = ws.ensureWorkCost(rows * cols)
 		}
 		lostSub := downscaleSlice(orig, dst, downExp)
-		return m, n, dst, orig, false, lostSub, downExp, nil
+		return m, n, dst, orig, false, lostSub, false, downExp, nil
 	}
 
 	if !transposed && negate {
@@ -742,28 +1274,36 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		} else {
 			dst = ws.ensureWorkCost(rows * cols)
 		}
-		if simd.ValidateAndNegate64With(dst, cost, hugeCostThreshold, disableSIMD) {
-			return m, n, dst, dst, false, false, 0, nil
+		if checkInt {
+			if ok, allInt := simd.ValidateAndNegateCheckInt64With(dst, cost, hugeCostThreshold, intLim, disableSIMD); ok {
+				return m, n, dst, dst, false, false, allInt, 0, nil
+			}
+		} else if simd.ValidateAndNegate64With(dst, cost, hugeCostThreshold, disableSIMD) {
+			return m, n, dst, dst, false, false, false, 0, nil
 		}
+		allInt := checkInt
 		for _, nc := range dst {
 			if !(math.Abs(nc) <= hugeCostThreshold) {
 				if math.IsNaN(nc) || math.IsInf(nc, -1) {
-					return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
+					return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
 				}
 				if !math.IsInf(nc, 1) {
+					allInt = false
 					if ac := math.Abs(nc); ac > maxAbsFinite {
 						maxAbsFinite = ac
 					}
 				}
+			} else if allInt && !isExactSmallInt(nc, intLim) {
+				allInt = false
 			}
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
 		if downExp > 0 {
 			orig := slices.Clone(dst)
 			lostSub := downscaleSlice(orig, dst, downExp)
-			return m, n, dst, orig, false, lostSub, downExp, nil
+			return m, n, dst, orig, false, lostSub, false, downExp, nil
 		}
-		return m, n, dst, dst, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), 0, nil
+		return m, n, dst, dst, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), allInt && !(maxAbsFinite > hugeCostThreshold), 0, nil
 	}
 
 	// Transposed (rows > cols): m = cols, n = rows.
@@ -783,11 +1323,17 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		dst = ws.ensureWorkCost(total)
 	}
 
-	if simd.AllAbsLE64With(src, hugeCostThreshold, disableSIMD) {
+	if checkInt {
+		if ok, allInt := simd.AllAbsLECheckInt64With(src, hugeCostThreshold, intLim, disableSIMD); ok {
+			simd.Transpose64With(dst, src, rows, cols, negate, disableSIMD)
+			return m, n, dst, dst, true, false, allInt, 0, nil
+		}
+	} else if simd.AllAbsLE64With(src, hugeCostThreshold, disableSIMD) {
 		simd.Transpose64With(dst, src, rows, cols, negate, disableSIMD)
-		return m, n, dst, dst, true, false, 0, nil
+		return m, n, dst, dst, true, false, false, 0, nil
 	}
 
+	allInt := checkInt
 	const tile = 16
 	if negate {
 		for r0 := 0; r0 < rows; r0 += tile {
@@ -800,13 +1346,16 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 						val := rowSlice[c]
 						if !(math.Abs(val) <= hugeCostThreshold) {
 							if math.IsNaN(val) || math.IsInf(val, 1) {
-								return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
+								return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
 							}
 							if !math.IsInf(val, -1) {
+								allInt = false
 								if av := math.Abs(val); av > maxAbsFinite {
 									maxAbsFinite = av
 								}
 							}
+						} else if allInt && !isExactSmallInt(val, intLim) {
+							allInt = false
 						}
 						dst[c*rows+r] = 0.0 - val
 					}
@@ -824,13 +1373,16 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 						val := rowSlice[c]
 						if !(math.Abs(val) <= hugeCostThreshold) {
 							if math.IsNaN(val) || math.IsInf(val, -1) {
-								return 0, 0, nil, nil, false, false, 0, ErrInvalidCost
+								return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
 							}
 							if !math.IsInf(val, 1) {
+								allInt = false
 								if av := math.Abs(val); av > maxAbsFinite {
 									maxAbsFinite = av
 								}
 							}
+						} else if allInt && !isExactSmallInt(val, intLim) {
+							allInt = false
 						}
 						dst[c*rows+r] = val
 					}
@@ -842,9 +1394,9 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 	if downExp > 0 {
 		orig := slices.Clone(dst)
 		lostSub := downscaleSlice(orig, dst, downExp)
-		return m, n, dst, orig, true, lostSub, downExp, nil
+		return m, n, dst, orig, true, lostSub, false, downExp, nil
 	}
-	return m, n, dst, dst, true, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), 0, nil
+	return m, n, dst, dst, true, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), allInt && !(maxAbsFinite > hugeCostThreshold), 0, nil
 }
 
 func solveWithWorkspace(ctx context.Context, rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, cfg Options) (Result, error) {
@@ -881,23 +1433,50 @@ func solveIntoPreallocated(ctx context.Context, rows, cols int, cost []float64, 
 	return obj, err
 }
 
-func colReduceValidateSquare(n int, cost, v []float64, row4col []int, disableSIMD bool, done <-chan struct{}) (bool, error) {
-	if done == nil || n <= 256 {
-		return simd.ColReduceValidateRows64With(n, 0, n, cost, v, row4col, hugeCostThreshold, disableSIMD), nil
+func colReduceValidateSquare(n int, cost, v []float64, row4col []int, intLim float64, checkInt, disableSIMD bool, done <-chan struct{}) (ok, allInt bool, err error) {
+	if !checkInt {
+		if done == nil || n <= 256 {
+			return simd.ColReduceValidateRows64With(n, 0, n, cost, v, row4col, hugeCostThreshold, disableSIMD), false, nil
+		}
+		for r0 := 0; r0 < n; r0 += 256 {
+			if r0 > 0 {
+				select {
+				case <-done:
+					return false, false, errContextCanceled
+				default:
+				}
+			}
+			if !simd.ColReduceValidateRows64With(n, r0, min(n, r0+256), cost, v, row4col, hugeCostThreshold, disableSIMD) {
+				return false, false, nil
+			}
+		}
+		return true, false, nil
 	}
+	if done == nil || n <= 256 {
+		ok, allInt = simd.ColReduceValidateCheckIntRows64With(n, 0, n, cost, v, row4col, hugeCostThreshold, intLim, disableSIMD)
+		return ok, allInt, nil
+	}
+	allInt = true
 	for r0 := 0; r0 < n; r0 += 256 {
 		if r0 > 0 {
 			select {
 			case <-done:
-				return false, errContextCanceled
+				return false, false, errContextCanceled
 			default:
 			}
 		}
-		if !simd.ColReduceValidateRows64With(n, r0, min(n, r0+256), cost, v, row4col, hugeCostThreshold, disableSIMD) {
-			return false, nil
+		var chunkOK, chunkInt bool
+		if allInt {
+			chunkOK, chunkInt = simd.ColReduceValidateCheckIntRows64With(n, r0, min(n, r0+256), cost, v, row4col, hugeCostThreshold, intLim, disableSIMD)
+			allInt = chunkInt
+		} else {
+			chunkOK = simd.ColReduceValidateRows64With(n, r0, min(n, r0+256), cost, v, row4col, hugeCostThreshold, disableSIMD)
+		}
+		if !chunkOK {
+			return false, false, nil
 		}
 	}
-	return true, nil
+	return true, allInt, nil
 }
 
 const (
@@ -1015,6 +1594,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		normCost, unscaledCost []float64
 		transposed             bool
 		lostSubnormal          bool
+		allSmallInt            bool
 		scaleExp               int
 		colReduced             bool
 		err                    error
@@ -1023,7 +1603,9 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	if rows == cols && rows > 1 && sense == Minimize {
 		m, n = rows, cols
 		ws.ensure(m, n)
-		ok, crErr := colReduceValidateSquare(n, cost, ws.v[:n], ws.row4col[:n], cfg.DisableSIMD, done)
+		intLim := exactSmallIntLimit(n)
+		checkInt := probeExactSmallInt(cost[:n*n], intLim, false)
+		ok, allInt, crErr := colReduceValidateSquare(n, cost, ws.v[:n], ws.row4col[:n], intLim, checkInt, cfg.DisableSIMD, done)
 		if crErr != nil {
 			if errors.Is(crErr, errContextCanceled) {
 				return 0, false, ctx.Err()
@@ -1034,14 +1616,15 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 			normCost = cost
 			unscaledCost = cost
 			colReduced = true
+			allSmallInt = allInt
 		} else {
-			m, n, normCost, unscaledCost, transposed, lostSubnormal, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+			m, n, normCost, unscaledCost, transposed, lostSubnormal, allSmallInt, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
 			if err != nil {
 				return 0, false, err
 			}
 		}
 	} else {
-		m, n, normCost, unscaledCost, transposed, lostSubnormal, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+		m, n, normCost, unscaledCost, transposed, lostSubnormal, allSmallInt, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
 		if err != nil {
 			return 0, false, err
 		}
@@ -1089,8 +1672,21 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		return 0, transposed, err
 	}
 
-	normObj := computeMatchedObjective(m, n, normCost, col4row, scaleExp == 0)
-	hasPotCancel := hasPotentialCancellation(m, n, normCost, u, v, col4row, normObj)
+	var (
+		normObj      float64
+		hasPotCancel bool
+	)
+	if scaleExp == 0 && !lostSubnormal && allSmallInt {
+		if exactObj, ok := verifyExactSmallIntStage1(m, n, normCost, u, v, col4row, row4col, exactSmallIntLimit(n)); ok {
+			normObj = exactObj
+		} else {
+			normObj = computeMatchedObjective(m, n, normCost, col4row, true)
+			hasPotCancel = hasPotentialCancellation(m, n, normCost, u, v, col4row, row4col, ws, cfg.DisableSIMD)
+		}
+	} else {
+		normObj = computeMatchedObjective(m, n, normCost, col4row, scaleExp == 0)
+		hasPotCancel = hasPotentialCancellation(m, n, normCost, u, v, col4row, row4col, ws, cfg.DisableSIMD)
+	}
 	var (
 		st             stage2State
 		stage2Accepted bool
@@ -1127,7 +1723,7 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	}
 
 	if scaleExp > 0 || st.numDualPasses > 0 || hasPotCancel {
-		finalizeStage2Duals(m, n, scaleExp, unscaledCost, col4row, row4col, u, v, &st, hasPotCancel)
+		finalizeStage2Duals(m, n, scaleExp, unscaledCost, col4row, row4col, u, v, &st, hasPotCancel, ws, cfg.DisableSIMD)
 	}
 
 	obj := totalMin
@@ -1525,7 +2121,7 @@ func runStage2Refinement(
 	return st, stage2Accepted, nil
 }
 
-func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, row4col []int, u, v []float64, st *stage2State, hasPotCancel bool) {
+func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, row4col []int, u, v []float64, st *stage2State, hasPotCancel bool, ws *Workspace, disableSIMD bool) {
 	if scaleExp > 0 || st.numDualPasses > 0 {
 		anyClamped := false
 		if st.numDualPasses > 0 {
@@ -1662,16 +2258,39 @@ func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, ro
 				u[i] = ui
 			}
 		} else if st.numDualPasses > 0 || hasPotCancel {
-			polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v)
+			polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v, ws, disableSIMD)
 		}
 	} else if hasPotCancel {
-		polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v)
+		polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v, ws, disableSIMD)
 	}
 }
 
-func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int, u, v []float64) {
+func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int, u, v []float64, ws *Workspace, disableSIMD bool) {
 	var pi []float64
 	var rootToRow []float64
+	var scanBuf []int
+	if ws != nil && len(ws.scanBuf) > 0 {
+		scanBuf = ws.scanBuf
+	} else {
+		var stackBuf [cancelScanBufLen]int
+		scanBuf = stackBuf[:]
+	}
+	vFilterBound := func() (float64, bool) {
+		vMax := 0.0
+		for _, vj := range v[:n] {
+			if math.IsNaN(vj) || math.IsInf(vj, 0) {
+				return 0, false
+			}
+			av := math.Abs(vj)
+			if av > cancelDualFiniteCap {
+				return 0, false
+			}
+			if av > vMax {
+				vMax = av
+			}
+		}
+		return vMax, true
+	}
 	for range 3 {
 		for i := range m {
 			j := col4row[i]
@@ -1682,26 +2301,43 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 			if math.IsInf(cij, 0) || math.IsNaN(cij) {
 				return
 			}
-			if lim := cij - v[j]; !math.IsNaN(lim) && !math.IsInf(lim, 0) {
-				s, e := twoSumAssign(u[i], v[j])
-				if math.Abs((cij-s)-e) > 4.0*0x1p-53*(math.Abs(cij)+math.Abs(u[i])+math.Abs(v[j])) {
+			if lim := cij - v[j]; !math.IsNaN(lim) && !math.IsInf(lim, 0) && lim != u[i] {
+				rcCur, okCur := exactReducedCost(cij, u[i], v[j])
+				rcLim, okLim := exactReducedCost(cij, lim, v[j])
+				if !okCur || (okLim && math.Abs(rcLim) < math.Abs(rcCur)) {
 					u[i] = lim
 				}
 			}
 		}
+		vMaxAbs, canFilter := vFilterBound()
 		needPolish := false
 		for i := range m {
 			ui := u[i]
 			rowSlice := unscaledCost[i*n : (i+1)*n]
-			for j, cij := range rowSlice {
-				if math.IsInf(cij, 1) {
-					continue
+			if canFilter && !math.IsNaN(ui) && !math.IsInf(ui, 0) && math.Abs(ui) <= cancelDualFiniteCap {
+				rowLimit := 0x1p-48*(math.Abs(ui)+vMaxAbs)*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+				for pos := 0; pos < n && !needPolish; {
+					next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, ui, rowLimit, scanBuf, disableSIMD)
+					for k := range cnt {
+						j := scanBuf[k]
+						rc, ok := exactReducedCost(rowSlice[j], ui, v[j])
+						if !ok || math.IsNaN(rc) || rc < 0 {
+							needPolish = true
+							break
+						}
+					}
+					pos = next
 				}
-				s, e := twoSumAssign(ui, v[j])
-				tol := max(1e-320, 16.0*0x1p-53*(math.Abs(cij)+math.Abs(ui)+math.Abs(v[j])))
-				if (s-cij)+e > tol {
-					needPolish = true
-					break
+			} else {
+				for j, cij := range rowSlice {
+					if math.IsInf(cij, 1) {
+						continue
+					}
+					rc, ok := exactReducedCost(cij, ui, v[j])
+					if !ok || rc < 0 {
+						needPolish = true
+						break
+					}
 				}
 			}
 			if needPolish {
@@ -1771,9 +2407,11 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 					if math.IsInf(cij, 1) {
 						continue
 					}
-					s1, e1 := twoSumAssign(cij, -u[i])
-					s2, e2 := twoSumAssign(s1, -vj)
-					cand := pk + (s2 + (e1 + e2))
+					rc, ok := exactReducedCost(cij, u[i], vj)
+					if !ok {
+						continue
+					}
+					cand := pk + rc
 					if !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
 						pi[i] = cand
 						changed = true
@@ -1795,14 +2433,67 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 				continue
 			}
 			j := col4row[i]
-			newU := clampFinite(u[i] + delta)
-			newV := clampFinite(v[j] - delta)
+			uSum, uErr := twoSumAssign(u[i], delta)
+			newU := clampFinite(uSum)
+			if uErr < 0 && math.Abs(uErr) >= 0x1p-60*math.Abs(newU) && !math.IsInf(uSum, 0) {
+				newU = clampFinite(math.Nextafter(newU, math.Inf(-1)))
+			}
+			vSum, vErr := twoSumAssign(v[j], -delta)
+			newV := clampFinite(vSum)
+			if vErr < 0 && math.Abs(vErr) >= 0x1p-60*math.Abs(newV) && !math.IsInf(vSum, 0) {
+				newV = clampFinite(math.Nextafter(newV, math.Inf(-1)))
+			}
 			if m < n && newV > 0 {
 				newV = 0
 				newU = clampFinite(unscaledCost[i*n+j])
 			}
 			u[i] = newU
 			v[j] = newV
+		}
+	}
+	// Final single-ULP downward projection when residual dual violation is on u[i]'s ULP scale
+	// (avoids touching extreme exponent spreads where viol << 2^-60 * |u[i]|).
+	vMaxAbs, canFilter := vFilterBound()
+	for i := range m {
+		ui := u[i]
+		if math.IsNaN(ui) || math.IsInf(ui, 0) {
+			continue
+		}
+		worstViol := 0.0
+		worstJ := -1
+		rowSlice := unscaledCost[i*n : (i+1)*n]
+		if canFilter && math.Abs(ui) <= cancelDualFiniteCap {
+			rowLimit := 0x1p-48*(math.Abs(ui)+vMaxAbs)*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+			for pos := 0; pos < n; {
+				next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, ui, rowLimit, scanBuf, disableSIMD)
+				for k := range cnt {
+					j := scanBuf[k]
+					rc, ok := exactReducedCost(rowSlice[j], ui, v[j])
+					if ok && rc < 0 && -rc > worstViol {
+						worstViol = -rc
+						worstJ = j
+					}
+				}
+				pos = next
+			}
+		} else {
+			for j, cij := range rowSlice {
+				if math.IsInf(cij, 1) {
+					continue
+				}
+				rc, ok := exactReducedCost(cij, ui, v[j])
+				if ok && rc < 0 && -rc > worstViol {
+					worstViol = -rc
+					worstJ = j
+				}
+			}
+		}
+		if worstJ >= 0 && worstViol >= 0x1p-60*math.Abs(ui) {
+			candU := clampFinite(ui - worstViol)
+			if rc2, ok2 := exactReducedCost(rowSlice[worstJ], candU, v[worstJ]); ok2 && rc2 < 0 {
+				candU = clampFinite(math.Nextafter(candU, math.Inf(-1)))
+			}
+			u[i] = candU
 		}
 	}
 }

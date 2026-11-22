@@ -34,10 +34,21 @@ type Workspace struct {
 	closedStamp []int32
 	heapCol     []int32
 	heapDist    []float64
+	candRow     []int
+	candCol     []int
+	candRC      []float64
+	violRow     []int
+	violCol     []int
+	rowLimits   []float64
+	scanRow     []int
+	scanCol     []int
+	scanBuf     []int
 	stamp       int32
 	opts        Options
 	inPool      atomic.Bool
 }
+
+const cancelScanBufLen = 64
 
 var workspacePool = sync.Pool{
 	New: func() any {
@@ -52,6 +63,15 @@ var workspacePool = sync.Pool{
 			remaining: make([]int, 0, defaultDimCap),
 			freeRows:  make([]int, 0, defaultDimCap),
 			auxRows:   make([]int, 0, defaultDimCap),
+			candRow:   make([]int, 0, 2*defaultDimCap),
+			candCol:   make([]int, 0, 2*defaultDimCap),
+			candRC:    make([]float64, 0, 2*defaultDimCap),
+			violRow:   make([]int, 0, 2*defaultDimCap),
+			violCol:   make([]int, 0, 2*defaultDimCap),
+			rowLimits: make([]float64, 0, defaultDimCap),
+			scanRow:   make([]int, 0, 4*defaultDimCap),
+			scanCol:   make([]int, 0, 4*defaultDimCap),
+			scanBuf:   make([]int, cancelScanBufLen),
 		}
 	},
 }
@@ -125,6 +145,17 @@ func (ws *Workspace) ensure(m, n int) {
 	ws.remaining = growInt(ws.remaining, n)
 	ws.freeRows = growInt(ws.freeRows, m)
 	ws.auxRows = growInt(ws.auxRows, m)
+	candCap := 2 * m
+	ws.candRow = growInt(ws.candRow, candCap)
+	ws.candCol = growInt(ws.candCol, candCap)
+	ws.candRC = growFloat64(ws.candRC, candCap)
+	ws.violRow = growInt(ws.violRow, candCap)
+	ws.violCol = growInt(ws.violCol, candCap)
+	ws.rowLimits = growFloat64(ws.rowLimits, m)
+	scanCap := max(cancelScanBufLen, 4*m)
+	ws.scanRow = growInt(ws.scanRow, scanCap)
+	ws.scanCol = growInt(ws.scanCol, scanCap)
+	ws.scanBuf = growInt(ws.scanBuf, cancelScanBufLen)
 }
 
 func (ws *Workspace) ensureWorkCost(size int) []float64 {

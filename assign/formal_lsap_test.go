@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -528,4 +529,308 @@ func TestFormalLSAPVerification(t *testing.T) {
 			t.Fatalf("malformed JSON unexpectedly accepted:\n%s", outMal)
 		}
 	})
+}
+
+func TestHasPotentialCancellationFallbackAndZeroAlloc(t *testing.T) {
+	// 1. Constant/tied matrix with zero duality gap saturates the Pass-1 candidate cache
+	//    while remaining certified without Stage 2 and with zero heap allocations.
+	const n = 40
+	cost := make([]float64, n*n)
+	u := make([]float64, n)
+	v := make([]float64, n)
+	col4row := make([]int, n)
+	row4col := make([]int, n)
+	for i := range n {
+		col4row[i] = i
+		row4col[i] = i
+		u[i] = 1.0
+		v[i] = 2.0
+		for j := range n {
+			cost[i*n+j] = 3.0
+		}
+	}
+	ws := AcquireWorkspace(n, n)
+	defer ReleaseWorkspace(ws)
+	for _, dis := range []bool{false, true} {
+		if hasPotentialCancellation(n, n, cost, u, v, col4row, row4col, ws, dis) {
+			t.Fatalf("disableSIMD=%v: exact tied matrix falsely flagged for Stage 2", dis)
+		}
+	}
+	allocs := testing.AllocsPerRun(50, func() {
+		if hasPotentialCancellation(n, n, cost, u, v, col4row, row4col, ws, false) {
+			t.Fatal("unexpected Stage 2 flag")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("hasPotentialCancellation allocated %.1f times/run, want 0", allocs)
+	}
+
+	// 2. Violation-overflow fallback (projectCancelViolFallback): inject > 2*n tiny 1-ULP
+	//    violations on an acyclic upper-triangular tight structure and verify parity & feasibility.
+	cost2 := make([]float64, n*n)
+	u2 := make([]float64, n)
+	v2 := make([]float64, n)
+	for i := range n {
+		u2[i] = 1.0
+		v2[i] = 1.0
+		for j := range n {
+			switch {
+			case i == j:
+				cost2[i*n+j] = 2.0
+			case j > i:
+				cost2[i*n+j] = math.Nextafter(2.0, 0)
+			default:
+				cost2[i*n+j] = 10.0
+			}
+		}
+	}
+	for _, dis := range []bool{false, true} {
+		uTry := slices.Clone(u2)
+		vTry := slices.Clone(v2)
+		got := hasPotentialCancellation(n, n, cost2, uTry, vTry, col4row, row4col, ws, dis)
+		if !got {
+			for i := range n {
+				for j := range n {
+					rc, ok := exactReducedCost(cost2[i*n+j], uTry[i], vTry[j])
+					if !ok || rc < 0 {
+						t.Fatalf("disableSIMD=%v: projected dual infeasible at (%d,%d): rc=%g ok=%v", dis, i, j, rc, ok)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestExactSmallIntFastPathAndNegativeControls(t *testing.T) {
+	verifyExactIntStrongDuality := func(t *testing.T, rows, cols int, cost []float64, sense Sense, res Result) {
+		t.Helper()
+		k := min(rows, cols)
+		if len(res.RowInd) != k || len(res.ColInd) != k {
+			t.Fatalf("matching len (%d,%d), want %d", len(res.RowInd), len(res.ColInd), k)
+		}
+		if len(res.U) != rows || len(res.V) != cols {
+			t.Fatalf("dual len (%d,%d), want (%d,%d)", len(res.U), len(res.V), rows, cols)
+		}
+		matchedRow := make([]bool, rows)
+		matchedCol := make([]bool, cols)
+		objSum := 0.0
+		sign := 1.0
+		if sense == Maximize {
+			sign = -1.0
+		}
+		for idx := range k {
+			r, c := res.RowInd[idx], res.ColInd[idx]
+			if r < 0 || r >= rows || c < 0 || c >= cols || matchedRow[r] || matchedCol[c] {
+				t.Fatalf("invalid matching pair (%d,%d)", r, c)
+			}
+			matchedRow[r] = true
+			matchedCol[c] = true
+			val := cost[r*cols+c]
+			objSum += val
+			if rc, ok := exactReducedCost(sign*val, res.U[r], res.V[c]); !ok || rc != 0 {
+				t.Fatalf("matched pair (%d,%d) nonzero slack rc=%g ok=%v", r, c, rc, ok)
+			}
+		}
+		if res.Objective != objSum {
+			t.Fatalf("objective=%g, want exact %g", res.Objective, objSum)
+		}
+		for r := range rows {
+			if rows > cols {
+				if res.U[r] > 0 || (!matchedRow[r] && res.U[r] != 0) {
+					t.Fatalf("tall unassigned/sign violation u[%d]=%g matched=%v", r, res.U[r], matchedRow[r])
+				}
+			}
+			for c := range cols {
+				val := cost[r*cols+c]
+				if (sense == Minimize && math.IsInf(val, 1)) || (sense == Maximize && math.IsInf(val, -1)) {
+					continue
+				}
+				if rc, ok := exactReducedCost(sign*val, res.U[r], res.V[c]); !ok || rc < 0 {
+					t.Fatalf("dual infeasible at (%d,%d): rc=%g ok=%v", r, c, rc, ok)
+				}
+			}
+		}
+		if rows < cols {
+			for c := range cols {
+				if res.V[c] > 0 || (!matchedCol[c] && res.V[c] != 0) {
+					t.Fatalf("wide unassigned/sign violation v[%d]=%g matched=%v", c, res.V[c], matchedCol[c])
+				}
+			}
+		}
+	}
+
+	rng := rand.New(rand.NewPCG(9001, 1337))
+	// 1. Positive controls: square tied, sparse +Inf, wide, tall, maximize (including -Inf).
+	type caseSpec struct {
+		name  string
+		rows  int
+		cols  int
+		sense Sense
+		build func() []float64
+	}
+	cases := []caseSpec{
+		{
+			name: "square_tied_36x36_min", rows: 36, cols: 36, sense: Minimize,
+			build: func() []float64 {
+				c := make([]float64, 36*36)
+				for i := range c {
+					c[i] = float64(rng.IntN(7) - 3)
+				}
+				return c
+			},
+		},
+		{
+			name: "square_sparse_inf_24x24_min", rows: 24, cols: 24, sense: Minimize,
+			build: func() []float64 {
+				c := make([]float64, 24*24)
+				for i := range c {
+					c[i] = math.Inf(1)
+				}
+				for i := range 24 {
+					c[i*24+i] = float64((i % 5) + 1)
+					c[i*24+((i+1)%24)] = float64(((i + 2) % 5) + 1)
+					c[i*24+((i+7)%24)] = float64(((i + 3) % 7) - 2)
+				}
+				return c
+			},
+		},
+		{
+			name: "wide_12x40_min", rows: 12, cols: 40, sense: Minimize,
+			build: func() []float64 {
+				c := make([]float64, 12*40)
+				for i := range c {
+					c[i] = float64(rng.IntN(25) - 12)
+				}
+				return c
+			},
+		},
+		{
+			name: "tall_40x12_max_negInf", rows: 40, cols: 12, sense: Maximize,
+			build: func() []float64 {
+				c := make([]float64, 40*12)
+				for i := range c {
+					c[i] = float64(rng.IntN(30) - 10)
+				}
+				for i := range 20 {
+					c[(i+15)*12+(i%12)] = math.Inf(-1)
+				}
+				return c
+			},
+		},
+		{
+			name: "square_36x36_max", rows: 36, cols: 36, sense: Maximize,
+			build: func() []float64 {
+				c := make([]float64, 36*36)
+				for i := range c {
+					c[i] = float64(rng.IntN(100) - 50)
+				}
+				return c
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		cost := tc.build()
+		ws := AcquireWorkspace(tc.rows, tc.cols)
+		for _, dis := range []bool{false, true} {
+			res, err := LinearSumFlat(t.Context(), tc.rows, tc.cols, cost, tc.sense, WithSIMD(!dis))
+			if err != nil {
+				t.Fatalf("%s (disableSIMD=%v): LinearSumFlat failed: %v", tc.name, dis, err)
+			}
+			verifyExactIntStrongDuality(t, tc.rows, tc.cols, cost, tc.sense, res)
+		}
+		rowInd := make([]int, min(tc.rows, tc.cols))
+		colInd := make([]int, min(tc.rows, tc.cols))
+		// Warm workspace and confirm zero allocations on SolveInto.
+		if _, err := SolveInto(t.Context(), tc.rows, tc.cols, cost, tc.sense, rowInd, colInd, ws); err != nil {
+			t.Fatalf("%s warm SolveInto failed: %v", tc.name, err)
+		}
+		allocs := testing.AllocsPerRun(50, func() {
+			if _, err := SolveInto(t.Context(), tc.rows, tc.cols, cost, tc.sense, rowInd, colInd, ws); err != nil {
+				t.Fatalf("SolveInto failed: %v", err)
+			}
+		})
+		if allocs != 0 {
+			t.Fatalf("%s SolveInto allocated %.1f times/run, want 0", tc.name, allocs)
+		}
+		ReleaseWorkspace(ws)
+	}
+
+	// 2. Negative controls: hidden fractional entry and out-of-range integer must set allSmallInt=false.
+	ws := AcquireWorkspace(40, 40)
+	defer ReleaseWorkspace(ws)
+	n := 36
+	intLim := exactSmallIntLimit(n)
+	hiddenFrac := make([]float64, n*n)
+	for i := range hiddenFrac {
+		hiddenFrac[i] = float64((i % 11) - 5)
+	}
+	hiddenFrac[(n/2)*n+(n/2)] = 1.5
+	for _, dis := range []bool{false, true} {
+		ok, allInt, err := colReduceValidateSquare(n, hiddenFrac, ws.v[:n], ws.row4col[:n], intLim, true, dis, nil)
+		if err != nil || !ok || allInt {
+			t.Fatalf("hiddenFrac square (dis=%v): got ok=%v allInt=%v err=%v, want ok=true allInt=false", dis, ok, allInt, err)
+		}
+		// Place fractional entry inside 12*40 window and check wide & tall maximize paths.
+		rectFrac := slices.Clone(hiddenFrac[:12*40])
+		rectFrac[6*40+21] = -0.25
+		_, _, _, _, _, _, allIntRect, _, err := validateAndPrepareCost(12, 40, rectFrac, false, Minimize, ws, dis)
+		if err != nil || allIntRect {
+			t.Fatalf("hiddenFrac wide (dis=%v): got allInt=%v err=%v, want false", dis, allIntRect, err)
+		}
+		_, _, _, _, _, _, allIntTall, _, err := validateAndPrepareCost(40, 12, rectFrac, false, Maximize, ws, dis)
+		if err != nil || allIntTall {
+			t.Fatalf("hiddenFrac tall max (dis=%v): got allInt=%v err=%v, want false", dis, allIntTall, err)
+		}
+	}
+
+	// Out-of-range exact integer (Bug #5 scale 1e15+1 > exactSmallIntLimit) must NOT set allSmallInt=true.
+	bigIntMat := make([]float64, n*n)
+	for i := range bigIntMat {
+		bigIntMat[i] = 1e15 + float64(i%3)
+	}
+	if probeExactSmallInt(bigIntMat, intLim, false) {
+		t.Fatalf("probeExactSmallInt unexpectedly accepted 1e15 > intLim=%g", intLim)
+	}
+	bigHidden := make([]float64, n*n)
+	for i := range bigHidden {
+		bigHidden[i] = float64(i % 7)
+	}
+	bigHidden[(n/2)*n+5] = intLim + 1
+	if ok, allInt, err := colReduceValidateSquare(n, bigHidden, ws.v[:n], ws.row4col[:n], intLim, true, false, nil); err != nil || !ok || allInt {
+		t.Fatalf("bigHidden: got ok=%v allInt=%v err=%v, want ok=true allInt=false", ok, allInt, err)
+	}
+
+	// 3. Direct negative controls on verifyExactSmallIntStage1.
+	c2 := []float64{1, 4, 2, 3}
+	u2 := []float64{1, 2}
+	v2 := []float64{0, 1}
+	c4r2 := []int{0, 1}
+	r4c2 := []int{0, 1}
+	if obj, ok := verifyExactSmallIntStage1(2, 2, c2, u2, v2, c4r2, r4c2, 100); !ok || obj != 4 {
+		t.Fatalf("verifyExactSmallIntStage1 valid 2x2: got (%g,%v), want (4,true)", obj, ok)
+	}
+	if _, ok := verifyExactSmallIntStage1(2, 2, c2, []float64{1.5, 2}, v2, c4r2, r4c2, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted non-integer u")
+	}
+	if _, ok := verifyExactSmallIntStage1(2, 2, c2, u2, []float64{0, 1.25}, c4r2, r4c2, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted non-integer v")
+	}
+	if _, ok := verifyExactSmallIntStage1(2, 2, c2, []float64{0x1p51, 2}, []float64{1 - 0x1p51, 1}, c4r2, r4c2, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted |u| > exactIntDualCap")
+	}
+	if _, ok := verifyExactSmallIntStage1(2, 2, c2, []float64{0, 2}, v2, c4r2, r4c2, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted nonzero matched slack")
+	}
+	if _, ok := verifyExactSmallIntStage1(2, 2, c2, u2, v2, []int{0, 0}, r4c2, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted non-injective col4row")
+	}
+	// Rectangular unassigned column with nonzero v or positive v must be rejected.
+	cRect := []float64{1, 2, 3, 4, 5, 6}
+	if _, ok := verifyExactSmallIntStage1(2, 3, cRect, []float64{1, 5}, []float64{0, 0, -1}, []int{0, 1}, []int{0, 1, -1}, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted unassigned rectangular column with v != 0")
+	}
+	if _, ok := verifyExactSmallIntStage1(2, 3, cRect, []float64{0, 5}, []float64{1, 0, 0}, []int{0, 1}, []int{0, 1, -1}, 100); ok {
+		t.Fatal("verifyExactSmallIntStage1 accepted rectangular column with v > 0")
+	}
 }

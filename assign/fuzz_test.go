@@ -231,10 +231,75 @@ func TestRandomFuzzAssignment(t *testing.T) {
 	}
 }
 
+func verifyFormalAssignResult(
+	tb testing.TB,
+	label string,
+	rows, cols int,
+	cost []float64,
+	sense assign.Sense,
+	res assign.Result,
+	exactMode bool,
+) {
+	tb.Helper()
+	if !formalAssignOracleEnabled() || rows == 0 || cols == 0 || rows*cols > 1024 {
+		return
+	}
+	maxAbs := 0.0
+	for _, v := range cost[:rows*cols] {
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return
+		}
+		if a := math.Abs(v); a > maxAbs {
+			maxAbs = a
+		}
+	}
+	if exactMode {
+		raw, ok := buildFormalLSAPJSON(rows, cols, cost, sense, res, "exact", 0)
+		if !ok {
+			tb.Fatalf("[%s] buildFormalLSAPJSON failed on finite matrix", label)
+		}
+		okCall, _, detail := formalAssignOracleCall(tb, raw)
+		if !okCall {
+			tb.Fatalf("[%s] lsap-check --jsonl exact rejected: %s", label, detail)
+		}
+		return
+	}
+	tol := max(1e-300, 1e-9*max(1.0, maxAbs)*float64(max(rows, cols)))
+	if maxAbs > 1e280 {
+		tol = max(tol, maxAbs*0x1p-46*float64(max(rows, cols)))
+	}
+	if math.IsInf(tol, 0) {
+		tol = math.MaxFloat64
+	}
+	raw, ok := buildFormalLSAPJSON(rows, cols, cost, sense, res, "safe", tol)
+	if !ok {
+		return
+	}
+	okCall, bndPair, detail := formalAssignOracleCall(tb, raw)
+	if !okCall {
+		tb.Fatalf("[%s] lsap-check --jsonl safe rejected: %s", label, detail)
+	}
+	if bndPair[0] != "" && bndPair[1] != "" {
+		bndRat, err := (formalAssignRat{Num: bndPair[0], Den: bndPair[1]}).bigRat()
+		if err != nil {
+			tb.Fatalf("[%s] invalid safe bound %v: %v", label, bndPair, err)
+		}
+		if gotRat, okGot := exactMatchedObjRat(rows, cols, cost, res.RowInd, res.ColInd); okGot {
+			if sense == assign.Minimize && bndRat.Cmp(gotRat) > 0 {
+				tb.Fatalf("[%s] safe lower bound %s exceeds exact primal %s", label, bndRat.RatString(), gotRat.RatString())
+			}
+			if sense == assign.Maximize && bndRat.Cmp(gotRat) < 0 {
+				tb.Fatalf("[%s] safe upper bound %s below exact primal %s", label, bndRat.RatString(), gotRat.RatString())
+			}
+		}
+	}
+}
+
 func FuzzLinearSum(f *testing.F) {
 	f.Add(uint8(4), uint8(4), true, []byte{4, 1, 3, 2, 2, 0, 5, 1, 3, 2, 2, 6, 1, 4, 2, 3})
 	f.Add(uint8(3), uint8(5), false, []byte{10, 2, 8, 15, 4, 3, 9, 12, 1, 7, 6, 5, 11, 14, 3})
 	f.Add(uint8(5), uint8(3), true, []byte{0, 255, 1, 255, 0, 2, 3, 4, 255, 1, 0, 5, 2, 2, 2})
+	f.Add(uint8(5), uint8(3), true, []byte{12, 4, 9, 7, 2, 18, 6, 14, 1, 10, 8, 5, 3, 11, 15})
 
 	f.Fuzz(func(t *testing.T, rRaw, cRaw uint8, minimize bool, data []byte) {
 		rows := int(rRaw%24) + 1
@@ -262,17 +327,24 @@ func FuzzLinearSum(f *testing.F) {
 			}
 		}
 
-		res, err := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense)
-		if err != nil {
-			if !errors.Is(err, assign.ErrInfeasible) {
-				t.Fatalf("unexpected error: %v", err)
+		resSIMD, errSIMD := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, assign.WithSIMD(true))
+		resScalar, errScalar := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, assign.WithoutSIMD())
+		if (errSIMD != nil) != (errScalar != nil) {
+			t.Fatalf("SIMD/Scalar error mismatch: simd=%v scalar=%v", errSIMD, errScalar)
+		}
+		if errSIMD != nil {
+			if !errors.Is(errSIMD, assign.ErrInfeasible) {
+				t.Fatalf("unexpected error: %v", errSIMD)
 			}
 			if hasCompleteFiniteMatching(rows, cols, cost) {
 				t.Fatalf("fuzz_target reported ErrInfeasible, but a complete finite matching exists (%dx%d)", rows, cols)
 			}
 			return
 		}
-		verifyOptimalityCertificate(t, "fuzz_target", rows, cols, cost, sense, res)
+		verifyOptimalityCertificate(t, "fuzz_target/simd", rows, cols, cost, sense, resSIMD)
+		verifyOptimalityCertificate(t, "fuzz_target/scalar", rows, cols, cost, sense, resScalar)
+		verifyFormalAssignResult(t, "fuzz_target/simd", rows, cols, cost, sense, resSIMD, true)
+		verifyFormalAssignResult(t, "fuzz_target/scalar", rows, cols, cost, sense, resScalar, true)
 	})
 }
 
