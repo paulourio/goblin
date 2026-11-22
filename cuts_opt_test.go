@@ -1133,3 +1133,57 @@ func TestStrongBranchingBoundCutoffDomainReduction(t *testing.T) {
 		t.Fatalf("BestBound=%.10g > Objective=%.10g", resGap.BestBound, resGap.Objective)
 	}
 }
+
+func TestNextUpDownBitExact(t *testing.T) {
+	posInf := math.Inf(1)
+	negInf := math.Inf(-1)
+	edgeCases := []float64{
+		0.0,
+		math.Copysign(0.0, -1.0),
+		math.SmallestNonzeroFloat64,
+		-math.SmallestNonzeroFloat64,
+		math.Float64frombits(0x000fffffffffffff), // largest subnormal
+		-math.Float64frombits(0x000fffffffffffff),
+		math.Float64frombits(0x0010000000000000), // smallest normal
+		-math.Float64frombits(0x0010000000000000),
+		1.0,
+		-1.0,
+		math.Float64frombits(0x3ff0000000000001),
+		math.Float64frombits(0x3fefffffffffffff),
+		math.Float64frombits(0xbff0000000000001),
+		math.Float64frombits(0xbfefffffffffffff),
+		math.MaxFloat64,
+		-math.MaxFloat64,
+		posInf,
+		negInf,
+		math.NaN(),
+	}
+	checkVal := func(x float64) {
+		gotUp := nextUp(x)
+		wantUp := math.Nextafter(x, posInf)
+		if math.IsNaN(wantUp) {
+			if !math.IsNaN(gotUp) {
+				t.Fatalf("nextUp(%v) = %v, want NaN", x, gotUp)
+			}
+		} else if math.Float64bits(gotUp) != math.Float64bits(wantUp) {
+			t.Fatalf("nextUp(%x) = %x, want %x", math.Float64bits(x), math.Float64bits(gotUp), math.Float64bits(wantUp))
+		}
+		gotDown := nextDown(x)
+		wantDown := math.Nextafter(x, negInf)
+		if math.IsNaN(wantDown) {
+			if !math.IsNaN(gotDown) {
+				t.Fatalf("nextDown(%v) = %v, want NaN", x, gotDown)
+			}
+		} else if math.Float64bits(gotDown) != math.Float64bits(wantDown) {
+			t.Fatalf("nextDown(%x) = %x, want %x", math.Float64bits(x), math.Float64bits(gotDown), math.Float64bits(wantDown))
+		}
+	}
+	for _, x := range edgeCases {
+		checkVal(x)
+	}
+	rng := rand.New(rand.NewPCG(12345, 67890))
+	for range 10000 {
+		bits := rng.Uint64()
+		checkVal(math.Float64frombits(bits))
+	}
+}

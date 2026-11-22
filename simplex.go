@@ -335,7 +335,7 @@ func (s *LPSolver) unscaledTabEntryWithErr(bVar, k int) (alpha, errBound float64
 	}
 	alpha *= scale
 	if errBound > 0 {
-		errBound = math.Nextafter(errBound*scale, math.Inf(1))
+		errBound = nextUp(errBound * scale)
 	}
 	return alpha, errBound
 }
@@ -3339,78 +3339,26 @@ func (s *LPSolver) isDualFeasible() bool {
 	return true
 }
 
-func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCand []float64, origVal float64) float64 {
-	p := s.mat
-	ws := s.ws
-	n := p.numVars
-	baseM := p.numConstraints
-	tot := ws.totVar
-	status := ws.status[:tot]
-	xSlice := ws.x[:tot]
-
-	rhs := s.rowRHS(row)
-	slackVar := n + row
-	var slackTerm float64
-	hasSlackTerm := false
-	if status[slackVar] == statusBasic {
-		if includeBasic {
-			bSlot := ws.basicRow[slackVar]
-			if bSlot >= 0 && bSlot < len(xbCand) {
-				slackTerm = -xbCand[bSlot]
-				hasSlackTerm = true
-			}
-		}
-	} else {
-		slackTerm = -xSlice[slackVar]
-		hasSlackTerm = true
-	}
-
-	var cols []int
-	var vals []float64
-	if row < baseM {
-		st, en := p.rowPtr[row], p.rowPtr[row+1]
-		cols = p.colIdx[st:en]
-		vals = p.rowVal[st:en]
-	} else {
-		dr := s.extraRows[row-baseM]
-		cols = dr.ColIdx
-		vals = dr.Val[:len(cols)]
-	}
-
-	// Evaluate in double-double first and escalate to wideDotAcc only on overflow, underflow, or deep cancellation.
-	basicPos := ws.basicRow[:tot]
-	var acc dot2Acc
-	acc.addVal(rhs)
-	if hasSlackTerm {
-		acc.addVal(slackTerm)
-	}
-	for k, col := range cols {
-		if uint(col) >= uint(n) {
-			continue
-		}
-		if bSlot := basicPos[col]; bSlot >= 0 {
-			if !includeBasic {
-				continue
-			}
-			if bSlot < len(xbCand) {
-				if xVal := xbCand[bSlot]; xVal != 0 {
-					acc.addProd(-vals[k], xVal)
-				}
-			}
-		} else if xVal := xSlice[col]; xVal != 0 {
-			acc.addProd(-vals[k], xVal)
-		}
-	}
-	if val, eb, ok := acc.result(); ok && (eb <= 0x1p-48*math.Abs(val) ||
-		(includeBasic && (eb <= 0x1p-20*math.Abs(val) || eb <= 0x1p-88*acc.absL1))) {
-		return val
-	}
-
+// recomputeWorkingRowResidualWide isolates wideDotAcc stack allocation off the fast-path frame.
+//
+//go:noinline
+func recomputeWorkingRowResidualWide(
+	cols []int,
+	vals []float64,
+	status []varBasisStatus,
+	basicPos []int,
+	xSlice, xbCand []float64,
+	rhs, slackTerm float64,
+	hasSlackTerm, includeBasic bool,
+	n int,
+	origVal float64,
+) float64 {
 	var w wideDotAcc
 	w.addVal(rhs)
 	if hasSlackTerm {
 		w.addVal(slackTerm)
 	}
+	vals = vals[:len(cols)]
 	for k, col := range cols {
 		if uint(col) >= uint(n) {
 			continue
@@ -3419,8 +3367,8 @@ func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCan
 			if !includeBasic {
 				continue
 			}
-			bSlot := ws.basicRow[col]
-			if bSlot >= 0 && bSlot < len(xbCand) {
+			bSlot := basicPos[col]
+			if uint(bSlot) < uint(len(xbCand)) {
 				w.addProd(-vals[k], xbCand[bSlot])
 			}
 		} else {
@@ -3435,6 +3383,84 @@ func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCan
 		return origVal
 	}
 	return res
+}
+
+func (s *LPSolver) recomputeWorkingRowResidual(row int, includeBasic bool, xbCand []float64, origVal float64) float64 {
+	p := s.mat
+	ws := s.ws
+	n := p.numVars
+	baseM := p.numConstraints
+	tot := ws.totVar
+	status := ws.status[:tot]
+	xSlice := ws.x[:tot]
+	basicPos := ws.basicRow[:tot]
+
+	rhs := s.rowRHS(row)
+	slackVar := n + row
+	var slackTerm float64
+	hasSlackTerm := false
+	if uint(slackVar) < uint(tot) {
+		if status[slackVar] == statusBasic {
+			if includeBasic {
+				bSlot := basicPos[slackVar]
+				if uint(bSlot) < uint(len(xbCand)) {
+					slackTerm = -xbCand[bSlot]
+					hasSlackTerm = true
+				}
+			}
+		} else {
+			slackTerm = -xSlice[slackVar]
+			hasSlackTerm = true
+		}
+	}
+
+	var cols []int
+	var vals []float64
+	if row < baseM {
+		st, en := p.rowPtr[row], p.rowPtr[row+1]
+		cols = p.colIdx[st:en]
+		vals = p.rowVal[st:en]
+	} else {
+		dr := s.extraRows[row-baseM]
+		cols = dr.ColIdx
+		vals = dr.Val[:len(cols)]
+	}
+	vals = vals[:len(cols)]
+	xN := xSlice[:n]
+	basicPosN := basicPos[:n]
+
+	// Evaluate in double-double first and escalate to wideDotAcc only on overflow, underflow, or deep cancellation.
+	var acc dot2Acc
+	acc.addVal(rhs)
+	if hasSlackTerm {
+		acc.addVal(slackTerm)
+	}
+	for k, col := range cols {
+		if uint(col) >= uint(n) {
+			continue
+		}
+		if bSlot := basicPosN[col]; bSlot >= 0 {
+			if !includeBasic {
+				continue
+			}
+			if bSlot < len(xbCand) {
+				if xVal := xbCand[bSlot]; xVal != 0 {
+					acc.addProd(-vals[k], xVal)
+				}
+			}
+		} else if xVal := xN[col]; xVal != 0 {
+			acc.addProd(-vals[k], xVal)
+		}
+	}
+	if val, eb, ok := acc.result(); ok && (eb <= 0x1p-48*math.Abs(val) ||
+		(includeBasic && (eb <= 0x1p-20*math.Abs(val) || eb <= 0x1p-88*acc.absL1))) {
+		return val
+	}
+
+	return recomputeWorkingRowResidualWide(
+		cols, vals, status[:n], basicPosN, xN, xbCand,
+		rhs, slackTerm, hasSlackTerm, includeBasic, n, origVal,
+	)
 }
 
 func (s *LPSolver) computePrimalValues() {
@@ -3725,6 +3751,15 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 	numChunks := (n + 63) >> 6
 	chunkMark := ws.tabRowChunkMark[:numChunks]
 
+	if cap(ws.tabRowChunks) < numChunks {
+		ws.tabRowChunks = make([]int, 0, numChunks)
+	}
+	chunksBuf := ws.tabRowChunks[:numChunks]
+	if cap(ws.tabRowIdx) < tot {
+		ws.tabRowIdx = make([]int, 0, tot)
+	}
+	tabIdxBuf := ws.tabRowIdx[:tot]
+
 	if ws.rhoSparse {
 		for _, i := range ws.rhoIdx {
 			if uint(i) < uint(m) {
@@ -3735,7 +3770,9 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 	} else {
 		clear(rho)
 	}
-	rho[r] = 1.0
+	if uint(r) < uint(m) {
+		rho[r] = 1.0
+	}
 	var unitHint [1]int
 	unitHint[0] = r
 	ws.rhoIdx = ws.lu.BTRANSparseHint(ws.rho, unitHint[:], ws.rhoIdx)
@@ -3767,13 +3804,16 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 		ws.tabRowIdx = ws.tabRowIdx[:0]
 	}
 	baseM := p.numConstraints
+	rowPtr := p.rowPtr[:baseM+1]
+	pColIdx := p.colIdx
+	pRowVal := p.rowVal[:len(pColIdx)]
 	totalNNZ := 0
 	for _, i := range ws.rhoIdx {
 		if uint(i) >= uint(m) {
 			continue
 		}
 		if i < baseM {
-			totalNNZ += p.rowPtr[i+1] - p.rowPtr[i]
+			totalNNZ += rowPtr[i+1] - rowPtr[i]
 		} else {
 			totalNNZ += len(s.extraRows[i-baseM].ColIdx)
 		}
@@ -3781,32 +3821,34 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 
 	if n > 0 && n <= DenseThreshold && len(p.denseRows) > 0 && len(p.denseRows) == baseM*p.rowStride && totalNNZ >= min(64, n>>1) {
 		ws.tabRowSparse = false
-		chunks := ws.tabRowChunks[:0]
 		for ch := range numChunks {
 			chunkMark[ch] = true
-			chunks = append(chunks, ch)
+			chunksBuf[ch] = ch
 		}
-		ws.tabRowChunks = chunks
+		ws.tabRowChunks = chunksBuf[:numChunks]
 		stride := p.rowStride
 		tabStruct := tabRow[:n]
 		sparseRowCap := n >> 2
 		if simd.UsingHardwareSIMDWith(s.DisableSIMD) && n >= 32 {
 			sparseRowCap = max(8, n>>4)
 		}
-		tabIdx := ws.tabRowIdx
+		nTabIdx := 0
 		for _, i := range ws.rhoIdx {
 			if uint(i) >= uint(m) {
 				continue
 			}
 			yi := rho[i]
 			if i < baseM {
-				start, end := p.rowPtr[i], p.rowPtr[i+1]
+				start, end := rowPtr[i], rowPtr[i+1]
 				if end-start <= sparseRowCap {
-					cols := p.colIdx[start:end]
-					vals := p.rowVal[start:end]
-					for k, col := range cols {
-						if uint(col) < uint(n) {
-							tabStruct[col] += float64(yi * vals[k])
+					if start >= 0 && end <= len(pColIdx) {
+						cols := pColIdx[start:end]
+						vals := pRowVal[start:end]
+						vals = vals[:len(cols)]
+						for k, col := range cols {
+							if uint(col) < uint(n) {
+								tabStruct[col] += float64(yi * vals[k])
+							}
 						}
 					}
 				} else {
@@ -3825,7 +3867,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 			slack := n + i
 			if uint(slack) < uint(tot) && status[slack] != statusBasic {
 				tabRow[slack] = yi
-				tabIdx = append(tabIdx, slack)
+				if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+					tabIdxBuf[nTabIdx] = slack
+					nTabIdx++
+				}
 			}
 		}
 		for _, bVar := range basis {
@@ -3834,19 +3879,22 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 			}
 		}
 		br := basis[r]
-		tabRow[br] = 1.0
-		if br >= n {
-			tabIdx = append(tabIdx, br)
+		if uint(br) < uint(tot) {
+			tabRow[br] = 1.0
 		}
-		ws.tabRowIdx = tabIdx
+		if br >= n && uint(nTabIdx) < uint(len(tabIdxBuf)) {
+			tabIdxBuf[nTabIdx] = br
+			nTabIdx++
+		}
+		ws.tabRowIdx = tabIdxBuf[:nTabIdx]
 		return
 	}
 
 	if totalNNZ >= 64 {
 		ws.tabRowSparse = false
 		tabStruct := tabRow[:n]
-		chunks := ws.tabRowChunks[:0]
-		tabIdx := ws.tabRowIdx
+		nChunks := 0
+		nTabIdx := 0
 		for _, i := range ws.rhoIdx {
 			if uint(i) >= uint(m) {
 				continue
@@ -3855,15 +3903,18 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 			var cols []int
 			var vals []float64
 			if i < baseM {
-				start, end := p.rowPtr[i], p.rowPtr[i+1]
-				cols = p.colIdx[start:end]
-				vals = p.rowVal[start:end]
+				start, end := rowPtr[i], rowPtr[i+1]
+				if start >= 0 && end <= len(pColIdx) {
+					cols = pColIdx[start:end]
+					vals = pRowVal[start:end]
+				}
 			} else {
 				dr := s.extraRows[i-baseM]
 				cols = dr.ColIdx
-				vals = dr.Val[:len(cols)]
+				vals = dr.Val
 			}
 			cnt := len(cols)
+			vals = vals[:cnt]
 			if cnt >= 32 {
 				c0 := cols[0]
 				if cols[cnt-1]-c0 == cnt-1 {
@@ -3871,7 +3922,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 					for ch := c0 >> 6; ch <= (c0+cnt-1)>>6; ch++ {
 						if uint(ch) < uint(numChunks) && !chunkMark[ch] {
 							chunkMark[ch] = true
-							chunks = append(chunks, ch)
+							if uint(nChunks) < uint(len(chunksBuf)) {
+								chunksBuf[nChunks] = ch
+								nChunks++
+							}
 						}
 					}
 				} else if cols[31]-c0 == 31 {
@@ -3888,7 +3942,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 					for ch := c0 >> 6; ch <= (c0+lo-1)>>6; ch++ {
 						if uint(ch) < uint(numChunks) && !chunkMark[ch] {
 							chunkMark[ch] = true
-							chunks = append(chunks, ch)
+							if uint(nChunks) < uint(len(chunksBuf)) {
+								chunksBuf[nChunks] = ch
+								nChunks++
+							}
 						}
 					}
 					for k := lo; k < cnt; k++ {
@@ -3897,7 +3954,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 							tabStruct[col] += float64(yi * vals[k])
 							if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 								chunkMark[ch] = true
-								chunks = append(chunks, ch)
+								if uint(nChunks) < uint(len(chunksBuf)) {
+									chunksBuf[nChunks] = ch
+									nChunks++
+								}
 							}
 						}
 					}
@@ -3907,7 +3967,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 							tabStruct[col] += float64(yi * vals[k])
 							if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 								chunkMark[ch] = true
-								chunks = append(chunks, ch)
+								if uint(nChunks) < uint(len(chunksBuf)) {
+									chunksBuf[nChunks] = ch
+									nChunks++
+								}
 							}
 						}
 					}
@@ -3918,7 +3981,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 						tabStruct[col] += float64(yi * vals[k])
 						if ch := col >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 							chunkMark[ch] = true
-							chunks = append(chunks, ch)
+							if uint(nChunks) < uint(len(chunksBuf)) {
+								chunksBuf[nChunks] = ch
+								nChunks++
+							}
 						}
 					}
 				}
@@ -3926,7 +3992,10 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 			slack := n + i
 			if uint(slack) < uint(tot) && status[slack] != statusBasic {
 				tabRow[slack] = yi
-				tabIdx = append(tabIdx, slack)
+				if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+					tabIdxBuf[nTabIdx] = slack
+					nTabIdx++
+				}
 			}
 		}
 		for _, bVar := range basis {
@@ -3935,38 +4004,50 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 			}
 		}
 		br := basis[r]
-		tabRow[br] = 1.0
+		if uint(br) < uint(tot) {
+			tabRow[br] = 1.0
+		}
 		if br < n {
 			if ch := br >> 6; uint(ch) < uint(numChunks) && !chunkMark[ch] {
 				chunkMark[ch] = true
-				chunks = append(chunks, ch)
+				if uint(nChunks) < uint(len(chunksBuf)) {
+					chunksBuf[nChunks] = ch
+					nChunks++
+				}
 			}
-		} else {
-			tabIdx = append(tabIdx, br)
+		} else if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+			tabIdxBuf[nTabIdx] = br
+			nTabIdx++
 		}
-		ws.tabRowChunks = chunks
-		ws.tabRowIdx = tabIdx
+		ws.tabRowChunks = chunksBuf[:nChunks]
+		ws.tabRowIdx = tabIdxBuf[:nTabIdx]
 	} else {
 		ws.tabRowSparse = true
-		tabIdx := ws.tabRowIdx
+		nTabIdx := 0
 		for _, i := range ws.rhoIdx {
 			if uint(i) >= uint(m) {
 				continue
 			}
 			yi := rho[i]
 			if i < baseM {
-				start, end := p.rowPtr[i], p.rowPtr[i+1]
-				cols := p.colIdx[start:end]
-				vals := p.rowVal[start:end]
-				for k, col := range cols {
-					if uint(col) >= uint(tot) || status[col] == statusBasic {
-						continue
+				start, end := rowPtr[i], rowPtr[i+1]
+				if start >= 0 && end <= len(pColIdx) {
+					cols := pColIdx[start:end]
+					vals := pRowVal[start:end]
+					vals = vals[:len(cols)]
+					for k, col := range cols {
+						if uint(col) >= uint(tot) || status[col] == statusBasic {
+							continue
+						}
+						if !tabMark[col] {
+							tabMark[col] = true
+							if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+								tabIdxBuf[nTabIdx] = col
+								nTabIdx++
+							}
+						}
+						tabRow[col] += float64(yi * vals[k])
 					}
-					if !tabMark[col] {
-						tabMark[col] = true
-						tabIdx = append(tabIdx, col)
-					}
-					tabRow[col] += float64(yi * vals[k])
 				}
 			} else {
 				dr := s.extraRows[i-baseM]
@@ -3978,15 +4059,23 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 					}
 					if !tabMark[col] {
 						tabMark[col] = true
-						tabIdx = append(tabIdx, col)
+						if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+							tabIdxBuf[nTabIdx] = col
+							nTabIdx++
+						}
 					}
 					tabRow[col] += float64(yi * vals[k])
 				}
 			}
 			slack := n + i
 			if uint(slack) < uint(tot) && status[slack] != statusBasic {
-				tabMark[slack] = true
-				tabIdx = append(tabIdx, slack)
+				if !tabMark[slack] {
+					tabMark[slack] = true
+					if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+						tabIdxBuf[nTabIdx] = slack
+						nTabIdx++
+					}
+				}
 				tabRow[slack] = yi
 			}
 		}
@@ -3994,11 +4083,14 @@ func (s *LPSolver) ComputeTableauRow(r int) {
 		if uint(br) < uint(tot) {
 			if !tabMark[br] {
 				tabMark[br] = true
-				tabIdx = append(tabIdx, br)
+				if uint(nTabIdx) < uint(len(tabIdxBuf)) {
+					tabIdxBuf[nTabIdx] = br
+					nTabIdx++
+				}
 			}
 			tabRow[br] = 1.0
 		}
-		ws.tabRowIdx = tabIdx
+		ws.tabRowIdx = tabIdxBuf[:nTabIdx]
 	}
 }
 
@@ -4054,12 +4146,12 @@ func sortBFRTCands(a []bfrtCand) {
 	}
 	for i := 1; i < len(a); i++ {
 		cur := a[i]
-		j := i - 1
-		for j >= 0 && bfrtCandLess(cur, a[j]) {
-			a[j+1] = a[j]
-			j--
+		k := i
+		for k > 0 && bfrtCandLess(cur, a[k-1]) {
+			a[k] = a[k-1]
+			k--
 		}
-		a[j+1] = cur
+		a[k] = cur
 	}
 }
 
@@ -4406,7 +4498,11 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 	tot := ws.totVar
 	thetaMax = math.Inf(1)
 	minRatio = math.Inf(1)
-	cands := ws.bfrtCands[:0]
+	if cap(ws.bfrtCands) < tot {
+		ws.bfrtCands = make([]bfrtCand, 0, tot)
+	}
+	candsBuf := ws.bfrtCands[:tot]
+	nCands := 0
 	tabRow := ws.tabRow[:tot]
 	status := ws.status[:tot]
 	dj := ws.dj[:tot]
@@ -4437,6 +4533,9 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 					bland, s.DisableSIMD, candIdxBuf[:batchCap],
 				)
 				for _, k := range candIdxBuf[:cnt] {
+					if uint(k) >= uint(n) {
+						continue
+					}
 					tab := tabStruct[k]
 					if tab == 0 {
 						continue
@@ -4450,12 +4549,15 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 						}
 						if super {
 							thetaMax, minRatio = 0, 0
-							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							if uint(nCands) < uint(len(candsBuf)) {
+								candsBuf[nCands] = bfrtCand{col: k, ratio: 0, absA: absA}
+								nCands++
+							}
 							continue
 						}
 						d := djSign * djN[k]
 						if math.IsNaN(d) {
-							ws.bfrtCands = cands
+							ws.bfrtCands = candsBuf[:nCands]
 							return 0, 0, false, true
 						}
 						if d <= 0 {
@@ -4467,7 +4569,10 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 									thetaMax = hr
 								}
 							}
-							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							if uint(nCands) < uint(len(candsBuf)) {
+								candsBuf[nCands] = bfrtCand{col: k, ratio: 0, absA: absA}
+								nCands++
+							}
 							continue
 						}
 						if bland {
@@ -4481,12 +4586,15 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 							if hr := (d + effHarris) * invA; hr < thetaMax {
 								thetaMax = hr
 							}
-							cands = append(cands, bfrtCand{col: k, ratio: r0, absA: absA})
+							if uint(nCands) < uint(len(candsBuf)) {
+								candsBuf[nCands] = bfrtCand{col: k, ratio: r0, absA: absA}
+								nCands++
+							}
 						}
 					} else {
 						blk, nan := dualSubTolCheck(tab, alphaBar, st)
 						if nan {
-							ws.bfrtCands = cands
+							ws.bfrtCands = candsBuf[:nCands]
 							return 0, 0, false, true
 						}
 						subTol = subTol || blk
@@ -4497,13 +4605,12 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 			for _, ch := range chunks {
 				start := ch << tabRowChunkBits
 				end := min(start+tabRowChunkSize, n)
-				if start >= end {
+				if start < 0 || start >= end {
 					continue
 				}
-				size := end - start
-				tabChunk := tabStruct[start : start+size]
-				stChunk := statusN[start : start+size]
-				djChunk := djN[start : start+size]
+				tabChunk := tabStruct[start:end]
+				stChunk := statusN[start:end]
+				djChunk := djN[start:end]
 				for i, tab := range tabChunk {
 					if tab == 0 {
 						continue
@@ -4518,12 +4625,15 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 						k := start + i
 						if super {
 							thetaMax, minRatio = 0, 0
-							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							if uint(nCands) < uint(len(candsBuf)) {
+								candsBuf[nCands] = bfrtCand{col: k, ratio: 0, absA: absA}
+								nCands++
+							}
 							continue
 						}
 						d := djSign * djChunk[i]
 						if math.IsNaN(d) {
-							ws.bfrtCands = cands
+							ws.bfrtCands = candsBuf[:nCands]
 							return 0, 0, false, true
 						}
 						if d <= 0 {
@@ -4535,7 +4645,10 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 									thetaMax = hr
 								}
 							}
-							cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+							if uint(nCands) < uint(len(candsBuf)) {
+								candsBuf[nCands] = bfrtCand{col: k, ratio: 0, absA: absA}
+								nCands++
+							}
 							continue
 						}
 						if bland {
@@ -4549,12 +4662,15 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 							if hr := (d + effHarris) * invA; hr < thetaMax {
 								thetaMax = hr
 							}
-							cands = append(cands, bfrtCand{col: k, ratio: r0, absA: absA})
+							if uint(nCands) < uint(len(candsBuf)) {
+								candsBuf[nCands] = bfrtCand{col: k, ratio: r0, absA: absA}
+								nCands++
+							}
 						}
 					} else {
 						blk, nan := dualSubTolCheck(tab, alphaBar, st)
 						if nan {
-							ws.bfrtCands = cands
+							ws.bfrtCands = candsBuf[:nCands]
 							return 0, 0, false, true
 						}
 						subTol = subTol || blk
@@ -4576,7 +4692,7 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 		if !(tab > pivotTol || tab < -pivotTol) {
 			blk, nan := dualSubTolCheck(tab, alphaBar, st)
 			if nan {
-				ws.bfrtCands = cands
+				ws.bfrtCands = candsBuf[:nCands]
 				return 0, 0, false, true
 			}
 			if blk {
@@ -4590,12 +4706,15 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 		}
 		if super {
 			thetaMax, minRatio = 0, 0
-			cands = append(cands, bfrtCand{col: k, ratio: 0, absA: absA})
+			if uint(nCands) < uint(len(candsBuf)) {
+				candsBuf[nCands] = bfrtCand{col: k, ratio: 0, absA: absA}
+				nCands++
+			}
 			continue
 		}
 		d := djSign * dj[k]
 		if math.IsNaN(d) {
-			ws.bfrtCands = cands
+			ws.bfrtCands = candsBuf[:nCands]
 			return 0, 0, false, true
 		}
 		if d < 0 {
@@ -4612,10 +4731,13 @@ func (s *LPSolver) dualRatioPass1(leaveDir float64, bland bool) (thetaMax, minRa
 			if ratio := (d + effHarris) * invA; ratio < thetaMax {
 				thetaMax = ratio
 			}
-			cands = append(cands, bfrtCand{col: k, ratio: r0, absA: absA})
+			if uint(nCands) < uint(len(candsBuf)) {
+				candsBuf[nCands] = bfrtCand{col: k, ratio: r0, absA: absA}
+				nCands++
+			}
 		}
 	}
-	ws.bfrtCands = cands
+	ws.bfrtCands = candsBuf[:nCands]
 	return thetaMax, minRatio, subTol, false
 }
 
@@ -5923,7 +6045,10 @@ runPrimalFTRAN:
 }
 
 func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj, eb, dy2Scaled, yDotScaled float64, ok bool) {
-	const shift = 32
+	if len(vals) < len(rows) {
+		return 0, 0, 0, 0, false
+	}
+	vals = vals[:len(rows)]
 	var acc dot2Acc
 	acc.addVal(c0)
 	dy2Raw := 0.0
@@ -5942,6 +6067,18 @@ func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj
 			yDotRaw += math.Abs(yr * a)
 		}
 	} else {
+		if dy1 != nil {
+			if len(dy1) < len(y0) {
+				return 0, 0, 0, 0, false
+			}
+			dy1 = dy1[:len(y0)]
+		}
+		if dy2Abs != nil {
+			if len(dy2Abs) < len(y0) {
+				return 0, 0, 0, 0, false
+			}
+			dy2Abs = dy2Abs[:len(y0)]
+		}
 		for idx, r := range rows {
 			if uint(r) >= uint(len(y0)) {
 				continue
@@ -5974,11 +6111,25 @@ func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj
 	}
 	v, errB, accOK := acc.result()
 	if accOK && !isNonFinite(dy2Raw) && !isNonFinite(yDotRaw) {
-		return v, errB, math.Ldexp(dy2Raw, -shift), math.Ldexp(yDotRaw, -shift), true
+		return v, errB, dy2Raw * 0x1p-32, yDotRaw * 0x1p-32, true
+	}
+	return evalColDualDotWide(c0, rows, vals, y0, dy1, dy2Abs)
+}
+
+// evalColDualDotWide isolates wideDotAcc stack allocation off the fast-path evalColDualDot frame.
+//
+//go:noinline
+func evalColDualDotWide(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj, eb, dy2Scaled, yDotScaled float64, ok bool) {
+	const shift = 32
+	nCols := len(rows)
+	if len(vals) < nCols {
+		return 0, 0, 0, 0, false
 	}
 	if math.IsNaN(c0) || math.IsInf(c0, 0) {
 		return 0, 0, 0, 0, false
 	}
+	rows = rows[:nCols]
+	vals = vals[:nCols]
 	maxExp := 0
 	if c0 != 0 {
 		_, ce := math.Frexp(math.Abs(c0))
@@ -5998,7 +6149,8 @@ func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj
 			midL1 += math.Abs(c0)
 		}
 	}
-	for idx, r := range rows {
+	for idx := range nCols {
+		r := rows[idx]
 		if uint(r) >= uint(len(y0)) {
 			continue
 		}
@@ -6062,7 +6214,8 @@ func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj
 	s2 := dynShift - s1
 	dy2Dyn := 0.0
 	yDotDyn := 0.0
-	for idx, r := range rows {
+	for idx := range nCols {
+		r := rows[idx]
 		if uint(r) >= uint(len(y0)) {
 			continue
 		}
@@ -6096,13 +6249,14 @@ func evalColDualDot(c0 float64, rows []int, vals, y0, dy1, dy2Abs []float64) (dj
 	return dj, eb, dy2Scaled, yDotScaled, true
 }
 
+// combineDualNoiseTol stays within the Go inline budget (cost <= 80) for dual residual checks.
 func combineDualNoiseTol(eb, dy2Scaled, yDotScaled, maxBasisDualRel, mult float64) float64 {
-	tail := math.Ldexp(mult*(dy2Scaled+maxBasisDualRel*yDotScaled), 32)
-	if math.IsInf(tail, 1) {
+	tail := mult * (dy2Scaled + maxBasisDualRel*yDotScaled) * 0x1p32
+	if tail == math.Inf(1) {
 		return math.MaxFloat64
 	}
 	res := eb + tail
-	if math.IsInf(res, 1) {
+	if res == math.Inf(1) {
 		return math.MaxFloat64
 	}
 	return res
@@ -7145,15 +7299,20 @@ func (s *LPSolver) dualResidualsEval(
 	baseM := p.numConstraints
 	m := s.TotalRows()
 
-	yMin := ensureFloat64Slice(&ws.refineBuf1, m, false)
+	objMinVec := p.objMin[:n]
+	colPtr := p.colPtr[:n+1]
+	yWork = yWork[:m]
+	yMin := ensureFloat64Slice(&ws.refineBuf1, m, false)[:m]
 	var dy1Min, dy2MinAbs []float64
 	if dy1Work != nil {
-		dy1Min = ensureFloat64Slice(&ws.refineBuf2, m, false)
-		dy2MinAbs = ensureFloat64Slice(&ws.refineBuf3, m, false)
+		dy1Work = dy1Work[:m]
+		dy2AbsWork = dy2AbsWork[:m]
+		dy1Min = ensureFloat64Slice(&ws.refineBuf2, m, false)[:m]
+		dy2MinAbs = ensureFloat64Slice(&ws.refineBuf3, m, false)[:m]
 	}
 	maxObj := 1.0
 	for j := range n {
-		if av := math.Abs(p.objMin[j]); av > maxObj {
+		if av := math.Abs(objMinVec[j]); av > maxObj {
 			maxObj = av
 		}
 	}
@@ -7182,95 +7341,147 @@ func (s *LPSolver) dualResidualsEval(
 		}
 	}
 
-	djOrig := ensureFloat64Slice(&ws.evalDJOrig, n, false)
-	djErr := ensureFloat64Slice(&ws.evalDJErr, n, false)
-	dy2Sc := ensureFloat64Slice(&ws.evalDY2Sc, n, false)
-	yDotSc := ensureFloat64Slice(&ws.evalYDotSc, n, dy1Work == nil)
+	djOrig := ensureFloat64Slice(&ws.evalDJOrig, n, false)[:n]
+	djErr := ensureFloat64Slice(&ws.evalDJErr, n, false)[:n]
+	dy2Sc := ensureFloat64Slice(&ws.evalDY2Sc, n, false)[:n]
+	yDotSc := ensureFloat64Slice(&ws.evalYDotSc, n, dy1Work == nil && len(s.extraRows) > 0)[:n]
 	if dy1Work == nil {
-		colAcc := ws.ensureDotAcc(n)
-		yL1 := yDotSc
-		for j := range n {
-			colAcc[j].addVal(p.objMin[j])
-			for q := p.colPtr[j]; q < p.colPtr[j+1]; q++ {
-				yr := yMin[p.rowIdx[q]]
+		if len(s.extraRows) == 0 {
+			rowIdx := p.rowIdx
+			colVal := p.colVal
+			for j := range n {
+				st, en := colPtr[j], colPtr[j+1]
+				var acc dot2Acc
+				acc.addVal(objMinVec[j])
+				yL1 := 0.0
+				rCol := rowIdx[st:en]
+				vCol := colVal[st:en]
+				vCol = vCol[:len(rCol)]
+				for q, r := range rCol {
+					yr := yMin[r]
+					if yr == 0 {
+						continue
+					}
+					av := vCol[q]
+					acc.addProd(-yr, av)
+					yL1 += math.Abs(yr * av)
+				}
+				v, eb, ok := acc.result()
+				if ok && !isNonFinite(yL1) {
+					djOrig[j] = v
+					djErr[j] = eb
+					dy2Sc[j] = 0
+					yDotSc[j] = yL1 * 0x1p-32
+					continue
+				}
+				var d2s, yds float64
+				v, eb, d2s, yds, ok = evalColDualDot(objMinVec[j], rCol, vCol, yMin, nil, nil)
+				if !ok {
+					return false
+				}
+				djOrig[j] = v
+				djErr[j] = eb
+				dy2Sc[j] = d2s
+				yDotSc[j] = yds
+			}
+		} else {
+			colAcc := ws.ensureDotAcc(n)[:n]
+			yL1 := yDotSc
+			rowIdx := p.rowIdx
+			colVal := p.colVal
+			for j := range n {
+				colAcc[j].addVal(objMinVec[j])
+				st, en := colPtr[j], colPtr[j+1]
+				rCol := rowIdx[st:en]
+				vCol := colVal[st:en]
+				vCol = vCol[:len(rCol)]
+				yL1j := yL1[j]
+				for q, r := range rCol {
+					yr := yMin[r]
+					if yr == 0 {
+						continue
+					}
+					av := vCol[q]
+					colAcc[j].addProd(-yr, av)
+					yL1j += math.Abs(yr * av)
+				}
+				yL1[j] = yL1j
+			}
+			for e, dr := range s.extraRows {
+				yr := yMin[baseM+e]
 				if yr == 0 {
 					continue
 				}
-				av := p.colVal[q]
-				colAcc[j].addProd(-yr, av)
-				yL1[j] += math.Abs(yr * av)
+				vals := dr.Val
+				if s.scaled && dr.OrigVal != nil {
+					vals = dr.OrigVal
+				}
+				cols := dr.ColIdx
+				vals = vals[:len(cols)]
+				for k, c := range cols {
+					colAcc[c].addProd(-yr, vals[k])
+					yL1[c] += math.Abs(yr * vals[k])
+				}
 			}
-		}
-		for e, dr := range s.extraRows {
-			yr := yMin[baseM+e]
-			if yr == 0 {
-				continue
-			}
-			vals := dr.Val
-			if s.scaled && dr.OrigVal != nil {
-				vals = dr.OrigVal
-			}
-			for k, c := range dr.ColIdx {
-				colAcc[c].addProd(-yr, vals[k])
-				yL1[c] += math.Abs(yr * vals[k])
-			}
-		}
-		var exOff, exRows []int
-		var exVals []float64
-		builtEx := false
-		for j := range n {
-			v, eb, ok := colAcc[j].result()
-			if ok && !isNonFinite(yL1[j]) {
+			var exOff, exRows []int
+			var exVals []float64
+			builtEx := false
+			for j := range n {
+				v, eb, ok := colAcc[j].result()
+				if ok && !isNonFinite(yL1[j]) {
+					djOrig[j] = v
+					djErr[j] = eb
+					dy2Sc[j] = 0
+					yDotSc[j] = yL1[j] * 0x1p-32
+					continue
+				}
+				if !builtEx {
+					exOff, exRows, exVals = s.buildExtraColBuckets(true)
+					builtEx = true
+				}
+				st, en := colPtr[j], colPtr[j+1]
+				var rSlice []int
+				var vSlice []float64
+				if exOff == nil || exOff[j] == exOff[j+1] {
+					rSlice = rowIdx[st:en]
+					vSlice = colVal[st:en]
+				} else {
+					es, ee := exOff[j], exOff[j+1]
+					ws.dualRefRows = append(append(ws.dualRefRows[:0], rowIdx[st:en]...), exRows[es:ee]...)
+					ws.dualRefVals = append(append(ws.dualRefVals[:0], colVal[st:en]...), exVals[es:ee]...)
+					rSlice = ws.dualRefRows
+					vSlice = ws.dualRefVals
+				}
+				var d2s, yds float64
+				v, eb, d2s, yds, ok = evalColDualDot(objMinVec[j], rSlice, vSlice, yMin, nil, nil)
+				if !ok {
+					return false
+				}
 				djOrig[j] = v
 				djErr[j] = eb
-				dy2Sc[j] = 0
-				yDotSc[j] = math.Ldexp(yL1[j], -32)
-				continue
+				dy2Sc[j] = d2s
+				yDotSc[j] = yds
 			}
-			if !builtEx {
-				exOff, exRows, exVals = s.buildExtraColBuckets(true)
-				builtEx = true
-			}
-			st, en := p.colPtr[j], p.colPtr[j+1]
-			var rSlice []int
-			var vSlice []float64
-			if exOff == nil || exOff[j] == exOff[j+1] {
-				rSlice = p.rowIdx[st:en]
-				vSlice = p.colVal[st:en]
-			} else {
-				es, ee := exOff[j], exOff[j+1]
-				ws.dualRefRows = append(append(ws.dualRefRows[:0], p.rowIdx[st:en]...), exRows[es:ee]...)
-				ws.dualRefVals = append(append(ws.dualRefVals[:0], p.colVal[st:en]...), exVals[es:ee]...)
-				rSlice = ws.dualRefRows
-				vSlice = ws.dualRefVals
-			}
-			var d2s, yds float64
-			v, eb, d2s, yds, ok = evalColDualDot(p.objMin[j], rSlice, vSlice, yMin, nil, nil)
-			if !ok {
-				return false
-			}
-			djOrig[j] = v
-			djErr[j] = eb
-			dy2Sc[j] = d2s
-			yDotSc[j] = yds
 		}
 	} else {
 		exOff, exRows, exVals := s.buildExtraColBuckets(true)
+		rowIdx := p.rowIdx
+		colVal := p.colVal
 		for j := range n {
-			st, en := p.colPtr[j], p.colPtr[j+1]
+			st, en := colPtr[j], colPtr[j+1]
 			var rSlice []int
 			var vSlice []float64
 			if exOff == nil || exOff[j] == exOff[j+1] {
-				rSlice = p.rowIdx[st:en]
-				vSlice = p.colVal[st:en]
+				rSlice = rowIdx[st:en]
+				vSlice = colVal[st:en]
 			} else {
 				es, ee := exOff[j], exOff[j+1]
-				ws.dualRefRows = append(append(ws.dualRefRows[:0], p.rowIdx[st:en]...), exRows[es:ee]...)
-				ws.dualRefVals = append(append(ws.dualRefVals[:0], p.colVal[st:en]...), exVals[es:ee]...)
+				ws.dualRefRows = append(append(ws.dualRefRows[:0], rowIdx[st:en]...), exRows[es:ee]...)
+				ws.dualRefVals = append(append(ws.dualRefVals[:0], colVal[st:en]...), exVals[es:ee]...)
 				rSlice = ws.dualRefRows
 				vSlice = ws.dualRefVals
 			}
-			v, eb, d2s, yds, ok := evalColDualDot(p.objMin[j], rSlice, vSlice, yMin, dy1Min, dy2MinAbs)
+			v, eb, d2s, yds, ok := evalColDualDot(objMinVec[j], rSlice, vSlice, yMin, dy1Min, dy2MinAbs)
 			if !ok {
 				return false
 			}
@@ -7292,9 +7503,9 @@ func (s *LPSolver) dualResidualsEval(
 	maxBasisDualRel := 0.0
 	for _, bCol := range ws.basis[:m] {
 		if bCol < n {
-			denSc := yDotSc[bCol] + math.Ldexp(math.Abs(p.objMin[bCol]), -32)
+			denSc := yDotSc[bCol] + math.Abs(objMinVec[bCol])*0x1p-32
 			if denSc > 0 {
-				numSc := math.Ldexp(math.Abs(djOrig[bCol])+djErr[bCol], -32)
+				numSc := (math.Abs(djOrig[bCol]) + djErr[bCol]) * 0x1p-32
 				if rel := numSc / denSc; rel > maxBasisDualRel {
 					maxBasisDualRel = rel
 				}
@@ -7305,9 +7516,9 @@ func (s *LPSolver) dualResidualsEval(
 			if dy1Min != nil {
 				d1Abs = math.Abs(dy1Min[r])
 			}
-			denSc := math.Ldexp(math.Abs(yMin[r]), -32) + math.Ldexp(d1Abs, -32)
+			denSc := (math.Abs(yMin[r]) + d1Abs) * 0x1p-32
 			if denSc > 0 {
-				numSc := math.Ldexp(math.Abs(slackY)+math.Abs(slackEB), -32)
+				numSc := (math.Abs(slackY) + math.Abs(slackEB)) * 0x1p-32
 				if rel := numSc / denSc; rel > maxBasisDualRel {
 					maxBasisDualRel = rel
 				}
@@ -7323,12 +7534,21 @@ func (s *LPSolver) dualResidualsEval(
 	slackNoise := max(1e-13, 1e-12*maxDual)
 	compGap := 0.0
 	status := ws.status[:ws.totVar]
+	if len(primal) >= n {
+		primal = primal[:n]
+	}
 
 	unscaledLB, unscaledUB := ws.lb[:n], ws.ub[:n]
 	if s.scaled {
-		unscaledLB, unscaledUB = s.origLB, s.origUB
+		unscaledLB, unscaledUB = s.origLB[:n], s.origUB[:n]
 	}
 	hasCachedRowRes := len(rowRes) >= baseM
+	if hasCachedRowRes {
+		rowRes = rowRes[:baseM]
+	}
+	rowPtr := p.rowPtr[:baseM+1]
+	rowSense := p.rowSense[:baseM]
+	rowRHS := p.rowRHS[:baseM]
 
 	for i := range baseM {
 		yiSum, yiRem, d2Abs := rowDualAt(i)
@@ -7336,7 +7556,7 @@ func (s *LPSolver) dualResidualsEval(
 			continue
 		}
 		slackBasic := status[n+i] == statusBasic
-		sense := p.rowSense[i]
+		sense := rowSense[i]
 		needSignCheck := (sense == LessEqual && yiSum > 0) || (sense == GreaterEqual && yiSum < 0)
 		strictSign := !slackBasic && hasInfStruct && needSignCheck && s.slackCanMoveUnbounded(i, sense == LessEqual)
 		rowSignTol := signTol
@@ -7350,8 +7570,8 @@ func (s *LPSolver) dualResidualsEval(
 				}
 				rowSignTol = combineDualNoiseTol(
 					math.Abs(yiRem),
-					math.Ldexp(d2Abs, -32),
-					math.Ldexp(math.Abs(yMin[i]), -32)+math.Ldexp(d1Abs, -32),
+					d2Abs*0x1p-32,
+					(math.Abs(yMin[i])+d1Abs)*0x1p-32,
 					maxBasisDualRel,
 					16.0,
 				)
@@ -7365,7 +7585,7 @@ func (s *LPSolver) dualResidualsEval(
 				return false
 			}
 			if yiSum > slackNoise && !strictSign {
-				st, en := p.rowPtr[i], p.rowPtr[i+1]
+				st, en := rowPtr[i], rowPtr[i+1]
 				if span, spOK := s.boundedRowSpan(p.colIdx[st:en], p.rowVal[st:en]); spOK {
 					compGap += (yiSum - slackNoise) * span
 				} else {
@@ -7374,8 +7594,8 @@ func (s *LPSolver) dualResidualsEval(
 			}
 			if yiSum < -slackNoise {
 				if !hasCachedRowRes || rowRes[i] < -verifyFeasTol {
-					st, en := p.rowPtr[i], p.rowPtr[i+1]
-					res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, p.rowRHS[i], verifyFeasTol, 1e-8)
+					st, en := rowPtr[i], rowPtr[i+1]
+					res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, rowRHS[i], verifyFeasTol, 1e-8)
 					if !ok {
 						return false
 					}
@@ -7392,7 +7612,7 @@ func (s *LPSolver) dualResidualsEval(
 				return false
 			}
 			if yiSum < -slackNoise && !strictSign {
-				st, en := p.rowPtr[i], p.rowPtr[i+1]
+				st, en := rowPtr[i], rowPtr[i+1]
 				if span, spOK := s.boundedRowSpan(p.colIdx[st:en], p.rowVal[st:en]); spOK {
 					compGap += (-yiSum - slackNoise) * span
 				} else {
@@ -7401,8 +7621,8 @@ func (s *LPSolver) dualResidualsEval(
 			}
 			if yiSum > slackNoise {
 				if !hasCachedRowRes || rowRes[i] > verifyFeasTol {
-					st, en := p.rowPtr[i], p.rowPtr[i+1]
-					res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, p.rowRHS[i], verifyFeasTol, 1e-8)
+					st, en := rowPtr[i], rowPtr[i+1]
+					res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, unscaledLB, unscaledUB, rowRHS[i], verifyFeasTol, 1e-8)
 					if !ok {
 						return false
 					}
@@ -7432,8 +7652,8 @@ func (s *LPSolver) dualResidualsEval(
 				}
 				rowSignTol = combineDualNoiseTol(
 					math.Abs(yiRem),
-					math.Ldexp(d2Abs, -32),
-					math.Ldexp(math.Abs(yMin[idx]), -32)+math.Ldexp(d1Abs, -32),
+					d2Abs*0x1p-32,
+					(math.Abs(yMin[idx])+d1Abs)*0x1p-32,
 					maxBasisDualRel,
 					16.0,
 				)
@@ -7471,23 +7691,25 @@ func (s *LPSolver) dualResidualsEval(
 		}
 	}
 
+	statusN := status[:n]
 	for j := range n {
 		dj := djOrig[j]
 		if math.IsNaN(dj) || math.IsInf(dj, 0) {
 			return false
 		}
-		lbj := s.unscaledBound(j, false)
-		ubj := s.unscaledBound(j, true)
+		lbj := unscaledLB[j]
+		ubj := unscaledUB[j]
 		if lbj == ubj {
 			continue
 		}
-		colL1Sc := yDotSc[j] + math.Ldexp(math.Abs(p.objMin[j]), -32)
-		dTolRel := math.Ldexp(1e-7*colL1Sc, 32)
-		if math.IsInf(dTolRel, 1) {
+		colL1Sc := yDotSc[j] + math.Abs(objMinVec[j])*0x1p-32
+		dTolRel := (1e-7 * colL1Sc) * 0x1p32
+		if dTolRel == math.Inf(1) {
 			dTolRel = math.MaxFloat64
 		}
 		dTol := max(verifyFeasTol, max(1e-7, dTolRel))
-		if status[j] == statusBasic {
+		pj := primal[j]
+		if statusN[j] == statusBasic {
 			if math.Abs(dj) > dTol {
 				return false
 			}
@@ -7504,27 +7726,27 @@ func (s *LPSolver) dualResidualsEval(
 			if math.IsInf(lbj, -1) && dj > infNoise {
 				return false
 			}
-			bTol := max(verifyFeasTol, 1e-8*max(1.0, math.Abs(primal[j])))
-			if !math.IsInf(ubj, 1) && dj < -dTol && primal[j] < ubj && ubj-primal[j] > bTol {
+			bTol := max(verifyFeasTol, 1e-8*max(1.0, math.Abs(pj)))
+			if !math.IsInf(ubj, 1) && dj < -dTol && pj < ubj && ubj-pj > bTol {
 				return false
 			}
-			if !math.IsInf(lbj, -1) && dj > dTol && primal[j] > lbj && primal[j]-lbj > bTol {
+			if !math.IsInf(lbj, -1) && dj > dTol && pj > lbj && pj-lbj > bTol {
 				return false
 			}
 		}
 		boxNoise := combineDualNoiseTol(djErr[j], dy2Sc[j], yDotSc[j], maxBasisDualRel, 4.0)
-		if !math.IsInf(ubj, 1) && dj < -boxNoise && primal[j] < ubj {
-			rem := ubj - primal[j]
+		if !math.IsInf(ubj, 1) && dj < -boxNoise && pj < ubj {
+			rem := ubj - pj
 			if math.IsInf(rem, 1) {
-				compGap += math.Ldexp(-dj-boxNoise, 2) * (math.Ldexp(ubj, -2) - math.Ldexp(primal[j], -2))
+				compGap += ((-dj - boxNoise) * 4.0) * (ubj*0.25 - pj*0.25)
 			} else if rem > 0 {
 				compGap += (-dj - boxNoise) * rem
 			}
 		}
-		if !math.IsInf(lbj, -1) && dj > boxNoise && primal[j] > lbj {
-			rem := primal[j] - lbj
+		if !math.IsInf(lbj, -1) && dj > boxNoise && pj > lbj {
+			rem := pj - lbj
 			if math.IsInf(rem, 1) {
-				compGap += math.Ldexp(dj-boxNoise, 2) * (math.Ldexp(primal[j], -2) - math.Ldexp(lbj, -2))
+				compGap += ((dj - boxNoise) * 4.0) * (pj*0.25 - lbj*0.25)
 			} else if rem > 0 {
 				compGap += (dj - boxNoise) * rem
 			}
@@ -7671,16 +7893,20 @@ func (acc *dot2Acc) addProd(a, b float64) {
 		return
 	}
 	p, pe := twoProd(a, b)
-	if isNonFinite(p) || isNonFinite(pe) {
+	pBits := math.Float64bits(p)
+	const signMask = uint64(1) << 63
+	const expMask = uint64(0x7ff0000000000000)
+	if (pBits&expMask) == expMask || isNonFinite(pe) {
 		acc.nonFin = true
 		return
 	}
-	if (a > 0) == (b > 0) {
+	if (pBits & signMask) == 0 {
 		acc.hasPos = true
 	} else {
 		acc.hasNeg = true
 	}
-	if math.Abs(p) < twoProdExactMin {
+	absP := math.Abs(p)
+	if absP < twoProdExactMin {
 		acc.lowCount++
 	}
 	ns, se := twoSum(acc.s, p)
@@ -7689,10 +7915,9 @@ func (acc *dot2Acc) addProd(a, b float64) {
 		return
 	}
 	acc.s = ns
-	q := pe + se
-	acc.c += q
+	acc.c += pe + se
 	acc.errL1 += math.Abs(pe) + math.Abs(se)
-	acc.absL1 += math.Abs(p)
+	acc.absL1 += absP
 	acc.count++
 }
 
@@ -7789,7 +8014,7 @@ func tightenRowLeVerifyBounds(cols []int, vals []float64, rhs, sign float64, lb,
 		}
 		hi := numVal + numErr
 		if numErr > 0 && !math.IsNaN(hi) && !math.IsInf(hi, 0) {
-			hi = math.Nextafter(hi, math.Inf(1))
+			hi = nextUp(hi)
 		}
 		if math.IsNaN(hi) || math.IsInf(hi, 0) {
 			return false
@@ -7806,7 +8031,7 @@ func tightenRowLeVerifyBounds(cols []int, vals []float64, rhs, sign float64, lb,
 			case q == 0 && hi > 0:
 				bnd = math.SmallestNonzeroFloat64
 			default:
-				bnd = math.Nextafter(q, math.Inf(1))
+				bnd = nextUp(q)
 			}
 			if !math.IsInf(bnd, 1) && bnd < ub[c] {
 				ub[c] = bnd
@@ -7822,7 +8047,7 @@ func tightenRowLeVerifyBounds(cols []int, vals []float64, rhs, sign float64, lb,
 			case q == 0 && hi > 0:
 				bnd = -math.SmallestNonzeroFloat64
 			default:
-				bnd = math.Nextafter(q, math.Inf(-1))
+				bnd = nextDown(q)
 			}
 			if !math.IsInf(bnd, -1) && bnd > lb[c] {
 				lb[c] = bnd

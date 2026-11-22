@@ -299,7 +299,8 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			if !r.active || r.sense != LessEqual {
 				continue
 			}
-			s, _ := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+			var s rowActivitySummary
+			evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, false, true)
 			if s.extreme || s.maxInfCount > 0 {
 				continue
 			}
@@ -314,23 +315,19 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					a := r.vals[k]
 					if a > binTol && surplusHi < a-binTol {
 						newVal := surplusHi
-						var w wideDotAcc
-						w.addVal(r.rhs)
-						w.addVal(-a)
-						w.addVal(newVal)
-						top, rem, ok := w.finishDD()
+						top, rem, ok := evalBinaryTightenRHSWide(r.rhs, a, newVal)
 						if !ok || math.IsNaN(top) || math.IsInf(top, 0) {
 							continue
 						}
 						if rem > 0 {
-							top = math.Nextafter(top, math.Inf(1))
+							top = nextUp(top)
 						}
 						if newVal > 0 && newVal < a-binTol && top < r.rhs-binTol && !isNonFinite(top) {
 							r.ensureOwned()
 							r.vals[k] = newVal
 							r.rhs = top
 							strengthened++
-							s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+							evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, false, true)
 							if s.extreme || s.maxInfCount > 0 {
 								break
 							}
@@ -347,7 +344,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 							r.ensureOwned()
 							r.vals[k] = newVal
 							strengthened++
-							s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+							evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, false, true)
 							if s.extreme || s.maxInfCount > 0 {
 								break
 							}
@@ -631,15 +628,53 @@ func canonicalizeCSRRow(colIdx *[]int, rowVal *[]float64, rowStart int) {
 	*rowVal = (*rowVal)[:rowStart+w]
 }
 
+// isFractionalFloat64 stays within the Go inline budget (cost <= 80) to avoid math.Trunc calls.
+func isFractionalFloat64(x float64) bool {
+	absBits := math.Float64bits(x) &^ (uint64(1) << 63)
+	if absBits == 0 {
+		return false
+	}
+	exp := absBits >> 52
+	if exp < 1023 {
+		return true
+	}
+	if exp >= 1075 {
+		return exp == 0x7ff && (absBits&0x000fffffffffffff) != 0
+	}
+	fracMask := uint64(0x000fffffffffffff) >> (exp - 1023)
+	return (absBits & fracMask) != 0
+}
+
+// evalBinaryTightenRHSWide isolates wideDotAcc stack allocation off the fast-path frame.
+//
+//go:noinline
+func evalBinaryTightenRHSWide(rhs, a, newVal float64) (top, rem float64, ok bool) {
+	var w wideDotAcc
+	w.addVal(rhs)
+	w.addVal(-a)
+	w.addVal(newVal)
+	return w.finishDD()
+}
+
 // fastRowCanSkip performs an O(rowLen) float64 pre-check with conservative ULP and
 // feasibility margins to skip exact dot2Acc/wideDotAcc activity evaluation when a row
 // can neither prove infeasibility, be dropped as redundant, nor tighten any variable bound.
 // Extreme-scale rows (|a| > 1e12, 0 < |a| < 1e-12, |term| > 1e12, or |rhs| > 1e12)
 // always fall back to exact activity evaluation.
 func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64) bool {
-	if len(r.cols) > presolveFastMaxRowLen {
+	cols := r.cols
+	vals := r.vals
+	if len(cols) > presolveFastMaxRowLen || len(vals) < len(cols) {
 		return false
 	}
+	n := orig.numVars
+	if len(lb) < n || len(ub) < n || len(orig.varCat) < n {
+		return false
+	}
+	vals = vals[:len(cols)]
+	lb = lb[:n]
+	ub = ub[:n]
+	varCat := orig.varCat[:n]
 	absRHS := math.Abs(r.rhs)
 	if math.IsNaN(absRHS) || absRHS > presolveFastMaxAbs {
 		return false
@@ -652,8 +687,11 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 	maxSpan := 0.0
 	hasInfSpan := false
 	hasFracInt := false
-	for k, col := range r.cols {
-		a := r.vals[k]
+	for k, col := range cols {
+		if col < 0 || col >= n {
+			return false
+		}
+		a := vals[k]
 		absA := math.Abs(a)
 		if absA == 0 {
 			continue
@@ -665,8 +703,8 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 		if math.IsNaN(l) || math.IsNaN(u) {
 			return false
 		}
-		if orig.varCat[col] != Continuous {
-			if (l != 0 && !math.IsInf(l, 0) && l != math.Trunc(l)) || (u != 0 && !math.IsInf(u, 0) && u != math.Trunc(u)) {
+		if varCat[col] != Continuous {
+			if isFractionalFloat64(l) || isFractionalFloat64(u) {
 				hasFracInt = true
 			}
 		}
@@ -771,6 +809,9 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 			return false
 		}
 		if minInf == 1 {
+			if minInfCol < 0 || minInfCol >= n {
+				return false
+			}
 			if minInfA > 0 {
 				uInf := ub[minInfCol]
 				if math.IsInf(uInf, 1) || slackFast-margin < minInfA*uInf {
@@ -791,6 +832,9 @@ func fastRowCanSkip(orig *CompiledProblem, r *presolveWorkRow, lb, ub []float64)
 			return false
 		}
 		if maxInf == 1 {
+			if maxInfCol < 0 || maxInfCol >= n {
+				return false
+			}
 			if maxInfA > 0 {
 				lInf := lb[maxInfCol]
 				if math.IsInf(lInf, -1) || deficitFast+margin > maxInfA*lInf {
@@ -816,7 +860,7 @@ func presolveCanSkipTerm(slackLo, absA, l, u, targetBound float64, isInt bool) b
 	if slackLo <= 0 || math.IsInf(targetBound, 0) {
 		return false
 	}
-	if isInt && targetBound != math.Trunc(targetBound) {
+	if isInt && isFractionalFloat64(targetBound) {
 		return false
 	}
 	span := u - l
@@ -905,114 +949,16 @@ func runActivityTighteningDirty(
 
 			hasUpper := r.sense == LessEqual || r.sense == Equal
 			hasLower := r.sense == GreaterEqual || r.sense == Equal
-			s, _ := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, true, true)
+			var s rowActivitySummary
+			evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, true, true)
 			if s.extreme {
-				maxExp := 0
-				if r.rhs != 0 && !math.IsInf(r.rhs, 0) && !math.IsNaN(r.rhs) {
-					if _, re := math.Frexp(math.Abs(r.rhs)); re > maxExp {
-						maxExp = re
-					}
-				}
-				for k, col := range r.cols {
-					a := r.vals[k]
-					if a == 0 {
-						continue
-					}
-					_, ea := math.Frexp(math.Abs(a))
-					if l := lb[col]; !math.IsInf(l, 0) && l != 0 {
-						if _, el := math.Frexp(math.Abs(l)); ea+el > maxExp {
-							maxExp = ea + el
-						}
-					}
-					if u := ub[col]; !math.IsInf(u, 0) && u != 0 {
-						if _, eu := math.Frexp(math.Abs(u)); ea+eu > maxExp {
-							maxExp = ea + eu
-						}
-					}
-				}
-				shift := max(32, maxExp-wideExpCutoff)
-				s1 := shift / 2
-				s2 := shift - s1
-				var slackW, defW wideDotAcc
-				rhsS := math.Ldexp(r.rhs, -shift)
-				underflowed := r.rhs != 0 && rhsS == 0
-				slackW.addVal(rhsS)
-				defW.addVal(rhsS)
-				l1Scaled := math.Abs(rhsS)
-				for k, col := range r.cols {
-					a := r.vals[k]
-					l, u := lb[col], ub[col]
-					as := math.Ldexp(a, -s1)
-					if a != 0 && as == 0 {
-						underflowed = true
-					}
-					if a > 0 {
-						if !math.IsInf(l, -1) {
-							ls := math.Ldexp(l, -s2)
-							if (l != 0 && ls == 0) || (as != 0 && l != 0 && as*ls == 0) {
-								underflowed = true
-							}
-							slackW.addProd(-as, ls)
-							l1Scaled += math.Abs(as * ls)
-						}
-						if !math.IsInf(u, 1) {
-							us := math.Ldexp(u, -s2)
-							if (u != 0 && us == 0) || (as != 0 && u != 0 && as*us == 0) {
-								underflowed = true
-							}
-							defW.addProd(-as, us)
-							l1Scaled += math.Abs(as * us)
-						}
-					} else if a < 0 {
-						if !math.IsInf(u, 1) {
-							us := math.Ldexp(u, -s2)
-							if (u != 0 && us == 0) || (as != 0 && u != 0 && as*us == 0) {
-								underflowed = true
-							}
-							slackW.addProd(-as, us)
-							l1Scaled += math.Abs(as * us)
-						}
-						if !math.IsInf(l, -1) {
-							ls := math.Ldexp(l, -s2)
-							if (l != 0 && ls == 0) || (as != 0 && l != 0 && as*ls == 0) {
-								underflowed = true
-							}
-							defW.addProd(-as, ls)
-							l1Scaled += math.Abs(as * ls)
-						}
-					}
-				}
-				if underflowed {
-					continue
-				}
-				slackS := slackW.finish(math.NaN())
-				defS := defW.finish(math.NaN())
-				if math.IsNaN(slackS) || math.IsInf(slackS, 0) || math.IsNaN(defS) || math.IsInf(defS, 0) || math.IsNaN(l1Scaled) || math.IsInf(l1Scaled, 0) {
-					continue
-				}
-				errS := 0x1p-45 * (l1Scaled + math.Abs(slackS) + math.Abs(defS))
-				tolS := max(math.Ldexp(presolveFeasTol, -shift), presolveRelScaleTol*l1Scaled) + errS
-				chgS := math.Ldexp(presolveBoundChangeTol, -shift)
-				if hasUpper && s.minInfCount == 0 && slackS+errS < -tolS {
+				extInfeas, extRemove := handleExtremeRowTightening(r, lb, ub, s.minInfCount, s.maxInfCount, hasUpper, hasLower)
+				if extInfeas {
 					return tightened, removedRows, true, false
 				}
-				if hasLower && s.maxInfCount == 0 && defS-errS > tolS {
-					return tightened, removedRows, true, false
-				}
-				if r.sense == LessEqual && s.maxInfCount == 0 && defS-errS >= 0 {
+				if extRemove {
 					r.active = false
 					removedRows++
-					continue
-				}
-				if r.sense == GreaterEqual && s.minInfCount == 0 && slackS+errS <= 0 {
-					r.active = false
-					removedRows++
-					continue
-				}
-				if r.sense == Equal && s.minInfCount == 0 && s.maxInfCount == 0 && math.Abs(slackS)+errS <= chgS && math.Abs(defS)+errS <= chgS {
-					r.active = false
-					removedRows++
-					continue
 				}
 				continue
 			}
@@ -1128,7 +1074,7 @@ func runActivityTighteningDirty(
 			}
 
 			if hasLower && upperTightenedRow {
-				s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+				evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, false, true)
 				if s.extreme {
 					continue
 				}
@@ -1250,16 +1196,140 @@ type rowActivitySummary struct {
 	extreme              bool
 }
 
+//go:noinline
+func handleExtremeRowTightening(
+	r *presolveWorkRow,
+	lb, ub []float64,
+	minInfCount, maxInfCount int,
+	hasUpper, hasLower bool,
+) (infeas, remove bool) {
+	maxExp := 0
+	if r.rhs != 0 && !math.IsInf(r.rhs, 0) && !math.IsNaN(r.rhs) {
+		if _, re := math.Frexp(math.Abs(r.rhs)); re > maxExp {
+			maxExp = re
+		}
+	}
+	for k, col := range r.cols {
+		a := r.vals[k]
+		if a == 0 {
+			continue
+		}
+		_, ea := math.Frexp(math.Abs(a))
+		if l := lb[col]; !math.IsInf(l, 0) && l != 0 {
+			if _, el := math.Frexp(math.Abs(l)); ea+el > maxExp {
+				maxExp = ea + el
+			}
+		}
+		if u := ub[col]; !math.IsInf(u, 0) && u != 0 {
+			if _, eu := math.Frexp(math.Abs(u)); ea+eu > maxExp {
+				maxExp = ea + eu
+			}
+		}
+	}
+	shift := max(32, maxExp-wideExpCutoff)
+	s1 := shift / 2
+	s2 := shift - s1
+	var slackW, defW wideDotAcc
+	rhsS := math.Ldexp(r.rhs, -shift)
+	underflowed := r.rhs != 0 && rhsS == 0
+	slackW.addVal(rhsS)
+	defW.addVal(rhsS)
+	l1Scaled := math.Abs(rhsS)
+	for k, col := range r.cols {
+		a := r.vals[k]
+		l, u := lb[col], ub[col]
+		as := math.Ldexp(a, -s1)
+		if a != 0 && as == 0 {
+			underflowed = true
+		}
+		if a > 0 {
+			if !math.IsInf(l, -1) {
+				ls := math.Ldexp(l, -s2)
+				if (l != 0 && ls == 0) || (as != 0 && l != 0 && as*ls == 0) {
+					underflowed = true
+				}
+				slackW.addProd(-as, ls)
+				l1Scaled += math.Abs(as * ls)
+			}
+			if !math.IsInf(u, 1) {
+				us := math.Ldexp(u, -s2)
+				if (u != 0 && us == 0) || (as != 0 && u != 0 && as*us == 0) {
+					underflowed = true
+				}
+				defW.addProd(-as, us)
+				l1Scaled += math.Abs(as * us)
+			}
+		} else if a < 0 {
+			if !math.IsInf(u, 1) {
+				us := math.Ldexp(u, -s2)
+				if (u != 0 && us == 0) || (as != 0 && u != 0 && as*us == 0) {
+					underflowed = true
+				}
+				slackW.addProd(-as, us)
+				l1Scaled += math.Abs(as * us)
+			}
+			if !math.IsInf(l, -1) {
+				ls := math.Ldexp(l, -s2)
+				if (l != 0 && ls == 0) || (as != 0 && l != 0 && as*ls == 0) {
+					underflowed = true
+				}
+				defW.addProd(-as, ls)
+				l1Scaled += math.Abs(as * ls)
+			}
+		}
+	}
+	if underflowed {
+		return false, false
+	}
+	slackS := slackW.finish(math.NaN())
+	defS := defW.finish(math.NaN())
+	if math.IsNaN(slackS) || math.IsInf(slackS, 0) || math.IsNaN(defS) || math.IsInf(defS, 0) || math.IsNaN(l1Scaled) || math.IsInf(l1Scaled, 0) {
+		return false, false
+	}
+	errS := 0x1p-45 * (l1Scaled + math.Abs(slackS) + math.Abs(defS))
+	tolS := max(math.Ldexp(presolveFeasTol, -shift), presolveRelScaleTol*l1Scaled) + errS
+	chgS := math.Ldexp(presolveBoundChangeTol, -shift)
+	if hasUpper && minInfCount == 0 && slackS+errS < -tolS {
+		return true, false
+	}
+	if hasLower && maxInfCount == 0 && defS-errS > tolS {
+		return true, false
+	}
+	if r.sense == LessEqual && maxInfCount == 0 && defS-errS >= 0 {
+		return false, true
+	}
+	if r.sense == GreaterEqual && minInfCount == 0 && slackS+errS <= 0 {
+		return false, true
+	}
+	if r.sense == Equal && minInfCount == 0 && maxInfCount == 0 && math.Abs(slackS)+errS <= chgS && math.Abs(defS)+errS <= chgS {
+		return false, true
+	}
+	return false, false
+}
+
 func evalRowActivitySummary(
 	cols []int,
 	vals, lb, ub []float64,
 	rhs float64,
 	bailBothInf, hasUpper, hasLower bool,
 ) (s rowActivitySummary, earlyBail bool) {
-	if math.IsNaN(rhs) || math.IsInf(rhs, 0) {
+	earlyBail = evalRowActivitySummaryInto(&s, cols, vals, lb, ub, rhs, bailBothInf, hasUpper, hasLower)
+	return s, earlyBail
+}
+
+func evalRowActivitySummaryInto(
+	s *rowActivitySummary,
+	cols []int,
+	vals, lb, ub []float64,
+	rhs float64,
+	bailBothInf, hasUpper, hasLower bool,
+) (earlyBail bool) {
+	*s = rowActivitySummary{}
+	if math.IsNaN(rhs) || math.IsInf(rhs, 0) || len(vals) < len(cols) {
 		s.extreme = true
-		return s, false
+		return false
 	}
+	vals = vals[:len(cols)]
 	if hasUpper {
 		s.slackAcc.addVal(rhs)
 	}
@@ -1273,7 +1343,7 @@ func evalRowActivitySummary(
 		}
 		if isNonFinite(a) {
 			s.extreme = true
-			return s, false
+			return false
 		}
 		l, u := lb[col], ub[col]
 		if a > 0 {
@@ -1320,13 +1390,13 @@ func evalRowActivitySummary(
 			}
 		}
 		if bailBothInf && (!hasUpper || s.minInfCount > 0) && (!hasLower || s.maxInfCount > 0) {
-			return s, true
+			return true
 		}
 	}
 
 	if math.IsNaN(s.l1Min) || math.IsInf(s.l1Min, 0) || math.IsNaN(s.l1Max) || math.IsInf(s.l1Max, 0) {
 		s.extreme = true
-		return s, false
+		return false
 	}
 
 	if hasUpper {
@@ -1335,20 +1405,10 @@ func evalRowActivitySummary(
 			s.slackHi = val + eb
 		} else {
 			s.useWideSlack = true
-			var w wideDotAcc
-			w.addVal(rhs)
-			for k, col := range cols {
-				a := vals[k]
-				if a > 0 && !math.IsInf(lb[col], -1) {
-					w.addProd(-a, lb[col])
-				} else if a < 0 && !math.IsInf(ub[col], 1) {
-					w.addProd(-a, ub[col])
-				}
-			}
-			val := w.finish(math.NaN())
-			if math.IsNaN(val) || math.IsInf(val, 0) {
+			val, ok := evalRowActivityWide(cols, vals, lb, ub, rhs, true)
+			if !ok {
 				s.extreme = true
-				return s, false
+				return false
 			}
 			ulp := 0x1p-50 * math.Abs(val)
 			s.slackLo = val - ulp
@@ -1362,20 +1422,10 @@ func evalRowActivitySummary(
 			s.deficitHi = val + eb
 		} else {
 			s.useWideDeficit = true
-			var w wideDotAcc
-			w.addVal(rhs)
-			for k, col := range cols {
-				a := vals[k]
-				if a > 0 && !math.IsInf(ub[col], 1) {
-					w.addProd(-a, ub[col])
-				} else if a < 0 && !math.IsInf(lb[col], -1) {
-					w.addProd(-a, lb[col])
-				}
-			}
-			val := w.finish(math.NaN())
-			if math.IsNaN(val) || math.IsInf(val, 0) {
+			val, ok := evalRowActivityWide(cols, vals, lb, ub, rhs, false)
+			if !ok {
 				s.extreme = true
-				return s, false
+				return false
 			}
 			ulp := 0x1p-50 * math.Abs(val)
 			s.deficitLo = val - ulp
@@ -1383,7 +1433,90 @@ func evalRowActivitySummary(
 		}
 	}
 
-	return s, false
+	return false
+}
+
+// evalRowActivityWide isolates wideDotAcc stack allocation off evalRowActivitySummaryInto.
+//
+//go:noinline
+func evalRowActivityWide(cols []int, vals, lb, ub []float64, rhs float64, upper bool) (float64, bool) {
+	if len(vals) < len(cols) {
+		return 0, false
+	}
+	vals = vals[:len(cols)]
+	var w wideDotAcc
+	w.addVal(rhs)
+	if upper {
+		for k, col := range cols {
+			a := vals[k]
+			if a > 0 && !math.IsInf(lb[col], -1) {
+				w.addProd(-a, lb[col])
+			} else if a < 0 && !math.IsInf(ub[col], 1) {
+				w.addProd(-a, ub[col])
+			}
+		}
+	} else {
+		for k, col := range cols {
+			a := vals[k]
+			if a > 0 && !math.IsInf(ub[col], 1) {
+				w.addProd(-a, ub[col])
+			} else if a < 0 && !math.IsInf(lb[col], -1) {
+				w.addProd(-a, lb[col])
+			}
+		}
+	}
+	val := w.finish(math.NaN())
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return 0, false
+	}
+	return val, true
+}
+
+//go:noinline
+func residualQuotientWide(
+	cols []int,
+	vals, lb, ub []float64,
+	rhs float64,
+	skipIdx int,
+	a float64,
+	isUpper bool,
+) (qVal, qEB float64, ok bool) {
+	if len(vals) < len(cols) {
+		return 0, 0, false
+	}
+	vals = vals[:len(cols)]
+	var w wideDotAcc
+	w.addVal(rhs)
+	if isUpper {
+		for k, c := range cols {
+			if k == skipIdx {
+				continue
+			}
+			ak := vals[k]
+			if ak > 0 && !math.IsInf(lb[c], -1) {
+				w.addProd(-ak, lb[c])
+			} else if ak < 0 && !math.IsInf(ub[c], 1) {
+				w.addProd(-ak, ub[c])
+			}
+		}
+	} else {
+		for k, c := range cols {
+			if k == skipIdx {
+				continue
+			}
+			ak := vals[k]
+			if ak > 0 && !math.IsInf(ub[c], 1) {
+				w.addProd(-ak, ub[c])
+			} else if ak < 0 && !math.IsInf(lb[c], -1) {
+				w.addProd(-ak, lb[c])
+			}
+		}
+	}
+	top, rem, wOK := w.finishDD()
+	if !wOK {
+		return 0, 0, false
+	}
+	return divDDByFloat(top, rem, a, 0)
 }
 
 func (s *rowActivitySummary) residualQuotient(
@@ -1411,24 +1544,7 @@ func (s *rowActivitySummary) residualQuotient(
 				}
 			}
 		}
-		var w wideDotAcc
-		w.addVal(rhs)
-		for k, c := range cols {
-			if k == skipIdx {
-				continue
-			}
-			ak := vals[k]
-			if ak > 0 && !math.IsInf(lb[c], -1) {
-				w.addProd(-ak, lb[c])
-			} else if ak < 0 && !math.IsInf(ub[c], 1) {
-				w.addProd(-ak, ub[c])
-			}
-		}
-		top, rem, wOK := w.finishDD()
-		if !wOK {
-			return 0, 0, false
-		}
-		return divDDByFloat(top, rem, a, 0)
+		return residualQuotientWide(cols, vals, lb, ub, rhs, skipIdx, a, true)
 	}
 
 	if !s.useWideDeficit {
@@ -1446,24 +1562,7 @@ func (s *rowActivitySummary) residualQuotient(
 			}
 		}
 	}
-	var w wideDotAcc
-	w.addVal(rhs)
-	for k, c := range cols {
-		if k == skipIdx {
-			continue
-		}
-		ak := vals[k]
-		if ak > 0 && !math.IsInf(ub[c], 1) {
-			w.addProd(-ak, ub[c])
-		} else if ak < 0 && !math.IsInf(lb[c], -1) {
-			w.addProd(-ak, lb[c])
-		}
-	}
-	top, rem, wOK := w.finishDD()
-	if !wOK {
-		return 0, 0, false
-	}
-	return divDDByFloat(top, rem, a, 0)
+	return residualQuotientWide(cols, vals, lb, ub, rhs, skipIdx, a, false)
 }
 
 type orbitSortEntry struct {
@@ -3240,9 +3339,10 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 			}
 
 			// Drop strictly redundant inequality rows (never drop if margin is zero/ambiguous).
+			var s rowActivitySummary
 			switch r.sense {
 			case LessEqual:
-				s, early := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, true, true, true)
+				early := evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, true, true, true)
 				if !early && !s.extreme {
 					tol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, max(s.l1Min, s.l1Max)))
 					if s.minInfCount == 0 && s.slackHi < -tol {
@@ -3255,7 +3355,7 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 					}
 				}
 			case GreaterEqual:
-				s, early := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, true, true, true)
+				early := evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, true, true, true)
 				if !early && !s.extreme {
 					tol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, max(s.l1Min, s.l1Max)))
 					if s.maxInfCount == 0 && s.deficitLo > tol {

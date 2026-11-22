@@ -43,7 +43,7 @@ func canSkipBoundTightening(slackLo, absA, l, u, targetBound float64, isInt bool
 	if slackLo < 0 || math.IsInf(targetBound, 0) {
 		return false
 	}
-	if isInt && targetBound != math.Trunc(targetBound) {
+	if isInt && isFractionalFloat64(targetBound) {
 		return false
 	}
 	span := u - l
@@ -68,7 +68,8 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 	hasUB := sense == LessEqual || sense == Equal
 	hasLB := sense == GreaterEqual || sense == Equal
 
-	sum, earlyBail := evalRowActivitySummary(cols, vals, lb, ub, rhs, true, hasUB, hasLB)
+	var sum rowActivitySummary
+	earlyBail := evalRowActivitySummaryInto(&sum, cols, vals, lb, ub, rhs, true, hasUB, hasLB)
 	if earlyBail || sum.extreme {
 		return true, false
 	}
@@ -160,7 +161,7 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 	}
 
 	if hasLB && upperChanged {
-		sum, _ = evalRowActivitySummary(cols, vals, lb, ub, rhs, false, false, true)
+		evalRowActivitySummaryInto(&sum, cols, vals, lb, ub, rhs, false, false, true)
 		if sum.extreme {
 			return true, changed
 		}
@@ -796,6 +797,22 @@ type epigraphComponent struct {
 	rows    []epigraphRowTerm
 }
 
+// evalEpigraphCompObjWide isolates wideDotAcc stack allocation off solveEpigraphComponent.
+//
+//go:noinline
+func evalEpigraphCompObjWide(objM, mv, objN, nv float64, nCol int, epiObj, epiMax []float64) float64 {
+	var compObj wideDotAcc
+	compObj.addProd(objM, mv)
+	if nCol != -1 {
+		compObj.addProd(objN, nv)
+	}
+	n := min(len(epiObj), len(epiMax))
+	for ei := range n {
+		compObj.addProd(epiObj[ei], epiMax[ei])
+	}
+	return compObj.finish(math.NaN())
+}
+
 // solveEpigraphComponent enumerates piecewise-linear breakpoints (m, n) of one independent epigraph component and writes the optimal assignment into cand.
 func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hub, cand []float64) {
 	mCol := comp.contCol
@@ -958,7 +975,6 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 	bestM := mCands[0]
 	bestN := nCands[0]
 	screenFactor := float64(numEpi+4) * 1e-13
-	var compObj wideDotAcc
 
 	for _, mv := range mCands {
 		copy(baseEpi, epiLB)
@@ -1015,15 +1031,7 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 			}
 			obj, eb, ok := acc.result()
 			if !ok || eb > 0x1p-48*math.Abs(obj) {
-				compObj.reset()
-				compObj.addProd(objM, mv)
-				if nCol != -1 {
-					compObj.addProd(objN, nv)
-				}
-				for ei := range numEpi {
-					compObj.addProd(epiObj[ei], epiMax[ei])
-				}
-				obj = compObj.finish(math.NaN())
+				obj = evalEpigraphCompObjWide(objM, mv, objN, nv, nCol, epiObj, epiMax[:numEpi])
 			}
 			if !math.IsNaN(obj) && !math.IsInf(obj, 0) && obj < bestCompObj {
 				bestCompObj = obj

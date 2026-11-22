@@ -802,13 +802,6 @@ type wideDotAcc struct {
 	nonFin bool
 }
 
-func (w *wideDotAcc) reset() {
-	w.hiLen = 0
-	w.midLen = 0
-	w.loLen = 0
-	w.nonFin = false
-}
-
 func (w *wideDotAcc) isEmpty() bool {
 	return w.hiLen == 0 && w.midLen == 0 && w.loLen == 0
 }

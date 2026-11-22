@@ -1503,3 +1503,69 @@ func TestDynamicOrbitalBranchingAsymmetricControl(t *testing.T) {
 		t.Fatalf("asym con obj=%.10f, want 35.0 (false orbital pruning excluded feasible high-index items)", resCon.Objective)
 	}
 }
+
+func TestIsFractionalFloat64Parity(t *testing.T) {
+	edges := []float64{
+		0.0,
+		math.Copysign(0.0, -1.0),
+		math.SmallestNonzeroFloat64,
+		-math.SmallestNonzeroFloat64,
+		math.Float64frombits(0x000fffffffffffff),
+		-math.Float64frombits(0x000fffffffffffff),
+		math.Float64frombits(0x0010000000000000),
+		0.5,
+		-0.5,
+		1.0 - 0x1p-53,
+		1.0,
+		-1.0,
+		1.0 + 0x1p-52,
+		1.5,
+		-1.5,
+		2.0,
+		2.5,
+		3.0,
+		math.Ldexp(1, 51) + 0.5,
+		-(math.Ldexp(1, 51) + 0.5),
+		math.Ldexp(1, 52) - 1.0,
+		math.Ldexp(1, 52) - 0.5,
+		math.Ldexp(1, 52),
+		math.Ldexp(1, 52) + 1.0,
+		math.Ldexp(1, 53),
+		math.MaxFloat64,
+		-math.MaxFloat64,
+		math.Inf(1),
+		math.Inf(-1),
+		math.NaN(),
+	}
+	check := func(x float64) {
+		got := isFractionalFloat64(x)
+		want := math.Trunc(x) != x
+		if got != want {
+			t.Fatalf("isFractionalFloat64(%v, bits=%016x) = %v, want %v", x, math.Float64bits(x), got, want)
+		}
+	}
+	for _, x := range edges {
+		check(x)
+	}
+	state := uint64(0x9e3779b97f4a7c15)
+	next64 := func() uint64 {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		return state
+	}
+	for range 10000 {
+		check(math.Float64frombits(next64()))
+	}
+	for e := 1020; e <= 1080; e++ {
+		for k := range 64 {
+			frac := next64() & ((uint64(1) << 52) - 1)
+			if k < 52 {
+				frac &= (uint64(1) << (52 - k)) - 1
+			}
+			sign := (uint64(k) & 1) << 63
+			bits := sign | (uint64(e) << 52) | frac
+			check(math.Float64frombits(bits))
+		}
+	}
+}

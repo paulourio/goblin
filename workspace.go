@@ -207,6 +207,9 @@ func (ws *Workspace) ensureSize(n, m int) {
 		clear(ws.tabRowMark)
 	}
 	ws.tabRowIdx = ws.tabRowIdx[:0]
+	if cap(ws.tabRowIdx) < tot {
+		ws.tabRowIdx = make([]int, 0, tot)
+	}
 	ws.tabRowSparse = false
 	numChunks := (n + tabRowChunkMask) >> tabRowChunkBits
 	if cap(ws.tabRowChunkMark) < numChunks {
@@ -215,10 +218,18 @@ func (ws *Workspace) ensureSize(n, m int) {
 	} else {
 		ws.tabRowChunkMark = ws.tabRowChunkMark[:numChunks]
 		clear(ws.tabRowChunkMark)
-		ws.tabRowChunks = ws.tabRowChunks[:0]
+		if cap(ws.tabRowChunks) < numChunks {
+			ws.tabRowChunks = make([]int, 0, numChunks)
+		} else {
+			ws.tabRowChunks = ws.tabRowChunks[:0]
+		}
 	}
 	ws.flipCols = ws.flipCols[:0]
-	ws.bfrtCands = ws.bfrtCands[:0]
+	if cap(ws.bfrtCands) < tot {
+		ws.bfrtCands = make([]bfrtCand, 0, tot)
+	} else {
+		ws.bfrtCands = ws.bfrtCands[:0]
+	}
 	ws.dualShift = ws.dualShift[:0]
 	ws.rowMaxTerm = resizeFloat64(ws.rowMaxTerm, m)
 	if cap(ws.varTol) < tot {

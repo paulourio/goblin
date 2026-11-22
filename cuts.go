@@ -43,6 +43,40 @@ const (
 	cutDensityPen    = 0.01
 )
 
+// nextUp stays within the Go inline budget (cost <= 80) to avoid math.Nextafter calls in cut loops.
+func nextUp(x float64) float64 {
+	if x == 0 {
+		return math.SmallestNonzeroFloat64
+	}
+	if x > 0 {
+		if x > math.MaxFloat64 {
+			return x
+		}
+		return math.Float64frombits(math.Float64bits(x) + 1)
+	}
+	if x < 0 {
+		return math.Float64frombits(math.Float64bits(x) - 1)
+	}
+	return x
+}
+
+// nextDown stays within the Go inline budget (cost <= 80) to avoid math.Nextafter calls in cut loops.
+func nextDown(x float64) float64 {
+	if x == 0 {
+		return -math.SmallestNonzeroFloat64
+	}
+	if x < 0 {
+		if x < -math.MaxFloat64 {
+			return x
+		}
+		return math.Float64frombits(math.Float64bits(x) + 1)
+	}
+	if x > 0 {
+		return math.Float64frombits(math.Float64bits(x) - 1)
+	}
+	return x
+}
+
 type cutPlane struct {
 	ColIdx   []int
 	Val      []float64
@@ -594,6 +628,12 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 	n := p.numVars
 	m := solver.TotalRows()
 
+	basis := ws.basis[:m]
+	varCat := p.varCat[:n]
+	varLB := p.varLB[:n]
+	varUB := p.varUB[:n]
+	status := ws.status[:n+m]
+
 	type gmiRow struct {
 		r    int
 		bVar int
@@ -601,9 +641,8 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 		dist float64
 	}
 	var fracRows []gmiRow
-	for r := range m {
-		bVar := ws.basis[r]
-		if bVar >= n || p.varCat[bVar] == Continuous {
+	for r, bVar := range basis {
+		if uint(bVar) >= uint(n) || varCat[bVar] == Continuous {
 			continue
 		}
 		xVal := solver.unscaledBasicVal(r)
@@ -629,21 +668,33 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 	}
 
 	cutWS.ensureGMIVars(n)
+	gmiMark := cutWS.gmiMark[:n]
+	gmiAcc := cutWS.gmiAcc[:n]
+	unscaledLB, unscaledUB := ws.lb[:n], ws.ub[:n]
+	if solver.scaled && len(solver.origLB) >= n && len(solver.origUB) >= n {
+		unscaledLB, unscaledUB = solver.origLB[:n], solver.origUB[:n]
+	}
 	gmiMaxNNZ := maxCutNNZ(n)
 	var cuts []cutPlane
 
 	evalGMIInt := func(a float64, f0 float64) float64 {
 		fk := a - math.Floor(a)
+		var v float64
 		if fk <= f0 {
-			return math.Nextafter(fk/f0, math.Inf(1))
+			v = fk / f0
+		} else {
+			v = (1.0 - fk) / (1.0 - f0)
 		}
-		return math.Nextafter((1.0-fk)/(1.0-f0), math.Inf(1))
+		return nextUp(v)
 	}
 	evalGMICont := func(a float64, f0 float64) float64 {
+		var v float64
 		if a >= 0 {
-			return math.Nextafter(a/f0, math.Inf(1))
+			v = a / f0
+		} else {
+			v = (-a) / (1.0 - f0)
 		}
-		return math.Nextafter((-a)/(1.0-f0), math.Inf(1))
+		return nextUp(v)
 	}
 
 	for _, fr := range fracRows {
@@ -667,7 +718,7 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			if k == bVar {
 				continue
 			}
-			st := ws.status[k]
+			st := status[k]
 			if st == statusBasic {
 				continue
 			}
@@ -677,7 +728,7 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			if !globalOnly && st == statusFixed {
 				continue
 			}
-			if globalOnly && k < n && p.varLB[k] == p.varUB[k] {
+			if globalOnly && k < n && varLB[k] == varUB[k] {
 				continue
 			}
 			if st == statusSuperBasic {
@@ -696,12 +747,16 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			effSt := st
 			var bndVal float64
 			if k < n {
-				bndVal = solver.unscaledBound(k, st == statusAtUpper)
+				if st == statusAtUpper {
+					bndVal = unscaledUB[k]
+				} else {
+					bndVal = unscaledLB[k]
+				}
 				if globalOnly {
 					switch bndVal {
-					case p.varLB[k]:
+					case varLB[k]:
 						effSt = statusAtLower
-					case p.varUB[k]:
+					case varUB[k]:
 						effSt = statusAtUpper
 					default:
 						validRow = false
@@ -720,7 +775,7 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			}
 
 			var gamma float64
-			isIntVar := k < n && p.varCat[k] != Continuous
+			isIntVar := k < n && varCat[k] != Continuous
 			if isIntVar {
 				if math.Abs(bndVal-math.Round(bndVal)) > cutCompareTol {
 					isIntVar = false
@@ -734,8 +789,8 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 					gamma = evalGMICont(alphaTilde, f0)
 				}
 			} else {
-				loA := math.Nextafter(alphaTilde-alphaErr, math.Inf(-1))
-				hiA := math.Nextafter(alphaTilde+alphaErr, math.Inf(1))
+				loA := nextDown(alphaTilde - alphaErr)
+				hiA := nextUp(alphaTilde + alphaErr)
 				if isIntVar {
 					if hiA-loA >= 1.0 || math.Floor(hiA-f0) >= math.Ceil(loA-f0) {
 						gamma = 1.0
@@ -756,16 +811,16 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			}
 
 			if k < n {
-				if cutWS.gmiMark[k] != gen {
-					cutWS.gmiMark[k] = gen
-					cutWS.gmiAcc[k] = dot2Acc{}
+				if gmiMark[k] != gen {
+					gmiMark[k] = gen
+					gmiAcc[k] = dot2Acc{}
 					gmiCols = append(gmiCols, k)
 				}
 				if effSt == statusAtLower {
-					cutWS.gmiAcc[k].addVal(gamma)
+					gmiAcc[k].addVal(gamma)
 					rhsAcc.addProd(gamma, bndVal)
 				} else {
-					cutWS.gmiAcc[k].addVal(-gamma)
+					gmiAcc[k].addVal(-gamma)
 					rhsAcc.addProd(-gamma, bndVal)
 				}
 			} else {
@@ -790,40 +845,54 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 
 		slices.Sort(gmiCols)
 		extraLHSErr := 0.0
-		idxBuf := cutWS.tmpIdx[:0]
-		valBuf := cutWS.tmpVal[:0]
+		needCols := len(gmiCols)
+		if cap(cutWS.tmpIdx) < needCols {
+			cutWS.tmpIdx = make([]int, needCols)
+		}
+		if cap(cutWS.tmpVal) < needCols {
+			cutWS.tmpVal = make([]float64, needCols)
+		}
+		idxBuf := cutWS.tmpIdx[:needCols]
+		valBuf := cutWS.tmpVal[:needCols]
+		outLen := 0
 		for _, j := range gmiCols {
-			cv, ce, okC := cutWS.gmiAcc[j].result()
+			if uint(j) >= uint(n) {
+				continue
+			}
+			cv, ce, okC := gmiAcc[j].result()
 			if !okC {
 				validRow = false
 				break
 			}
-			if cv != 0 {
-				idxBuf = append(idxBuf, j)
-				valBuf = append(valBuf, -cv)
+			if cv != 0 && outLen < len(idxBuf) {
+				idxBuf[outLen] = j
+				valBuf[outLen] = -cv
+				outLen++
 			}
 			if ce > 0 {
-				maxB := max(math.Abs(p.varLB[j]), math.Abs(p.varUB[j]))
+				maxB := max(math.Abs(varLB[j]), math.Abs(varUB[j]))
 				if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
 					validRow = false
 					break
 				}
-				extraLHSErr += math.Nextafter(ce*maxB, math.Inf(1))
+				extraLHSErr += nextUp(ce * maxB)
 				if math.IsInf(extraLHSErr, 0) || math.IsNaN(extraLHSErr) {
 					validRow = false
 					break
 				}
 			}
 		}
+		idxBuf = idxBuf[:outLen]
+		valBuf = valBuf[:outLen]
 		cutWS.tmpIdx = idxBuf
 		cutWS.tmpVal = valBuf
-		if !validRow || len(idxBuf) == 0 {
+		if !validRow || outLen == 0 {
 			continue
 		}
 
 		cutRHS := (-rhsVal + rhsErr) + extraLHSErr
 		if rhsErr+extraLHSErr > 0 && !math.IsInf(cutRHS, 0) && !math.IsNaN(cutRHS) {
-			cutRHS = math.Nextafter(cutRHS, math.Inf(1))
+			cutRHS = nextUp(cutRHS)
 		}
 
 		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, gmiMaxNNZ, cutWS); ok {
@@ -835,15 +904,24 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 }
 
 func addScaledRowAccSparse(p *CompiledProblem, extra []dynamicRow, rowIdx int, scale float64, cutWS *cutGenWorkspace, gen int, cols *[]int) {
+	n := p.numVars
+	gmiMark := cutWS.gmiMark[:n]
+	gmiAcc := cutWS.gmiAcc[:n]
 	if rowIdx < p.numConstraints {
-		for k := p.rowPtr[rowIdx]; k < p.rowPtr[rowIdx+1]; k++ {
-			col := p.colIdx[k]
-			if cutWS.gmiMark[col] != gen {
-				cutWS.gmiMark[col] = gen
-				cutWS.gmiAcc[col] = dot2Acc{}
+		st, en := p.rowPtr[rowIdx], p.rowPtr[rowIdx+1]
+		rCols := p.colIdx[st:en]
+		rVals := p.rowVal[st:en]
+		rVals = rVals[:len(rCols)]
+		for k, col := range rCols {
+			if uint(col) >= uint(n) {
+				continue
+			}
+			if gmiMark[col] != gen {
+				gmiMark[col] = gen
+				gmiAcc[col] = dot2Acc{}
 				*cols = append(*cols, col)
 			}
-			cutWS.gmiAcc[col].addProd(scale, p.rowVal[k])
+			gmiAcc[col].addProd(scale, rVals[k])
 		}
 		return
 	}
@@ -852,13 +930,18 @@ func addScaledRowAccSparse(p *CompiledProblem, extra []dynamicRow, rowIdx int, s
 	if dr.OrigVal != nil {
 		vals = dr.OrigVal
 	}
-	for k, col := range dr.ColIdx {
-		if cutWS.gmiMark[col] != gen {
-			cutWS.gmiMark[col] = gen
-			cutWS.gmiAcc[col] = dot2Acc{}
+	dCols := dr.ColIdx
+	vals = vals[:len(dCols)]
+	for k, col := range dCols {
+		if uint(col) >= uint(n) {
+			continue
+		}
+		if gmiMark[col] != gen {
+			gmiMark[col] = gen
+			gmiAcc[col] = dot2Acc{}
 			*cols = append(*cols, col)
 		}
-		cutWS.gmiAcc[col].addProd(scale, vals[k])
+		gmiAcc[col].addProd(scale, vals[k])
 	}
 }
 
@@ -1206,10 +1289,10 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 }
 
 func mirUseLower(x, l, u float64) bool {
-	if math.IsInf(u, 1) {
+	if u == math.Inf(1) {
 		return true
 	}
-	if math.IsInf(l, -1) {
+	if l == math.Inf(-1) {
 		return false
 	}
 	return x-l <= u-x
@@ -1254,10 +1337,22 @@ func separateCMIRFromSparseRow(
 	if len(cols) < minPairNNZ {
 		return cuts
 	}
+	n := p.numVars
+	vals = vals[:len(cols)]
+	varLB := p.varLB[:n]
+	varUB := p.varUB[:n]
+	varCat := p.varCat[:n]
+	if len(lpPrimal) >= n {
+		lpPrimal = lpPrimal[:n]
+	}
+
 	rhs := sign * rawRHS
 	act := 0.0
 	for k, col := range cols {
-		if math.IsInf(p.varLB[col], -1) && math.IsInf(p.varUB[col], 1) {
+		if uint(col) >= uint(n) {
+			return cuts
+		}
+		if math.IsInf(varLB[col], -1) && math.IsInf(varUB[col], 1) {
 			return cuts
 		}
 		act += sign * vals[k] * lpPrimal[col]
@@ -1277,7 +1372,7 @@ func separateCMIRFromSparseRow(
 		if triedDivs >= maxDivs || triedDivs >= len(triedDeltas) {
 			break
 		}
-		if p.varCat[divCol] == Continuous {
+		if uint(divCol) >= uint(n) || varCat[divCol] == Continuous {
 			continue
 		}
 		xv := lpPrimal[divCol]
@@ -1307,7 +1402,7 @@ func separateCMIRFromSparseRow(
 			betaAcc.addVal(rhs)
 			for k, col := range cols {
 				a := sign * vals[k]
-				l, u := p.varLB[col], p.varUB[col]
+				l, u := varLB[col], varUB[col]
 				if mirUseLower(lpPrimal[col], l, u) {
 					betaAcc.addProd(-a, l)
 				} else {
@@ -1335,42 +1430,52 @@ func separateCMIRFromSparseRow(
 			continue
 		}
 
-		idxBuf := ws.tmpIdx[:0]
-		valBuf := ws.tmpVal[:0]
 		var cutRHSAcc dot2Acc
 		cutRHSAcc.addVal(b0)
-		contDenLo := math.Nextafter(delta*math.Nextafter(1.0-f0, math.Inf(-1)), math.Inf(-1))
+		contDenLo := nextDown(delta * nextDown(1.0-f0))
 		if !(contDenLo > 0) || math.IsInf(contDenLo, 0) || math.IsNaN(contDenLo) {
 			continue
 		}
-		intDenHi := math.Nextafter(1.0-f0, math.Inf(1))
+		intDenHi := nextUp(1.0 - f0)
+		needCols := len(cols)
+		if cap(ws.tmpIdx) < needCols {
+			ws.tmpIdx = make([]int, needCols)
+		}
+		if cap(ws.tmpVal) < needCols {
+			ws.tmpVal = make([]float64, needCols)
+		}
+		idxBuf := ws.tmpIdx[:needCols]
+		valBuf := ws.tmpVal[:needCols]
+		outLen := 0
 		for k, col := range cols {
 			a := sign * vals[k]
-			l, u := p.varLB[col], p.varUB[col]
+			l, u := varLB[col], varUB[col]
 			if l == u {
 				continue
 			}
 			atLower := mirUseLower(lpPrimal[col], l, u)
 
-			if p.varCat[col] == Continuous {
+			if varCat[col] == Continuous {
 				if a > 0 {
 					if atLower {
 						continue
 					}
-					g := math.Nextafter(a/contDenLo, math.Inf(1))
-					if g != 0 {
-						idxBuf = append(idxBuf, col)
-						valBuf = append(valBuf, g)
+					g := nextUp(a / contDenLo)
+					if g != 0 && outLen < len(idxBuf) {
+						idxBuf[outLen] = col
+						valBuf[outLen] = g
+						outLen++
 					}
 					cutRHSAcc.addProd(g, u)
 				} else if a < 0 {
 					if !atLower {
 						continue
 					}
-					g := math.Nextafter((-a)/contDenLo, math.Inf(1))
-					if g != 0 {
-						idxBuf = append(idxBuf, col)
-						valBuf = append(valBuf, -g)
+					g := nextUp((-a) / contDenLo)
+					if g != 0 && outLen < len(idxBuf) {
+						idxBuf[outLen] = col
+						valBuf[outLen] = -g
+						outLen++
 					}
 					cutRHSAcc.addProd(-g, l)
 				}
@@ -1382,38 +1487,42 @@ func separateCMIRFromSparseRow(
 				}
 				alpha := num / delta
 				if alpha != 0 {
-					alpha = math.Nextafter(alpha, math.Inf(-1))
+					alpha = nextDown(alpha)
 				}
 				flA := math.Floor(alpha)
 				fj := alpha - flA
 				coeff := flA
 				if fj > f0 {
-					numLo := math.Nextafter(fj-f0, math.Inf(-1))
+					numLo := nextDown(fj - f0)
 					if numLo > 0 {
-						fracLo := math.Nextafter(numLo/intDenHi, math.Inf(-1))
+						fracLo := nextDown(numLo / intDenHi)
 						if fracLo > 0 {
-							coeff = math.Nextafter(flA+fracLo, math.Inf(-1))
+							coeff = nextDown(flA + fracLo)
 						}
 					}
 				}
 				if !comp {
-					if coeff != 0 {
-						idxBuf = append(idxBuf, col)
-						valBuf = append(valBuf, coeff)
+					if coeff != 0 && outLen < len(idxBuf) {
+						idxBuf[outLen] = col
+						valBuf[outLen] = coeff
+						outLen++
 					}
 					cutRHSAcc.addProd(coeff, l)
 				} else {
-					if coeff != 0 {
-						idxBuf = append(idxBuf, col)
-						valBuf = append(valBuf, -coeff)
+					if coeff != 0 && outLen < len(idxBuf) {
+						idxBuf[outLen] = col
+						valBuf[outLen] = -coeff
+						outLen++
 					}
 					cutRHSAcc.addProd(-coeff, u)
 				}
 			}
 		}
+		idxBuf = idxBuf[:outLen]
+		valBuf = valBuf[:outLen]
 		ws.tmpIdx = idxBuf
 		ws.tmpVal = valBuf
-		if len(idxBuf) == 0 {
+		if outLen == 0 {
 			continue
 		}
 		cutRHSVal, cutRHSErr, okCutRHS := cutRHSAcc.result()
@@ -1422,7 +1531,7 @@ func separateCMIRFromSparseRow(
 		}
 		cutRHS := cutRHSVal + cutRHSErr
 		if cutRHSErr > 0 && !math.IsInf(cutRHS, 0) && !math.IsNaN(cutRHS) {
-			cutRHS = math.Nextafter(cutRHS, math.Inf(1))
+			cutRHS = nextUp(cutRHS)
 		}
 		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, maxNNZ, ws); ok {
 			cuts = append(cuts, cut)
@@ -1454,14 +1563,23 @@ func addScaledProblemRowToAgg(
 	cols *[]int,
 ) {
 	rhsAcc.addProd(mu, p.rowRHS[r])
-	for k := p.rowPtr[r]; k < p.rowPtr[r+1]; k++ {
-		col := p.colIdx[k]
-		if ws.aggMark[col] != colGen {
-			ws.aggMark[col] = colGen
-			ws.aggAcc[col] = dot2Acc{}
+	n := p.numVars
+	st, en := p.rowPtr[r], p.rowPtr[r+1]
+	rCols := p.colIdx[st:en]
+	rVals := p.rowVal[st:en]
+	rVals = rVals[:len(rCols)]
+	aggMark := ws.aggMark[:n]
+	aggAcc := ws.aggAcc[:n]
+	for k, col := range rCols {
+		if uint(col) >= uint(n) {
+			continue
+		}
+		if aggMark[col] != colGen {
+			aggMark[col] = colGen
+			aggAcc[col] = dot2Acc{}
 			*cols = append(*cols, col)
 		}
-		ws.aggAcc[col].addProd(mu, p.rowVal[k])
+		aggAcc[col].addProd(mu, rVals[k])
 	}
 }
 
@@ -1476,22 +1594,29 @@ func materializeAggRow(
 	if !okRHS || math.IsNaN(rhsVal) || math.IsInf(rhsVal, 0) || math.IsNaN(rhsErr) || math.IsInf(rhsErr, 0) {
 		return nil, nil, 0, false
 	}
+	n := p.numVars
+	aggAcc := ws.aggAcc[:n]
+	varLB := p.varLB[:n]
+	varUB := p.varUB[:n]
 	outCols = ws.aggOutCols[:0]
 	outVals = ws.aggOutVals[:0]
 	extraLHSErr := 0.0
 	for _, j := range cols {
-		cv, ce, okC := ws.aggAcc[j].result()
+		if uint(j) >= uint(n) {
+			continue
+		}
+		cv, ce, okC := aggAcc[j].result()
 		if !okC || math.IsNaN(cv) || math.IsInf(cv, 0) {
 			return nil, nil, 0, false
 		}
 		if ce > 0 {
-			maxB := max(math.Abs(p.varLB[j]), math.Abs(p.varUB[j]))
+			maxB := max(math.Abs(varLB[j]), math.Abs(varUB[j]))
 			if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
 				return nil, nil, 0, false
 			}
-			extraLHSErr += math.Nextafter(ce*maxB, math.Inf(1))
+			extraLHSErr += nextUp(ce * maxB)
 			if !math.IsInf(extraLHSErr, 0) && !math.IsNaN(extraLHSErr) {
-				extraLHSErr = math.Nextafter(extraLHSErr, math.Inf(1))
+				extraLHSErr = nextUp(extraLHSErr)
 			} else {
 				return nil, nil, 0, false
 			}
@@ -1513,11 +1638,11 @@ func materializeAggRow(
 	}
 	errBound := rhsErr + extraLHSErr
 	if errBound > 0 && !math.IsInf(errBound, 0) && !math.IsNaN(errBound) {
-		errBound = math.Nextafter(errBound, math.Inf(1))
+		errBound = nextUp(errBound)
 	}
 	aggRHS = rhsVal + errBound
 	if errBound > 0 && !math.IsInf(aggRHS, 0) && !math.IsNaN(aggRHS) {
-		aggRHS = math.Nextafter(aggRHS, math.Inf(1))
+		aggRHS = nextUp(aggRHS)
 	}
 	if math.IsNaN(aggRHS) || math.IsInf(aggRHS, 0) {
 		return nil, nil, 0, false
@@ -2027,25 +2152,30 @@ func finalizeSparseCut(
 	ws.ensureVars(n)
 	gen := ws.nextGen()
 	uniq := ws.uniqCols[:0]
+	mark := ws.mark[:n]
+	acc := ws.acc[:n]
+	varLB := p.varLB[:n]
+	varUB := p.varUB[:n]
+	val = val[:len(idx)]
 	sorted := true
 	prevCol := -1
 
 	for k, col := range idx {
 		v := val[k]
-		if col < 0 || col >= n || math.IsNaN(v) || math.IsInf(v, 0) {
+		if uint(col) >= uint(n) || math.IsNaN(v) || math.IsInf(v, 0) {
 			return cutPlane{}, false
 		}
-		if ws.mark[col] != gen {
-			ws.mark[col] = gen
-			ws.acc[col] = v
+		if mark[col] != gen {
+			mark[col] = gen
+			acc[col] = v
 			if col < prevCol {
 				sorted = false
 			}
 			prevCol = col
 			uniq = append(uniq, col)
 		} else {
-			ws.acc[col] += v
-			if math.IsNaN(ws.acc[col]) || math.IsInf(ws.acc[col], 0) {
+			acc[col] += v
+			if math.IsNaN(acc[col]) || math.IsInf(acc[col], 0) {
 				return cutPlane{}, false
 			}
 		}
@@ -2063,7 +2193,10 @@ func finalizeSparseCut(
 	minAbs := math.Inf(1)
 	nnz := 0
 	for _, j := range uniq {
-		v := ws.acc[j]
+		if uint(j) >= uint(n) {
+			return cutPlane{}, false
+		}
+		v := acc[j]
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return cutPlane{}, false
 		}
@@ -2075,13 +2208,13 @@ func finalizeSparseCut(
 			nnz++
 		} else if v != 0 {
 			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
-			p1 := math.Nextafter(v*p.varLB[j], math.Inf(-1))
-			p2 := math.Nextafter(v*p.varUB[j], math.Inf(-1))
+			p1 := nextDown(v * varLB[j])
+			p2 := nextDown(v * varUB[j])
 			lo := min(p1, p2)
 			if math.IsInf(lo, 0) || math.IsNaN(lo) {
 				return cutPlane{}, false
 			}
-			rhs = math.Nextafter(rhs-lo, math.Inf(1))
+			rhs = nextUp(rhs - lo)
 			if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
 				return cutPlane{}, false
 			}
@@ -2114,24 +2247,27 @@ func finalizeSparseCut(
 	act := 0.0
 	subScaleErr := 0.0
 	for _, j := range kept {
-		v := ws.acc[j]
+		if uint(j) >= uint(n) {
+			return cutPlane{}, false
+		}
+		v := acc[j]
 		sv := math.Ldexp(v, -normExp)
 		if sv == 0 || math.IsNaN(sv) || math.IsInf(sv, 0) {
 			return cutPlane{}, false
 		}
 		if math.Ldexp(sv, normExp) != v {
-			maxB := max(math.Abs(p.varLB[j]), math.Abs(p.varUB[j]))
+			maxB := max(math.Abs(varLB[j]), math.Abs(varUB[j]))
 			if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
 				return cutPlane{}, false
 			}
-			subScaleErr += math.Nextafter(math.SmallestNonzeroFloat64*maxB, math.Inf(1))
+			subScaleErr += nextUp(math.SmallestNonzeroFloat64 * maxB)
 		}
-		ws.acc[j] = sv
+		acc[j] = sv
 		act += sv * lpPrimal[j]
 	}
 	rawRHS := math.Ldexp(rhs, -normExp)
 	if rhs != 0 && math.Ldexp(rawRHS, normExp) != rhs {
-		rawRHS = math.Nextafter(rawRHS, math.Inf(1))
+		rawRHS = nextUp(rawRHS)
 	}
 	scaledRHS := (rawRHS + subScaleErr) + rhsSafetyMargin*scaledNorm
 	if math.IsNaN(scaledRHS) || math.IsInf(scaledRHS, 0) || math.IsNaN(act) || math.IsInf(act, 0) {
@@ -2180,13 +2316,13 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 			nnz++
 		} else if v != 0 {
 			// Dropping v*x_j relaxes the cut only after adding max(-v*x_j) = -min(v*l_j, v*u_j).
-			p1 := math.Nextafter(v*p.varLB[j], math.Inf(-1))
-			p2 := math.Nextafter(v*p.varUB[j], math.Inf(-1))
+			p1 := nextDown(v * p.varLB[j])
+			p2 := nextDown(v * p.varUB[j])
 			lo := min(p1, p2)
 			if math.IsInf(lo, 0) || math.IsNaN(lo) {
 				return cutPlane{}, false
 			}
-			rhs = math.Nextafter(rhs-lo, math.Inf(1))
+			rhs = nextUp(rhs - lo)
 			if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
 				return cutPlane{}, false
 			}
@@ -2229,7 +2365,7 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 				if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
 					return cutPlane{}, false
 				}
-				subScaleErr += math.Nextafter(math.SmallestNonzeroFloat64*maxB, math.Inf(1))
+				subScaleErr += nextUp(math.SmallestNonzeroFloat64 * maxB)
 			}
 			colIdx = append(colIdx, j)
 			val = append(val, sv)
@@ -2238,7 +2374,7 @@ func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []fl
 	}
 	rawRHS := math.Ldexp(rhs, -normExp)
 	if rhs != 0 && math.Ldexp(rawRHS, normExp) != rhs {
-		rawRHS = math.Nextafter(rawRHS, math.Inf(1))
+		rawRHS = nextUp(rawRHS)
 	}
 	scaledRHS := (rawRHS + subScaleErr) + rhsSafetyMargin*scaledNorm
 	if math.IsNaN(scaledRHS) || math.IsInf(scaledRHS, 0) || math.IsNaN(act) || math.IsInf(act, 0) {
