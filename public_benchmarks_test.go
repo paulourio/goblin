@@ -26,6 +26,7 @@ type publicInstanceMeta struct {
 // Verifies status, objective parity, and primal feasibility on held-out public Netlib LP
 // and MIPLIB / COIN-OR MILP benchmark instances stored in testdata/public.
 func TestPublicNetlibAndMIPLIBSuite(t *testing.T) {
+	t.Parallel()
 	rawManifest, err := os.ReadFile(filepath.Join("testdata", "public", "manifest.json"))
 	if err != nil {
 		t.Fatalf("read public manifest: %v", err)
@@ -40,6 +41,7 @@ func TestPublicNetlibAndMIPLIBSuite(t *testing.T) {
 
 	for _, inst := range manifest {
 		t.Run(inst.ID, func(t *testing.T) {
+			t.Parallel()
 			if testing.Short() && inst.IsMIP && (inst.NumVars > 200 || inst.ID == "miplib_flugpl") {
 				t.Skip("skipping larger-tree public MIP under -short")
 			}

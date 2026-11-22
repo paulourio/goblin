@@ -17,6 +17,7 @@ import (
 // TestDocumentationAndBenchmarkSync verifies that all Markdown tables and the final benchmark
 // report match the canonical JSON telemetry artifacts on disk.
 func TestDocumentationAndBenchmarkSync(t *testing.T) {
+	t.Parallel()
 	requiredDocs := []string{
 		"README.md",
 		"docs/index.md",
@@ -78,6 +79,7 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 // Verifies that CamelCase Go identifiers cited in architecture and internals docs match
 // live AST declarations across the repository so stale symbol names fail CI immediately.
 func TestDocBacktickIdentifiersResolve(t *testing.T) {
+	t.Parallel()
 	dirs := []string{".", "assign", "format", "bench", filepath.Join("internal", "simd")}
 	declared := map[string]bool{
 		// External Go stdlib / archsimd / Python PuLP / COIN-OR C++ names referenced in prose:
