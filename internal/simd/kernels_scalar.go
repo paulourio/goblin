@@ -187,6 +187,7 @@ func AbsMax64(x []float64) float64 {
 }
 
 // AllAbsLE64Scalar reports whether every element x[i] satisfies |x[i]| <= limit.
+// Keep the i <= len(x)-4 bound form so Go SSA prove eliminates loop bounds checks.
 func AllAbsLE64Scalar(x []float64, limit float64) bool {
 	i := 0
 	for ; i <= len(x)-4; i += 4 {
@@ -330,6 +331,7 @@ func Min2ReducedRow64With(costRow, v []float64, _ bool) (u1, u2 float64, j1, j2 
 
 // Min2ReducedRow64 computes the smallest (u1, j1) and second-smallest (u2, j2)
 // values of costRow[j] - v[j] using 4-way unrolled fast-filtering.
+// Keep vSlice tied to len(cSlice) and the j <= len(cSlice)-4 bound so Go SSA prove eliminates loop BCE.
 func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 	n := min(len(costRow), len(v))
 	u1, u2 = math.Inf(1), math.Inf(1)
@@ -476,22 +478,39 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 	if capDst == 0 {
 		return 0, chunkPos, elemPos
 	}
+	if chunkPos < 0 {
+		chunkPos = 0
+	}
+	if elemPos < 0 {
+		elemPos = 0
+	}
+	if n == 0 {
+		return 0, len(chunks), 0
+	}
+	tab = tab[:n]
+	dj = dj[:n]
+	status = status[:n]
+	dst = dst[:capDst]
 	filterByTheta := !bland && !math.IsInf(thetaGuard, 1)
 	cnt := 0
 	for ci := chunkPos; ci < len(chunks); ci++ {
 		ch := chunks[ci]
 		start := ch << 6
-		if start >= n {
+		if start < 0 || start >= n {
 			elemPos = 0
 			continue
 		}
 		end := min(start+64, n)
-		size := end - start
 		i := elemPos
 		elemPos = 0
+		tChunk := tab[start:end]
+		dChunk := dj[start:end]
+		sChunk := status[start:end]
+		size := len(tChunk)
+		dChunk = dChunk[:size]
+		sChunk = sChunk[:size]
 		for ; i < size; i++ {
-			col := start + i
-			tv := tab[col]
+			tv := tChunk[i]
 			if tv == 0 {
 				continue
 			}
@@ -500,13 +519,13 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 				hit = true
 			} else {
 				alphaBar := negLeaveDir * tv
-				switch uint8(status[col]) {
+				switch uint8(sChunk[i]) {
 				case 0: // statusAtLower
-					if alphaBar > 0 && (!filterByTheta || !(dj[col] > thetaGuard*alphaBar)) {
+					if alphaBar > 0 && (!filterByTheta || !(dChunk[i] > thetaGuard*alphaBar)) {
 						hit = true
 					}
 				case 1: // statusAtUpper
-					if alphaBar < 0 && (!filterByTheta || !(dj[col] < thetaGuard*alphaBar)) {
+					if alphaBar < 0 && (!filterByTheta || !(dChunk[i] < thetaGuard*alphaBar)) {
 						hit = true
 					}
 				case 4: // statusSuperBasic
@@ -514,7 +533,10 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 				}
 			}
 			if hit {
-				dst[cnt] = col
+				if cnt >= capDst {
+					return cnt, ci, i
+				}
+				dst[cnt] = start + i
 				cnt++
 				if cnt >= capDst {
 					if i+1 >= size {

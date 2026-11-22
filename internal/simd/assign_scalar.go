@@ -16,60 +16,56 @@ func RelaxRow64Scalar(rCost, v, d []float64, pred []int, start, rowI int, ui, mi
 	if start >= n {
 		return n
 	}
-	cSlice := rCost[start:n]
-	vSlice := v[start:n]
-	dSlice := d[start:n]
-	pSlice := pred[start:n]
+	// Keep sub-slices tied to len(cSlice) and use j <= len(cSlice)-4 so Go SSA prove eliminates loop BCE.
+	cSlice := rCost[:n]
+	vSlice := v[:len(cSlice)]
+	dSlice := d[:len(cSlice)]
+	pSlice := pred[:len(cSlice)]
 	j := start
-	for len(cSlice) >= 4 && len(vSlice) >= 4 && len(dSlice) >= 4 && len(pSlice) >= 4 {
-		r0 := minVal + ((cSlice[0] - vSlice[0]) - ui)
-		r1 := minVal + ((cSlice[1] - vSlice[1]) - ui)
-		r2 := minVal + ((cSlice[2] - vSlice[2]) - ui)
-		r3 := minVal + ((cSlice[3] - vSlice[3]) - ui)
-		if r0 < dSlice[0] || r1 < dSlice[1] || r2 < dSlice[2] || r3 < dSlice[3] {
-			if r0 < dSlice[0] {
+	for ; j <= len(cSlice)-4; j += 4 {
+		r0 := minVal + ((cSlice[j] - vSlice[j]) - ui)
+		r1 := minVal + ((cSlice[j+1] - vSlice[j+1]) - ui)
+		r2 := minVal + ((cSlice[j+2] - vSlice[j+2]) - ui)
+		r3 := minVal + ((cSlice[j+3] - vSlice[j+3]) - ui)
+		if r0 < dSlice[j] || r1 < dSlice[j+1] || r2 < dSlice[j+2] || r3 < dSlice[j+3] {
+			if r0 < dSlice[j] {
 				if r0 <= minVal {
 					return j
 				}
-				dSlice[0] = r0
-				pSlice[0] = rowI
+				dSlice[j] = r0
+				pSlice[j] = rowI
 			}
-			if r1 < dSlice[1] {
+			if r1 < dSlice[j+1] {
 				if r1 <= minVal {
 					return j + 1
 				}
-				dSlice[1] = r1
-				pSlice[1] = rowI
+				dSlice[j+1] = r1
+				pSlice[j+1] = rowI
 			}
-			if r2 < dSlice[2] {
+			if r2 < dSlice[j+2] {
 				if r2 <= minVal {
 					return j + 2
 				}
-				dSlice[2] = r2
-				pSlice[2] = rowI
+				dSlice[j+2] = r2
+				pSlice[j+2] = rowI
 			}
-			if r3 < dSlice[3] {
+			if r3 < dSlice[j+3] {
 				if r3 <= minVal {
 					return j + 3
 				}
-				dSlice[3] = r3
-				pSlice[3] = rowI
+				dSlice[j+3] = r3
+				pSlice[j+3] = rowI
 			}
 		}
-		cSlice = cSlice[4:]
-		vSlice = vSlice[4:]
-		dSlice = dSlice[4:]
-		pSlice = pSlice[4:]
-		j += 4
 	}
-	for k, cj := range cSlice {
-		r := minVal + ((cj - vSlice[k]) - ui)
-		if r < dSlice[k] {
+	for ; j < len(cSlice); j++ {
+		r := minVal + ((cSlice[j] - vSlice[j]) - ui)
+		if r < dSlice[j] {
 			if r <= minVal {
-				return j + k
+				return j
 			}
-			dSlice[k] = r
-			pSlice[k] = rowI
+			dSlice[j] = r
+			pSlice[j] = rowI
 		}
 	}
 	return n
@@ -86,10 +82,12 @@ func RelaxRow64(rCost, v, d []float64, pred []int, start, rowI int, ui, minVal f
 }
 
 // MinNoNaN64Scalar returns the minimum non-NaN value in x, or +Inf if x is empty or all-NaN.
+// Keep the i <= len(x)-4 bound form so Go SSA prove eliminates loop bounds checks.
 func MinNoNaN64Scalar(x []float64) float64 {
 	res := math.Inf(1)
-	for len(x) >= 4 {
-		v0, v1, v2, v3 := x[0], x[1], x[2], x[3]
+	i := 0
+	for ; i <= len(x)-4; i += 4 {
+		v0, v1, v2, v3 := x[i], x[i+1], x[i+2], x[i+3]
 		if v0 < res {
 			res = v0
 		}
@@ -102,11 +100,10 @@ func MinNoNaN64Scalar(x []float64) float64 {
 		if v3 < res {
 			res = v3
 		}
-		x = x[4:]
 	}
-	for _, v := range x {
-		if v < res {
-			res = v
+	for ; i < len(x); i++ {
+		if x[i] < res {
+			res = x[i]
 		}
 	}
 	return res
@@ -132,31 +129,53 @@ func CollectLE64Scalar(x []float64, start int, limit float64, out []int) (next, 
 	if start >= n || len(out) == 0 {
 		return min(max(start, 0), n), 0
 	}
-	capOut := len(out)
-	j := start
-	for ; j+4 <= n; j += 4 {
-		if x[j] <= limit || x[j+1] <= limit || x[j+2] <= limit || x[j+3] <= limit {
-			for k := range 4 {
-				if x[j+k] <= limit {
-					if count == capOut {
-						return j + k, count
-					}
-					out[count] = j + k
-					count++
+	xTail := x[start:n]
+	outSlice := out
+	cnt := 0
+	i := 0
+	for ; i <= len(xTail)-4; i += 4 {
+		v0, v1, v2, v3 := xTail[i], xTail[i+1], xTail[i+2], xTail[i+3]
+		if v0 <= limit || v1 <= limit || v2 <= limit || v3 <= limit {
+			if v0 <= limit {
+				if cnt >= len(outSlice) {
+					return start + i, cnt
 				}
+				outSlice[cnt] = start + i
+				cnt++
+			}
+			if v1 <= limit {
+				if cnt >= len(outSlice) {
+					return start + i + 1, cnt
+				}
+				outSlice[cnt] = start + i + 1
+				cnt++
+			}
+			if v2 <= limit {
+				if cnt >= len(outSlice) {
+					return start + i + 2, cnt
+				}
+				outSlice[cnt] = start + i + 2
+				cnt++
+			}
+			if v3 <= limit {
+				if cnt >= len(outSlice) {
+					return start + i + 3, cnt
+				}
+				outSlice[cnt] = start + i + 3
+				cnt++
 			}
 		}
 	}
-	for ; j < n; j++ {
-		if x[j] <= limit {
-			if count == capOut {
-				return j, count
+	for ; i < len(xTail); i++ {
+		if xTail[i] <= limit {
+			if cnt >= len(outSlice) {
+				return start + i, cnt
 			}
-			out[count] = j
-			count++
+			outSlice[cnt] = start + i
+			cnt++
 		}
 	}
-	return n, count
+	return n, cnt
 }
 
 // CollectLE64With scans x[start:len(x)] for entries <= limit.
@@ -221,30 +240,31 @@ func MinReducedSkip64(rowCost, v []float64, skip int) float64 {
 // ValidateAndNegate64Scalar writes dst[i] = 0.0 - src[i] for every index i
 // and returns true if every element of src is finite with |src[i]| <= limit.
 // Aliasing dst and src identically is safe because all n elements are always written.
+// Keep dSlice tied to len(sSlice) and use i <= len(sSlice)-4 so Go SSA prove eliminates loop BCE.
 func ValidateAndNegate64Scalar(dst, src []float64, limit float64) bool {
 	n := min(len(dst), len(src))
 	if n == 0 {
 		return !(limit < 0 || math.IsNaN(limit))
 	}
-	dSlice := dst[:n]
 	sSlice := src[:n]
+	dSlice := dst[:len(sSlice)]
 	allOK := true
-	for len(sSlice) >= 4 && len(dSlice) >= 4 {
-		c0, c1, c2, c3 := sSlice[0], sSlice[1], sSlice[2], sSlice[3]
+	i := 0
+	for ; i <= len(sSlice)-4; i += 4 {
+		c0, c1, c2, c3 := sSlice[i], sSlice[i+1], sSlice[i+2], sSlice[i+3]
 		if !(math.Abs(c0) <= limit &&
 			math.Abs(c1) <= limit &&
 			math.Abs(c2) <= limit &&
 			math.Abs(c3) <= limit) {
 			allOK = false
 		}
-		dSlice[0] = 0.0 - c0
-		dSlice[1] = 0.0 - c1
-		dSlice[2] = 0.0 - c2
-		dSlice[3] = 0.0 - c3
-		sSlice = sSlice[4:]
-		dSlice = dSlice[4:]
+		dSlice[i] = 0.0 - c0
+		dSlice[i+1] = 0.0 - c1
+		dSlice[i+2] = 0.0 - c2
+		dSlice[i+3] = 0.0 - c3
 	}
-	for i, c := range sSlice {
+	for ; i < len(sSlice); i++ {
+		c := sSlice[i]
 		if !(math.Abs(c) <= limit) {
 			allOK = false
 		}
@@ -287,51 +307,48 @@ func ColReduceValidateRows64Scalar(n, rowStart, rowEnd int, cost, v []float64, r
 		i = 1
 	}
 	for ; i < rowEnd; i++ {
-		rSlice := cost[i*n:][:n]
-		vSlice := v
-		r4cSlice := row4col
-		for len(rSlice) >= 4 && len(vSlice) >= 4 && len(r4cSlice) >= 4 {
-			c0, c1, c2, c3 := rSlice[0], rSlice[1], rSlice[2], rSlice[3]
+		rOff := i * n
+		// Keep vSlice and r4c tied to len(rSlice) with j <= len(rSlice)-4 so Go SSA prove eliminates loop BCE.
+		rSlice := cost[rOff : rOff+n]
+		vSlice := v[:len(rSlice)]
+		r4c := row4col[:len(rSlice)]
+		j := 0
+		for ; j <= len(rSlice)-4; j += 4 {
+			c0, c1, c2, c3 := rSlice[j], rSlice[j+1], rSlice[j+2], rSlice[j+3]
 			if !(math.Abs(c0) <= limit &&
 				math.Abs(c1) <= limit &&
 				math.Abs(c2) <= limit &&
 				math.Abs(c3) <= limit) {
 				return false
 			}
-			v0, v1, v2, v3 := vSlice[0], vSlice[1], vSlice[2], vSlice[3]
+			v0, v1, v2, v3 := vSlice[j], vSlice[j+1], vSlice[j+2], vSlice[j+3]
 			if c0 < v0 || c1 < v1 || c2 < v2 || c3 < v3 {
 				if c0 < v0 {
-					vSlice[0] = c0
-					r4cSlice[0] = i
+					vSlice[j] = c0
+					r4c[j] = i
 				}
 				if c1 < v1 {
-					vSlice[1] = c1
-					r4cSlice[1] = i
+					vSlice[j+1] = c1
+					r4c[j+1] = i
 				}
 				if c2 < v2 {
-					vSlice[2] = c2
-					r4cSlice[2] = i
+					vSlice[j+2] = c2
+					r4c[j+2] = i
 				}
 				if c3 < v3 {
-					vSlice[3] = c3
-					r4cSlice[3] = i
+					vSlice[j+3] = c3
+					r4c[j+3] = i
 				}
 			}
-			rSlice = rSlice[4:]
-			vSlice = vSlice[4:]
-			r4cSlice = r4cSlice[4:]
 		}
-		if len(rSlice) > 0 {
-			vSlice = vSlice[:len(rSlice)]
-			r4cSlice = r4cSlice[:len(rSlice)]
-			for k, c := range rSlice {
-				if !(math.Abs(c) <= limit) {
-					return false
-				}
-				if c < vSlice[k] {
-					vSlice[k] = c
-					r4cSlice[k] = i
-				}
+		for ; j < len(rSlice); j++ {
+			c := rSlice[j]
+			if !(math.Abs(c) <= limit) {
+				return false
+			}
+			if c < vSlice[j] {
+				vSlice[j] = c
+				r4c[j] = i
 			}
 		}
 	}
@@ -365,42 +382,39 @@ func ColReduceRows64Scalar(n, rowStart, rowEnd int, cost, v []float64, row4col [
 		i = 1
 	}
 	for ; i < rowEnd; i++ {
-		rSlice := cost[i*n:][:n]
-		vSlice := v
-		r4cSlice := row4col
-		for len(rSlice) >= 4 && len(vSlice) >= 4 && len(r4cSlice) >= 4 {
-			c0, c1, c2, c3 := rSlice[0], rSlice[1], rSlice[2], rSlice[3]
-			v0, v1, v2, v3 := vSlice[0], vSlice[1], vSlice[2], vSlice[3]
+		rOff := i * n
+		// Keep vSlice and r4c tied to len(rSlice) with j <= len(rSlice)-4 so Go SSA prove eliminates loop BCE.
+		rSlice := cost[rOff : rOff+n]
+		vSlice := v[:len(rSlice)]
+		r4c := row4col[:len(rSlice)]
+		j := 0
+		for ; j <= len(rSlice)-4; j += 4 {
+			c0, c1, c2, c3 := rSlice[j], rSlice[j+1], rSlice[j+2], rSlice[j+3]
+			v0, v1, v2, v3 := vSlice[j], vSlice[j+1], vSlice[j+2], vSlice[j+3]
 			if c0 < v0 || c1 < v1 || c2 < v2 || c3 < v3 {
 				if c0 < v0 {
-					vSlice[0] = c0
-					r4cSlice[0] = i
+					vSlice[j] = c0
+					r4c[j] = i
 				}
 				if c1 < v1 {
-					vSlice[1] = c1
-					r4cSlice[1] = i
+					vSlice[j+1] = c1
+					r4c[j+1] = i
 				}
 				if c2 < v2 {
-					vSlice[2] = c2
-					r4cSlice[2] = i
+					vSlice[j+2] = c2
+					r4c[j+2] = i
 				}
 				if c3 < v3 {
-					vSlice[3] = c3
-					r4cSlice[3] = i
+					vSlice[j+3] = c3
+					r4c[j+3] = i
 				}
 			}
-			rSlice = rSlice[4:]
-			vSlice = vSlice[4:]
-			r4cSlice = r4cSlice[4:]
 		}
-		if len(rSlice) > 0 {
-			vSlice = vSlice[:len(rSlice)]
-			r4cSlice = r4cSlice[:len(rSlice)]
-			for k, c := range rSlice {
-				if c < vSlice[k] {
-					vSlice[k] = c
-					r4cSlice[k] = i
-				}
+		for ; j < len(rSlice); j++ {
+			c := rSlice[j]
+			if c < vSlice[j] {
+				vSlice[j] = c
+				r4c[j] = i
 			}
 		}
 	}
@@ -429,24 +443,29 @@ func Transpose64Scalar(dst, src []float64, rows, cols int, negate bool) {
 	src = src[:total]
 	dst = dst[:total]
 	const tile = 16
+	c2 := cols * 2
+	c3 := cols * 3
+	c4 := cols * 4
 	if negate {
 		for c0 := 0; c0 < cols; c0 += tile {
 			cLim := min(cols, c0+tile)
 			for r0 := 0; r0 < rows; r0 += tile {
 				rLim := min(rows, r0+tile)
 				for c := c0; c < cLim; c++ {
-					dstRow := dst[c*rows+r0 : c*rows+rLim]
+					dOff := c * rows
+					dstRow := dst[dOff+r0 : dOff+rLim]
 					base := r0*cols + c
-					for len(dstRow) >= 4 {
-						dstRow[0] = 0.0 - src[base]
-						dstRow[1] = 0.0 - src[base+cols]
-						dstRow[2] = 0.0 - src[base+2*cols]
-						dstRow[3] = 0.0 - src[base+3*cols]
-						dstRow = dstRow[4:]
-						base += 4 * cols
+					k := 0
+					for ; k <= len(dstRow)-4; k += 4 {
+						dstRow[k] = 0.0 - src[base]
+						dstRow[k+1] = 0.0 - src[base+cols]
+						dstRow[k+2] = 0.0 - src[base+c2]
+						dstRow[k+3] = 0.0 - src[base+c3]
+						base += c4
 					}
-					for k := range dstRow {
-						dstRow[k] = 0.0 - src[base+k*cols]
+					for ; k < len(dstRow); k++ {
+						dstRow[k] = 0.0 - src[base]
+						base += cols
 					}
 				}
 			}
@@ -458,18 +477,20 @@ func Transpose64Scalar(dst, src []float64, rows, cols int, negate bool) {
 		for r0 := 0; r0 < rows; r0 += tile {
 			rLim := min(rows, r0+tile)
 			for c := c0; c < cLim; c++ {
-				dstRow := dst[c*rows+r0 : c*rows+rLim]
+				dOff := c * rows
+				dstRow := dst[dOff+r0 : dOff+rLim]
 				base := r0*cols + c
-				for len(dstRow) >= 4 {
-					dstRow[0] = src[base]
-					dstRow[1] = src[base+cols]
-					dstRow[2] = src[base+2*cols]
-					dstRow[3] = src[base+3*cols]
-					dstRow = dstRow[4:]
-					base += 4 * cols
+				k := 0
+				for ; k <= len(dstRow)-4; k += 4 {
+					dstRow[k] = src[base]
+					dstRow[k+1] = src[base+cols]
+					dstRow[k+2] = src[base+c2]
+					dstRow[k+3] = src[base+c3]
+					base += c4
 				}
-				for k := range dstRow {
-					dstRow[k] = src[base+k*cols]
+				for ; k < len(dstRow); k++ {
+					dstRow[k] = src[base]
+					base += cols
 				}
 			}
 		}

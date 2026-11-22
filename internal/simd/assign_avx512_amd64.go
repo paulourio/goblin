@@ -105,6 +105,7 @@ func collectLE64AVX512(x []float64, start int, limit float64, out []int) (int, i
 	xp := unsafe.Pointer(&x[0])
 	vlim := archsimd.BroadcastFloat64x8(limit)
 	capOut := len(out)
+	out = out[:capOut]
 	count := 0
 	j := start
 	for ; j+16 <= n; j += 16 {
@@ -116,7 +117,7 @@ func collectLE64AVX512(x []float64, start int, limit float64, out []int) (int, i
 			bm := uint16(m0.ToBits()) | (uint16(m1.ToBits()) << 8)
 			for bm != 0 {
 				k := bits.TrailingZeros16(bm)
-				if count == capOut {
+				if uint(count) >= uint(capOut) {
 					archsimd.ClearAVXUpperBits()
 					return j + k, count
 				}
@@ -131,7 +132,7 @@ func collectLE64AVX512(x []float64, start int, limit float64, out []int) (int, i
 		bm := v0.LessEqual(vlim).ToBits()
 		for bm != 0 {
 			k := bits.TrailingZeros8(bm)
-			if count == capOut {
+			if uint(count) >= uint(capOut) {
 				archsimd.ClearAVXUpperBits()
 				return j + k, count
 			}
@@ -401,6 +402,14 @@ func transpose64AVX512(dst, src []float64, rows, cols int, negate bool) {
 	rows8 := rows &^ 7
 	cols8 := cols &^ 7
 	const tile = 16
+	srcRowBytes := cols * 8
+	srcRowBytes2 := cols * 16
+	srcRowBytes3 := cols * 24
+	srcRowBytes4 := cols * 32
+	dstRowBytes := rows * 8
+	dstRowBytes2 := rows * 16
+	dstRowBytes3 := rows * 24
+	dstRowBytes4 := rows * 32
 
 	idxLo4 := archsimd.LoadUint64x8Array(&transposeIdxLo4)
 	idxHi4 := archsimd.LoadUint64x8Array(&transposeIdxHi4)
@@ -415,15 +424,19 @@ func transpose64AVX512(dst, src []float64, rows, cols int, negate bool) {
 			for r0 := 0; r0 < rows8; r0 += tile {
 				rLim := min(rows8, r0+tile)
 				for c := c0; c < cLim; c += 8 {
+					sCol := unsafe.Add(sp, c*8)
+					dCol := unsafe.Add(dp, c*dstRowBytes)
 					for r := r0; r < rLim; r += 8 {
-						a0 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, (r*cols+c)*8))))
-						a1 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+1)*cols+c)*8))))
-						a2 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+2)*cols+c)*8))))
-						a3 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+3)*cols+c)*8))))
-						a4 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+4)*cols+c)*8))))
-						a5 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+5)*cols+c)*8))))
-						a6 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+6)*cols+c)*8))))
-						a7 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+7)*cols+c)*8))))
+						s0 := unsafe.Add(sCol, r*srcRowBytes)
+						s4 := unsafe.Add(s0, srcRowBytes4)
+						a0 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(s0)))
+						a1 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s0, srcRowBytes))))
+						a2 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s0, srcRowBytes2))))
+						a3 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s0, srcRowBytes3))))
+						a4 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(s4)))
+						a5 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s4, srcRowBytes))))
+						a6 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s4, srcRowBytes2))))
+						a7 := vZero.Sub(archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s4, srcRowBytes3))))
 
 						t0 := a0.ConcatPermuteScalarsGrouped(0, 2, a1)
 						t1 := a0.ConcatPermuteScalarsGrouped(1, 3, a1)
@@ -443,14 +456,16 @@ func transpose64AVX512(dst, src []float64, rows, cols int, negate bool) {
 						q6 := t4.ConcatPermute(t6, idxHi4)
 						q7 := t5.ConcatPermute(t7, idxHi4)
 
-						q0.ConcatPermute(q4, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, (c*rows+r)*8)))
-						q1.ConcatPermute(q5, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+1)*rows+r)*8)))
-						q2.ConcatPermute(q6, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+2)*rows+r)*8)))
-						q3.ConcatPermute(q7, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+3)*rows+r)*8)))
-						q0.ConcatPermute(q4, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+4)*rows+r)*8)))
-						q1.ConcatPermute(q5, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+5)*rows+r)*8)))
-						q2.ConcatPermute(q6, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+6)*rows+r)*8)))
-						q3.ConcatPermute(q7, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+7)*rows+r)*8)))
+						d0 := unsafe.Add(dCol, r*8)
+						d4 := unsafe.Add(d0, dstRowBytes4)
+						q0.ConcatPermute(q4, idxLo8).StoreArray((*[8]float64)(d0))
+						q1.ConcatPermute(q5, idxLo8).StoreArray((*[8]float64)(unsafe.Add(d0, dstRowBytes)))
+						q2.ConcatPermute(q6, idxLo8).StoreArray((*[8]float64)(unsafe.Add(d0, dstRowBytes2)))
+						q3.ConcatPermute(q7, idxLo8).StoreArray((*[8]float64)(unsafe.Add(d0, dstRowBytes3)))
+						q0.ConcatPermute(q4, idxHi8).StoreArray((*[8]float64)(d4))
+						q1.ConcatPermute(q5, idxHi8).StoreArray((*[8]float64)(unsafe.Add(d4, dstRowBytes)))
+						q2.ConcatPermute(q6, idxHi8).StoreArray((*[8]float64)(unsafe.Add(d4, dstRowBytes2)))
+						q3.ConcatPermute(q7, idxHi8).StoreArray((*[8]float64)(unsafe.Add(d4, dstRowBytes3)))
 					}
 				}
 			}
@@ -464,15 +479,19 @@ func transpose64AVX512(dst, src []float64, rows, cols int, negate bool) {
 		for r0 := 0; r0 < rows8; r0 += tile {
 			rLim := min(rows8, r0+tile)
 			for c := c0; c < cLim; c += 8 {
+				sCol := unsafe.Add(sp, c*8)
+				dCol := unsafe.Add(dp, c*dstRowBytes)
 				for r := r0; r < rLim; r += 8 {
-					a0 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, (r*cols+c)*8)))
-					a1 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+1)*cols+c)*8)))
-					a2 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+2)*cols+c)*8)))
-					a3 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+3)*cols+c)*8)))
-					a4 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+4)*cols+c)*8)))
-					a5 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+5)*cols+c)*8)))
-					a6 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+6)*cols+c)*8)))
-					a7 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(sp, ((r+7)*cols+c)*8)))
+					s0 := unsafe.Add(sCol, r*srcRowBytes)
+					s4 := unsafe.Add(s0, srcRowBytes4)
+					a0 := archsimd.LoadFloat64x8Array((*[8]float64)(s0))
+					a1 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s0, srcRowBytes)))
+					a2 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s0, srcRowBytes2)))
+					a3 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s0, srcRowBytes3)))
+					a4 := archsimd.LoadFloat64x8Array((*[8]float64)(s4))
+					a5 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s4, srcRowBytes)))
+					a6 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s4, srcRowBytes2)))
+					a7 := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(s4, srcRowBytes3)))
 
 					t0 := a0.ConcatPermuteScalarsGrouped(0, 2, a1)
 					t1 := a0.ConcatPermuteScalarsGrouped(1, 3, a1)
@@ -492,14 +511,16 @@ func transpose64AVX512(dst, src []float64, rows, cols int, negate bool) {
 					q6 := t4.ConcatPermute(t6, idxHi4)
 					q7 := t5.ConcatPermute(t7, idxHi4)
 
-					q0.ConcatPermute(q4, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, (c*rows+r)*8)))
-					q1.ConcatPermute(q5, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+1)*rows+r)*8)))
-					q2.ConcatPermute(q6, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+2)*rows+r)*8)))
-					q3.ConcatPermute(q7, idxLo8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+3)*rows+r)*8)))
-					q0.ConcatPermute(q4, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+4)*rows+r)*8)))
-					q1.ConcatPermute(q5, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+5)*rows+r)*8)))
-					q2.ConcatPermute(q6, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+6)*rows+r)*8)))
-					q3.ConcatPermute(q7, idxHi8).StoreArray((*[8]float64)(unsafe.Add(dp, ((c+7)*rows+r)*8)))
+					d0 := unsafe.Add(dCol, r*8)
+					d4 := unsafe.Add(d0, dstRowBytes4)
+					q0.ConcatPermute(q4, idxLo8).StoreArray((*[8]float64)(d0))
+					q1.ConcatPermute(q5, idxLo8).StoreArray((*[8]float64)(unsafe.Add(d0, dstRowBytes)))
+					q2.ConcatPermute(q6, idxLo8).StoreArray((*[8]float64)(unsafe.Add(d0, dstRowBytes2)))
+					q3.ConcatPermute(q7, idxLo8).StoreArray((*[8]float64)(unsafe.Add(d0, dstRowBytes3)))
+					q0.ConcatPermute(q4, idxHi8).StoreArray((*[8]float64)(d4))
+					q1.ConcatPermute(q5, idxHi8).StoreArray((*[8]float64)(unsafe.Add(d4, dstRowBytes)))
+					q2.ConcatPermute(q6, idxHi8).StoreArray((*[8]float64)(unsafe.Add(d4, dstRowBytes2)))
+					q3.ConcatPermute(q7, idxHi8).StoreArray((*[8]float64)(unsafe.Add(d4, dstRowBytes3)))
 				}
 			}
 		}

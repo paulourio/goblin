@@ -2274,6 +2274,14 @@ func augmentingRowReduction(n int, cost, u, v []float64, col4row, row4col, freeR
 // tight columns at minVal as queued with NaN sentinels in d, and returns matched=true
 // immediately if an unassigned column achieves minVal in one hop.
 func initAugmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, col4row, row4col, remaining []int) (minVal float64, up int, matched bool, err error) {
+	if n <= 0 || len(d) < n || len(dQueue) < n || len(pred) < n || len(row4col) < n || len(remaining) < n {
+		return 0, 0, false, nil
+	}
+	d = d[:n]
+	dQueue = dQueue[:n]
+	pred = pred[:n]
+	row4col = row4col[:n]
+	remaining = remaining[:n]
 	rowCost := cost[curRow*n:][:n]
 	ui := u[curRow]
 
@@ -2286,18 +2294,26 @@ func initAugmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, co
 	var hits [8]int
 	for pos := 0; pos < n; {
 		next, cnt := simd.CollectLE64(d, pos, minVal, hits[:])
+		if cnt > len(hits) {
+			cnt = len(hits)
+		}
 		for k := range cnt {
 			j := hits[k]
+			if j < 0 || j >= n {
+				continue
+			}
 			if row4col[j] == -1 {
 				u[curRow] += d[j]
 				col4row[curRow] = j
 				row4col[j] = curRow
 				return minVal, 0, true, nil
 			}
-			remaining[up] = j
-			dQueue[up] = minVal
-			d[j] = nan
-			up++
+			if up < n {
+				remaining[up] = j
+				dQueue[up] = minVal
+				d[j] = nan
+				up++
+			}
 		}
 		pos = next
 	}
@@ -2309,23 +2325,42 @@ func initAugmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, co
 // all achieving columns with NaN sentinels, and returns sink >= 0 if any achieving
 // column is unassigned.
 func refillQueueContigSIMD(d, dQueue []float64, row4col, remaining []int, up int) (minVal float64, newUp, sink int, err error) {
+	n := len(d)
+	if n == 0 || len(dQueue) < n || len(row4col) < n || len(remaining) < n {
+		return 0, up, -1, ErrInfeasible
+	}
+	if up < 0 {
+		up = 0
+	}
+	d = d[:n]
+	dQueue = dQueue[:n]
+	row4col = row4col[:n]
+	remaining = remaining[:n]
 	nan := math.NaN()
 	minVal = simd.MinNoNaN64(d)
 	if !(minVal < math.Inf(1)) {
 		return 0, up, -1, ErrInfeasible
 	}
 	var hits [8]int
-	for pos := 0; pos < len(d); {
+	for pos := 0; pos < n; {
 		next, cnt := simd.CollectLE64(d, pos, minVal, hits[:])
+		if cnt > len(hits) {
+			cnt = len(hits)
+		}
 		for k := range cnt {
 			jj := hits[k]
+			if jj < 0 || jj >= n {
+				continue
+			}
 			if row4col[jj] == -1 {
 				return minVal, up, jj, nil
 			}
-			remaining[up] = jj
-			dQueue[up] = minVal
-			d[jj] = nan
-			up++
+			if up < n {
+				remaining[up] = jj
+				dQueue[up] = minVal
+				d[jj] = nan
+				up++
+			}
 		}
 		pos = next
 	}
@@ -2335,10 +2370,23 @@ func refillQueueContigSIMD(d, dQueue []float64, row4col, remaining []int, up int
 // relaxRowContigSIMD relaxes contiguous d[0:n] from row rowI using the 4-wide AVX2
 // branchless kernel, enqueuing tight columns and returning sink >= 0 on an unassigned hit.
 func relaxRowContigSIMD(rCost, v, d, dQueue []float64, pred, row4col, remaining []int, n, rowI, up int, ui, minVal float64) (newUp, sink int) {
+	if n <= 0 || len(rCost) < n || len(v) < n || len(d) < n || len(dQueue) < n || len(pred) < n || len(row4col) < n || len(remaining) < n {
+		return up, -1
+	}
+	if up < 0 {
+		up = 0
+	}
+	rCost = rCost[:n]
+	v = v[:n]
+	d = d[:n]
+	dQueue = dQueue[:n]
+	pred = pred[:n]
+	row4col = row4col[:n]
+	remaining = remaining[:n]
 	nan := math.NaN()
 	for j := 0; j < n; {
 		j = simd.RelaxRow64(rCost, v, d, pred, j, rowI, ui, minVal)
-		if j >= n {
+		if j < 0 || j >= n {
 			break
 		}
 		lim := min(j+4, n)
@@ -2350,10 +2398,12 @@ func relaxRowContigSIMD(rCost, v, d, dQueue []float64, pred, row4col, remaining 
 					if row4col[j] == -1 {
 						return up, j
 					}
-					remaining[up] = j
-					dQueue[up] = minVal
-					d[j] = nan
-					up++
+					if up < n {
+						remaining[up] = j
+						dQueue[up] = minVal
+						d[j] = nan
+						up++
+					}
 				} else {
 					d[j] = r
 				}
@@ -2441,6 +2491,12 @@ func augmentRowSIMD(curRow, n int, cost, u, v, d, dQueue []float64, pred, col4ro
 // relaxRowIndirectScalar relaxes unscanned columns remaining[up:n] in scalar mode,
 // kept separate from augmentRowScalar so register pressure never spills cancellation state.
 func relaxRowIndirectScalar(rCost, v, d []float64, pred, row4col, remaining []int, n, rowI, up int, ui, minVal float64) (newUp, sink int) {
+	if n <= 0 {
+		return up, -1
+	}
+	if up < 0 {
+		up = 0
+	}
 	rCost = rCost[:n]
 	v = v[:n]
 	d = d[:n]
@@ -2450,6 +2506,9 @@ func relaxRowIndirectScalar(rCost, v, d []float64, pred, row4col, remaining []in
 
 	for k := up; k < n; k++ {
 		j := remaining[k]
+		if j < 0 || j >= n {
+			continue
+		}
 		r := minVal + ((rCost[j] - v[j]) - ui)
 		if r < d[k] {
 			pred[j] = rowI
@@ -2457,11 +2516,13 @@ func relaxRowIndirectScalar(rCost, v, d []float64, pred, row4col, remaining []in
 				if row4col[j] == -1 {
 					return up, j
 				}
-				remaining[k] = remaining[up]
-				remaining[up] = j
-				d[k] = d[up]
-				d[up] = minVal
-				up++
+				if up < n {
+					remaining[k] = remaining[up]
+					remaining[up] = j
+					d[k] = d[up]
+					d[up] = minVal
+					up++
+				}
 			} else {
 				d[k] = r
 			}

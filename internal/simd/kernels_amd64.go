@@ -452,6 +452,7 @@ func absMax64AVX2(x []float64) float64 {
 }
 
 // AllAbsLE64Scalar reports whether every element x[i] satisfies |x[i]| <= limit.
+// Keep the i <= len(x)-4 bound form so Go SSA prove eliminates loop bounds checks.
 func AllAbsLE64Scalar(x []float64, limit float64) bool {
 	i := 0
 	for ; i <= len(x)-4; i += 4 {
@@ -844,6 +845,7 @@ func initReducedRow64AVX2(dst, costRow, v []float64, ui float64) float64 {
 
 // Min2ReducedRow64Scalar computes the smallest (u1, j1) and second-smallest (u2, j2)
 // values of costRow[j] - v[j] using 4-way unrolled scalar fast-filtering.
+// Keep vSlice tied to len(cSlice) and the j <= len(cSlice)-4 bound so Go SSA prove eliminates loop BCE.
 func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 	n := min(len(costRow), len(v))
 	u1, u2 = math.Inf(1), math.Inf(1)
@@ -1097,8 +1099,25 @@ func SelectDualLeaveRow64With(xb, basicLB, basicUB, basicTol, dse []float64, dis
 	return SelectDualLeaveRow64Scalar(xb, basicLB, basicUB, basicTol, dse)
 }
 
+// evalDualLeaveRow stays within the Go inline budget (cost <= 80) to avoid closure captures in selectDualLeaveRow64Vec.
+func evalDualLeaveRow(xb, basicLB, basicUB, basicTol []float64, r int) (viol, dir float64) {
+	val, tol := xb[r], basicTol[r]
+	if lbr := basicLB[r]; val < lbr-tol {
+		return lbr - val, 1.0
+	}
+	if ubr := basicUB[r]; val > ubr+tol {
+		return val - ubr, -1.0
+	}
+	return 0, 0
+}
+
 func selectDualLeaveRow64Vec(xb, basicLB, basicUB, basicTol, dse []float64, useAVX512 bool) (leaveRow int, leaveDir, primalInfeas float64) {
 	m := len(xb)
+	xb = xb[:m]
+	basicLB = basicLB[:m]
+	basicUB = basicUB[:m]
+	basicTol = basicTol[:m]
+	dse = dse[:m]
 	xp := unsafe.Pointer(&xb[0])
 	lp := unsafe.Pointer(&basicLB[0])
 	up := unsafe.Pointer(&basicUB[0])
@@ -1107,34 +1126,6 @@ func selectDualLeaveRow64Vec(xb, basicLB, basicUB, basicTol, dse []float64, useA
 
 	leaveRow = -1
 	bestScore := -1.0
-
-	evalRow := func(r int) {
-		val := xb[r]
-		lbr := basicLB[r]
-		ubr := basicUB[r]
-		tol := basicTol[r]
-		var viol, dir float64
-		if val < lbr-tol {
-			viol = lbr - val
-			dir = 1.0
-		} else if val > ubr+tol {
-			viol = val - ubr
-			dir = -1.0
-		}
-		if viol > 0 {
-			w := dse[r]
-			v2 := viol * viol
-			if v2 > bestScore*w {
-				score := v2 / w
-				if leaveRow == -1 || score > bestScore {
-					bestScore = score
-					leaveRow = r
-					leaveDir = dir
-					primalInfeas = viol
-				}
-			}
-		}
-	}
 
 	pos := 0
 	if useAVX512 {
@@ -1147,7 +1138,19 @@ func selectDualLeaveRow64Vec(xb, basicLB, basicUB, basicTol, dse []float64, useA
 			for bm != 0 {
 				k := bits.TrailingZeros16(bm)
 				bm &= bm - 1
-				evalRow(r + k)
+				row := r + k
+				if uint(row) >= uint(m) {
+					continue
+				}
+				if viol, dir := evalDualLeaveRow(xb, basicLB, basicUB, basicTol, row); viol > 0 {
+					w := dse[row]
+					v2 := viol * viol
+					if v2 > bestScore*w {
+						if score := v2 / w; leaveRow == -1 || score > bestScore {
+							leaveRow, leaveDir, bestScore, primalInfeas = row, dir, score, viol
+						}
+					}
+				}
 			}
 			if r+16 <= m {
 				pos = r + 16
@@ -1165,7 +1168,19 @@ func selectDualLeaveRow64Vec(xb, basicLB, basicUB, basicTol, dse []float64, useA
 			for bm != 0 {
 				k := bits.TrailingZeros8(bm)
 				bm &= bm - 1
-				evalRow(r + k)
+				row := r + k
+				if uint(row) >= uint(m) {
+					continue
+				}
+				if viol, dir := evalDualLeaveRow(xb, basicLB, basicUB, basicTol, row); viol > 0 {
+					w := dse[row]
+					v2 := viol * viol
+					if v2 > bestScore*w {
+						if score := v2 / w; leaveRow == -1 || score > bestScore {
+							leaveRow, leaveDir, bestScore, primalInfeas = row, dir, score, viol
+						}
+					}
+				}
 			}
 			if r+8 <= m {
 				pos = r + 8
@@ -1175,7 +1190,15 @@ func selectDualLeaveRow64Vec(xb, basicLB, basicUB, basicTol, dse []float64, useA
 		}
 	}
 	for ; pos < m; pos++ {
-		evalRow(pos)
+		if viol, dir := evalDualLeaveRow(xb, basicLB, basicUB, basicTol, pos); viol > 0 {
+			w := dse[pos]
+			v2 := viol * viol
+			if v2 > bestScore*w {
+				if score := v2 / w; leaveRow == -1 || score > bestScore {
+					leaveRow, leaveDir, bestScore, primalInfeas = pos, dir, score, viol
+				}
+			}
+		}
 	}
 	return leaveRow, leaveDir, primalInfeas
 }
@@ -1257,22 +1280,39 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 	if capDst == 0 {
 		return 0, chunkPos, elemPos
 	}
+	if chunkPos < 0 {
+		chunkPos = 0
+	}
+	if elemPos < 0 {
+		elemPos = 0
+	}
+	if n == 0 {
+		return 0, len(chunks), 0
+	}
+	tab = tab[:n]
+	dj = dj[:n]
+	status = status[:n]
+	dst = dst[:capDst]
 	filterByTheta := !bland && !math.IsInf(thetaGuard, 1)
 	cnt := 0
 	for ci := chunkPos; ci < len(chunks); ci++ {
 		ch := chunks[ci]
 		start := ch << 6
-		if start >= n {
+		if start < 0 || start >= n {
 			elemPos = 0
 			continue
 		}
 		end := min(start+64, n)
-		size := end - start
 		i := elemPos
 		elemPos = 0
+		tChunk := tab[start:end]
+		dChunk := dj[start:end]
+		sChunk := status[start:end]
+		size := len(tChunk)
+		dChunk = dChunk[:size]
+		sChunk = sChunk[:size]
 		for ; i < size; i++ {
-			col := start + i
-			tv := tab[col]
+			tv := tChunk[i]
 			if tv == 0 {
 				continue
 			}
@@ -1281,13 +1321,13 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 				hit = true
 			} else {
 				alphaBar := negLeaveDir * tv
-				switch uint8(status[col]) {
+				switch uint8(sChunk[i]) {
 				case 0: // statusAtLower
-					if alphaBar > 0 && (!filterByTheta || !(dj[col] > thetaGuard*alphaBar)) {
+					if alphaBar > 0 && (!filterByTheta || !(dChunk[i] > thetaGuard*alphaBar)) {
 						hit = true
 					}
 				case 1: // statusAtUpper
-					if alphaBar < 0 && (!filterByTheta || !(dj[col] < thetaGuard*alphaBar)) {
+					if alphaBar < 0 && (!filterByTheta || !(dChunk[i] < thetaGuard*alphaBar)) {
 						hit = true
 					}
 				case 4: // statusSuperBasic
@@ -1295,7 +1335,10 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 				}
 			}
 			if hit {
-				dst[cnt] = col
+				if cnt >= capDst {
+					return cnt, ci, i
+				}
+				dst[cnt] = start + i
 				cnt++
 				if cnt >= capDst {
 					if i+1 >= size {
@@ -1348,20 +1391,30 @@ func scanDualRatioCandAVX2(
 	filterByTheta bool,
 	dst []int,
 ) (hitCount, nextChunk, nextElem int) {
+	capDst := len(dst)
+	if chunkPos < 0 {
+		chunkPos = 0
+	}
+	if elemPos < 0 {
+		elemPos = 0
+	}
+	if capDst == 0 {
+		return 0, chunkPos, elemPos
+	}
+	dstPtr := unsafe.Pointer(&dst[0])
+
 	signMask := archsimd.BroadcastUint64x4(0x7fffffffffffffff)
 	vZero := signMask.Xor(signMask).BitsToFloat64()
 	vNegLeave := archsimd.BroadcastFloat64x4(negLeaveDir)
 	vPivotTol := archsimd.BroadcastFloat64x4(pivotTol)
-	vNegPivotTol := archsimd.BroadcastFloat64x4(-pivotTol)
 	vThetaGuard := archsimd.BroadcastFloat64x4(thetaGuard)
 
-	capDst := len(dst)
 	cnt := 0
 
 	for ci := chunkPos; ci < len(chunks); ci++ {
 		ch := chunks[ci]
 		start := ch << 6
-		if start >= n {
+		if start < 0 || start >= n {
 			elemPos = 0
 			continue
 		}
@@ -1389,9 +1442,10 @@ func scanDualRatioCandAVX2(
 			var bm uint8
 			if nz0 != 0 {
 				vAlpha := vNegLeave.Mul(t0)
-				gtTol := vAlpha.Greater(vPivotTol).ToBits() & 0xF
-				ltNegTol := vAlpha.Less(vNegPivotTol).ToBits() & 0xF
-				big := gtTol | ltNegTol
+				vAbs := u0.And(signMask).BitsToFloat64()
+				big := vAbs.Greater(vPivotTol).ToBits() & 0xF
+				gtTol := big & (vAlpha.Greater(vZero).ToBits() & 0xF)
+				ltNegTol := big &^ gtTol
 				subOrNaN := nz0 &^ big
 
 				st4 := *(*uint32)(unsafe.Add(sp, i))
@@ -1404,7 +1458,6 @@ func scanDualRatioCandAVX2(
 				blk := blkLower | blkUpper
 				if blk != 0 && filterByTheta {
 					vDJ := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(dp, i*8)))
-					vAbs := u0.And(signMask).BitsToFloat64()
 					vLim := vThetaGuard.Mul(vAbs)
 					if blkLower != 0 {
 						blkLower &^= vDJ.Greater(vLim).ToBits() & 0xF
@@ -1418,9 +1471,10 @@ func scanDualRatioCandAVX2(
 			}
 			if nz1 != 0 {
 				vAlpha := vNegLeave.Mul(t1)
-				gtTol := vAlpha.Greater(vPivotTol).ToBits() & 0xF
-				ltNegTol := vAlpha.Less(vNegPivotTol).ToBits() & 0xF
-				big := gtTol | ltNegTol
+				vAbs := u1.And(signMask).BitsToFloat64()
+				big := vAbs.Greater(vPivotTol).ToBits() & 0xF
+				gtTol := big & (vAlpha.Greater(vZero).ToBits() & 0xF)
+				ltNegTol := big &^ gtTol
 				subOrNaN := nz1 &^ big
 
 				st4 := *(*uint32)(unsafe.Add(sp, i+4))
@@ -1433,7 +1487,6 @@ func scanDualRatioCandAVX2(
 				blk := blkLower | blkUpper
 				if blk != 0 && filterByTheta {
 					vDJ := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(dp, (i+4)*8)))
-					vAbs := u1.And(signMask).BitsToFloat64()
 					vLim := vThetaGuard.Mul(vAbs)
 					if blkLower != 0 {
 						blkLower &^= vDJ.Greater(vLim).ToBits() & 0xF
@@ -1454,7 +1507,7 @@ func scanDualRatioCandAVX2(
 				for bm != 0 {
 					off := bits.TrailingZeros8(bm)
 					bm &= bm - 1
-					dst[cnt] = base + off
+					*(*int)(unsafe.Add(dstPtr, cnt*8)) = base + off
 					cnt++
 				}
 				if cnt+8 > capDst {
@@ -1474,9 +1527,10 @@ func scanDualRatioCandAVX2(
 				continue
 			}
 			vAlpha := vNegLeave.Mul(t0)
-			gtTol := vAlpha.Greater(vPivotTol).ToBits() & 0xF
-			ltNegTol := vAlpha.Less(vNegPivotTol).ToBits() & 0xF
-			big := gtTol | ltNegTol
+			vAbs := u0.And(signMask).BitsToFloat64()
+			big := vAbs.Greater(vPivotTol).ToBits() & 0xF
+			gtTol := big & (vAlpha.Greater(vZero).ToBits() & 0xF)
+			ltNegTol := big &^ gtTol
 			subOrNaN := nz0 &^ big
 
 			st4 := *(*uint32)(unsafe.Add(sp, i))
@@ -1489,7 +1543,6 @@ func scanDualRatioCandAVX2(
 			blk := blkLower | blkUpper
 			if blk != 0 && filterByTheta {
 				vDJ := archsimd.LoadFloat64x4Array((*[4]float64)(unsafe.Add(dp, i*8)))
-				vAbs := u0.And(signMask).BitsToFloat64()
 				vLim := vThetaGuard.Mul(vAbs)
 				if blkLower != 0 {
 					blkLower &^= vDJ.Greater(vLim).ToBits() & 0xF
@@ -1508,7 +1561,7 @@ func scanDualRatioCandAVX2(
 				for bm != 0 {
 					off := bits.TrailingZeros8(bm)
 					bm &= bm - 1
-					dst[cnt] = base + off
+					*(*int)(unsafe.Add(dstPtr, cnt*8)) = base + off
 					cnt++
 				}
 				if cnt+8 > capDst {
@@ -1527,7 +1580,7 @@ func scanDualRatioCandAVX2(
 				return cnt, ci, i
 			}
 			for ; i < size; i++ {
-				dst[cnt] = start + i
+				*(*int)(unsafe.Add(dstPtr, cnt*8)) = start + i
 				cnt++
 			}
 		}

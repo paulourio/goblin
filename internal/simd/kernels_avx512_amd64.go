@@ -497,20 +497,30 @@ func scanDualRatioCandAVX512(
 	filterByTheta bool,
 	dst []int,
 ) (hitCount, nextChunk, nextElem int) {
+	capDst := len(dst)
+	if chunkPos < 0 {
+		chunkPos = 0
+	}
+	if elemPos < 0 {
+		elemPos = 0
+	}
+	if capDst == 0 {
+		return 0, chunkPos, elemPos
+	}
+	dstPtr := unsafe.Pointer(&dst[0])
+
 	signMask := archsimd.BroadcastUint64x8(0x7fffffffffffffff)
 	vZero := signMask.Xor(signMask).BitsToFloat64()
 	vNegLeave := archsimd.BroadcastFloat64x8(negLeaveDir)
 	vPivotTol := archsimd.BroadcastFloat64x8(pivotTol)
-	vNegPivotTol := archsimd.BroadcastFloat64x8(-pivotTol)
 	vThetaGuard := archsimd.BroadcastFloat64x8(thetaGuard)
 
-	capDst := len(dst)
 	cnt := 0
 
 	for ci := chunkPos; ci < len(chunks); ci++ {
 		ch := chunks[ci]
 		start := ch << 6
-		if start >= n {
+		if start < 0 || start >= n {
 			elemPos = 0
 			continue
 		}
@@ -533,9 +543,10 @@ func scanDualRatioCandAVX512(
 				continue
 			}
 			vAlpha := vNegLeave.Mul(vTab)
-			gtTol := vAlpha.Greater(vPivotTol).ToBits()
-			ltNegTol := vAlpha.Less(vNegPivotTol).ToBits()
-			big := gtTol | ltNegTol
+			vAbs := uTab.And(signMask).BitsToFloat64()
+			big := vAbs.Greater(vPivotTol).ToBits()
+			gtTol := big & vAlpha.Greater(vZero).ToBits()
+			ltNegTol := big &^ gtTol
 			subOrNaN := nz &^ big
 
 			st8 := *(*uint64)(unsafe.Add(sp, i))
@@ -555,7 +566,6 @@ func scanDualRatioCandAVX512(
 			}
 			if blk != 0 && filterByTheta {
 				vDJ := archsimd.LoadFloat64x8Array((*[8]float64)(unsafe.Add(dp, i*8)))
-				vAbs := uTab.And(signMask).BitsToFloat64()
 				vLim := vThetaGuard.Mul(vAbs)
 				if blkLower != 0 {
 					blkLower &^= vDJ.Greater(vLim).ToBits()
@@ -574,7 +584,7 @@ func scanDualRatioCandAVX512(
 				for hit != 0 {
 					off := bits.TrailingZeros8(hit)
 					hit &= hit - 1
-					dst[cnt] = base + off
+					*(*int)(unsafe.Add(dstPtr, cnt*8)) = base + off
 					cnt++
 				}
 				if cnt+8 > capDst {
@@ -593,7 +603,7 @@ func scanDualRatioCandAVX512(
 				return cnt, ci, i
 			}
 			for ; i < size; i++ {
-				dst[cnt] = start + i
+				*(*int)(unsafe.Add(dstPtr, cnt*8)) = start + i
 				cnt++
 			}
 		}
