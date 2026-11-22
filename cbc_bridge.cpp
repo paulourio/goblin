@@ -27,7 +27,7 @@ namespace {
 
 // COIN-OR Cgl (specifically CglZeroHalf/Cgl012cut.cpp) and CbcModel
 // (openblas_set_num_threads) mutate unsynchronized file-scope static state
-// during branch-and-cut. Serializing C++ solver invocations at the bridge
+// during branch-and-cut. Serializing C++ solver calls at the bridge
 // boundary guarantees memory safety when Go callers invoke goblin concurrently
 // from multiple goroutines.
 std::mutex g_cbc_mutex;
@@ -1459,8 +1459,22 @@ void goblin_solve_mip(
     }
     out->has_sol = hasSol ? 1 : 0;
 
+    bool userCanceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0);
+    bool timeLimited = userCanceled || m.isSecondsLimitReached() || m.secondaryStatus() == 4;
+    bool iterLimited = iterHit || tl_iter_limit_hit || m.secondaryStatus() == 8 ||
+                       (max_iter > 0 && out->iterations >= max_iter &&
+                        !m.isProvenOptimal() && !m.isProvenInfeasible());
+
+    // Guard against stale CbcModel bestPossibleObjective_ values on aborted solves:
+    // before branching (nodes == 0), CbcModel.cpp:4047 can copy solver_->getObjValue() from
+    // an interrupted LP, and CbcModel.cpp:5979 can overwrite bestPossibleObjective_ with
+    // bestObjective_ when a Clp cancel event leaves CbcModel::status_ == 0.
+    bool untrustedCbcBestBound =
+        ((timeLimited || iterLimited) && out->nodes == 0) ||
+        ((userCanceled || iterLimited) && m.status() == 0 && m.secondaryStatus() != 2);
+
     double rawBestBnd = m.getBestPossibleObjValue();
-    bool hasBestBnd = (std::isfinite(rawBestBnd) && std::fabs(rawBestBnd) < 1e50);
+    bool hasBestBnd = (!untrustedCbcBestBound && std::isfinite(rawBestBnd) && std::fabs(rawBestBnd) < 1e50);
     if (hasBestBnd) {
         double bnd = (objExp > 0) ? std::ldexp(rawBestBnd, objExp) : rawBestBnd;
         if (std::isfinite(bnd)) {
@@ -1471,7 +1485,11 @@ void goblin_solve_mip(
         }
     }
     if (!hasBestBnd) {
-        if (out->has_root_cut) {
+        if (untrustedCbcBestBound) {
+            out->has_root_cut = 0;
+            out->root_cut_min = 0.0;
+        }
+        if (!untrustedCbcBestBound && out->has_root_cut) {
             out->best_bound_min = out->root_cut_min;
             out->has_best_bound = 1;
             hasBestBnd = true;
@@ -1480,16 +1498,10 @@ void goblin_solve_mip(
             out->has_best_bound = 1;
             hasBestBnd = true;
         } else {
-            out->best_bound_min = rawBestBnd;
+            out->best_bound_min = untrustedCbcBestBound ? 0.0 : rawBestBnd;
         }
     }
 
-    bool gapClosed = false;
-    if (hasSol && hasBestBnd) {
-        double gap = std::max(0.0, out->obj_min - out->best_bound_min);
-        double tol = std::max(abs_gap_tol, rel_gap_tol * std::max(1.0, std::fabs(out->obj_min)));
-        gapClosed = (gap <= tol);
-    }
     bool rawObjDrifted = false;
     if (hasSol) {
         double cbcObjMin = (objExp > 0) ? std::ldexp(rawObjVal, objExp) : rawObjVal;
@@ -1498,11 +1510,17 @@ void goblin_solve_mip(
             rawObjDrifted = true;
         }
     }
+    bool gapClosed = false;
+    if (hasSol && hasBestBnd) {
+        double rawDiff = out->obj_min - out->best_bound_min;
+        double tol = std::max(abs_gap_tol, rel_gap_tol * std::max(1.0, std::fabs(out->obj_min)));
+        double invTol = rawObjDrifted ? std::min(tol, 1e-7 * std::max(1.0, std::fabs(out->obj_min))) : tol;
+        gapClosed = (rawDiff >= -invTol && rawDiff <= tol);
+    }
 
-    bool userCanceled = (cancel_flag && __atomic_load_n(cancel_flag, __ATOMIC_RELAXED) != 0);
-    bool iterLimited = iterHit || tl_iter_limit_hit || m.secondaryStatus() == 8 ||
-                       (max_iter > 0 && out->iterations >= max_iter &&
-                        !m.isProvenOptimal() && !m.isProvenInfeasible() && !gapClosed);
+    if (iterLimited && gapClosed && !userCanceled && !iterHit && !tl_iter_limit_hit && m.secondaryStatus() != 8) {
+        iterLimited = false;
+    }
 
     if (droppedTiny) {
         out->has_sol = 0;
@@ -1513,7 +1531,7 @@ void goblin_solve_mip(
         out->best_bound_min = 0.0;
         out->root_lp_min = 0.0;
         out->root_cut_min = 0.0;
-        if (userCanceled || m.isSecondsLimitReached() || m.secondaryStatus() == 4) {
+        if (timeLimited) {
             out->status = -4; // StatusTimeLimit
         } else if (iterLimited) {
             out->status = -8; // StatusIterationLimit
@@ -1523,7 +1541,8 @@ void goblin_solve_mip(
             out->status = -12; // StatusNumericalError
         }
     } else if (!userCanceled && !iterLimited &&
-        ((!rawObjDrifted && m.isProvenOptimal()) || gapClosed || (!rawObjDrifted && m.status() == 0 && hasSol && m.secondaryStatus() == 0))) {
+        ((!timeLimited && !rawObjDrifted && m.isProvenOptimal()) || gapClosed ||
+         (!timeLimited && !rawObjDrifted && m.status() == 0 && hasSol && m.secondaryStatus() == 0))) {
         out->status = 1; // StatusOptimal
         if (hasSol && !hasBestBnd) {
             out->best_bound_min = out->obj_min;

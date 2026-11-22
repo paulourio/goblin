@@ -593,9 +593,11 @@ func TestCBCPeerReviewRegressions(t *testing.T) {
 
 // TestCBCPeerReviewV2Regressions covers the v1.0.0 peer-review findings on BackendCBC and CBCLPSolver.
 func TestCBCPeerReviewV2Regressions(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 
 	t.Run("c1_and_m6_wide_dot_and_bound_non_inversion", func(t *testing.T) {
+		t.Parallel()
 		m := gb.NewModel("cbc_wide_dot_1e17", gb.Minimize)
 		x0 := m.AddContVar("x0", 1, 1)
 		x1 := m.AddContVar("x1", 1, 1)
@@ -625,6 +627,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("c3_mad_lp_relaxations_optimal_without_false_numerr", func(t *testing.T) {
+		t.Parallel()
 		for _, id := range []string{"t2_mad_g3_i9", "t2_mad_g4_i12", "t3_mad_g10_i100"} {
 			rawLines, err := os.ReadFile(filepath.Join("testdata", "corpus", "trials", id+".jsonl"))
 			if err != nil {
@@ -664,6 +667,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("c5_verify_cbc_mip_respects_bounded_domain_and_max_iter", func(t *testing.T) {
+		t.Parallel()
 		raw, err := os.ReadFile(filepath.Join("testdata", "corpus", "t3_mad_g10_i100.json"))
 		if err != nil {
 			t.Fatalf("read t3_mad_g10_i100.json: %v", err)
@@ -689,6 +693,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("c6_multirow_tiny_coeff_aggregate_drift", func(t *testing.T) {
+		t.Parallel()
 		// 20 columns with |a_ij| = 1e-19 at x_j = 1e10 each contribute 1e-9 (< 1e-8 individually),
 		// but sum to 2e-8 (>= 1e-8 aggregate row violation when Clp drops |a| <= 1e-18).
 		m := gb.NewModel("cbc_tiny_row_sum", gb.Minimize)
@@ -715,6 +720,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("c7_multiscale_and_negative_extreme_mip_objectives", func(t *testing.T) {
+		t.Parallel()
 		// Multi-scale objective (1e60 + 1e-295) cannot be rescaled without Clp cutoff overflow or underflow.
 		mMulti := gb.NewModel("cbc_multiscale_mip", gb.Minimize)
 		xBig := mMulti.AddBinaryVar("x_big")
@@ -744,6 +750,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("m2_cbc_objective_overflow_and_unconstrained_mip_nil_duals", func(t *testing.T) {
+		t.Parallel()
 		mConst := gb.NewModel("cbc_const_overflow", gb.Minimize)
 		xc := mConst.AddIntVar("x", 1, 1)
 		mConst.SetObjective(gb.NewExpr(xc.T(1e308)).AddConstant(1e308))
@@ -768,6 +775,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("cbc_residual_fixed_tiny_obj_and_extreme_finite_bounds", func(t *testing.T) {
+		t.Parallel()
 		wantLo := math.Ldexp(1, -970)
 		mLo := gb.NewModel("cbc_lo_after_hi_mid_cancel", gb.Minimize)
 		lx0 := mLo.AddContVar("x0", 1, 1)
@@ -849,6 +857,7 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 	})
 
 	t.Run("c1_cbc_row_and_objective_cancellation_models", func(t *testing.T) {
+		t.Parallel()
 		cbcVariants := []struct {
 			name string
 			opts []gb.Option
@@ -1355,6 +1364,296 @@ func TestCBCPeerReviewV2Regressions(t *testing.T) {
 					t.Fatalf("c1_cbclp_maximize_cut_cancel rc[%d]=%g, want %g", j, rc.ReducedCosts[j], rg.ReducedCosts[j])
 				}
 			}
+		}
+	})
+}
+
+func TestAdversarialPeerReviewCBCRegressions(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	cbcVariants := []struct {
+		name string
+		opts []gb.Option
+	}{
+		{"default", []gb.Option{gb.WithCBC()}},
+		{"no-presolve", []gb.Option{gb.WithCBC(), gb.WithPresolve(false)}},
+		{"bare-no-presolve", []gb.Option{gb.WithCBC(), gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false)}},
+	}
+	checkOpt := func(t *testing.T, label string, p *gb.CompiledProblem, res gb.Result, want float64) {
+		t.Helper()
+		if res.Backend != gb.BackendCBC {
+			t.Fatalf("%s: backend=%v, want BackendCBC", label, res.Backend)
+		}
+		if res.Status != gb.StatusOptimal {
+			t.Fatalf("%s: status=%v obj=%g bnd=%g, want Optimal %g", label, res.Status, res.Objective, res.BestBound, want)
+		}
+		if rel := math.Abs(res.Objective-want) / max(1.0, math.Abs(want)); rel > 1e-6 {
+			t.Fatalf("%s: objective=%.10g, want %.10g (rel=%.2e)", label, res.Objective, want, rel)
+		}
+		bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
+		if bV > 1e-6 || rV > 1e-6 || iV > 1e-6 {
+			t.Fatalf("%s: violation bound=%.2e row=%.2e int=%.2e", label, bV, rV, iV)
+		}
+	}
+
+	t.Run("c1c_eq_and_inv", func(t *testing.T) {
+		t.Parallel()
+		mEq := gb.NewModel("cbc_c1c_eq", gb.Minimize)
+		x := mEq.AddContVar("x", 1, 2)
+		mEq.AddConstraint("eq", gb.NewExpr(x.T(math.Ldexp(1, 40))).Eq(math.Ldexp(1, 40)-524288))
+		mEq.SetObjective(gb.NewExpr(x.T(1)))
+		pEq := mEq.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, pEq, v.opts...)
+			if err != nil || res.Status != gb.StatusInfeasible {
+				t.Fatalf("c1c_eq/%s: status=%v err=%v, want Infeasible", v.name, res.Status, err)
+			}
+		}
+
+		mInv := gb.NewModel("cbc_c1c_inv", gb.Minimize)
+		xi := mInv.AddContVar("x", 2, 1)
+		mInv.SetObjective(gb.NewExpr(xi.T(1)))
+		pInv := mInv.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, pInv, v.opts...)
+			if err != nil || res.Status != gb.StatusInfeasible {
+				t.Fatalf("m5_inv/%s: status=%v err=%v, want Infeasible", v.name, res.Status, err)
+			}
+		}
+	})
+
+	t.Run("new_c1_sub_1e6_and_int_snapping", func(t *testing.T) {
+		t.Parallel()
+		for _, isMIP := range []bool{false, true} {
+			m := gb.NewModel("cbc_new_c1a", gb.Minimize)
+			x := m.AddContVar("x", 0, 1)
+			y := m.AddContVar("y", 0, 1)
+			var z gb.Var
+			if isMIP {
+				z = m.AddBinaryVar("z")
+			} else {
+				z = m.AddContVar("z", 0, 1)
+			}
+			m.AddConstraint("ub", gb.NewExpr(x.T(math.Ldexp(1, 44))).Le(1))
+			m.AddConstraint("lb", gb.NewExpr(x.T(math.Ldexp(1, 45))).Ge(1))
+			m.AddConstraint("trig", gb.NewExpr(y.T(1e9), z.T(-1e9)).Le(1))
+			m.SetObjective(gb.NewExpr(x.T(math.Ldexp(1, 45))))
+			p := m.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p, v.opts...)
+				if err != nil {
+					t.Fatalf("new_c1a(mip=%v)/%s err: %v", isMIP, v.name, err)
+				}
+				checkOpt(t, fmt.Sprintf("new_c1a(mip=%v)/%s", isMIP, v.name), p, res, 1.0)
+			}
+		}
+
+		m1b := gb.NewModel("cbc_new_c1b", gb.Minimize)
+		xb := m1b.AddContVar("x", 0, 1e-3)
+		yb := m1b.AddContVar("y", 1e10, 1e10)
+		bb := m1b.AddBinaryVar("b")
+		m1b.AddConstraint("ub", gb.NewExpr(xb.T(math.Ldexp(1, 44))).Le(1))
+		m1b.AddConstraint("trig", gb.NewExpr(yb.T(1), bb.T(1)).Le(1e10+1))
+		m1b.SetObjective(gb.NewExpr(xb.T(-math.Ldexp(1, 51))))
+		p1b := m1b.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, p1b, v.opts...)
+			if err != nil {
+				t.Fatalf("new_c1b/%s err: %v", v.name, err)
+			}
+			checkOpt(t, "new_c1b/"+v.name, p1b, res, -128.0)
+		}
+
+		m1c := gb.NewModel("cbc_new_c1c", gb.Minimize)
+		xc := m1c.AddIntVar("x", 0, 10)
+		yc := m1c.AddContVar("y", 1e10, 1e10)
+		m1c.AddConstraint("lb", gb.NewExpr(xc.T(1)).Ge(1.0-math.Ldexp(1, -42)))
+		m1c.AddConstraint("ub", gb.NewExpr(xc.T(1)).Le(1.0))
+		m1c.AddConstraint("trig", gb.NewExpr(yc.T(1), xc.T(1)).Le(1e10+10))
+		m1c.SetObjective(gb.NewExpr(xc.T(1e15)))
+		p1c := m1c.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, p1c, v.opts...)
+			if err != nil {
+				t.Fatalf("new_c1c/%s err: %v", v.name, err)
+			}
+			checkOpt(t, "new_c1c/"+v.name, p1c, res, 1e15)
+			if res.Values[0] != 1.0 {
+				t.Fatalf("new_c1c/%s x0=%.17g, want 1", v.name, res.Values[0])
+			}
+		}
+	})
+
+	t.Run("new_c2_new_c3_new_c4_new_c7", func(t *testing.T) {
+		t.Parallel()
+		m2a := gb.NewModel("cbc_new_c2a", gb.Minimize)
+		x2a := m2a.AddContVar("x", 0, 1)
+		m2a.AddConstraint("ub", gb.NewExpr(x2a.T(1e14)).Le(1))
+		m2a.AddConstraint("lb", gb.NewExpr(x2a.T(1e14)).Ge(1e5))
+		m2a.SetObjective(gb.NewExpr(x2a.T(1e14)))
+		p2a := m2a.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, p2a, v.opts...)
+			if err != nil || res.Status != gb.StatusInfeasible {
+				t.Fatalf("new_c2a/%s: status=%v err=%v, want Infeasible", v.name, res.Status, err)
+			}
+		}
+
+		m2b := gb.NewModel("cbc_new_c2b", gb.Minimize)
+		x2b := m2b.AddContVar("x", 0, 1)
+		m2b.AddConstraint("ub", gb.NewExpr(x2b.T(1e13)).Le(1))
+		m2b.AddConstraint("lb", gb.NewExpr(x2b.T(1e14)).Ge(1))
+		m2b.SetObjective(gb.NewExpr(x2b.T(1e14)))
+		p2b := m2b.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, p2b, v.opts...)
+			if err != nil {
+				t.Fatalf("new_c2b/%s err: %v", v.name, err)
+			}
+			checkOpt(t, "new_c2b/"+v.name, p2b, res, 1.0)
+		}
+
+		for _, addVacuous := range []bool{false, true} {
+			m3 := gb.NewModel("cbc_new_c3", gb.Minimize)
+			x0 := m3.AddContVar("x0", math.Ldexp(1, 30), math.Ldexp(1, 30))
+			x1 := m3.AddContVar("x1", math.Ldexp(1, 30), math.Ldexp(1, 30))
+			z := m3.AddBinaryVar("z")
+			w := m3.AddContVar("w", 0, 1)
+			m3.AddConstraint("eq", gb.NewExpr(x0.T(math.Ldexp(1, 30)), x1.T(-math.Ldexp(1, 30)), z.T(1)).Eq(1))
+			if addVacuous {
+				m3.AddConstraint("vac", gb.NewExpr(w.T(1e-19), z.T(1)).Le(2))
+			}
+			m3.SetObjective(gb.NewExpr(z.T(1)))
+			p3 := m3.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p3, v.opts...)
+				if err != nil {
+					t.Fatalf("new_c3(vac=%v)/%s err: %v", addVacuous, v.name, err)
+				}
+				checkOpt(t, fmt.Sprintf("new_c3(vac=%v)/%s", addVacuous, v.name), p3, res, 1.0)
+			}
+		}
+
+		m4 := gb.NewModel("cbc_new_c4", gb.Minimize)
+		fx1 := m4.AddContVar("x1", math.Inf(-1), math.Inf(1))
+		fx2 := m4.AddContVar("x2", math.Inf(-1), math.Inf(1))
+		fx3 := m4.AddContVar("x3", math.Inf(-1), math.Inf(1))
+		fx4 := m4.AddContVar("x4", math.Inf(-1), math.Inf(1))
+		fx6 := m4.AddContVar("x6", 52776558133248, 52776558133248)
+		m4.AddConstraint("r0", gb.NewExpr(fx1.T(-2e13), fx3.T(1e13)).Le(-4e13))
+		m4.AddConstraint("r1", gb.NewExpr(fx1.T(1e10), fx2.T(-3e10), fx6.T(1e10)).Ge(1e10))
+		m4.AddConstraint("r2", gb.NewExpr(fx1.T(-1e10), fx2.T(3e10), fx4.T(-3e10), fx6.T(2e10/3.0)).Ge(4e10))
+		m4.AddConstraint("r3", gb.NewExpr(fx1.T(3e10), fx3.T(-3e10)).Eq(-5e10))
+		m4.AddConstraint("c", gb.NewExpr(fx1.T(-1e10)).Le(1))
+		m4.SetObjective(gb.NewExpr(fx3.T(1), fx4.T(-1), fx6.T(1)))
+		p4 := m4.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, p4, v.opts...)
+			if err != nil {
+				t.Fatalf("new_c4/%s err: %v", v.name, err)
+			}
+			if res.Status != gb.StatusOptimal || math.IsNaN(res.Objective) {
+				t.Fatalf("new_c4/%s: status=%v obj=%g, want Optimal", v.name, res.Status, res.Objective)
+			}
+		}
+		lp4 := gb.NewCBCLPSolver(p4)
+		defer lp4.Close()
+		if r4 := lp4.Solve(); r4.Status != gb.StatusOptimal {
+			t.Fatalf("new_c4 CBCLPSolver status=%v, want Optimal", r4.Status)
+		}
+
+		m7 := gb.NewModel("cbc_new_c7", gb.Minimize)
+		x7 := m7.AddContVar("x", 0, 1)
+		b7 := m7.AddBinaryVar("b")
+		m7.AddConstraint("ub", gb.NewExpr(x7.T(1e13)).Le(1))
+		m7.AddConstraint("lb", gb.NewExpr(x7.T(1e14)).Ge(1))
+		m7.AddConstraint("b_con", gb.NewExpr(b7.T(1)).Le(1))
+		m7.SetObjective(gb.NewExpr(x7.T(1e14), b7.T(-1)))
+		p7 := m7.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, p7, v.opts...)
+			if err != nil {
+				t.Fatalf("new_c7/%s err: %v", v.name, err)
+			}
+			checkOpt(t, "new_c7/"+v.name, p7, res, 0.0)
+		}
+	})
+
+	t.Run("c3_tiny_pivot_and_m1_presolved_root_lp", func(t *testing.T) {
+		t.Parallel()
+		for _, eps := range []float64{5e-14, 2e-12} {
+			m := gb.NewModel("cbc_c3a", gb.Minimize)
+			b0 := m.AddBinaryVar("b0")
+			b1 := m.AddBinaryVar("b1")
+			b2 := m.AddBinaryVar("b2")
+			b3 := m.AddBinaryVar("b3")
+			b4 := m.AddBinaryVar("b4")
+			u := m.AddContVar("u", 0, math.Inf(1))
+			s := m.AddContVar("s", 0, math.Inf(1))
+			w := m.AddContVar("w", -1, 0)
+			c1 := m.AddContVar("c1", 0, 1)
+			m.AddConstraint("e01", gb.NewExpr(b0.T(1), b1.T(1)).Le(1))
+			m.AddConstraint("e12", gb.NewExpr(b1.T(1), b2.T(1)).Le(1))
+			m.AddConstraint("e23", gb.NewExpr(b2.T(1), b3.T(1)).Le(1))
+			m.AddConstraint("e34", gb.NewExpr(b3.T(1), b4.T(1)).Le(1))
+			m.AddConstraint("e40", gb.NewExpr(b4.T(1), b0.T(1)).Le(1))
+			m.AddConstraint("r1", gb.NewExpr(u.T(1), s.T(-1), w.T(-1)).Eq(1))
+			m.AddConstraint("r2", gb.NewExpr(s.T(1), w.T(1), c1.T(1)).Ge(-0.5))
+			m.AddConstraint("r0", gb.NewExpr(b0.T(1), c1.T(1), u.T(-eps)).Le(0.5-eps))
+			m.SetObjective(gb.NewExpr(b0.T(-1.50), b1.T(-1.01), b2.T(-1.02), b3.T(-1.03), b4.T(-1.04), w.T(-10.0), c1.T(10.0)))
+			p := m.Compile()
+			for _, v := range cbcVariants {
+				res, err := gb.SolveCompiled(ctx, p, v.opts...)
+				if err != nil {
+					t.Fatalf("cbc_c3a(%.1e)/%s err: %v", eps, v.name, err)
+				}
+				if res.Status == gb.StatusInfeasible || res.Status == gb.StatusUnbounded {
+					t.Fatalf("cbc_c3a(%.1e)/%s unsound status=%v", eps, v.name, res.Status)
+				}
+			}
+		}
+
+		eps := 5e-14
+		mb := gb.NewModel("cbc_c3b", gb.Minimize)
+		b0 := mb.AddBinaryVar("b0")
+		b1 := mb.AddBinaryVar("b1")
+		b2 := mb.AddBinaryVar("b2")
+		u := mb.AddContVar("u", 0, math.Inf(1))
+		s := mb.AddContVar("s", 0, math.Inf(1))
+		w := mb.AddContVar("w", -1, 0)
+		c1 := mb.AddContVar("c1", 0, 1)
+		mb.AddConstraint("t1", gb.NewExpr(b0.T(1), b1.T(1)).Ge(1))
+		mb.AddConstraint("t2", gb.NewExpr(b0.T(1), b2.T(1)).Ge(1))
+		mb.AddConstraint("t3", gb.NewExpr(b1.T(1), b2.T(1)).Le(1))
+		mb.AddConstraint("r1", gb.NewExpr(u.T(1), s.T(-1), w.T(-1)).Eq(1))
+		mb.AddConstraint("r2", gb.NewExpr(s.T(1), w.T(1), c1.T(1)).Ge(-0.5))
+		mb.AddConstraint("r0", gb.NewExpr(b0.T(1), c1.T(1), u.T(-eps)).Le(0.5-eps))
+		mb.SetObjective(gb.NewExpr(b0.T(10.0), b1.T(1.0), b2.T(1.1), w.T(-10.0), c1.T(10.0)))
+		pb := mb.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, pb, v.opts...)
+			if err != nil {
+				t.Fatalf("cbc_c3b/%s err: %v", v.name, err)
+			}
+			if res.Status == gb.StatusInfeasible || res.Status == gb.StatusUnbounded {
+				t.Fatalf("cbc_c3b/%s unsound status=%v", v.name, res.Status)
+			}
+		}
+
+		m1 := gb.NewModel("cbc_m1", gb.Minimize)
+		mx := m1.AddIntVar("x", 0, math.Inf(1))
+		my := m1.AddBinaryVar("y")
+		mz := m1.AddBinaryVar("z")
+		m1.AddConstraint("cx", gb.NewExpr(mx.T(1)).Le(1))
+		m1.AddConstraint("cyz", gb.NewExpr(my.T(2), mz.T(1)).Le(1))
+		m1.SetObjective(gb.NewExpr(mx.T(-1), my.T(-10), mz.T(-1)))
+		pm1 := m1.Compile()
+		for _, v := range cbcVariants {
+			res, err := gb.SolveCompiled(ctx, pm1, v.opts...)
+			if err != nil {
+				t.Fatalf("m1/%s err: %v", v.name, err)
+			}
+			checkOpt(t, "m1/"+v.name, pm1, res, -2.0)
 		}
 	})
 }

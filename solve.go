@@ -54,7 +54,8 @@ type Options struct {
 	AbsGapTol float64
 	// TimeLimit bounds the wall-clock solve time (0 = unlimited).
 	TimeLimit time.Duration
-	// Workers controls parallel Branch-and-Bound node evaluation (<= 1 runs single-threaded).
+	// Workers controls parallel Branch-and-Bound node evaluation on BackendGo
+	// (<= 1 runs single-threaded; ignored on BackendCBC, which runs single-threaded).
 	Workers int
 
 	cutoffMin float64
@@ -85,7 +86,9 @@ const (
 )
 
 // DefaultOptions returns the default solver settings (pure-Go backend, presolve, cuts,
-// and heuristics enabled, with MaxNodes = 50000; pass WithMaxNodes(0) for an unlimited tree).
+// and heuristics enabled, with MaxNodes = 50000 and MaxCutPasses = 12 on BackendGo;
+// pass WithMaxNodes(0) for an unlimited tree). Untouched BackendCBC defaults map MaxNodes
+// to unlimited and MaxCutPasses to 30 unless explicitly overridden.
 func DefaultOptions() Options {
 	return Options{
 		Backend:              BackendGo,
@@ -137,6 +140,9 @@ func WithBackend(b Backend) Option {
 
 // WithCBC selects the optional in-process C++ COIN-OR CBC/CLP backend (shorthand for WithBackend(BackendCBC)).
 // Requires building with -tags cbc and cgo enabled; otherwise Solve returns StatusUndefined.
+// Access is serialized single-threaded (WithWorkers is ignored). Models with unresolved IEEE-754
+// cancellation risk, tiny-pivot risk, or uncertified CBC exits transparently fall back to the
+// compensated pure-Go engine while reporting Result.Backend == BackendCBC.
 func WithCBC() Option {
 	return func(cfg *Options) { cfg.Backend = BackendCBC }
 }
@@ -187,7 +193,8 @@ func WithMaxCutPasses(n int) Option {
 	}
 }
 
-// WithWorkers sets the number of parallel Branch-and-Bound worker goroutines (<= 1 runs single-threaded).
+// WithWorkers sets the number of parallel Branch-and-Bound worker goroutines on BackendGo
+// (<= 1 runs single-threaded; ignored on BackendCBC).
 func WithWorkers(n int) Option {
 	return func(cfg *Options) { cfg.Workers = n }
 }
