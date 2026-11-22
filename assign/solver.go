@@ -141,6 +141,75 @@ func assignRoundToOddSticky(top, rem float64) float64 {
 	return math.Nextafter(top, 0)
 }
 
+func assignRoundToOddSign(v float64, tailSign int) float64 {
+	if tailSign == 0 || v == 0 || math.Float64bits(v)&1 != 0 {
+		return v
+	}
+	if (v > 0) == (tailSign > 0) {
+		return math.Nextafter(v, math.Copysign(math.Inf(1), v))
+	}
+	return math.Nextafter(v, 0)
+}
+
+func assignRoundComp(comp []float64, tailSign int) float64 {
+	n := len(comp)
+	if n == 0 {
+		return 0
+	}
+	top := comp[n-1]
+	if n == 1 {
+		return top
+	}
+	tSign := tailSign
+	if n >= 3 {
+		tSign = assignSignOf(comp[n-3])
+	}
+	rem := assignRoundToOddSign(comp[n-2], tSign)
+	comb := top + rem
+	if math.IsNaN(comb) {
+		return top
+	}
+	return comb
+}
+
+func assignRoundToSubnormalComp(comp []float64, biasScale float64, tailSign int) float64 {
+	n := len(comp)
+	if n == 0 {
+		return 0
+	}
+	cTop := comp[n-1]
+	tSign := tailSign
+	if n >= 3 {
+		tSign = assignSignOf(comp[n-3])
+	}
+	rem := 0.0
+	if n >= 2 {
+		rem = assignRoundToOddSign(comp[n-2], tSign)
+	}
+	ac := math.Abs(cTop)
+	if ac > biasScale || (ac == biasScale && (rem == 0 || (cTop > 0) == (rem > 0))) {
+		comb := cTop + rem
+		if math.IsNaN(comb) {
+			return cTop
+		}
+		return comb
+	}
+	bias := math.Copysign(biasScale, cTop)
+	hi, lo1 := twoSumAssign(bias, cTop)
+	if n == 1 {
+		tail := assignRoundToOddSign(lo1, tSign)
+		return (hi + tail) - bias
+	}
+	t, u := twoSumAssign(lo1, rem)
+	var tail float64
+	if u != 0 {
+		tail = assignRoundToOddSticky(t, u)
+	} else {
+		tail = assignRoundToOddSign(t, tSign)
+	}
+	return (hi + tail) - bias
+}
+
 func growAssignBuf(e *[assignExpCap]float64, n int, b float64) (int, bool) {
 	if b == 0 {
 		return n, true
@@ -193,6 +262,13 @@ type assignWideAcc struct {
 	nonFin bool
 }
 
+func (w *assignWideAcc) reset() {
+	w.hiLen = 0
+	w.midLen = 0
+	w.loLen = 0
+	w.nonFin = false
+}
+
 func (w *assignWideAcc) addVal(v float64) {
 	if v == 0 || w.nonFin {
 		return
@@ -210,6 +286,30 @@ func (w *assignWideAcc) addVal(v float64) {
 		w.loLen, ok = growAssignBuf(&w.loBuf, w.loLen, math.Ldexp(math.Ldexp(v, assignWideHalf), assignWideHalf))
 	default:
 		w.midLen, ok = growAssignBuf(&w.midBuf, w.midLen, v)
+	}
+	if !ok {
+		w.nonFin = true
+	}
+}
+
+func (w *assignWideAcc) addScaled(v float64, shift int) {
+	if v == 0 || w.nonFin {
+		return
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		w.nonFin = true
+		return
+	}
+	f, e := math.Frexp(v)
+	totE := e + shift
+	var ok bool
+	switch {
+	case totE > assignWideCut:
+		w.hiLen, ok = growAssignBuf(&w.hiBuf, w.hiLen, math.Ldexp(f, totE-2*assignWideHalf))
+	case totE < -assignWideCut:
+		w.loLen, ok = growAssignBuf(&w.loBuf, w.loLen, math.Ldexp(f, totE+2*assignWideHalf))
+	default:
+		w.midLen, ok = growAssignBuf(&w.midBuf, w.midLen, math.Ldexp(f, totE))
 	}
 	if !ok {
 		w.nonFin = true
@@ -267,28 +367,29 @@ func (w *assignWideAcc) eval() (val float64, sgn int) {
 			if eHalf+assignWideHalf > 1024 {
 				var sc4Work [3 * assignExpCap]float64
 				sc4 := sc4Work[:0]
+				midDropSign := 0
 				for _, m := range mid {
-					if math.Abs(m) < 0x1p-400 && math.Abs(m) >= 0x1p-1018 {
-						sc4 = growAssignSlice(sc4, math.Ldexp(m, -4))
+					if math.Abs(m) < 0x1p-400 {
+						if math.Abs(m) >= 0x1p-1018 {
+							sc4 = growAssignSlice(sc4, math.Ldexp(m, -4))
+						} else {
+							midDropSign = assignSignOf(m)
+						}
 					}
 				}
 				for _, c := range half {
 					sc4 = growAssignSlice(sc4, math.Ldexp(c, assignWideHalf-4))
 				}
 				sc4 = compressAssignSlice(sc4)
-				t4, r4 := assignTopRem(sc4)
-				res := math.Ldexp(t4, 4)
-				if math.IsInf(res, 0) {
-					if math.Abs(t4) == 0x1p1020 && (t4 > 0) != (r4 > 0) && math.Abs(r4) > 0x1p966 {
-						res = math.Copysign(math.MaxFloat64, t4)
-					}
-					return res, assignSignOf(t4)
+				if len(sc4) == 0 {
+					return 0, 0
 				}
-				comb := res + math.Ldexp(r4, 4)
-				if math.IsNaN(comb) {
-					return res, assignSignOf(t4)
+				tailSign := midDropSign
+				if tailSign == 0 && len(lo) > 0 {
+					tailSign = assignSignOf(lo[len(lo)-1])
 				}
-				return comb, assignSignOf(t4)
+				val4 := assignRoundComp(sc4, tailSign)
+				return math.Ldexp(val4, 4), assignSignOf(sc4[len(sc4)-1])
 			}
 		}
 		for _, m := range mid {
@@ -306,12 +407,7 @@ func (w *assignWideAcc) eval() (val float64, sgn int) {
 		if len(midMerged) == 0 {
 			return 0, 0
 		}
-		top, rem := assignTopRem(midMerged)
-		comb := top + rem
-		if math.IsNaN(comb) {
-			comb = top
-		}
-		return comb, assignSignOf(midMerged[len(midMerged)-1])
+		return assignRoundComp(midMerged, 0), assignSignOf(midMerged[len(midMerged)-1])
 	}
 
 	var loSmallWork [assignExpCap]float64
@@ -332,20 +428,11 @@ func (w *assignWideAcc) eval() (val float64, sgn int) {
 		if len(midMerged) == 0 {
 			return 0, 0
 		}
-		top, rem := assignTopRem(midMerged)
-		comb := top + rem
-		if math.IsNaN(comb) {
-			comb = top
-		}
-		return comb, assignSignOf(midMerged[len(midMerged)-1])
+		return assignRoundComp(midMerged, 0), assignSignOf(midMerged[len(midMerged)-1])
 	}
 
 	if len(midMerged) == 0 {
-		loTop, loRem := assignTopRem(loSmall)
-		if loTop == 0 {
-			return 0, 0
-		}
-		adj := assignRoundToOddSticky(loTop, loRem)
+		adj := assignRoundToSubnormalComp(loSmall, 0x1p34, 0)
 		return math.Ldexp(math.Ldexp(adj, -assignWideHalf), -assignWideHalf), assignSignOf(loSmall[len(loSmall)-1])
 	}
 
@@ -374,51 +461,30 @@ func (w *assignWideAcc) eval() (val float64, sgn int) {
 			if len(up) == 0 {
 				return 0, loTinySign
 			}
-			uTop, uRem := assignTopRem(up)
-			if math.Abs(uTop) >= 0x1p-493 {
-				s0 := math.Ldexp(uTop, -assignWideHalf)
-				e0 := math.Ldexp(uRem, -assignWideHalf)
-				s, e := twoSumAssign(s0, e0)
-				return s + e, assignSignOf(up[len(up)-1])
-			}
-			adj := assignRoundToOddSticky(uTop, uRem)
+			adj := assignRoundToSubnormalComp(up, 0x1p-494, loTinySign)
 			return math.Ldexp(adj, -assignWideHalf), assignSignOf(up[len(up)-1])
 		}
 		rebuilt := midWork[:0]
+		upDropSign := 0
 		for _, u := range up {
 			if math.Abs(u) >= 0x1p-494 {
 				rebuilt = growAssignSlice(rebuilt, math.Ldexp(u, -assignWideHalf))
+			} else {
+				upDropSign = assignSignOf(u)
 			}
 		}
 		for _, m := range topKeep {
 			rebuilt = growAssignSlice(rebuilt, m)
 		}
 		rebuilt = compressAssignSlice(rebuilt)
-		top, rem := assignTopRem(rebuilt)
-		comb := top + rem
-		if math.IsNaN(comb) {
-			comb = top
+		dropSign := upDropSign
+		if dropSign == 0 {
+			dropSign = loTinySign
 		}
-		return comb, assignSignOf(rebuilt[len(rebuilt)-1])
+		return assignRoundComp(rebuilt, dropSign), assignSignOf(rebuilt[len(rebuilt)-1])
 	}
 
-	loTop, loRem := assignTopRem(loSmall)
-	loUnscaled := math.Ldexp(math.Ldexp(assignRoundToOddSticky(loTop, loRem), -assignWideHalf), -assignWideHalf)
-	r := 0.0
-	for i := range len(midMerged) - 1 {
-		r += midMerged[i]
-	}
-	if r == 0 {
-		r = loUnscaled
-	} else {
-		r += loUnscaled
-	}
-	s, e := twoSumAssign(midMerged[len(midMerged)-1], r)
-	comb := s + e
-	if math.IsNaN(comb) {
-		comb = s
-	}
-	return comb, assignSignOf(midMerged[len(midMerged)-1])
+	return assignRoundComp(midMerged, assignSignOf(loSmall[len(loSmall)-1])), assignSignOf(midMerged[len(midMerged)-1])
 }
 
 func (w *assignWideAcc) sign() int {
@@ -520,13 +586,10 @@ func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int,
 	if maxPot == 0 {
 		return false
 	}
-	suspect := minNonZeroPot <= 0x1p-30*maxPot
-	if !suspect {
-		oppSign := (maxU > 0 && minV < 0) || (minU < 0 && maxV > 0)
-		if oppSign && math.Abs(obj) <= 0x1p-12*maxPot {
-			suspect = true
-		}
-	}
+	oppSign := (maxU > 0 && minV < 0) || (minU < 0 && maxV > 0) ||
+		(maxU > 0 && minU < 0) || (maxV > 0 && minV < 0)
+	globalCancel := oppSign && math.Abs(obj) <= 0x1p-12*maxPot
+	suspect := minNonZeroPot <= 0x1p-30*maxPot || globalCancel
 	if !suspect {
 		for i := range m {
 			j := col4row[i]
@@ -572,7 +635,7 @@ func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int,
 			severeCancel := auv > 0x1p20*ac ||
 				(avj > 0 && ac+aui > 0x1p20*avj) ||
 				(aui > 0 && ac+avj > 0x1p20*aui)
-			if severeCancel {
+			if severeCancel || globalCancel {
 				if (j == mj && rc > 0) || rc < 0 {
 					return true
 				}
@@ -587,28 +650,28 @@ func hasPotentialCancellation(m, n int, normCost, u, v []float64, col4row []int,
 	return false
 }
 
-func isAssignmentStrictlyWorse(m, n int, candCol4Row, baseCol4Row []int, unscaledCost []float64) bool {
+func compareAssignmentObj(m, n int, candCol4Row, baseCol4Row []int, unscaledCost []float64) int {
 	var diffAcc assignWideAcc
 	for i := range m {
 		jc := candCol4Row[i]
 		jb := baseCol4Row[i]
 		if jc < 0 || jc >= n {
-			return true
+			return 1
 		}
 		if jc == jb {
 			continue
 		}
 		cc := unscaledCost[i*n+jc]
 		if math.IsInf(cc, 1) || math.IsNaN(cc) {
-			return true
+			return 1
 		}
 		diffAcc.addVal(cc)
 		diffAcc.addVal(-unscaledCost[i*n+jb])
 	}
 	if diffAcc.nonFin {
-		return true
+		return 1
 	}
-	return diffAcc.sign() > 0
+	return diffAcc.sign()
 }
 
 func hasTinyEntry(cost []float64) bool {
@@ -1026,239 +1089,16 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		return 0, transposed, err
 	}
 
+	normObj := computeMatchedObjective(m, n, normCost, col4row, scaleExp == 0)
+	hasPotCancel := hasPotentialCancellation(m, n, normCost, u, v, col4row, normObj)
 	var (
-		uSubOrig, vSubOrig []float64
-		normObj            float64
-		hasPotCancel       bool
-		stage2Accepted     bool
+		st             stage2State
+		stage2Accepted bool
 	)
-	if !lostSubnormal {
-		normObj = computeMatchedObjective(m, n, normCost, col4row, scaleExp == 0)
-		hasPotCancel = hasPotentialCancellation(m, n, normCost, u, v, col4row, normObj)
-	}
 	if lostSubnormal || hasPotCancel {
-		hasDeepSub := false
-		if lostSubnormal {
-			for _, oc := range unscaledCost[:m*n] {
-				if oc != 0 && math.Abs(oc) < 0x1p-950 {
-					hasDeepSub = true
-					break
-				}
-			}
-		}
-		tau := 4.0 * float64(m+1) * math.SmallestNonzeroFloat64
-		subCap := float64(m+2) * tau
-		maxPot := 0.0
-		uBase := make([]float64, m)
-		for i, ui := range u {
-			if a := math.Abs(ui); a > maxPot {
-				maxPot = a
-			}
-			if math.Abs(ui) > subCap {
-				uBase[i] = ui
-			}
-		}
-		vBase := make([]float64, n)
-		if m == n {
-			for j, vj := range v {
-				if a := math.Abs(vj); a > maxPot {
-					maxPot = a
-				}
-				if math.Abs(vj) > subCap {
-					vBase[j] = vj
-				}
-			}
-		} else {
-			for j, vj := range v {
-				if a := math.Abs(vj); a > maxPot {
-					maxPot = a
-				}
-				if vj < -subCap {
-					vBase[j] = vj
-				}
-			}
-		}
-		uSubCur := make([]float64, m)
-		vSubCur := make([]float64, n)
-		edgeResidual := func(idx int, ui, uSub, vj, vSub float64) (s2, rem float64) {
-			nc := normCost[idx]
-			s1, e1 := twoSumAssign(nc, -ui)
-			s2, e2 := twoSumAssign(s1, -vj)
-			rem = (e1 + e2) - math.Ldexp(uSub, -scaleExp) - math.Ldexp(vSub, -scaleExp)
-			return s2, rem
-		}
-		maxPasses := 1
-		if hasDeepSub {
-			maxPasses = 2
-		}
-		resCost := make([]float64, m*n)
-		u2 := make([]float64, m)
-		v2 := make([]float64, n)
-		c4r2 := make([]int, m)
-		r4c2 := make([]int, n)
-		capRC := math.MaxFloat64 / (64.0 * float64(m+2) * float64(m+2))
-		for pass := range maxPasses {
-			s1Pos := 0.0
-			maxNegD := 0.0
-			for i := range m {
-				ui, uSub := uBase[i], uSubCur[i]
-				for j := range n {
-					idx := i*n + j
-					if math.IsInf(unscaledCost[idx], 1) {
-						continue
-					}
-					s2, rem := edgeResidual(idx, ui, uSub, vBase[j], vSubCur[j])
-					d := s2 + rem
-					if j == col4row[i] && d > 0 {
-						s1Pos += d
-					}
-					if -d > maxNegD {
-						maxNegD = -d
-					}
-				}
-			}
-			cutCap := s1Pos + float64(m)*maxNegD
-			globalFpTol := 0.0
-			if hasPotCancel {
-				globalFpTol = 8.0 * float64(m+2) * 0x1p-53 * (2.0 * maxPot)
-			}
-			baseCap := max(2.0*subCap, max(cutCap, globalFpTol))
-			maxOrigCandAbs := 0.0
-			for i := range m {
-				ui, uSub := uBase[i], uSubCur[i]
-				for j := range n {
-					idx := i*n + j
-					oc := unscaledCost[idx]
-					if math.IsInf(oc, 1) {
-						continue
-					}
-					nc := normCost[idx]
-					s2, rem := edgeResidual(idx, ui, uSub, vBase[j], vSubCur[j])
-					d := s2 + rem
-					edgeScale := math.Abs(nc) + math.Abs(ui) + math.Abs(vBase[j])
-					fpTol := 8.0 * float64(m+2) * 0x1p-53 * edgeScale
-					if pass > 0 {
-						fpTol = 2.0 * float64(m+2) * 0x1p-53 * edgeScale
-					}
-					if d > max(fpTol, baseCap) {
-						continue
-					}
-					origAbs := math.Ldexp(math.Abs(d), scaleExp)
-					if math.IsInf(origAbs, 1) {
-						origAbs = math.MaxFloat64
-					}
-					if origAbs > maxOrigCandAbs {
-						maxOrigCandAbs = origAbs
-					}
-				}
-			}
-			liftExp := 64
-			if maxOrigCandAbs > 0 {
-				_, maxE := math.Frexp(maxOrigCandAbs)
-				_, capE := math.Frexp(capRC)
-				liftExp = max(0, min(64, capE-maxE-1))
-			}
-			minNegRC := 0.0
-			for i := range m {
-				ui, uSub := uBase[i], uSubCur[i]
-				for j := range n {
-					idx := i*n + j
-					oc := unscaledCost[idx]
-					if math.IsInf(oc, 1) {
-						resCost[idx] = math.Inf(1)
-						continue
-					}
-					nc := normCost[idx]
-					s2, rem := edgeResidual(idx, ui, uSub, vBase[j], vSubCur[j])
-					d := s2 + rem
-					edgeScale := math.Abs(nc) + math.Abs(ui) + math.Abs(vBase[j])
-					fpTol := 8.0 * float64(m+2) * 0x1p-53 * edgeScale
-					if pass > 0 {
-						fpTol = 2.0 * float64(m+2) * 0x1p-53 * edgeScale
-					}
-					if d > max(fpTol, baseCap) {
-						resCost[idx] = math.Inf(1)
-						continue
-					}
-					s1, e1 := twoSumAssign(nc, -ui)
-					s2b, e2 := twoSumAssign(s1, -vBase[j])
-					rc := math.Ldexp(s2b, scaleExp+liftExp) + math.Ldexp(e1+e2, scaleExp+liftExp) -
-						math.Ldexp(uSub, liftExp) - math.Ldexp(vSubCur[j], liftExp)
-					if math.Ldexp(nc, scaleExp) != oc {
-						rc += math.Ldexp(oc, liftExp) - math.Ldexp(nc, scaleExp+liftExp)
-					}
-					if rc > capRC {
-						rc = capRC
-					} else if rc < -capRC {
-						rc = -capRC
-					} else if math.IsNaN(rc) {
-						rc = 0
-					}
-					resCost[idx] = rc
-					if rc < minNegRC {
-						minNegRC = rc
-					}
-				}
-			}
-			var colBonus []float64
-			if m < n {
-				stage1PosSum := 0.0
-				for i := range m {
-					if j := col4row[i]; uint(j) < uint(n) {
-						if rc := resCost[i*n+j]; rc > 0 && !math.IsInf(rc, 1) {
-							stage1PosSum += rc
-						}
-					}
-				}
-				swing := stage1PosSum - float64(m)*minNegRC
-				mustBonusCap := min(capRC, 4.0*swing+math.Ldexp(8.0*subCap, scaleExp+liftExp))
-				if mustBonusCap <= 0 {
-					mustBonusCap = math.SmallestNonzeroFloat64
-				}
-				colBonus = make([]float64, n)
-				for j, vj := range vBase {
-					totVJ := math.Ldexp(vj, scaleExp) + vSubCur[j]
-					if totVJ >= 0 {
-						continue
-					}
-					b := min(mustBonusCap, math.Ldexp(-totVJ, liftExp))
-					colBonus[j] = b
-					for i := range m {
-						idx := i*n + j
-						if !math.IsInf(resCost[idx], 1) {
-							resCost[idx] -= b
-						}
-					}
-				}
-			}
-			if err2 := runNormalizedLSAP(ctx, m, n, resCost, u2, v2, c4r2, r4c2, ws, cfg.DisableSIMD, false, done); err2 != nil {
-				if errors.Is(err2, context.Canceled) || errors.Is(err2, context.DeadlineExceeded) {
-					return 0, transposed, err2
-				}
-				break
-			}
-			if !isAssignmentStrictlyWorse(m, n, c4r2, col4row, unscaledCost) {
-				stage2Accepted = true
-				copy(col4row, c4r2)
-				copy(row4col, r4c2)
-				copy(u, uBase)
-				copy(v, vBase)
-				for i := range m {
-					uSubCur[i] += math.Ldexp(u2[i], -liftExp)
-				}
-				for j := range n {
-					vj := v2[j]
-					if m < n && colBonus != nil {
-						vj += colBonus[j]
-					}
-					vSubCur[j] += math.Ldexp(vj, -liftExp)
-				}
-				uSubOrig = uSubCur
-				vSubOrig = vSubCur
-			}
-			if liftExp >= 53 {
-				break
-			}
+		st, stage2Accepted, err = runStage2Refinement(ctx, m, n, scaleExp, normCost, unscaledCost, u, v, col4row, row4col, ws, cfg.DisableSIMD, done)
+		if err != nil {
+			return 0, transposed, err
 		}
 	}
 
@@ -1286,55 +1126,515 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		totalMin = computeMatchedObjective(m, n, unscaledCost, col4row, scaleExp == 0)
 	}
 
-	if scaleExp > 0 || uSubOrig != nil {
-		shift := 0.0
+	if scaleExp > 0 || st.numDualPasses > 0 || hasPotCancel {
+		finalizeStage2Duals(m, n, scaleExp, unscaledCost, col4row, row4col, u, v, &st, hasPotCancel)
+	}
+
+	obj := totalMin
+	if sense == Maximize {
+		obj = -obj
+	}
+	if obj == 0 {
+		obj = 0
+	}
+	return obj, transposed, nil
+}
+
+const maxStage2Passes = 8
+
+type stage2State struct {
+	uBase         []float64
+	vBase         []float64
+	uDeltas       []float64
+	vDeltas       []float64
+	vBonus        []float64
+	passShift     [maxStage2Passes]int
+	numDualPasses int
+}
+
+func evalStage2Pot(acc *assignWideAcc, base float64, scaleExp int, deltas, bonus []float64, stride, idx, numPasses int, passShift []int, extraShift int) (float64, int) {
+	acc.reset()
+	acc.addScaled(base, scaleExp+extraShift)
+	for p := range numPasses {
+		s := passShift[p] + extraShift
+		acc.addScaled(deltas[p*stride+idx], s)
+		if bonus != nil {
+			acc.addScaled(bonus[p*stride+idx], s)
+		}
+	}
+	return acc.eval()
+}
+
+func evalStage2Edge(acc *assignWideAcc, m, n, scaleExp, i, j int, normCost, unscaledCost []float64, st *stage2State, extraShift int) (float64, int) {
+	idx := i*n + j
+	oc := unscaledCost[idx]
+	if st.numDualPasses == 0 && extraShift == 0 {
+		if scaleExp == 0 {
+			s1, e1 := twoSumAssign(oc, -st.uBase[i])
+			s2, e2 := twoSumAssign(s1, -st.vBase[j])
+			if !math.IsInf(s1, 0) && !math.IsInf(s2, 0) {
+				d := s2 + (e1 + e2)
+				return d, assignSignOf(d)
+			}
+		} else {
+			nc := normCost[idx]
+			if math.Ldexp(nc, scaleExp) == oc {
+				s1, e1 := twoSumAssign(nc, -st.uBase[i])
+				s2, e2 := twoSumAssign(s1, -st.vBase[j])
+				if !math.IsInf(s1, 0) && !math.IsInf(s2, 0) {
+					dScaled := s2 + (e1 + e2)
+					return math.Ldexp(dScaled, scaleExp), assignSignOf(dScaled)
+				}
+			}
+		}
+	}
+	acc.reset()
+	acc.addScaled(oc, extraShift)
+	acc.addScaled(-st.uBase[i], scaleExp+extraShift)
+	acc.addScaled(-st.vBase[j], scaleExp+extraShift)
+	for p := range st.numDualPasses {
+		s := st.passShift[p] + extraShift
+		acc.addScaled(-st.uDeltas[p*m+i], s)
+		acc.addScaled(-st.vDeltas[p*n+j], s)
+		if st.vBonus != nil {
+			acc.addScaled(-st.vBonus[p*n+j], s)
+		}
+	}
+	return acc.eval()
+}
+
+func runStage2Refinement(
+	ctx context.Context,
+	m, n, scaleExp int,
+	normCost, unscaledCost, u, v []float64,
+	col4row, row4col []int,
+	ws *Workspace,
+	disableSIMD bool,
+	done <-chan struct{},
+) (stage2State, bool, error) {
+	tau := 4.0 * float64(m+1) * math.SmallestNonzeroFloat64
+	subCap := float64(m+2) * tau
+	st := stage2State{
+		uBase:   make([]float64, m),
+		vBase:   make([]float64, n),
+		uDeltas: make([]float64, maxStage2Passes*m),
+		vDeltas: make([]float64, maxStage2Passes*n),
+	}
+	if m < n {
+		st.vBonus = make([]float64, maxStage2Passes*n)
+	}
+	if scaleExp > 0 {
+		for i, ui := range u {
+			if math.Abs(ui) > subCap {
+				st.uBase[i] = ui
+			}
+		}
 		if m == n {
-			minU, maxU := u[0], u[0]
-			for _, ui := range u[1:] {
-				minU = min(minU, ui)
-				maxU = max(maxU, ui)
+			for j, vj := range v {
+				if math.Abs(vj) > subCap {
+					st.vBase[j] = vj
+				}
 			}
-			minV, maxV := v[0], v[0]
-			for _, vj := range v[1:] {
-				minV = min(minV, vj)
-				maxV = max(maxV, vj)
-			}
-			mLim := math.Ldexp(math.MaxFloat64, -scaleExp)
-			deltaLo := max(-mLim-minU, maxV-mLim)
-			deltaHi := min(mLim-maxU, minV+mLim)
-			if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
-				shift = 0.5 * (deltaLo + deltaHi)
+		} else {
+			for j, vj := range v {
+				if vj < -subCap {
+					st.vBase[j] = vj
+				}
 			}
 		}
-		anyClamped := false
+	} else {
+		copy(st.uBase, u)
+		copy(st.vBase, v)
+	}
+
+	uApprox := make([]float64, m)
+	uApproxAbs := make([]float64, m)
+	vApprox := make([]float64, n)
+	vApproxAbs := make([]float64, n)
+	resCost := make([]float64, m*n)
+	u2 := make([]float64, m)
+	v2 := make([]float64, n)
+	c4r2 := make([]int, m)
+	r4c2 := make([]int, n)
+	var colBonus []float64
+	if m < n {
+		colBonus = make([]float64, n)
+	}
+	capRC := math.MaxFloat64 / (64.0 * float64(m+2) * float64(m+2))
+
+	var (
+		acc                          assignWideAcc
+		stage2Accepted               bool
+		prevPassWasDualOnly          bool
+		prevPassHadPrimalImprovement bool
+		savedCutCap                  float64
+		prevCutCap                   float64
+	)
+
+	for pass := range maxStage2Passes {
 		for i := range m {
-			scaled := math.Ldexp(u[i]+shift, scaleExp)
-			if uSubOrig != nil {
-				scaled += uSubOrig[i]
-			}
-			clamped := clampFinite(scaled)
-			if clamped != scaled {
-				anyClamped = true
-			}
-			u[i] = clamped
+			uiVal, _ := evalStage2Pot(&acc, st.uBase[i], scaleExp, st.uDeltas, nil, m, i, st.numDualPasses, st.passShift[:], 0)
+			uApprox[i] = uiVal
+			uApproxAbs[i] = math.Abs(uiVal)
 		}
+		unassignedNegV := 0.0
+		assignedPosV := 0.0
+		anyUnassignedNegV := false
+		anyPosV := false
 		for j := range n {
-			if m < n && row4col[j] < 0 {
-				v[j] = 0
-				continue
+			vjVal, vjSgn := evalStage2Pot(&acc, st.vBase[j], scaleExp, st.vDeltas, st.vBonus, n, j, st.numDualPasses, st.passShift[:], 0)
+			vApprox[j] = vjVal
+			vApproxAbs[j] = math.Abs(vjVal)
+			if m < n {
+				if row4col[j] < 0 && vjSgn < 0 {
+					anyUnassignedNegV = true
+					unassignedNegV += -vjVal
+				}
+				if vjSgn > 0 {
+					anyPosV = true
+					if row4col[j] >= 0 {
+						assignedPosV += vjVal
+					}
+				}
 			}
-			scaled := math.Ldexp(v[j]-shift, scaleExp)
-			if vSubOrig != nil {
-				scaled += vSubOrig[j]
+		}
+
+		s1Pos := 0.0
+		maxNegD := 0.0
+		anyMatchedPos := false
+		anyNegD := false
+		for i := range m {
+			uiApprox := uApprox[i]
+			uiAbs := uApproxAbs[i]
+			uiFin := !math.IsInf(uiApprox, 0)
+			matchedJ := col4row[i]
+			rowOff := i * n
+			for j := range n {
+				idx := rowOff + j
+				oc := unscaledCost[idx]
+				if math.IsInf(oc, 1) {
+					resCost[idx] = math.Inf(1)
+					continue
+				}
+				if st.numDualPasses > 0 && j != matchedJ && uiFin && !math.IsInf(vApprox[j], 0) {
+					t1 := oc - uiApprox
+					est := t1 - vApprox[j]
+					margin := 16.0*0x1p-53*(math.Abs(oc)+uiAbs+vApproxAbs[j]) + 16.0*math.SmallestNonzeroFloat64
+					if !math.IsInf(t1, 0) && !math.IsInf(est, 0) && !math.IsNaN(est) && est > margin {
+						resCost[idx] = math.NaN()
+						continue
+					}
+				}
+				d, sgn := evalStage2Edge(&acc, m, n, scaleExp, i, j, normCost, unscaledCost, &st, 0)
+				resCost[idx] = d
+				if j == matchedJ && sgn > 0 {
+					anyMatchedPos = true
+					s1Pos += d
+				}
+				if sgn < 0 {
+					anyNegD = true
+					if -d > maxNegD {
+						maxNegD = -d
+					}
+				}
 			}
-			clamped := clampFinite(scaled)
-			if m < n && clamped > 0 {
-				clamped = 0
+		}
+
+		cutCap := s1Pos + float64(m)*maxNegD + unassignedNegV + assignedPosV
+		if prevPassWasDualOnly && (anyMatchedPos || anyNegD || anyUnassignedNegV || anyPosV) && !(cutCap < 0.5*savedCutCap) {
+			st.numDualPasses--
+			break
+		}
+		if !anyMatchedPos && !anyNegD && !anyUnassignedNegV && !anyPosV {
+			break
+		}
+		if pass >= 2 && !prevPassHadPrimalImprovement && !(cutCap < 0.5*prevCutCap) {
+			break
+		}
+		prevCutCap = cutCap
+
+		thresh := max(2.0*cutCap, 4.0*math.SmallestNonzeroFloat64)
+		maxCand := 0.0
+		for i := range m {
+			uiApprox := uApprox[i]
+			uiAbs := uApproxAbs[i]
+			uiFin := !math.IsInf(uiApprox, 0)
+			rowOff := i * n
+			for j := range n {
+				idx := rowOff + j
+				d := resCost[idx]
+				if math.IsInf(d, 1) {
+					continue
+				}
+				if math.IsNaN(d) {
+					oc := unscaledCost[idx]
+					if uiFin && !math.IsInf(vApprox[j], 0) {
+						t1 := oc - uiApprox
+						est := t1 - vApprox[j]
+						margin := 16.0*0x1p-53*(math.Abs(oc)+uiAbs+vApproxAbs[j]) + 16.0*math.SmallestNonzeroFloat64
+						if !math.IsInf(t1, 0) && !math.IsInf(est, 0) && !math.IsNaN(est) && est > thresh+margin {
+							resCost[idx] = math.Inf(1)
+							continue
+						}
+					}
+					d, _ = evalStage2Edge(&acc, m, n, scaleExp, i, j, normCost, unscaledCost, &st, 0)
+					resCost[idx] = d
+				}
+				if d > thresh {
+					resCost[idx] = math.Inf(1)
+					continue
+				}
+				ad := math.Abs(d)
+				if math.IsInf(ad, 1) {
+					ad = math.MaxFloat64
+				}
+				if ad > maxCand {
+					maxCand = ad
+				}
 			}
-			if clamped != scaled {
-				anyClamped = true
+		}
+
+		liftExp := 64
+		if maxCand > 0 {
+			_, maxE := math.Frexp(maxCand)
+			_, capE := math.Frexp(capRC)
+			liftExp = max(0, min(64, capE-maxE-1))
+		}
+		minNegRC := 0.0
+		for i := range m {
+			rowOff := i * n
+			for j := range n {
+				idx := rowOff + j
+				d := resCost[idx]
+				if math.IsInf(d, 1) {
+					continue
+				}
+				rc := d
+				if liftExp > 0 {
+					if a := math.Abs(d); a >= 0x1p-950 && !math.IsInf(a, 0) {
+						rc = math.Ldexp(d, liftExp)
+					} else {
+						rc, _ = evalStage2Edge(&acc, m, n, scaleExp, i, j, normCost, unscaledCost, &st, liftExp)
+					}
+				}
+				if rc > capRC {
+					rc = capRC
+				} else if rc < -capRC {
+					rc = -capRC
+				} else if math.IsNaN(rc) {
+					rc = 0
+				}
+				resCost[idx] = rc
+				if rc < minNegRC {
+					minNegRC = rc
+				}
 			}
-			v[j] = clamped
+		}
+
+		if m < n {
+			clear(colBonus)
+			stage1PosSum := 0.0
+			for i := range m {
+				if j := col4row[i]; uint(j) < uint(n) {
+					if rc := resCost[i*n+j]; rc > 0 && !math.IsInf(rc, 1) {
+						stage1PosSum += rc
+					}
+				}
+			}
+			swing := stage1PosSum - float64(m)*minNegRC + math.Ldexp(unassignedNegV+assignedPosV, liftExp)
+			if math.IsInf(swing, 0) || math.IsNaN(swing) {
+				swing = capRC
+			}
+			mustBonusCap := min(capRC, 4.0*swing+math.Ldexp(8.0*subCap, scaleExp+liftExp))
+			if !(mustBonusCap > 0) || math.IsNaN(mustBonusCap) {
+				mustBonusCap = math.SmallestNonzeroFloat64
+			}
+			for j := range n {
+				totVJ, totSgn := evalStage2Pot(&acc, st.vBase[j], scaleExp, st.vDeltas, st.vBonus, n, j, st.numDualPasses, st.passShift[:], liftExp)
+				if totSgn >= 0 {
+					continue
+				}
+				b := mustBonusCap
+				if !math.IsInf(totVJ, -1) && -totVJ < b {
+					b = -totVJ
+				}
+				colBonus[j] = b
+				for i := range m {
+					idx := i*n + j
+					if !math.IsInf(resCost[idx], 1) {
+						resCost[idx] -= b
+					}
+				}
+			}
+		}
+
+		if err2 := runNormalizedLSAP(ctx, m, n, resCost, u2, v2, c4r2, r4c2, ws, disableSIMD, false, done); err2 != nil {
+			if errors.Is(err2, context.Canceled) || errors.Is(err2, context.DeadlineExceeded) {
+				return st, stage2Accepted, err2
+			}
+			break
+		}
+		finiteDuals := true
+		for i := range m {
+			if math.IsNaN(u2[i]) || math.IsInf(u2[i], 0) {
+				finiteDuals = false
+				break
+			}
+		}
+		if finiteDuals {
+			for j := range n {
+				if math.IsNaN(v2[j]) || math.IsInf(v2[j], 0) {
+					finiteDuals = false
+					break
+				}
+			}
+		}
+		if !finiteDuals {
+			break
+		}
+
+		cmp := compareAssignmentObj(m, n, c4r2, col4row, unscaledCost)
+		recordDualPass := func() {
+			p := st.numDualPasses
+			copy(st.uDeltas[p*m:(p+1)*m], u2)
+			copy(st.vDeltas[p*n:(p+1)*n], v2)
+			if st.vBonus != nil {
+				copy(st.vBonus[p*n:(p+1)*n], colBonus)
+			}
+			st.passShift[p] = -liftExp
+			st.numDualPasses++
+		}
+		if cmp <= 0 {
+			stage2Accepted = true
+			copy(col4row, c4r2)
+			copy(row4col, r4c2)
+			recordDualPass()
+			prevPassHadPrimalImprovement = cmp < 0
+			prevPassWasDualOnly = false
+		} else {
+			if pass+1 < maxStage2Passes {
+				recordDualPass()
+				prevPassWasDualOnly = true
+				prevPassHadPrimalImprovement = false
+				savedCutCap = cutCap
+			} else {
+				break
+			}
+		}
+	}
+	return st, stage2Accepted, nil
+}
+
+func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, row4col []int, u, v []float64, st *stage2State, hasPotCancel bool) {
+	if scaleExp > 0 || st.numDualPasses > 0 {
+		anyClamped := false
+		if st.numDualPasses > 0 {
+			var acc assignWideAcc
+			shift := 0.0
+			shiftExp := scaleExp + 2
+			if m == n {
+				u0, _ := evalStage2Pot(&acc, st.uBase[0], scaleExp, st.uDeltas, nil, m, 0, st.numDualPasses, st.passShift[:], -shiftExp)
+				minU, maxU := u0, u0
+				for i := 1; i < m; i++ {
+					ui, _ := evalStage2Pot(&acc, st.uBase[i], scaleExp, st.uDeltas, nil, m, i, st.numDualPasses, st.passShift[:], -shiftExp)
+					minU = min(minU, ui)
+					maxU = max(maxU, ui)
+				}
+				v0, _ := evalStage2Pot(&acc, st.vBase[0], scaleExp, st.vDeltas, nil, n, 0, st.numDualPasses, st.passShift[:], -shiftExp)
+				minV, maxV := v0, v0
+				for j := 1; j < n; j++ {
+					vj, _ := evalStage2Pot(&acc, st.vBase[j], scaleExp, st.vDeltas, nil, n, j, st.numDualPasses, st.passShift[:], -shiftExp)
+					minV = min(minV, vj)
+					maxV = max(maxV, vj)
+				}
+				mLim := math.Ldexp(math.MaxFloat64, -shiftExp)
+				deltaLo := max(-mLim-minU, maxV-mLim)
+				deltaHi := min(mLim-maxU, minV+mLim)
+				if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
+					shift = 0.5 * (deltaLo + deltaHi)
+				}
+			}
+			for i := range m {
+				acc.reset()
+				acc.addScaled(st.uBase[i], scaleExp)
+				acc.addScaled(shift, shiftExp)
+				for p := range st.numDualPasses {
+					acc.addScaled(st.uDeltas[p*m+i], st.passShift[p])
+				}
+				scaled, _ := acc.eval()
+				clamped := clampFinite(scaled)
+				if clamped != scaled {
+					anyClamped = true
+				}
+				u[i] = clamped
+			}
+			for j := range n {
+				if m < n && row4col[j] < 0 {
+					v[j] = 0
+					continue
+				}
+				acc.reset()
+				acc.addScaled(st.vBase[j], scaleExp)
+				acc.addScaled(-shift, shiftExp)
+				for p := range st.numDualPasses {
+					acc.addScaled(st.vDeltas[p*n+j], st.passShift[p])
+					if st.vBonus != nil {
+						acc.addScaled(st.vBonus[p*n+j], st.passShift[p])
+					}
+				}
+				scaled, _ := acc.eval()
+				clamped := clampFinite(scaled)
+				if m < n && clamped > 0 {
+					clamped = 0
+				}
+				if clamped != scaled {
+					anyClamped = true
+				}
+				v[j] = clamped
+			}
+		} else {
+			shift := 0.0
+			if m == n {
+				minU, maxU := u[0], u[0]
+				for _, ui := range u[1:] {
+					minU = min(minU, ui)
+					maxU = max(maxU, ui)
+				}
+				minV, maxV := v[0], v[0]
+				for _, vj := range v[1:] {
+					minV = min(minV, vj)
+					maxV = max(maxV, vj)
+				}
+				mLim := math.Ldexp(math.MaxFloat64, -scaleExp)
+				deltaLo := max(-mLim-minU, maxV-mLim)
+				deltaHi := min(mLim-maxU, minV+mLim)
+				if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
+					shift = 0.5 * (deltaLo + deltaHi)
+				}
+			}
+			for i := range m {
+				scaled := math.Ldexp(u[i]+shift, scaleExp)
+				clamped := clampFinite(scaled)
+				if clamped != scaled {
+					anyClamped = true
+				}
+				u[i] = clamped
+			}
+			for j := range n {
+				if m < n && row4col[j] < 0 {
+					v[j] = 0
+					continue
+				}
+				scaled := math.Ldexp(v[j]-shift, scaleExp)
+				clamped := clampFinite(scaled)
+				if m < n && clamped > 0 {
+					clamped = 0
+				}
+				if clamped != scaled {
+					anyClamped = true
+				}
+				v[j] = clamped
+			}
 		}
 		if anyClamped {
 			if m == n {
@@ -1361,147 +1661,149 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 				}
 				u[i] = ui
 			}
-		} else if uSubOrig != nil {
+		} else if st.numDualPasses > 0 || hasPotCancel {
 			polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v)
 		}
+	} else if hasPotCancel {
+		polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v)
 	}
-
-	obj := totalMin
-	if sense == Maximize {
-		obj = -obj
-	}
-	if obj == 0 {
-		obj = 0
-	}
-	return obj, transposed, nil
 }
 
 func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int, u, v []float64) {
-	for i := range m {
-		j := col4row[i]
-		if uint(j) >= uint(n) {
-			return
-		}
-		cij := unscaledCost[i*n+j]
-		if math.IsInf(cij, 0) || math.IsNaN(cij) {
-			return
-		}
-		if lim := cij - v[j]; !math.IsNaN(lim) && !math.IsInf(lim, 0) {
-			s, e := twoSumAssign(u[i], v[j])
-			if math.Abs((cij-s)-e) > 4.0*0x1p-53*(math.Abs(cij)+math.Abs(u[i])+math.Abs(v[j])) {
-				u[i] = lim
-			}
-		}
-	}
-	needPolish := false
-	for i := range m {
-		ui := u[i]
-		rowSlice := unscaledCost[i*n : (i+1)*n]
-		for j, cij := range rowSlice {
-			if math.IsInf(cij, 1) {
-				continue
-			}
-			s, e := twoSumAssign(ui, v[j])
-			tol := max(1e-320, 16.0*0x1p-53*(math.Abs(cij)+math.Abs(ui)+math.Abs(v[j])))
-			if (s-cij)+e > tol {
-				needPolish = true
-				break
-			}
-		}
-		if needPolish {
-			break
-		}
-	}
-	if !needPolish {
-		return
-	}
-
-	pi := make([]float64, m+1)
+	var pi []float64
 	var rootToRow []float64
-	if m < n {
-		rootToRow = make([]float64, m)
+	for range 3 {
 		for i := range m {
-			best := math.Inf(1)
+			j := col4row[i]
+			if uint(j) >= uint(n) {
+				return
+			}
+			cij := unscaledCost[i*n+j]
+			if math.IsInf(cij, 0) || math.IsNaN(cij) {
+				return
+			}
+			if lim := cij - v[j]; !math.IsNaN(lim) && !math.IsInf(lim, 0) {
+				s, e := twoSumAssign(u[i], v[j])
+				if math.Abs((cij-s)-e) > 4.0*0x1p-53*(math.Abs(cij)+math.Abs(u[i])+math.Abs(v[j])) {
+					u[i] = lim
+				}
+			}
+		}
+		needPolish := false
+		for i := range m {
 			ui := u[i]
 			rowSlice := unscaledCost[i*n : (i+1)*n]
 			for j, cij := range rowSlice {
-				if row4col[j] >= 0 || math.IsInf(cij, 1) {
+				if math.IsInf(cij, 1) {
 					continue
 				}
-				s, e := twoSumAssign(cij, -ui)
-				if g := s + e; g < best {
-					best = g
+				s, e := twoSumAssign(ui, v[j])
+				tol := max(1e-320, 16.0*0x1p-53*(math.Abs(cij)+math.Abs(ui)+math.Abs(v[j])))
+				if (s-cij)+e > tol {
+					needPolish = true
+					break
 				}
 			}
-			rootToRow[i] = best
+			if needPolish {
+				break
+			}
 		}
-	}
+		if !needPolish {
+			return
+		}
 
-	for range m + 1 {
-		changed := false
+		if pi == nil {
+			pi = make([]float64, m+1)
+			if m < n {
+				rootToRow = make([]float64, m)
+			}
+		} else {
+			clear(pi)
+		}
 		if m < n {
-			pm := pi[m]
-			for i, g := range rootToRow {
-				if math.IsInf(g, 1) {
-					continue
+			for i := range m {
+				best := math.Inf(1)
+				ui := u[i]
+				rowSlice := unscaledCost[i*n : (i+1)*n]
+				for j, cij := range rowSlice {
+					if row4col[j] >= 0 || math.IsInf(cij, 1) {
+						continue
+					}
+					s, e := twoSumAssign(cij, -ui)
+					if g := s + e; g < best {
+						best = g
+					}
 				}
-				if cand := pm + g; !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
-					pi[i] = cand
-					changed = true
+				rootToRow[i] = best
+			}
+		}
+
+		for range m + 1 {
+			changed := false
+			if m < n {
+				pm := pi[m]
+				for i, g := range rootToRow {
+					if math.IsInf(g, 1) {
+						continue
+					}
+					if cand := pm + g; !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
+						pi[i] = cand
+						changed = true
+					}
+				}
+				for k := range m {
+					j := col4row[k]
+					if cand := pi[k] - v[j]; !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[m] {
+						pi[m] = cand
+						changed = true
+					}
 				}
 			}
 			for k := range m {
 				j := col4row[k]
-				if cand := pi[k] - v[j]; !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[m] {
-					pi[m] = cand
-					changed = true
+				pk := pi[k]
+				vj := v[j]
+				for i := range m {
+					if i == k {
+						continue
+					}
+					cij := unscaledCost[i*n+j]
+					if math.IsInf(cij, 1) {
+						continue
+					}
+					s1, e1 := twoSumAssign(cij, -u[i])
+					s2, e2 := twoSumAssign(s1, -vj)
+					cand := pk + (s2 + (e1 + e2))
+					if !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
+						pi[i] = cand
+						changed = true
+					}
 				}
 			}
-		}
-		for k := range m {
-			j := col4row[k]
-			pk := pi[k]
-			vj := v[j]
-			for i := range m {
-				if i == k {
-					continue
-				}
-				cij := unscaledCost[i*n+j]
-				if math.IsInf(cij, 1) {
-					continue
-				}
-				s1, e1 := twoSumAssign(cij, -u[i])
-				s2, e2 := twoSumAssign(s1, -vj)
-				cand := pk + (s2 + (e1 + e2))
-				if !math.IsNaN(cand) && !math.IsInf(cand, 0) && cand < pi[i] {
-					pi[i] = cand
-					changed = true
-				}
+			if !changed {
+				break
 			}
 		}
-		if !changed {
-			break
-		}
-	}
 
-	base := pi[0]
-	if m < n {
-		base = pi[m]
-	}
-	for i := range m {
-		delta := pi[i] - base
-		if math.IsNaN(delta) || math.IsInf(delta, 0) || delta == 0 {
-			continue
+		base := 0.0
+		if m < n {
+			base = pi[m]
 		}
-		j := col4row[i]
-		newU := clampFinite(u[i] + delta)
-		newV := clampFinite(v[j] - delta)
-		if m < n && newV > 0 {
-			newV = 0
-			newU = clampFinite(unscaledCost[i*n+j])
+		for i := range m {
+			delta := pi[i] - base
+			if math.IsNaN(delta) || math.IsInf(delta, 0) || delta == 0 {
+				continue
+			}
+			j := col4row[i]
+			newU := clampFinite(u[i] + delta)
+			newV := clampFinite(v[j] - delta)
+			if m < n && newV > 0 {
+				newV = 0
+				newU = clampFinite(unscaledCost[i*n+j])
+			}
+			u[i] = newU
+			v[j] = newV
 		}
-		u[i] = newU
-		v[j] = newV
 	}
 }
 

@@ -115,6 +115,8 @@ type Result struct {
 	// ColInd contains the column index matched to each RowInd[i] (length k = min(rows, cols)).
 	ColInd []int
 	// Objective is the total cost sum_i cost[RowInd[i]][ColInd[i]] evaluated on the input matrix.
+	// If the exact sum of finite matched costs overflows float64 (for example large ~1e308 entries),
+	// Objective is returned as +Inf or -Inf.
 	Objective float64
 	// U holds the row dual potentials for the normalized minimum-cost problem (length rows).
 	U []float64
