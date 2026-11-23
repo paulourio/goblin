@@ -328,8 +328,8 @@ def stepChunked (chunks : List (List UInt32)) (cSz progLen : Nat)
   else if s.pcIdx < progLen then
     match chunkWord chunks cSz s.pcIdx with
     | some w => execArm64Insn progLen ext (decodeArm64Word w) s
-    | none => { s with status := .returned }
-  else { s with status := .returned }
+    | none => { s with status := .trapIllegal }
+  else { s with status := .trapIllegal }
 
 def runChunked (fuel : Nat) (chunks : List (List UInt32)) (cSz progLen : Nat)
     (ext : Nat → Option String) (s : Arm64State) : Arm64State :=
@@ -432,11 +432,13 @@ private theorem status_writeFp_any (s : Arm64State) (r : BitVec 5) (v : BitVec 6
 private theorem pcIdx_writeFp_any (s : Arm64State) (r : BitVec 5) (v : BitVec 64) :
     (writeFp s r v).pcIdx = s.pcIdx := rfl
 
-/-- All linear (non-branch, non-ret, non-unknown) ARM64 instructions preserve `status` and increment `pcIdx`. -/
+/-- All supported linear (non-branch, non-ret, non-unknown) ARM64 instructions preserve `status` and increment `pcIdx`. -/
 private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option String)
     (insn : Arm64Insn) (s : Arm64State)
     (hLin : match insn with
       | .ret _ | .b _ | .bl _ | .bCond _ _ | .cbz _ _ _ _ | .tbz _ _ _ _ | .unknown _ => false
+      | .fpUnaryD op _ _ => isSupportedFpUnary op
+      | .fpBinaryD op _ _ _ => isSupportedFpBinary op
       | _ => true) :
     (execArm64Insn progLen ext insn s).status = s.status ∧
       (execArm64Insn progLen ext insn s).pcIdx = s.pcIdx + 1 := by
@@ -445,10 +447,14 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
     simp at hLin
   | nop => exact ⟨rfl, rfl⟩
   | adrp _ _ | movWide _ _ _ _ _ | bitfield _ _ _ _ _ _ _
-  | condSel _ _ _ _ _ _ | div _ _ _ _ _ | mul3 _ _ _ _ _ =>
+  | condSel _ _ _ _ _ _ | mul3 _ _ _ _ _ =>
     unfold execArm64Insn
     simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any]
     exact ⟨trivial, trivial⟩
+  | div is64 _ _ _ _ =>
+    cases is64
+    · unfold execArm64Insn; dsimp only; simp only [Bool.false_eq_true, ↓reduceIte, advancePc, status_writeGpr_any, pcIdx_writeGpr_any]; exact ⟨trivial, trivial⟩
+    · unfold execArm64Insn; dsimp only; simp only [↓reduceIte, advancePc, status_writeGpr_any, pcIdx_writeGpr_any]; exact ⟨trivial, trivial⟩
   | addSubImm _ _ _ _ _ _ =>
     unfold execArm64Insn
     dsimp only
@@ -500,10 +506,16 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
     all_goals simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any, status_writeFp_any, pcIdx_writeFp_any]
     all_goals exact ⟨trivial, trivial⟩
   | fcmpD _ _ _ => exact ⟨rfl, rfl⟩
-  | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ =>
-    unfold execArm64Insn
-    simp only [advancePc, status_writeFp_any, pcIdx_writeFp_any]
-    exact ⟨trivial, trivial⟩
+  | fpUnaryD op _ _ =>
+    dsimp only at hLin
+    unfold isSupportedFpUnary at hLin
+    split at hLin
+    all_goals first | exact ⟨rfl, rfl⟩ | exact absurd hLin (by decide)
+  | fpBinaryD op _ _ _ =>
+    dsimp only at hLin
+    unfold isSupportedFpBinary at hLin
+    split at hLin
+    all_goals first | exact ⟨rfl, rfl⟩ | exact absurd hLin (by decide)
   | fpIntConv _ _ _ _ _ =>
     unfold execArm64Insn
     dsimp only
@@ -517,30 +529,48 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
 def strHasPrefix (s p : String) : Bool :=
   s.toList.take p.length == p.toList
 
-/-- Symbols that perform Go heap allocation or GC write-barrier invocation (strictly forbidden in Tier 5B kernels). -/
-def forbiddenAllocSyms : List String := [
-  "runtime.mallocgc",
-  "runtime.makeslice",
-  "runtime.growslice",
-  "runtime.newobject",
-  "runtime.gcWriteBarrier",
-  "runtime.gcWriteBarrier1",
-  "runtime.gcWriteBarrier2",
-  "runtime.gcWriteBarrier3",
-  "runtime.gcWriteBarrier4",
-  "runtime.gcWriteBarrier5",
-  "runtime.gcWriteBarrier6",
-  "runtime.gcWriteBarrier7",
-  "runtime.gcWriteBarrier8"
+/-- Strict fail-closed allow-list of audited non-allocating external targets permitted by
+`checkZeroGC` in verified ARM64 kernels. Any symbol outside this list is rejected. -/
+def allowedZeroGCSyms : List String := [
+  "runtime.panicBounds",
+  "runtime.panicdivide",
+  "runtime.panicDivide",
+  "runtime.morestack_noctxt.abi0",
+  "runtime.morestack_noctxt",
+  "runtime.morestack",
+  "runtime.memclrNoHeapPointers",
+  "runtime.selectnbrecv",
+  "math.Float64bits",
+  "math.IsInf",
+  "math.Nextafter",
+  "internal/simd.InitReducedRow64",
+  "internal/simd.ScanNearTightMatrix64Scalar",
+  "internal/simd.ScanNearTightRow64Scalar",
+  "assign.twoSumAssign",
+  "assign.exactReducedCost",
+  "assign.refillQueueIndirectScalar",
+  "assign.relaxRowIndirectScalar",
+  "assign.scanCancelRowsFallback",
+  "assign.buildCancelEdgesFallback",
+  "assign.projectCancelViolFallback"
 ]
 
+/-- Return `true` iff `sym` is on the audited non-allocating allow-list. -/
+def isAllowedZeroGCSym (sym : String) : Bool :=
+  allowedZeroGCSyms.contains sym
+
+/-- Fail-closed ZeroGC predicate: every external symbol outside `allowedZeroGCSyms` is forbidden. -/
 def isForbiddenAllocSym (sym : String) : Bool :=
-  forbiddenAllocSyms.contains sym ||
-  strHasPrefix sym "runtime.gcWriteBarrier" ||
-  strHasPrefix sym "runtime.mallocgc" ||
-  strHasPrefix sym "runtime.makeslice" ||
-  strHasPrefix sym "runtime.growslice" ||
-  strHasPrefix sym "runtime.newobject"
+  !isAllowedZeroGCSym sym
+
+/-- Return `true` iff `insn` is a decoded, modeled instruction (`RET` must target `X30`, and
+scalar FP opcodes must be implemented in `execArm64Insn`). -/
+def insnDecodedValid : Arm64Insn → Bool
+  | .unknown _ => false
+  | .ret rn => rn == 30#5
+  | .fpUnaryD op _ _ => isSupportedFpUnary op
+  | .fpBinaryD op _ _ _ => isSupportedFpBinary op
+  | _ => true
 
 def isOutOfBoundsRel (progSize idx : Nat) (imm : Int) : Bool :=
   let t : Int := (idx : Int) + imm
@@ -551,10 +581,7 @@ def zeroGcInsnOk (progSize : Nat) (ext : Nat → Option String) (idx : Nat) (ins
     match ext idx with
     | some sym => !isForbiddenAllocSym sym
     | none => true
-  let noUnknown :=
-    match insn with
-    | .unknown _ => false
-    | _ => true
+  let noUnknown := insnDecodedValid insn
   let extJumpResolved :=
     match insn with
     | .b imm26 | .bl imm26 => if isOutOfBoundsRel progSize idx imm26 then (ext idx).isSome else true
@@ -568,7 +595,7 @@ def checkZeroGC (prog : Array Arm64Insn) (ext : Nat → Option String) : Except 
   if everyWithIdx 0 prog.toList (zeroGcInsnOk prog.size ext) then
     .ok ()
   else
-    .error "ZeroGC violation: forbidden allocation/GC barrier target, unknown opcode, or unresolved external branch"
+    .error "ZeroGC violation: non-allowlisted external target, illegal/unknown opcode, or unresolved external branch"
 
 private theorem jumpRel_status_callExternal (progLen : Nat) (ext : Nat → Option String)
     (isCall : Bool) (s : Arm64State) (imm : Int) (tgt : String)
@@ -629,11 +656,11 @@ theorem checkZeroGC_sound (prog : Array Arm64Insn) (ext : Nat → Option String)
       cases hInsn : prog[s.pcIdx] with
       | unknown w =>
         rw [hInsn] at hNoUnk
-        simp at hNoUnk
+        simp [insnDecodedValid] at hNoUnk
       | ret rn =>
         rw [hInsn] at hCall
         dsimp only [execArm64Insn] at hCall
-        cases hCall
+        split at hCall <;> cases hCall
       | b imm26 =>
         rw [hInsn] at hCall hRes
         exact jumpRel_status_callExternal prog.size ext false s imm26 tgt
@@ -674,8 +701,12 @@ theorem checkZeroGC_sound (prog : Array Arm64Insn) (ext : Nat → Option String)
       | addSubExt _ _ _ _ _ _ _ _ | logicalImm _ _ _ _ _ | logicalReg _ _ _ _ _ _ _ _ | bitfield _ _ _ _ _ _ _
       | condSel _ _ _ _ _ _ | div _ _ _ _ _ | mul3 _ _ _ _ _ | ldrStrPair _ _ _ _ _ _ _
       | ldrStrUImm _ _ _ _ _ _ | ldrStrImm _ _ _ _ _ _ _ | ldrStrReg _ _ _ _ _ _ _ _ _
-      | fcmpD _ _ _ | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ | fpIntConv _ _ _ _ _ =>
-        have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by rw [hInsn])
+      | fcmpD _ _ _ | fpIntConv _ _ _ _ _ =>
+        have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by simp [hInsn])
+        rw [hLin.1, hRun] at hCall
+        cases hCall
+      | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ =>
+        have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by simpa [insnDecodedValid, hInsn] using hNoUnk)
         rw [hLin.1, hRun] at hCall
         cases hCall
     · simp [hLt] at hCall
@@ -752,11 +783,62 @@ def insnSuccessors (progSize : Nat) (ext : Nat → Option String) (idx : Nat) : 
     br ++ fall
   | _ => if idx + 1 < progSize then [idx + 1] else []
 
-def bodyInsnStackSafe (progSize guardIdx safeLimit : Nat) (ext : Nat → Option String)
+/-- Return `true` iff `insn` modifies `SP` (`r == 31#5`). -/
+def modifiesSP : Arm64Insn → Bool
+  | .addSubImm _ _ false rd _ _ => rd == 31#5
+  | .addSubExt _ _ false _ _ rd _ _ => rd == 31#5
+  | .logicalImm _ opc rd _ _ => opc != 3 && rd == 31#5
+  | .ldrStrPair _ _ .pre _ _ _ rn => rn == 31#5
+  | .ldrStrPair _ _ .post _ _ _ rn => rn == 31#5
+  | .ldrStrImm _ _ _ .pre _ _ rn => rn == 31#5
+  | .ldrStrImm _ _ _ .post _ _ rn => rn == 31#5
+  | _ => false
+
+/-- End index of the verified Go 1.27 frame-allocation prologue (`guardIdx + 1` for standard
+pre-indexed LR spill, `guardIdx + 3` for >256-byte `SUB X20, SP; STP; MOV SP, X20`, else `guardIdx`). -/
+def prologueEndIdx (getInsn : Nat → Option Arm64Insn) (guardIdx : Nat) : Nat :=
+  match getInsn (guardIdx + 3) with
+  | some (.addSubImm true false false 31#5 20#5 0#64) => guardIdx + 3
+  | _ =>
+    match getInsn (guardIdx + 1) with
+    | some (.ldrStrImm false false 8 .pre _ 30#5 31#5) => guardIdx + 1
+    | _ => guardIdx
+
+private theorem prologueEndIdx_ge (getInsn : Nat → Option Arm64Insn) (guardIdx : Nat) :
+    guardIdx ≤ prologueEndIdx getInsn guardIdx := by
+  unfold prologueEndIdx
+  split
+  · omega
+  · split <;> omega
+
+/-- Check whether an SP-modifying instruction at `idx` is a verified Go 1.27 prologue frame
+allocation or epilogue frame deallocation immediately preceding `RET X30`, bounded by `maxFrameBytes`. -/
+def isAllowedPrologueOrEpilogueSP (getInsn : Nat → Option Arm64Insn)
+    (guardIdx maxFrameBytes idx : Nat) (insn : Arm64Insn) : Bool :=
+  match insn with
+  | .ldrStrImm false false 8 .pre imm9 30#5 31#5 =>
+    idx == guardIdx + 1 && imm9 < 0 && (-imm9).toNat <= maxFrameBytes
+  | .addSubImm true false false 31#5 20#5 0#64 =>
+    idx == guardIdx + 3 &&
+    (match getInsn (guardIdx + 1), getInsn (guardIdx + 2) with
+     | some (.addSubImm true true false 20#5 31#5 frameImm),
+       some (.ldrStrPair false false .offset _ 29#5 30#5 20#5) =>
+       0 < frameImm.toNat && frameImm.toNat <= maxFrameBytes
+     | _, _ => false)
+  | .ldrStrImm true false 8 .post imm9 30#5 31#5 =>
+    0 < imm9 && imm9.toNat <= maxFrameBytes &&
+    getInsn (idx + 1) == some (.ret 30#5)
+  | .addSubImm true false false 31#5 31#5 imm =>
+    0 < imm.toNat && imm.toNat <= maxFrameBytes &&
+    getInsn (idx + 1) == some (.ret 30#5)
+  | _ => false
+
+def bodyInsnStackSafe (progSize guardIdx safeLimit maxFrameBytes : Nat)
+    (getInsn : Nat → Option Arm64Insn) (ext : Nat → Option String)
     (idx : Nat) (insn : Arm64Insn) : Bool :=
   if idx <= guardIdx || safeLimit <= idx then true
   else
-    let noUnk := match insn with | .unknown _ => false | _ => true
+    let noUnk := insnDecodedValid insn
     let noMore := match ext idx with | some sym => !isMorestackSym sym | none => true
     let noOutMore :=
       match insn with
@@ -773,8 +855,10 @@ def bodyInsnStackSafe (progSize guardIdx safeLimit : Nat) (ext : Nat → Option 
           match ext idx with | some sym => !isMorestackSym sym | none => true
         else true
       | _ => true
+    let proEnd := prologueEndIdx getInsn guardIdx
+    let minSucc := if idx > proEnd then proEnd else guardIdx
     let succsSafe :=
-      (insnSuccessors progSize ext idx insn).all (fun j => guardIdx < j && j < safeLimit)
+      (insnSuccessors progSize ext idx insn).all (fun j => minSucc < j && j < safeLimit)
     let fallSafe :=
       if idx + 1 == safeLimit then
         match insn with
@@ -785,7 +869,9 @@ def bodyInsnStackSafe (progSize guardIdx safeLimit : Nat) (ext : Nat → Option 
           | none => false
         | _ => false
       else true
-    noUnk && noMore && noOutMore && succsSafe && fallSafe
+    let spSafe :=
+      !modifiesSP insn || isAllowedPrologueOrEpilogueSP getInsn guardIdx maxFrameBytes idx insn
+    noUnk && noMore && noOutMore && succsSafe && fallSafe && spSafe
 
 private def trapStubReachesMorestack (getInsn : Nat → Option Arm64Insn)
     (ext : Nat → Option String) (progSize trapStart : Nat) : Bool :=
@@ -837,8 +923,8 @@ def checkStackGuardWith (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
           let safeLim := computeSafeLimit getInsn ext ((2 : Int) + imm19).toNat
           if safeLim <= 3 then
             .error "empty guarded function body"
-          else if !everyWithIdx 0 insns (bodyInsnStackSafe progSize 2 safeLim ext) then
-            .error "body instruction escapes stack-guarded region or calls morestack"
+          else if !everyWithIdx 0 insns (bodyInsnStackSafe progSize 2 safeLim 128 getInsn ext) then
+            .error "body instruction escapes stack-guarded region, violates SP discipline, or calls morestack"
           else
             .ok (.smallFrame ((2 : Int) + imm19).toNat safeLim)
     | _ => .error "expected B.ls after CMP R16, RSP at [2]"
@@ -864,8 +950,8 @@ def checkStackGuardWith (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
               let safeLim := computeSafeLimit getInsn ext trapStart
               if safeLim <= 4 then
                 .error "empty guarded large-frame function body"
-              else if !everyWithIdx 0 insns (bodyInsnStackSafe progSize 3 safeLim ext) then
-                .error "large-frame body escapes stack-guarded region or calls morestack"
+              else if !everyWithIdx 0 insns (bodyInsnStackSafe progSize 3 safeLim (subImm.toNat + 128) getInsn ext) then
+                .error "large-frame body escapes stack-guarded region, violates SP discipline, or calls morestack"
               else
                 .ok (.largeFrame subImm.toNat trapStart safeLim)
         | _ => .error "expected B.ls after CMP R16, R17 at [3]"
@@ -885,7 +971,7 @@ private theorem step_addSubReg_cmp64 (prog : Array Arm64Insn) (ext : Nat → Opt
   rw [stepArm64_insn prog ext s k n (.addSubReg true true true .lsl 0 31#5 rn rm) hRun hPc hSize hFetch]
   have hSh : (readGpr s rm) <<< (0 % 64) = readGpr s rm := by simp
   dsimp only [execArm64Insn]
-  simp only [mask32IfNeeded, shiftVal, ↓reduceIte, hSh]
+  simp only [mask32IfNeeded, shiftVal, subFlags, ↓reduceIte, hSh]
 
 private theorem jumpRel_body_safe (progLen guardIdx safeLimit : Nat) (ext : Nat → Option String)
     (isCall : Bool) (s : Arm64State) (imm : Int)
@@ -928,15 +1014,15 @@ private theorem jumpRel_body_safe (progLen guardIdx safeLimit : Nat) (ext : Nat 
         · exact ⟨(fun h => by cases h), fun h => by cases h⟩
 
 private theorem bodyInsnStackSafe_step (prog : Array Arm64Insn) (ext : Nat → Option String)
-    (guardIdx safeLimit : Nat)
+    (guardIdx safeLimit maxFrameBytes : Nat) (getInsn : Nat → Option Arm64Insn)
     (hSafeLim : safeLimit ≤ prog.size)
-    (hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size guardIdx safeLimit ext) = true)
+    (hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size guardIdx safeLimit maxFrameBytes getInsn ext) = true)
     (s : Arm64State) (hRun : s.status = .running)
     (hLo : guardIdx < s.pcIdx) (hHi : s.pcIdx < safeLimit) :
     let s' := stepArm64 prog ext s
     s'.status ≠ .trapMorestack ∧
       (s'.status = .running → guardIdx < s'.pcIdx ∧ s'.pcIdx < safeLimit) := by
-  have hAt := everyWithIdx_getElem?_zero prog.toList (bodyInsnStackSafe prog.size guardIdx safeLimit ext) hAll
+  have hAt := everyWithIdx_getElem?_zero prog.toList (bodyInsnStackSafe prog.size guardIdx safeLimit maxFrameBytes getInsn ext) hAll
   have hLtProg : s.pcIdx < prog.size := Nat.lt_of_lt_of_le hHi hSafeLim
   have hGet : prog.toList[s.pcIdx]? = some prog[s.pcIdx] :=
     Array.getElem?_toList.trans (Array.getElem?_eq_getElem hLtProg)
@@ -945,7 +1031,16 @@ private theorem bodyInsnStackSafe_step (prog : Array Arm64Insn) (ext : Nat → O
     simp [Nat.not_le.mpr hLo, Nat.not_le.mpr hHi]
   unfold bodyInsnStackSafe at hB
   simp only [hNotSkip, Bool.false_eq_true, ↓reduceIte, Bool.and_eq_true] at hB
-  rcases hB with ⟨⟨⟨⟨hNoUnk, _⟩, hNoOutMore⟩, hSucc⟩, hFall⟩
+  rcases hB with ⟨⟨⟨⟨⟨hNoUnk, _⟩, hNoOutMore⟩, hSucc⟩, hFall⟩, _⟩
+  have hMinGe : guardIdx ≤ (if s.pcIdx > prologueEndIdx getInsn guardIdx then prologueEndIdx getInsn guardIdx else guardIdx) := by
+    have hGe := prologueEndIdx_ge getInsn guardIdx
+    split <;> omega
+  have hSuccRelax : ∀ j, j ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] →
+      guardIdx < j ∧ j < safeLimit := by
+    intro j hj
+    have hP := List.all_eq_true.mp hSucc j hj
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    exact ⟨Nat.lt_of_le_of_lt hMinGe hP.1, hP.2⟩
   have hAdvSafe : s.pcIdx + 1 ≠ safeLimit → guardIdx < s.pcIdx + 1 ∧ s.pcIdx + 1 < safeLimit := by
     intro hNe; omega
   unfold stepArm64
@@ -954,58 +1049,55 @@ private theorem bodyInsnStackSafe_step (prog : Array Arm64Insn) (ext : Nat → O
   cases hInsn : prog[s.pcIdx] with
   | unknown w =>
     rw [hInsn] at hNoUnk
-    simp at hNoUnk
+    simp [insnDecodedValid] at hNoUnk
   | ret rn =>
     dsimp only [execArm64Insn]
-    exact ⟨(fun h => by cases h), fun h => by cases h⟩
+    split <;> exact ⟨(fun h => by cases h), fun h => by cases h⟩
   | b imm26 =>
-    rw [hInsn] at hNoOutMore hSucc
+    rw [hInsn] at hNoOutMore
     dsimp only [execArm64Insn]
     apply jumpRel_body_safe prog.size guardIdx safeLimit ext false s imm26 hRun
       (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
     intro hPos hLt
-    have hMem : ((s.pcIdx : Int) + imm26).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.b imm26) := by
-      simp [insnSuccessors, hPos, hLt]
-    have hP := List.all_eq_true.mp hSucc _ hMem
-    simpa [Bool.and_eq_true] using hP
+    have hMem : ((s.pcIdx : Int) + imm26).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+      rw [hInsn]; simp [insnSuccessors, hPos, hLt]
+    exact hSuccRelax _ hMem
   | bl imm26 =>
-    rw [hInsn] at hNoOutMore hSucc
+    rw [hInsn] at hNoOutMore
     dsimp only [execArm64Insn]
     apply jumpRel_body_safe prog.size guardIdx safeLimit ext true s imm26 hRun
       (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
     intro hPos hLt
-    have hMem : ((s.pcIdx : Int) + imm26).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.bl imm26) := by
+    have hMem : ((s.pcIdx : Int) + imm26).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+      rw [hInsn]
       unfold insnSuccessors
       simp only [hPos, hLt, decide_true, Bool.and_self, ↓reduceIte]
       split <;> try split <;> simp
-    have hP := List.all_eq_true.mp hSucc _ hMem
-    simpa [Bool.and_eq_true] using hP
+    exact hSuccRelax _ hMem
   | bCond cond imm19 =>
-    rw [hInsn] at hNoOutMore hSucc hFall
+    rw [hInsn] at hNoOutMore hFall
     dsimp only [execArm64Insn]
     split
     · apply jumpRel_body_safe prog.size guardIdx safeLimit ext false s imm19 hRun
         (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
       intro hPos hLt
-      have hMem : ((s.pcIdx : Int) + imm19).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.bCond cond imm19) := by
-        simp [insnSuccessors, hPos, hLt]
-      have hP := List.all_eq_true.mp hSucc _ hMem
-      simpa [Bool.and_eq_true] using hP
+      have hMem : ((s.pcIdx : Int) + imm19).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+        rw [hInsn]; simp [insnSuccessors, hPos, hLt]
+      exact hSuccRelax _ hMem
     · simp only [advancePc, hRun]
       have hNe : s.pcIdx + 1 ≠ safeLimit := by
         intro hEq; rw [hEq] at hFall; simp at hFall
       exact ⟨(fun h => by cases h), fun _ => hAdvSafe hNe⟩
   | cbz is64 isNz rt imm19 =>
-    rw [hInsn] at hNoOutMore hSucc hFall
+    rw [hInsn] at hNoOutMore hFall
     dsimp only [execArm64Insn]
     cases isNz <;> simp only [↓reduceIte, Bool.false_eq_true] <;> split
     · apply jumpRel_body_safe prog.size guardIdx safeLimit ext false s imm19 hRun
         (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
       intro hPos hLt
-      have hMem : ((s.pcIdx : Int) + imm19).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.cbz is64 true rt imm19) := by
-        simp [insnSuccessors, hPos, hLt]
-      have hP := List.all_eq_true.mp hSucc _ hMem
-      simpa [Bool.and_eq_true] using hP
+      have hMem : ((s.pcIdx : Int) + imm19).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+        rw [hInsn]; simp [insnSuccessors, hPos, hLt]
+      exact hSuccRelax _ hMem
     · simp only [advancePc, hRun]
       have hNe : s.pcIdx + 1 ≠ safeLimit := by
         intro hEq; rw [hEq] at hFall; simp at hFall
@@ -1013,25 +1105,23 @@ private theorem bodyInsnStackSafe_step (prog : Array Arm64Insn) (ext : Nat → O
     · apply jumpRel_body_safe prog.size guardIdx safeLimit ext false s imm19 hRun
         (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
       intro hPos hLt
-      have hMem : ((s.pcIdx : Int) + imm19).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.cbz is64 false rt imm19) := by
-        simp [insnSuccessors, hPos, hLt]
-      have hP := List.all_eq_true.mp hSucc _ hMem
-      simpa [Bool.and_eq_true] using hP
+      have hMem : ((s.pcIdx : Int) + imm19).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+        rw [hInsn]; simp [insnSuccessors, hPos, hLt]
+      exact hSuccRelax _ hMem
     · simp only [advancePc, hRun]
       have hNe : s.pcIdx + 1 ≠ safeLimit := by
         intro hEq; rw [hEq] at hFall; simp at hFall
       exact ⟨(fun h => by cases h), fun _ => hAdvSafe hNe⟩
   | tbz isNz bit rt imm14 =>
-    rw [hInsn] at hNoOutMore hSucc hFall
+    rw [hInsn] at hNoOutMore hFall
     dsimp only [execArm64Insn]
     cases isNz <;> simp only [↓reduceIte, Bool.false_eq_true] <;> split
     · apply jumpRel_body_safe prog.size guardIdx safeLimit ext false s imm14 hRun
         (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
       intro hPos hLt
-      have hMem : ((s.pcIdx : Int) + imm14).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.tbz true bit rt imm14) := by
-        simp [insnSuccessors, hPos, hLt]
-      have hP := List.all_eq_true.mp hSucc _ hMem
-      simpa [Bool.and_eq_true] using hP
+      have hMem : ((s.pcIdx : Int) + imm14).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+        rw [hInsn]; simp [insnSuccessors, hPos, hLt]
+      exact hSuccRelax _ hMem
     · simp only [advancePc, hRun]
       have hNe : s.pcIdx + 1 ≠ safeLimit := by
         intro hEq; rw [hEq] at hFall; simp at hFall
@@ -1039,10 +1129,9 @@ private theorem bodyInsnStackSafe_step (prog : Array Arm64Insn) (ext : Nat → O
     · apply jumpRel_body_safe prog.size guardIdx safeLimit ext false s imm14 hRun
         (fun h => by simp only [h, ↓reduceIte] at hNoOutMore; exact hNoOutMore)
       intro hPos hLt
-      have hMem : ((s.pcIdx : Int) + imm14).toNat ∈ insnSuccessors prog.size ext s.pcIdx (.tbz false bit rt imm14) := by
-        simp [insnSuccessors, hPos, hLt]
-      have hP := List.all_eq_true.mp hSucc _ hMem
-      simpa [Bool.and_eq_true] using hP
+      have hMem : ((s.pcIdx : Int) + imm14).toNat ∈ insnSuccessors prog.size ext s.pcIdx prog[s.pcIdx] := by
+        rw [hInsn]; simp [insnSuccessors, hPos, hLt]
+      exact hSuccRelax _ hMem
     · simp only [advancePc, hRun]
       have hNe : s.pcIdx + 1 ≠ safeLimit := by
         intro hEq; rw [hEq] at hFall; simp at hFall
@@ -1051,19 +1140,27 @@ private theorem bodyInsnStackSafe_step (prog : Array Arm64Insn) (ext : Nat → O
   | addSubExt _ _ _ _ _ _ _ _ | logicalImm _ _ _ _ _ | logicalReg _ _ _ _ _ _ _ _ | bitfield _ _ _ _ _ _ _
   | condSel _ _ _ _ _ _ | div _ _ _ _ _ | mul3 _ _ _ _ _ | ldrStrPair _ _ _ _ _ _ _
   | ldrStrUImm _ _ _ _ _ _ | ldrStrImm _ _ _ _ _ _ _ | ldrStrReg _ _ _ _ _ _ _ _ _
-  | fcmpD _ _ _ | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ | fpIntConv _ _ _ _ _ =>
+  | fcmpD _ _ _ | fpIntConv _ _ _ _ _ =>
     rw [hInsn] at hFall
     have hNe : s.pcIdx + 1 ≠ safeLimit := by
       intro hEq; rw [hEq] at hFall; simp at hFall
-    have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by rw [hInsn])
+    have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by simp [hInsn])
+    rw [hInsn] at hLin
+    rw [hLin.1, hLin.2, hRun]
+    exact ⟨(fun h => by cases h), fun _ => hAdvSafe hNe⟩
+  | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ =>
+    rw [hInsn] at hFall
+    have hNe : s.pcIdx + 1 ≠ safeLimit := by
+      intro hEq; rw [hEq] at hFall; simp at hFall
+    have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by simpa [insnDecodedValid, hInsn] using hNoUnk)
     rw [hInsn] at hLin
     rw [hLin.1, hLin.2, hRun]
     exact ⟨(fun h => by cases h), fun _ => hAdvSafe hNe⟩
 
 private theorem bodyInsnStackSafe_run (prog : Array Arm64Insn) (ext : Nat → Option String)
-    (guardIdx safeLimit : Nat)
+    (guardIdx safeLimit maxFrameBytes : Nat) (getInsn : Nat → Option Arm64Insn)
     (hSafeLim : safeLimit ≤ prog.size)
-    (hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size guardIdx safeLimit ext) = true) :
+    (hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size guardIdx safeLimit maxFrameBytes getInsn ext) = true) :
     ∀ (fuel : Nat) (s : Arm64State),
       s.status = .running → guardIdx < s.pcIdx → s.pcIdx < safeLimit →
       (runArm64 fuel prog ext s).status ≠ .trapMorestack := by
@@ -1075,7 +1172,7 @@ private theorem bodyInsnStackSafe_run (prog : Array Arm64Insn) (ext : Nat → Op
   | succ k ih =>
     intro s hRun hLo hHi
     rw [runArm64_succ_running k prog ext s hRun]
-    have hStep := bodyInsnStackSafe_step prog ext guardIdx safeLimit hSafeLim hAll s hRun hLo hHi
+    have hStep := bodyInsnStackSafe_step prog ext guardIdx safeLimit maxFrameBytes getInsn hSafeLim hAll s hRun hLo hHi
     let s1 := stepArm64 prog ext s
     by_cases hRun1 : s1.status = .running
     · have hBounds := hStep.2 hRun1
@@ -1099,7 +1196,9 @@ private theorem computeSafeLimit_le (getInsn : Nat → Option Arm64Insn) (ext : 
     · omega
   · omega
 
-/-- Full all-fuel stack-headroom safety theorem for `checkStackGuardWith`. -/
+/-- Full all-fuel stack-guard soundness theorem for `checkStackGuardWith`:
+verifies Go stack-guard prologue, bounded single-entry prologue/epilogue SP discipline,
+and proves `runtime.morestack` is unreachable for all fuels when entry headroom holds. -/
 theorem checkStackGuardWith_sound (prog : Array Arm64Insn) (getInsn : Nat → Option Arm64Insn)
     (ext : Nat → Option String) (kind : StackPrologueKind)
     (hGet : ∀ i, getInsn i = prog[i]?)
@@ -1137,10 +1236,10 @@ theorem checkStackGuardWith_sound (prog : Array Arm64Insn) (getInsn : Nat → Op
                 by_cases hSafeGt : computeSafeLimit (fun i => prog[i]?) ext ((2 : Int) + imm19).toNat ≤ 3
                 · simp only [hSafeGt, ↓reduceIte] at hOk; cases hOk
                 · simp only [hSafeGt, ↓reduceIte] at hOk
-                  by_cases hAllNeg : (!everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 2 (computeSafeLimit (fun i => prog[i]?) ext ((2 : Int) + imm19).toNat) ext)) = true
+                  by_cases hAllNeg : (!everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 2 (computeSafeLimit (fun i => prog[i]?) ext ((2 : Int) + imm19).toNat) 128 (fun i => prog[i]?) ext)) = true
                   · simp only [hAllNeg, ↓reduceIte] at hOk; cases hOk
                   · simp only [hAllNeg, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq] at hOk
-                    have hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 2 (computeSafeLimit (fun i => prog[i]?) ext ((2 : Int) + imm19).toNat) ext) = true := by
+                    have hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 2 (computeSafeLimit (fun i => prog[i]?) ext ((2 : Int) + imm19).toNat) 128 (fun i => prog[i]?) ext) = true := by
                       simpa [Bool.not_eq_true'] using hAllNeg
                     have hSafeLimLt : computeSafeLimit (fun i => prog[i]?) ext ((2 : Int) + imm19).toNat < prog.size := by
                       have hT : ((2 : Int) + imm19).toNat < prog.size := by
@@ -1166,7 +1265,7 @@ theorem checkStackGuardWith_sound (prog : Array Arm64Insn) (getInsn : Nat → Op
                     have hStep1 : stepArm64 prog ext s1 = s2 := by
                       have hs := step_addSubExt_cmp64 prog ext s1 1 prog.size 31#5 16#5 hRun1 hPc1 rfl hFetch1
                       have hSp1 : readGprSP s1 31#5 = s.sp := rfl
-                      have hCmp : (readGpr s1 16#5) <<< (0 % 5) = s.gStackGuard0 := by rw [hR16]; bv_decide
+                      have hCmp : (readGpr s1 16#5) <<< (0 % 5) = s.gStackGuard0 := by rw [hR16]; simp
                       rw [hs, hSp1, hCmp]
                     have hRun2 : s2.status = .running := by simp [s2, status_advancePc, status_writeGpr, hRun1]
                     have hPc2 : s2.pcIdx = 2 := by simp [s2, pcIdx_advancePc, pcIdx_writeGpr, hPc1]
@@ -1192,7 +1291,7 @@ theorem checkStackGuardWith_sound (prog : Array Arm64Insn) (getInsn : Nat → Op
                         | zero => simp [runArm64, hRun2]
                         | succ f3 =>
                           rw [runArm64_succ_running f3 prog ext s2 hRun2, hStep2]
-                          exact bodyInsnStackSafe_run prog ext 2 _ (Nat.le_of_lt hSafeLimLt) hAll f3 s3 hRun3 (by omega) (by rw [hPc3]; omega)
+                          exact bodyInsnStackSafe_run prog ext 2 _ 128 (fun i => prog[i]?) (Nat.le_of_lt hSafeLimLt) hAll f3 s3 hRun3 (by omega) (by rw [hPc3]; omega)
           all_goals (dsimp only at hOk; cases hOk)
         | _ => dsimp only at hOk; cases hOk
     · simp only [h1, Bool.false_eq_true, ↓reduceIte] at hOk
@@ -1234,10 +1333,10 @@ theorem checkStackGuardWith_sound (prog : Array Arm64Insn) (getInsn : Nat → Op
                           by_cases hSafeGt : computeSafeLimit (fun i => prog[i]?) ext ((3 : Int) + imm19).toNat ≤ 4
                           · simp only [hSafeGt, ↓reduceIte] at hOk; cases hOk
                           · simp only [hSafeGt, ↓reduceIte] at hOk
-                            by_cases hAllNeg : (!everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 3 (computeSafeLimit (fun i => prog[i]?) ext ((3 : Int) + imm19).toNat) ext)) = true
+                            by_cases hAllNeg : (!everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 3 (computeSafeLimit (fun i => prog[i]?) ext ((3 : Int) + imm19).toNat) (subImm.toNat + 128) (fun i => prog[i]?) ext)) = true
                             · simp only [hAllNeg, ↓reduceIte] at hOk; cases hOk
                             · simp only [hAllNeg, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq] at hOk
-                              have hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 3 (computeSafeLimit (fun i => prog[i]?) ext ((3 : Int) + imm19).toNat) ext) = true := by
+                              have hAll : everyWithIdx 0 prog.toList (bodyInsnStackSafe prog.size 3 (computeSafeLimit (fun i => prog[i]?) ext ((3 : Int) + imm19).toNat) (subImm.toNat + 128) (fun i => prog[i]?) ext) = true := by
                                 simpa [Bool.not_eq_true'] using hAllNeg
                               have hSafeLimLt : computeSafeLimit (fun i => prog[i]?) ext ((3 : Int) + imm19).toNat < prog.size := by
                                 have hT : ((3 : Int) + imm19).toNat < prog.size := by
@@ -1306,7 +1405,7 @@ theorem checkStackGuardWith_sound (prog : Array Arm64Insn) (getInsn : Nat → Op
                                     | zero => simp [runArm64, hRun3]
                                     | succ f4 =>
                                       rw [runArm64_succ_running f4 prog ext s3 hRun3, hStep3]
-                                      exact bodyInsnStackSafe_run prog ext 3 _ (Nat.le_of_lt hSafeLimLt) hAll f4 s4 hRun4 (by omega) (by rw [hPc4]; omega)
+                                      exact bodyInsnStackSafe_run prog ext 3 _ (subImm.toNat + 128) (fun i => prog[i]?) (Nat.le_of_lt hSafeLimLt) hAll f4 s4 hRun4 (by omega) (by rw [hPc4]; omega)
                   all_goals (dsimp only at hOk; cases hOk)
                 | _ => dsimp only at hOk; cases hOk
             · simp only [h2, Bool.not_false, ↓reduceIte] at hOk; cases hOk
@@ -1330,10 +1429,16 @@ def isBoundsCond : Arm64Cond → Bool
   | .cs | .cc | .hi | .ls => true
   | _ => false
 
+/-- Non-degenerate subtraction flag-setting comparison (`SUBS`/`CMP`) suitable as a bounds guard.
+Rejects additions (`CMN`), tautological same-register comparisons (`CMP Rn, Rn`), comparisons
+involving `XZR`/`SP` (`31#5`), and zero-immediate comparisons (`CMP Rn, #0`). -/
 def isFlagCmpInsn : Arm64Insn → Bool
-  | .addSubReg _ _ true _ _ _ _ _
-  | .addSubImm _ _ true _ _ _
-  | .addSubExt _ _ true _ _ _ _ _ => true
+  | .addSubReg _ true true _ _ _ rn rm =>
+    rn != rm && rn != 31#5 && rm != 31#5
+  | .addSubImm _ true true _ rn imm =>
+    rn != 31#5 && imm != 0#64
+  | .addSubExt _ true true _ _ _ rn rm =>
+    rn != rm && rn != 31#5 && rm != 31#5
   | _ => false
 
 def isFlagCmpOpt : Option Arm64Insn → Bool
@@ -1348,7 +1453,8 @@ private def isCondGeOpt : Option Arm64Insn → Bool
   | some (.bCond .ge _) => true
   | _ => false
 
-/-- Verified ARM64 bounds-check guard dominance pattern (`CMP; B.{cs,cc,hi,ls}` or loop `CMP; B.ge; B.{cc,hi}; B`). -/
+/-- Structural ARM64 bounds-check guard pattern (`CMP; B.{cs,cc,hi,ls}` or loop
+`CMP; B.ge; B.{cc,hi}; B`) requiring a non-degenerate subtraction comparison (`isFlagCmpInsn`). -/
 def isVerifiedBoundsGuard (getInsn : Nat → Option Arm64Insn) (src dst : Nat) : Bool :=
   match getInsn src with
   | some (.bCond c imm19) =>
@@ -1369,7 +1475,7 @@ def isPanicBoundsSym (sym : String) : Bool :=
 
 def panicBoundsInsnSafe (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
     (ext : Nat → Option String) (inPb : Nat → Bool) (idx : Nat) (insn : Arm64Insn) : Bool :=
-  let noUnk := match insn with | .unknown _ => false | _ => true
+  let noUnk := insnDecodedValid insn
   let pbCovered :=
     match ext idx with
     | some sym => if isPanicBoundsSym sym then inPb idx else true
@@ -1398,8 +1504,7 @@ def panicBoundsInsnSafe (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
     let fallSafe :=
       if idx + 1 < progSize then
         match insn with
-        | .ret _ | .b _ | .unknown _ => true
-        | .bl _ => true
+        | .ret _ | .b _ | .bl _ | .unknown _ => true
         | _ => !inPb (idx + 1) || isVerifiedBoundsGuard getInsn idx (idx + 1)
       else true
     noUnk && pbCovered && noOutPb && edgesGuarded && fallSafe
@@ -1529,10 +1634,10 @@ theorem checkPanicBoundsReachability_step_guard (prog : Array Arm64Insn)
         cases hInsn : prog[s.pcIdx] with
         | unknown w =>
           rw [hInsn] at hNoUnk
-          simp at hNoUnk
+          simp [insnDecodedValid] at hNoUnk
         | ret rn =>
           dsimp only [execArm64Insn]
-          exact ⟨(fun h => by cases h), fun h => by cases h⟩
+          split <;> exact ⟨(fun h => by cases h), fun h => by cases h⟩
         | b imm26 =>
           rw [hInsn] at hNoOutPb hEdges
           dsimp only [execArm64Insn]
@@ -1614,18 +1719,28 @@ theorem checkPanicBoundsReachability_step_guard (prog : Array Arm64Insn)
         | addSubExt _ _ _ _ _ _ _ _ | logicalImm _ _ _ _ _ | logicalReg _ _ _ _ _ _ _ _ | bitfield _ _ _ _ _ _ _
         | condSel _ _ _ _ _ _ | div _ _ _ _ _ | mul3 _ _ _ _ _ | ldrStrPair _ _ _ _ _ _ _
         | ldrStrUImm _ _ _ _ _ _ | ldrStrImm _ _ _ _ _ _ _ | ldrStrReg _ _ _ _ _ _ _ _ _
-        | fcmpD _ _ _ | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ | fpIntConv _ _ _ _ _ =>
+        | fcmpD _ _ _ | fpIntConv _ _ _ _ _ =>
           rw [hInsn] at hFall
           have hNextSafe : inPb (s.pcIdx + 1) = false ∨ isVerifiedBoundsGuard getInsn s.pcIdx (s.pcIdx + 1) = true :=
             hAdvStep (fun hLt1 => by simp only [hLt1, ↓reduceIte] at hFall; exact hFall)
-          have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by rw [hInsn])
+          have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by simp [hInsn])
+          rw [hInsn] at hLin
+          rw [hLin.1, hLin.2, hRun]
+          exact ⟨(fun h => by cases h), fun _ => hNextSafe⟩
+        | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ =>
+          rw [hInsn] at hFall
+          have hNextSafe : inPb (s.pcIdx + 1) = false ∨ isVerifiedBoundsGuard getInsn s.pcIdx (s.pcIdx + 1) = true :=
+            hAdvStep (fun hLt1 => by simp only [hLt1, ↓reduceIte] at hFall; exact hFall)
+          have hLin := execArm64Insn_linear prog.size ext prog[s.pcIdx] s (by simpa [insnDecodedValid, hInsn] using hNoUnk)
           rw [hInsn] at hLin
           rw [hLin.1, hLin.2, hRun]
           exact ⟨(fun h => by cases h), fun _ => hNextSafe⟩
       · simp only [hLt, ↓reduceDIte]
         exact ⟨(fun h => by cases h), fun h => by cases h⟩
 
-/-- Trace invariant stating all verified bounds-check guard transitions avoid cold panic regions along a `fuel`-step execution. -/
+/-- Trace hypothesis for structural bounds-guard mediation: states that along a `fuel`-step
+execution, every transition across a non-degenerate comparison guard (`isVerifiedBoundsGuard`)
+stays outside the `inPb` panicBounds region (i.e. the runtime bounds checks pass). -/
 def BoundsGuardsHold (prog : Array Arm64Insn) (getInsn : Nat → Option Arm64Insn)
     (ext : Nat → Option String) (inPb : Nat → Bool) :
     Nat → Arm64State → Prop
@@ -1636,7 +1751,9 @@ def BoundsGuardsHold (prog : Array Arm64Insn) (getInsn : Nat → Option Arm64Ins
       isVerifiedBoundsGuard getInsn s.pcIdx s1.pcIdx = true → inPb s1.pcIdx = false) ∧
       BoundsGuardsHold prog getInsn ext inPb k s1
 
-/-- Multi-step panic-freedom theorem: whenever `verifyPanicBoundsCertWith` passes and all bounds guards hold, `runtime.panicBounds` is unreachable for any `fuel : Nat`. -/
+/-- Structural bounds-guard mediation theorem: whenever `verifyPanicBoundsCertWith` passes,
+every CFG edge into `inPb` is mediated by a non-degenerate comparison guard (`isVerifiedBoundsGuard`),
+and `runtime.panicBounds` is unreachable for any `fuel : Nat` whenever those runtime bounds guards pass (`BoundsGuardsHold`). -/
 theorem checkPanicBoundsReachability_run_safe (prog : Array Arm64Insn)
     (getInsn : Nat → Option Arm64Insn) (ext : Nat → Option String) (inPb : Nat → Bool)
     (hBound : ∀ j, prog.size ≤ j → inPb j = false)
@@ -1779,7 +1896,7 @@ private theorem hasInf_stackGuard :
       (decodeArm64Prog hasInfeasibleIntegerEqRowWords).toList hasInfeasibleIntegerEqRowTargets =
       .ok (.smallFrame 149 148) := by
   have hAll : everyWithIdx 0 (decodeArm64Prog hasInfeasibleIntegerEqRowWords).toList
-      (bodyInsnStackSafe 154 2 148 hasInfeasibleIntegerEqRowTargets) = true := by
+      (bodyInsnStackSafe 154 2 148 128 (chunkDecode hasInfeasibleIntegerEqRowChunks) hasInfeasibleIntegerEqRowTargets) = true := by
     change everyWithIdx 0 (hasInfeasibleIntegerEqRowChunks.flatten.map decodeArm64Word) _ = true
     rw [everyWithIdx_map, everyWithIdx_flatten]
     decide
@@ -1796,7 +1913,7 @@ private theorem aug_stackGuard :
       (decodeArm64Prog augmentRowScalarWords).toList augmentRowScalarTargets =
       .ok (.largeFrame 112 316 315) := by
   have hAll : everyWithIdx 0 (decodeArm64Prog augmentRowScalarWords).toList
-      (bodyInsnStackSafe 335 3 315 augmentRowScalarTargets) = true := by
+      (bodyInsnStackSafe 335 3 315 (112 + 128) (chunkDecode augmentRowScalarChunks) augmentRowScalarTargets) = true := by
     change everyWithIdx 0 (augmentRowScalarChunks.flatten.map decodeArm64Word) _ = true
     rw [everyWithIdx_map, everyWithIdx_flatten]
     decide
@@ -1814,7 +1931,7 @@ private theorem init_stackGuard :
       (decodeArm64Prog initReducedRow64Words).toList initReducedRow64Targets =
       .ok (.smallFrame 87 86) := by
   have hAll : everyWithIdx 0 (decodeArm64Prog initReducedRow64Words).toList
-      (bodyInsnStackSafe 102 2 86 initReducedRow64Targets) = true := by
+      (bodyInsnStackSafe 102 2 86 128 (chunkDecode initReducedRow64Chunks) initReducedRow64Targets) = true := by
     change everyWithIdx 0 (initReducedRow64Chunks.flatten.map decodeArm64Word) _ = true
     rw [everyWithIdx_map, everyWithIdx_flatten]
     decide
@@ -1831,7 +1948,7 @@ private theorem refill_stackGuard :
       (decodeArm64Prog refillQueueIndirectScalarWords).toList refillQueueIndirectScalarTargets =
       .ok (.smallFrame 233 232) := by
   have hAll : everyWithIdx 0 (decodeArm64Prog refillQueueIndirectScalarWords).toList
-      (bodyInsnStackSafe 248 2 232 refillQueueIndirectScalarTargets) = true := by
+      (bodyInsnStackSafe 248 2 232 128 (chunkDecode refillQueueIndirectScalarChunks) refillQueueIndirectScalarTargets) = true := by
     change everyWithIdx 0 (refillQueueIndirectScalarChunks.flatten.map decodeArm64Word) _ = true
     rw [everyWithIdx_map, everyWithIdx_flatten]
     decide
@@ -1848,7 +1965,7 @@ private theorem relax_stackGuard :
       (decodeArm64Prog relaxRowIndirectScalarWords).toList relaxRowIndirectScalarTargets =
       .ok (.smallFrame 90 89) := by
   have hAll : everyWithIdx 0 (decodeArm64Prog relaxRowIndirectScalarWords).toList
-      (bodyInsnStackSafe 111 2 89 relaxRowIndirectScalarTargets) = true := by
+      (bodyInsnStackSafe 111 2 89 128 (chunkDecode relaxRowIndirectScalarChunks) relaxRowIndirectScalarTargets) = true := by
     change everyWithIdx 0 (relaxRowIndirectScalarChunks.flatten.map decodeArm64Word) _ = true
     rw [everyWithIdx_map, everyWithIdx_flatten]
     decide
@@ -1921,7 +2038,8 @@ private theorem aug_stack_headroom_112 (sp sg : BitVec 64)
     (hSp : BitVec.ult 239#64 sp = true)
     (hGuard : BitVec.ult sg (sp - 240#64) = true) :
     BitVec.ult 111#64 sp = true ∧ BitVec.ult sg (sp - 112#64) = true := by
-  bv_decide
+  simp only [BitVec.ult, decide_eq_true_eq] at hSp hGuard ⊢
+  constructor <;> bv_omega
 
 /-- Tier 5B theorem: decoded Go 1.27 ARM64 `hasInfeasibleIntegerEqRow` guarantees Zero-GC allocation, stack-headroom safety (all fuels), and guarded `panicBounds` transitions. -/
 theorem hasInfeasibleIntegerEqRow_elf_safe (s : Arm64State)
@@ -2103,11 +2221,96 @@ theorem lookupWord_upsert_ne (xs : List (BitVec 64 × BitVec 64)) (k v q : BitVe
       · simp [upsertWord, lookupWord, hk, hqk]
       · simp [upsertWord, lookupWord, hk, hqk, ih]
 
+private theorem and_7_toNat (x : BitVec 64) : (x &&& 7#64).toNat = x.toNat % 8 := by
+  rw [BitVec.toNat_and]
+  exact Nat.and_two_pow_sub_one_eq_mod x.toNat 3
+
+private theorem and_not7_eq_shift (x : BitVec 64) :
+    x &&& 0xfffffffffffffff8#64 = (x >>> 3) <<< 3 := by
+  have hMask : (0xfffffffffffffff8#64 : BitVec 64) = ~~~(7#64) := by decide
+  rw [hMask]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [BitVec.getLsbD_and, BitVec.getLsbD_not, BitVec.getLsbD_shiftLeft,
+    BitVec.getLsbD_ushiftRight, hi, decide_true, Bool.true_and]
+  by_cases h3 : i < 3
+  · match i, h3 with
+    | 0, _ => simp
+    | 1, _ => simp
+    | 2, _ => simp
+  · have hNot7 : (7#64 : BitVec 64).getLsbD i = false := by
+      change Nat.testBit 7 i = false
+      exact Nat.testBit_lt_two_pow (by
+        have hPow : 2 ^ 3 ≤ 2 ^ i := Nat.pow_le_pow_right (by decide) (by omega)
+        omega)
+    have hSub : 3 + (i - 3) = i := by omega
+    simp [h3, hNot7, hSub]
+
+private theorem and_not7_toNat (x : BitVec 64) :
+    (x &&& 0xfffffffffffffff8#64).toNat = (x.toNat / 8) * 8 := by
+  rw [and_not7_eq_shift, BitVec.toNat_shiftLeft, BitVec.toNat_ushiftRight]
+  have hlt := x.isLt
+  have hShift : (x.toNat >>> 3) <<< 3 = (x.toNat / 8) * 8 := by
+    rw [Nat.shiftRight_eq_div_pow, Nat.shiftLeft_eq]
+  rw [hShift]
+  exact Nat.mod_eq_of_lt (by omega)
+
 private theorem bv64_aligned_bytes (addr x : BitVec 64) (hAligned : addr &&& 7#64 = 0#64) :
     ((x == addr || x == addr + 1#64 || x == addr + 2#64 || x == addr + 3#64 ||
       x == addr + 4#64 || x == addr + 5#64 || x == addr + 6#64 || x == addr + 7#64) = true) ↔
     (x &&& 0xfffffffffffffff8#64) = addr := by
-  bv_decide
+  have hMod : addr.toNat % 8 = 0 := by
+    have := congrArg BitVec.toNat hAligned
+    rw [and_7_toNat] at this
+    exact this
+  have hAddrLt := addr.isLt
+  have hXLt := x.isLt
+  have hAddNat : ∀ k : Nat, k < 8 → (addr + BitVec.ofNat 64 k).toNat = addr.toNat + k := by
+    intro k hk
+    rw [BitVec.toNat_add, BitVec.toNat_ofNat]
+    have hKMod : k % 2 ^ 64 = k := Nat.mod_eq_of_lt (by omega)
+    rw [hKMod]
+    exact Nat.mod_eq_of_lt (by omega)
+  simp only [Bool.or_eq_true, beq_iff_eq]
+  constructor
+  · intro h
+    apply BitVec.eq_of_toNat_eq
+    rw [and_not7_toNat]
+    rcases h with ((((((rfl | rfl) | rfl) | rfl) | rfl) | rfl) | rfl) | rfl
+    · omega
+    · have := hAddNat 1 (by decide); change ((addr + BitVec.ofNat 64 1).toNat / 8) * 8 = addr.toNat; omega
+    · have := hAddNat 2 (by decide); change ((addr + BitVec.ofNat 64 2).toNat / 8) * 8 = addr.toNat; omega
+    · have := hAddNat 3 (by decide); change ((addr + BitVec.ofNat 64 3).toNat / 8) * 8 = addr.toNat; omega
+    · have := hAddNat 4 (by decide); change ((addr + BitVec.ofNat 64 4).toNat / 8) * 8 = addr.toNat; omega
+    · have := hAddNat 5 (by decide); change ((addr + BitVec.ofNat 64 5).toNat / 8) * 8 = addr.toNat; omega
+    · have := hAddNat 6 (by decide); change ((addr + BitVec.ofNat 64 6).toNat / 8) * 8 = addr.toNat; omega
+    · have := hAddNat 7 (by decide); change ((addr + BitVec.ofNat 64 7).toNat / 8) * 8 = addr.toNat; omega
+  · intro h
+    have hDiv : (x.toNat / 8) * 8 = addr.toNat := by
+      have := congrArg BitVec.toNat h
+      rw [and_not7_toNat] at this
+      exact this
+    have hRem : x.toNat % 8 < 8 := Nat.mod_lt x.toNat (by decide)
+    match hr : x.toNat % 8 with
+    | 0 => left; left; left; left; left; left; left; exact BitVec.eq_of_toNat_eq (by omega)
+    | 1 => left; left; left; left; left; left; right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 1 (by decide); change x.toNat = (addr + BitVec.ofNat 64 1).toNat; omega)
+    | 2 => left; left; left; left; left; right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 2 (by decide); change x.toNat = (addr + BitVec.ofNat 64 2).toNat; omega)
+    | 3 => left; left; left; left; right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 3 (by decide); change x.toNat = (addr + BitVec.ofNat 64 3).toNat; omega)
+    | 4 => left; left; left; right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 4 (by decide); change x.toNat = (addr + BitVec.ofNat 64 4).toNat; omega)
+    | 5 => left; left; right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 5 (by decide); change x.toNat = (addr + BitVec.ofNat 64 5).toNat; omega)
+    | 6 => left; right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 6 (by decide); change x.toNat = (addr + BitVec.ofNat 64 6).toNat; omega)
+    | 7 => right; exact BitVec.eq_of_toNat_eq (by have := hAddNat 7 (by decide); change x.toNat = (addr + BitVec.ofNat 64 7).toNat; omega)
+    | _ + 8 => omega
+
+private theorem extractLsb'_shiftRight_zero (v : BitVec 64) (k : Nat) (hk : k ≤ 56) :
+    (v >>> (BitVec.ofNat 64 k)).extractLsb' 0 8 = v.extractLsb' k 8 := by
+  change (v >>> (BitVec.ofNat 64 k).toNat).extractLsb' 0 8 = v.extractLsb' k 8
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [BitVec.getLsbD_extractLsb', BitVec.getLsbD_ushiftRight, hi, decide_true, Bool.true_and,
+    BitVec.toNat_ofNat]
+  have hMod : k % 2 ^ 64 = k := Nat.mod_eq_of_lt (by omega)
+  rw [hMod, Nat.zero_add]
 
 private theorem bv64_byte_extract (addr x v : BitVec 64) (hAligned : addr &&& 7#64 = 0#64)
     (hx : (x &&& 0xfffffffffffffff8#64) = addr) :
@@ -2120,7 +2323,91 @@ private theorem bv64_byte_extract (addr x v : BitVec 64) (hAligned : addr &&& 7#
      else if x == addr + 1#64 then v.extractLsb' 8 8
      else v.extractLsb' 0 8) =
     (v >>> ((x &&& 7#64) * 8#64)).extractLsb' 0 8 := by
-  bv_decide
+  have hMod : addr.toNat % 8 = 0 := by
+    have := congrArg BitVec.toNat hAligned
+    rw [and_7_toNat] at this; exact this
+  have hDiv : (x.toNat / 8) * 8 = addr.toNat := by
+    have := congrArg BitVec.toNat hx
+    rw [and_not7_toNat] at this; exact this
+  have hAddrLt := addr.isLt
+  have hXLt := x.isLt
+  have hAddNat : ∀ k : Nat, k < 8 → (addr + BitVec.ofNat 64 k).toNat = addr.toNat + k := by
+    intro k hk
+    rw [BitVec.toNat_add, BitVec.toNat_ofNat]
+    have hKMod : k % 2 ^ 64 = k := Nat.mod_eq_of_lt (by omega)
+    rw [hKMod]
+    exact Nat.mod_eq_of_lt (by omega)
+  have hNe : ∀ k j : Nat, k < 8 → j < 8 → k ≠ j → (addr + BitVec.ofNat 64 k == addr + BitVec.ofNat 64 j) = false := by
+    intro k j hk hj hne
+    apply beq_false_of_ne
+    intro hEq
+    have hN := congrArg BitVec.toNat hEq
+    rw [hAddNat k hk, hAddNat j hj] at hN
+    omega
+  have hRemLt : x.toNat % 8 < 8 := Nat.mod_lt x.toNat (by decide)
+  match hr : x.toNat % 8 with
+  | 0 =>
+    have hxEq : x = addr := BitVec.eq_of_toNat_eq (by omega)
+    have h7 : x &&& 7#64 = 0#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    have h0 : ∀ j : Nat, 0 < j → j < 8 → (addr == addr + BitVec.ofNat 64 j) = false := by
+      intro j hj1 hj2; simpa using hNe 0 j (by decide) hj2 (by omega)
+    rw [h7, hxEq]
+    simp only [h0 7 (by decide) (by decide), h0 6 (by decide) (by decide), h0 5 (by decide) (by decide),
+      h0 4 (by decide) (by decide), h0 3 (by decide) (by decide), h0 2 (by decide) (by decide),
+      h0 1 (by decide) (by decide), Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 0 (by decide)).symm
+  | 1 =>
+    have hxEq : x = addr + 1#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 1 (by decide); change x.toNat = (addr + BitVec.ofNat 64 1).toNat; omega)
+    have h7 : x &&& 7#64 = 1#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [hNe 1 7 (by decide) (by decide) (by decide), hNe 1 6 (by decide) (by decide) (by decide),
+      hNe 1 5 (by decide) (by decide) (by decide), hNe 1 4 (by decide) (by decide) (by decide),
+      hNe 1 3 (by decide) (by decide) (by decide), hNe 1 2 (by decide) (by decide) (by decide),
+      beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 8 (by decide)).symm
+  | 2 =>
+    have hxEq : x = addr + 2#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 2 (by decide); change x.toNat = (addr + BitVec.ofNat 64 2).toNat; omega)
+    have h7 : x &&& 7#64 = 2#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [hNe 2 7 (by decide) (by decide) (by decide), hNe 2 6 (by decide) (by decide) (by decide),
+      hNe 2 5 (by decide) (by decide) (by decide), hNe 2 4 (by decide) (by decide) (by decide),
+      hNe 2 3 (by decide) (by decide) (by decide), beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 16 (by decide)).symm
+  | 3 =>
+    have hxEq : x = addr + 3#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 3 (by decide); change x.toNat = (addr + BitVec.ofNat 64 3).toNat; omega)
+    have h7 : x &&& 7#64 = 3#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [hNe 3 7 (by decide) (by decide) (by decide), hNe 3 6 (by decide) (by decide) (by decide),
+      hNe 3 5 (by decide) (by decide) (by decide), hNe 3 4 (by decide) (by decide) (by decide),
+      beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 24 (by decide)).symm
+  | 4 =>
+    have hxEq : x = addr + 4#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 4 (by decide); change x.toNat = (addr + BitVec.ofNat 64 4).toNat; omega)
+    have h7 : x &&& 7#64 = 4#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [hNe 4 7 (by decide) (by decide) (by decide), hNe 4 6 (by decide) (by decide) (by decide),
+      hNe 4 5 (by decide) (by decide) (by decide), beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 32 (by decide)).symm
+  | 5 =>
+    have hxEq : x = addr + 5#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 5 (by decide); change x.toNat = (addr + BitVec.ofNat 64 5).toNat; omega)
+    have h7 : x &&& 7#64 = 5#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [hNe 5 7 (by decide) (by decide) (by decide), hNe 5 6 (by decide) (by decide) (by decide),
+      beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 40 (by decide)).symm
+  | 6 =>
+    have hxEq : x = addr + 6#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 6 (by decide); change x.toNat = (addr + BitVec.ofNat 64 6).toNat; omega)
+    have h7 : x &&& 7#64 = 6#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [hNe 6 7 (by decide) (by decide) (by decide), beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 48 (by decide)).symm
+  | 7 =>
+    have hxEq : x = addr + 7#64 := BitVec.eq_of_toNat_eq (by have := hAddNat 7 (by decide); change x.toNat = (addr + BitVec.ofNat 64 7).toNat; omega)
+    have h7 : x &&& 7#64 = 7#64 := BitVec.eq_of_toNat_eq (by rw [and_7_toNat, hr]; rfl)
+    rw [h7, hxEq]
+    simp only [beq_self_eq_true, ↓reduceIte]
+    exact (extractLsb'_shiftRight_zero v 56 (by decide)).symm
+  | _ + 8 => omega
 
 theorem writeU64_evalWordOverlay (base : BitVec 64 → BitVec 8) (ws : List (BitVec 64 × BitVec 64))
     (addr v : BitVec 64) (hAligned : addr &&& 7#64 = 0#64) :
@@ -2266,12 +2553,13 @@ private theorem f64Sub_posZero_right (a : BitVec 64) (q : Rat)
     (hBack : ratToFloat64Bits q false = a) :
     f64Sub a 0#64 = a := by
   unfold f64Sub f64Add
+  have hNaN0 : f64IsNaN 0#64 = false := by decide
   have hNeg0 : f64Neg 0#64 = 0x8000000000000000#64 := by decide
   rw [hNeg0, uint64_ofNat_toNat_eq a, uint64_ofNat_toNat_eq 0x8000000000000000#64]
   have hFlags0 : f64IsNaN 0x8000000000000000#64 = false ∧ f64IsPosInf 0x8000000000000000#64 = false ∧
       f64IsNegInf 0x8000000000000000#64 = false := by decide
   have hZ0 : float64BitsToRat ⟨0x8000000000000000#64⟩ = some 0 := by decide
-  simp only [hNaN, hPosInf, hNegInf, hFlags0.1, hFlags0.2.1, hFlags0.2.2, hZero,
+  simp only [hNaN, hNaN0, hPosInf, hNegInf, hFlags0.1, hFlags0.2.1, hFlags0.2.2, hZero,
     Bool.false_and, Bool.or_false, Bool.false_eq_true, ↓reduceIte,
     hRat, hZ0, Rat.add_zero, hBack]
 
@@ -2483,11 +2771,17 @@ private theorem execArm64Insn_pure_mem (progLen : Nat) (ext : Nat → Option Str
   case fpIntConv toInt isSigned gprToFp _ _ =>
     unfold execArm64Insn; dsimp only
     cases toInt <;> cases gprToFp <;> cases isSigned <;> simp only [advancePc_mem, ↓reduceIte, Bool.false_eq_true, writeGpr_mem, writeFp_mem]
+  case div is64 _ _ _ _ =>
+    cases is64
+    · unfold execArm64Insn; dsimp only; simp only [Bool.false_eq_true, ↓reduceIte, advancePc_mem, writeGpr_mem]
+    · unfold execArm64Insn; dsimp only; simp only [↓reduceIte, advancePc_mem, writeGpr_mem]
   case nop => rfl
-  case ret _ => rfl
+  case ret _ => unfold execArm64Insn; dsimp only; split <;> rfl
   case unknown _ => rfl
+  case fpUnaryD _ _ _ => unfold execArm64Insn; dsimp only; split <;> first | rfl | simp only [advancePc_mem, writeFp_mem]
+  case fpBinaryD _ _ _ _ => unfold execArm64Insn; dsimp only; split <;> first | rfl | simp only [advancePc_mem, writeFp_mem]
   all_goals
-    unfold execArm64Insn; dsimp only; simp only [advancePc_mem, writeGpr_mem, writeFp_mem]
+    unfold execArm64Insn; dsimp only; simp only [advancePc_mem, writeGpr_mem]
 
 def stepStoreOverlay (base : BitVec 64 → BitVec 8) (c : OverlayState) (insn : Arm64Insn) : Option OverlayState :=
   let s := c.toArm64 base
@@ -2593,14 +2887,14 @@ def stepOverlay (chunks : List (List UInt32)) (progLen : Nat) (ext : Nat → Opt
   if c.status != .running then some c
   else if c.pcIdx < progLen then
     match chunkWord chunks 16 c.pcIdx with
-    | none => some { c with status := .returned }
+    | none => some { c with status := .trapIllegal }
     | some w =>
       let insn := decodeArm64Word w
       if isPureNonStoreInsn insn then
         some (OverlayState.ofArm64 c.ws (execArm64Insn progLen ext insn (c.toArm64 base)))
       else
         stepStoreOverlay base c insn
-  else some { c with status := .returned }
+  else some { c with status := .trapIllegal }
 
 def runOverlay (fuel : Nat) (chunks : List (List UInt32)) (progLen : Nat) (ext : Nat → Option String)
     (base : BitVec 64 → BitVec 8) (c : OverlayState) : Option OverlayState :=
@@ -2742,24 +3036,27 @@ private theorem f64RoundToInt_ceil (b res : BitVec 64) (q : Rat) (z : Int)
     (hRat : float64BitsToRat ⟨b⟩ = some q)
     (hZ : q.ceil = z) (hNz : (z == 0) = false) (hBack : ratToFloat64Bits ↑z false = res) :
     f64RoundToInt .ceil b = res := by
+  simp only [Bool.or_eq_false_iff] at hBypass
   unfold f64RoundToInt; rw [uint64_ofNat_toNat_eq b]
-  simp only [hBypass, Bool.false_eq_true, ↓reduceIte, hRat, hZ, hNz, hBack]
+  simp only [hBypass.1.1, hBypass.1.2, hBypass.2, Bool.or_false, Bool.false_eq_true, ↓reduceIte, hRat, hZ, hNz, hBack]
 
 private theorem f64RoundToInt_floor (b res : BitVec 64) (q : Rat) (z : Int)
     (hBypass : (f64IsNaN b || f64Exp b == 2047 || f64IsZero b) = false)
     (hRat : float64BitsToRat ⟨b⟩ = some q)
     (hZ : q.floor = z) (hNz : (z == 0) = false) (hBack : ratToFloat64Bits ↑z false = res) :
     f64RoundToInt .floor b = res := by
+  simp only [Bool.or_eq_false_iff] at hBypass
   unfold f64RoundToInt; rw [uint64_ofNat_toNat_eq b]
-  simp only [hBypass, Bool.false_eq_true, ↓reduceIte, hRat, hZ, hNz, hBack]
+  simp only [hBypass.1.1, hBypass.1.2, hBypass.2, Bool.or_false, Bool.false_eq_true, ↓reduceIte, hRat, hZ, hNz, hBack]
 
 private theorem f64RoundToInt_nearestAway_nonneg (b res : BitVec 64) (q : Rat) (z : Int)
     (hBypass : (f64IsNaN b || f64Exp b == 2047 || f64IsZero b) = false)
     (hRat : float64BitsToRat ⟨b⟩ = some q) (hGe : q ≥ 0)
     (hZ : (q + mkRat 1 2).floor = z) (hNz : (z == 0) = false) (hBack : ratToFloat64Bits ↑z false = res) :
     f64RoundToInt .nearestAway b = res := by
+  simp only [Bool.or_eq_false_iff] at hBypass
   unfold f64RoundToInt; rw [uint64_ofNat_toNat_eq b]
-  simp only [hBypass, Bool.false_eq_true, ↓reduceIte, hRat, hGe, rat_half_eq, hZ, hNz, hBack]
+  simp only [hBypass.1.1, hBypass.1.2, hBypass.2, Bool.or_false, Bool.false_eq_true, ↓reduceIte, hRat, hGe, rat_half_eq, hZ, hNz, hBack]
 
 private theorem f64ToInt64_exact (b res : BitVec 64) (q : Rat) (z : Int)
     (hNaN : f64IsNaN b = false) (hPosInf : f64IsPosInf b = false) (hNegInf : f64IsNegInf b = false)
@@ -2801,9 +3098,13 @@ private theorem f64Add_0_1 : f64Add 0#64 0x3ff0000000000000#64 = 0x3ff0000000000
 set_option maxRecDepth 8192 in
 private theorem f64Sub_3_eps :
     f64Sub 0x4008000000000000#64 0x3eb0c6f7a0b5ed8d#64 = 0x4007ffff79c842fa#64 := by
-  unfold f64Sub
-  have hNeg : f64Neg 0x3eb0c6f7a0b5ed8d#64 = 0xbeb0c6f7a0b5ed8d#64 := by decide
-  rw [hNeg]
+  have hSub : f64Sub 0x4008000000000000#64 0x3eb0c6f7a0b5ed8d#64 =
+      f64Add 0x4008000000000000#64 0xbeb0c6f7a0b5ed8d#64 := by
+    unfold f64Sub
+    have hN : (f64IsNaN 0x4008000000000000#64 || f64IsNaN 0x3eb0c6f7a0b5ed8d#64) = false := by decide
+    have hNeg : f64Neg 0x3eb0c6f7a0b5ed8d#64 = 0xbeb0c6f7a0b5ed8d#64 := by decide
+    simp only [hN, Bool.false_eq_true, ↓reduceIte, hNeg]
+  rw [hSub]
   exact f64Add_mkRat_pow2 _ _ _ 3 (-4722366482869645) 0 72 (by decide) (by decide)
     (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
 
@@ -2816,9 +3117,13 @@ private theorem f64Add_3_eps :
 set_option maxRecDepth 8192 in
 private theorem f64Sub_4_eps :
     f64Sub 0x4010000000000000#64 0x3eb0c6f7a0b5ed8d#64 = 0x400fffff79c842fa#64 := by
-  unfold f64Sub
-  have hNeg : f64Neg 0x3eb0c6f7a0b5ed8d#64 = 0xbeb0c6f7a0b5ed8d#64 := by decide
-  rw [hNeg]
+  have hSub : f64Sub 0x4010000000000000#64 0x3eb0c6f7a0b5ed8d#64 =
+      f64Add 0x4010000000000000#64 0xbeb0c6f7a0b5ed8d#64 := by
+    unfold f64Sub
+    have hN : (f64IsNaN 0x4010000000000000#64 || f64IsNaN 0x3eb0c6f7a0b5ed8d#64) = false := by decide
+    have hNeg : f64Neg 0x3eb0c6f7a0b5ed8d#64 = 0xbeb0c6f7a0b5ed8d#64 := by decide
+    simp only [hN, Bool.false_eq_true, ↓reduceIte, hNeg]
+  rw [hSub]
   exact f64Add_mkRat_pow2 _ _ _ 4 (-4722366482869645) 0 72 (by decide) (by decide)
     (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
 

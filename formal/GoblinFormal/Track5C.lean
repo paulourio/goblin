@@ -29,13 +29,38 @@ private def matchOpmaskFromList : List Char → Bool
   | _ :: rest => matchOpmaskFromList rest
   | [] => false
 
-/-- Matches `%k[0-7]\b` in GNU objdump operand strings. -/
+/-- Matches `%k[0-7]\b` case-insensitively in GNU objdump operand strings. -/
 def hasOpmaskReg (args : String) : Bool :=
-  matchOpmaskFromList args.toList
+  matchOpmaskFromList args.toLower.toList
+
+private def isHighSimdNum (d1 d2 : Char) : Bool :=
+  (d1 == '1' && '6' <= d2 && d2 <= '9') ||
+  (d1 == '2' && '0' <= d2 && d2 <= '9') ||
+  (d1 == '3' && (d2 == '0' || d2 == '1'))
+
+private def matchHighSimdRegFromList : List Char → Bool
+  | '%' :: kind :: 'm' :: 'm' :: d1 :: d2 :: rest =>
+    if (kind == 'x' || kind == 'y') && isHighSimdNum d1 d2 then
+      match rest with
+      | [] => true
+      | c :: _ =>
+        if isWordBoundaryChar c then true
+        else matchHighSimdRegFromList (kind :: 'm' :: 'm' :: d1 :: d2 :: rest)
+    else
+      matchHighSimdRegFromList (kind :: 'm' :: 'm' :: d1 :: d2 :: rest)
+  | _ :: rest => matchHighSimdRegFromList rest
+  | [] => false
+
+/-- Matches EVEX-only `%xmm16..31` and `%ymm16..31` registers case-insensitively. -/
+def hasHighSimdReg (args : String) : Bool :=
+  matchHighSimdRegFromList args.toLower.toList
 
 /-- Normalizes hexadecimal address string by trimming leading zeros and lowercasing. -/
 def normalizeHexAddr (addr : String) : String :=
-  let s := addr.trimAscii.toString.toLower
+  let s0 := addr.trimAscii.toString.toLower
+  let s :=
+    if s0.startsWith "0x" then String.ofList (s0.toList.drop 2)
+    else s0
   let rec dropZeros : List Char → List Char
     | '0' :: rest => dropZeros rest
     | cs => cs
@@ -45,50 +70,220 @@ def normalizeHexAddr (addr : String) : String :=
 private def isHexDigit (c : Char) : Bool :=
   ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
 
+/-- Returns true when `addr` is a non-empty hexadecimal address string. -/
+def isValidHexAddr (addr : String) : Bool :=
+  let s := addr.trimAscii.toString
+  let hexPart :=
+    if s.startsWith "0x" || s.startsWith "0X" then String.ofList (s.toList.drop 2)
+    else s
+  !hexPart.isEmpty && hexPart.toList.all isHexDigit
+
+private def splitFirstWord (s : String) : Option (String × String) :=
+  let cs := s.trimAscii.toString.toList
+  if cs.isEmpty then none
+  else
+    let isWs (c : Char) : Bool := c == ' ' || c == '\t'
+    let tok := cs.takeWhile (fun c => !isWs c)
+    let rest := (cs.dropWhile (fun c => !isWs c)).dropWhile isWs
+    some (String.ofList tok, String.ofList rest)
+
+/-- Returns true when `tok` (lowercased) is an x86-64 instruction prefix mnemonic emitted by GNU objdump. -/
+def isX86PrefixToken (tok : String) : Bool :=
+  match tok with
+  | "notrack" | "bnd" | "rep" | "repz" | "repe" | "repne" | "repnz" | "lock"
+  | "cs" | "ds" | "es" | "fs" | "gs" | "ss"
+  | "data16" | "data32" | "addr16" | "addr32"
+  | "xacquire" | "xrelease" | "rex" => true
+  | _ => tok.startsWith "rex."
+
+private def stripLeadingPrefixes : Nat → String → String → String × String
+  | 0, opL, argsTrim => (opL, argsTrim)
+  | fuel + 1, opL, argsTrim =>
+    if isX86PrefixToken opL then
+      match splitFirstWord argsTrim with
+      | some (nextOp, nextArgs) => stripLeadingPrefixes fuel nextOp.toLower nextArgs
+      | none => (opL, argsTrim)
+    else
+      (opL, argsTrim)
+
+/-- Normalizes leading x86-64 prefix tokens (`notrack`, `bnd`, `rep*`, `lock`, segment overrides,
+`data16`, `addr32`, `rex*`) out of `(op, args)` into `(effOp, effArgs)` where `effOp` is lowercased. -/
+def normalizeX86PrefixOpArgs (op args : String) : String × String :=
+  stripLeadingPrefixes 16 op.trimAscii.toString.toLower args.trimAscii.toString
+
 /-- Parses a direct hexadecimal branch target from GNU objdump instruction args. -/
 def parseJumpTargetHex (args : String) : Option String :=
-  let trimmed := args.trimAscii.toString
-  if trimmed.isEmpty then none
-  else
-    let tok := (trimmed.splitOn " ").headD ""
+  match splitFirstWord args with
+  | none => none
+  | some (tok, _) =>
     if tok.isEmpty || tok.startsWith "*" || tok.startsWith "%" then none
-    else if tok.toList.all isHexDigit then some (normalizeHexAddr tok)
+    else
+      let hexTok :=
+        if tok.startsWith "0x" || tok.startsWith "0X" then String.ofList (tok.toList.drop 2)
+        else tok
+      if !hexTok.isEmpty && hexTok.toList.all isHexDigit then some (normalizeHexAddr hexTok)
+      else none
+
+/-- Strips trailing comment annotations (`//` or `#`) from an operand string. -/
+private def stripTrailingComment (s : String) : String :=
+  let s1 := (s.splitOn "//").headD s
+  (s1.splitOn "#").headD s1
+
+private def splitWhitespace (s : String) : List String :=
+  let rec go (cs : List Char) (cur : List Char) (acc : List String) : List String :=
+    match cs with
+    | [] => (if cur.isEmpty then acc else String.ofList cur.reverse :: acc).reverse
+    | c :: rest =>
+      if c == ' ' || c == '\t' || c == '\r' || c == '\n' then
+        if cur.isEmpty then go rest [] acc
+        else go rest [] (String.ofList cur.reverse :: acc)
+      else
+        go rest (c :: cur) acc
+  go s.toList [] []
+
+/-- Parses the direct target symbol `<sym>` from call/jump operands only (ignoring comments). -/
+def parseTargetSymbol (args : String) : Option String :=
+  let clean := stripTrailingComment args
+  let toks := splitWhitespace clean
+  match toks with
+  | _ :: symTok :: _ =>
+    if symTok.startsWith "<" && symTok.endsWith ">" then
+      let cs := symTok.toList
+      let inner := String.ofList ((cs.drop 1).dropLast)
+      let base := (inner.splitOn "+").headD inner
+      if base.isEmpty then none else some base
+    else none
+  | _ => none
+
+/-- Extracts all `<sym>` tokens appearing in `args` before any comment marker. -/
+private def extractArgSymbols (args : String) : List String :=
+  let clean := stripTrailingComment args
+  let toks := splitWhitespace clean
+  toks.filterMap fun tok =>
+    if tok.startsWith "<" && tok.endsWith ">" then
+      let cs := tok.toList
+      let inner := String.ofList ((cs.drop 1).dropLast)
+      let base := (inner.splitOn "+").headD inner
+      if base.isEmpty then none else some base
     else none
 
-/-- Detects AVX-512 EVEX instructions from opcode and operand strings. -/
+private def isPlan9RegToken (tok : String) : Bool :=
+  match tok with
+  | "AX" | "BX" | "CX" | "DX" | "SI" | "DI" | "BP" | "SP" | "SB" | "FP"
+  | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15"
+  | "K0" | "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" => true
+  | _ =>
+    match tok.toList with
+    | p :: rest =>
+      if (p == 'X' || p == 'Y' || p == 'Z') && !rest.isEmpty && rest.all Char.isDigit then
+        match String.toNat? (String.ofList rest) with
+        | some n => n <= 31
+        | none => false
+      else false
+    | [] => false
+
+private def isPlan9Sep (c : Char) : Bool :=
+  c == ' ' || c == '\t' || c == ',' || c == '(' || c == ')' || c == '+' || c == '-' || c == '*'
+
+/-- Detects unparsed Go Plan 9 assembly syntax (bare registers without `%` prefix). -/
+def isPlan9Syntax (args : String) : Bool :=
+  let beforeSym := ((stripTrailingComment args).splitOn "<").headD ""
+  let toks := beforeSym.splitOn " "
+  let rec splitTokens (cs : List Char) (cur : List Char) (acc : List String) : List String :=
+    match cs with
+    | [] =>
+      if cur.isEmpty then acc else String.ofList cur.reverse :: acc
+    | c :: rest =>
+      if isPlan9Sep c then
+        if cur.isEmpty then splitTokens rest [] acc
+        else splitTokens rest [] (String.ofList cur.reverse :: acc)
+      else
+        splitTokens rest (c :: cur) acc
+  let _ := toks
+  (splitTokens beforeSym.toList [] []).any isPlan9RegToken
+
+/-- Detects AVX-512 EVEX instructions from opcode and operand strings (case-insensitive). -/
 def isEVEXInsn (op args : String) : Bool :=
-  hasSubstr args "%zmm" ||
-  hasOpmaskReg args ||
-  hasSubstr args "{1to" ||
-  hasSubstr args "{rn-" ||
-  hasSubstr args "{rz-" ||
-  hasSubstr args "{rd-" ||
-  hasSubstr args "{ru-" ||
-  hasSubstr args "{sae}" ||
-  op.startsWith "vpternlog" ||
-  op.startsWith "vpermi2" ||
-  op.startsWith "vpermt2" ||
-  op.startsWith "vcompress" ||
-  op.startsWith "vexpand"
+  let (opL, argsEff) := normalizeX86PrefixOpArgs op args
+  let argsL := argsEff.toLower
+  hasSubstr argsL "%zmm" ||
+  hasOpmaskReg argsL ||
+  hasHighSimdReg argsL ||
+  hasSubstr argsL "{1to" ||
+  hasSubstr argsL "{z}" ||
+  hasSubstr argsL "{rn-" ||
+  hasSubstr argsL "{rz-" ||
+  hasSubstr argsL "{rd-" ||
+  hasSubstr argsL "{ru-" ||
+  hasSubstr argsL "{sae}" ||
+  opL.startsWith "vpternlog" ||
+  opL.startsWith "vpermi2" ||
+  opL.startsWith "vpermt2" ||
+  opL.startsWith "vcompress" ||
+  opL.startsWith "vexpand" ||
+  opL.startsWith "vpblendm" ||
+  opL.startsWith "vmovdqu64" ||
+  opL.startsWith "vmovdqu32" ||
+  opL.startsWith "vmovdqa64" ||
+  opL.startsWith "vmovdqa32" ||
+  opL.startsWith "vpcmpq" ||
+  opL.startsWith "vpcmpuq" ||
+  opL.startsWith "vscalef" ||
+  opL.startsWith "vrcp14" ||
+  opL.startsWith "vrsqrt14" ||
+  opL.startsWith "vrndscale" ||
+  opL.startsWith "vfixupimm" ||
+  opL.startsWith "vfpclass" ||
+  opL.startsWith "vptestm" ||
+  opL.startsWith "vpmovm2" ||
+  opL.startsWith "vpmovq2m" ||
+  opL.startsWith "vpmovd2m"
 
 /-- Detects VEX 256-bit YMM instructions (excluding EVEX and vzeroupper/vzeroall). -/
 def isVEXYMMInsn (op args : String) : Bool :=
-  if isEVEXInsn op args then false
-  else if op == "vzeroupper" || op == "vzeroall" then false
-  else op.startsWith "v" && hasSubstr args "%ymm"
+  let (opL, argsEff) := normalizeX86PrefixOpArgs op args
+  let argsL := argsEff.toLower
+  if isEVEXInsn opL argsL then false
+  else if opL == "vzeroupper" || opL == "vzeroall" then false
+  else opL.startsWith "v" && hasSubstr argsL "%ymm"
 
 /-- Detects legacy non-VEX SSE instructions referencing `%xmm`. -/
 def isLegacySSEInsn (op args : String) : Bool :=
-  !op.startsWith "v" && hasSubstr args "%xmm"
+  let (opL, argsEff) := normalizeX86PrefixOpArgs op args
+  let argsL := argsEff.toLower
+  !opL.startsWith "v" && hasSubstr argsL "%xmm"
 
 /-- Detects instructions that dirty upper YMM/ZMM AVX state. -/
 def dirtiesUpperVector (op args : String) : Bool :=
-  if !op.startsWith "v" || op == "vzeroupper" || op == "vzeroall" then false
-  else hasSubstr args "%ymm" || hasSubstr args "%zmm" || isEVEXInsn op args
+  let (opL, argsEff) := normalizeX86PrefixOpArgs op args
+  let argsL := argsEff.toLower
+  if !opL.startsWith "v" || opL == "vzeroupper" || opL == "vzeroall" then false
+  else hasSubstr argsL "%ymm" || hasSubstr argsL "%zmm" || isEVEXInsn opL argsL
 
-/-- Detects non-returning runtime panic calls. -/
-def isNoreturnRuntimeCall (raw : String) : Bool :=
-  hasSubstr raw "runtime.panic" || hasSubstr raw "runtime.gopanic"
+/-- Detects return instructions (`ret`/`retq`) after stripping leading x86-64 prefixes. -/
+def isRetInsn (op args : String) : Bool :=
+  let (opL, _) := normalizeX86PrefixOpArgs op args
+  opL == "ret" || opL == "retq"
+
+/-- Detects non-returning runtime panic target symbols from parsed call operands only. -/
+def isNoreturnPanicSymbol (sym : String) : Bool :=
+  let s := sym.trimAscii.toString
+  s.startsWith "runtime.panic" || s.startsWith "runtime.gopanic"
+
+/-- Detects `runtime.morestack*` stack-split target symbols from parsed operands only. -/
+def isMorestackSymbol (sym : String) : Bool :=
+  sym.trimAscii.toString.startsWith "runtime.morestack"
+
+/-- Detects explicit AVX-512 CPU feature check symbols (`hasAVX512`/`x86HasAVX512`/`activeTier`). -/
+def isCpuFeatureSymbol (sym : String) : Bool :=
+  let s := sym.trimAscii.toString.toLower
+  hasSubstr s "hasavx512" || hasSubstr s "x86hasavx512" || hasSubstr s "activetier"
+
+/-- Detects non-returning runtime panic calls by inspecting only the parsed call target symbol. -/
+def isNoreturnRuntimeCall (args : String) : Bool :=
+  match parseTargetSymbol args with
+  | some sym => isNoreturnPanicSymbol sym
+  | none => false
 
 /-- Classified x86-64 disassembly instruction for CFG auditing. -/
 structure Amd64Insn where
@@ -96,6 +291,7 @@ structure Amd64Insn where
   op : String
   args : String
   raw : String := ""
+  isPlan9 : Bool := false
   isEVEX : Bool
   isVEXYMM : Bool
   isLegacySSE : Bool
@@ -108,31 +304,48 @@ structure Amd64Insn where
   isNoreturnPanic : Bool
   isUncondJmp : Bool
   isCondJmp : Bool
+  isCpuFeatureCheck : Bool := false
+  isFlagTestOrCmp : Bool := false
   hasHexJmpTarget : Bool
   jmpTargetIdx : Option Nat
   deriving DecidableEq, Repr, Inhabited
 
 /-- Constructs a classified `Amd64Insn` matching `cmd/goblin-optcheck/main.go`. -/
 def classifyAmd64Insn (addr op args raw : String) (jmpTargetIdx : Option Nat) : Amd64Insn :=
-  let uncond := op == "jmp" || op == "jmpq"
-  let cond := !uncond && op.startsWith "j"
+  let (opL, argsTrim) := normalizeX86PrefixOpArgs op args
+  let uncond := opL == "jmp" || opL == "jmpq"
+  let cond := !uncond && opL.startsWith "j"
+  let targetSym := parseTargetSymbol argsTrim
+  let morestack :=
+    match targetSym with
+    | some sym => isMorestackSymbol sym
+    | none => false
+  let noreturnPanic :=
+    match targetSym with
+    | some sym => isNoreturnPanicSymbol sym
+    | none => false
+  let cpuCheck := (extractArgSymbols argsTrim).any isCpuFeatureSymbol
+  let flagCmp := opL.startsWith "cmp" || opL.startsWith "test"
   { addr := normalizeHexAddr addr
-    op := op
-    args := args
+    op := opL
+    args := argsTrim
     raw := raw
-    isEVEX := isEVEXInsn op args
-    isVEXYMM := isVEXYMMInsn op args
-    isLegacySSE := isLegacySSEInsn op args
-    dirtiesUpper := dirtiesUpperVector op args
-    isVzeroupper := op == "vzeroupper" || op == "vzeroall"
-    isRet := op == "ret" || op == "retq"
-    isTrap := op == "ud2" || op == "int3"
-    isCall := op == "call" || op == "callq"
-    isMorestackCall := hasSubstr raw "runtime.morestack"
-    isNoreturnPanic := isNoreturnRuntimeCall raw
+    isPlan9 := isPlan9Syntax argsTrim
+    isEVEX := isEVEXInsn opL argsTrim
+    isVEXYMM := isVEXYMMInsn opL argsTrim
+    isLegacySSE := isLegacySSEInsn opL argsTrim
+    dirtiesUpper := dirtiesUpperVector opL argsTrim
+    isVzeroupper := opL == "vzeroupper" || opL == "vzeroall"
+    isRet := isRetInsn opL argsTrim
+    isTrap := opL == "ud2" || opL == "int3"
+    isCall := opL == "call" || opL == "callq"
+    isMorestackCall := morestack
+    isNoreturnPanic := noreturnPanic
     isUncondJmp := uncond
     isCondJmp := cond
-    hasHexJmpTarget := (parseJumpTargetHex args).isSome
+    isCpuFeatureCheck := cpuCheck
+    isFlagTestOrCmp := flagCmp
+    hasHexJmpTarget := (parseJumpTargetHex argsTrim).isSome
     jmpTargetIdx := jmpTargetIdx }
 
 /-- Disassembled function CFG for amd64 vector safety checking. -/
@@ -154,6 +367,9 @@ inductive VectorHazardKind where
   | legacySSEWhileDirty
   | dirtyRet
   | dirtyCall
+  | dirtyCondExtJmp
+  | dirtyFallOffEnd
+  | indirectOrUnresolvedJmp
   | unguardedEVEX
   | internalError (msg : String)
   deriving DecidableEq, Repr, Inhabited
@@ -176,15 +392,31 @@ structure VectorHazard where
 @[inline] def insnLegacySSEHazard (ins : Amd64Insn) (dirty : Bool) : Bool :=
   !ins.isVzeroupper && !ins.dirtiesUpper && dirty && ins.isLegacySSE
 
-/-- Hazard condition for exiting or calling external code with dirty upper vector state. -/
-@[inline] def insnDirtyExitOrCallHazard (ins : Amd64Insn) (dirty : Bool) :
+/-- Hazard condition for exiting, calling external code, indirect branching, or falling off end. -/
+@[inline] def insnDirtyExitOrCallHazard (ins : Amd64Insn) (isLast : Bool) (dirty : Bool) :
     Option VectorHazardKind :=
   let nd := nextDirty dirty ins
-  if ins.isRet && nd then some .dirtyRet
-  else if ins.isCall && !ins.isNoreturnPanic && nd && !ins.isMorestackCall then some .dirtyCall
-  else if ins.isUncondJmp && ins.jmpTargetIdx.isNone && ins.hasHexJmpTarget && nd &&
-      !ins.isMorestackCall then some .dirtyRet
-  else none
+  if ins.isRet then
+    if nd then some .dirtyRet else none
+  else if ins.isTrap then
+    none
+  else if ins.isCall then
+    if ins.isNoreturnPanic then none
+    else if nd && !ins.isMorestackCall then some .dirtyCall
+    else if isLast && nd then some .dirtyFallOffEnd
+    else none
+  else if ins.isUncondJmp then
+    if !ins.hasHexJmpTarget then some .indirectOrUnresolvedJmp
+    else if ins.jmpTargetIdx.isNone && nd && !ins.isMorestackCall then some .dirtyRet
+    else none
+  else if ins.isCondJmp then
+    if !ins.hasHexJmpTarget then some .indirectOrUnresolvedJmp
+    else if ins.jmpTargetIdx.isNone && nd && !ins.isMorestackCall then some .dirtyCondExtJmp
+    else if isLast && nd then some .dirtyFallOffEnd
+    else none
+  else
+    if isLast && nd then some .dirtyFallOffEnd
+    else none
 
 /-- Operational successor list of `(idx, dirty)` in `fn.insns`. -/
 def cfgSucc (fn : Amd64FuncCFG) (idx : Nat) (dirty : Bool) : List (Nat × Bool) :=
@@ -220,25 +452,57 @@ inductive CfgReachable (fn : Amd64FuncCFG) : Nat → Bool → Prop where
   | entry (hPos : 0 < fn.insns.size) : CfgReachable fn 0 false
   | step {i d i' d'} : CfgReachable fn i d → CfgStep fn i d i' d' → CfgReachable fn i' d'
 
-/-- Successor list along unguarded paths (stopping before conditional branches). -/
+/-- Returns true iff `fn.insns[idx]` is a conditional branch directly guarded by an
+explicit AVX-512 CPU feature check (`hasAVX512` / `x86HasAVX512` / `activeTier`). -/
+def isCpuFeatureGuardAt (fn : Amd64FuncCFG) (idx : Nat) : Bool :=
+  if h : idx < fn.insns.size then
+    let ins := fn.insns[idx]
+    if !ins.isCondJmp then false
+    else
+      let prev1 :=
+        if idx > 0 then
+          match fn.insns[idx - 1]? with
+          | some p1 => p1.isCpuFeatureCheck
+          | none => false
+        else false
+      let prev2 :=
+        if idx > 1 then
+          match fn.insns[idx - 2]?, fn.insns[idx - 1]? with
+          | some p2, some p1 => p2.isCpuFeatureCheck && p1.isFlagTestOrCmp
+          | _, _ => false
+        else false
+      prev1 || prev2
+  else false
+
+/-- Successor list along paths that do not cross an explicit AVX-512 CPU feature guard. -/
 def unguardedSucc (fn : Amd64FuncCFG) (idx : Nat) : List Nat :=
   if h : idx < fn.insns.size then
     let ins := fn.insns[idx]
-    if ins.isRet || ins.isTrap || ins.isCondJmp then []
+    if ins.isRet || ins.isTrap then []
+    else if ins.isCall then
+      if ins.isNoreturnPanic then []
+      else if idx + 1 < fn.insns.size then [idx + 1] else []
     else if ins.isUncondJmp then
       match ins.jmpTargetIdx with
       | some t => if t < fn.insns.size then [t] else []
       | none => []
+    else if ins.isCondJmp then
+      if isCpuFeatureGuardAt fn idx then []
+      else
+        let fall := if idx + 1 < fn.insns.size then [idx + 1] else []
+        match ins.jmpTargetIdx with
+        | some t => if t < fn.insns.size then t :: fall else fall
+        | none => fall
     else
       if idx + 1 < fn.insns.size then [idx + 1] else []
   else []
 
-/-- Single-step unguarded CFG transition before any conditional branch. -/
+/-- Single-step unguarded CFG transition not crossing an explicit AVX-512 CPU feature guard. -/
 inductive UnguardedStep (fn : Amd64FuncCFG) : Nat → Nat → Prop where
   | mk {idx idx' : Nat} (hLt : idx < fn.insns.size)
       (hMem : idx' ∈ unguardedSucc fn idx) : UnguardedStep fn idx idx'
 
-/-- Instructions reachable from entry without crossing any conditional branch. -/
+/-- Instructions reachable from entry without crossing an explicit AVX-512 CPU feature guard. -/
 inductive UnguardedReachable (fn : Amd64FuncCFG) : Nat → Prop where
   | entry (hPos : 0 < fn.insns.size) : UnguardedReachable fn 0
   | step {i i'} : UnguardedReachable fn i → UnguardedStep fn i i' → UnguardedReachable fn i'
@@ -306,7 +570,7 @@ private def scanEVEX (fn : Amd64FuncCFG) (seen : Array Bool) (i : Nat) : Bool :=
   else false
 termination_by fn.insns.size - i
 
-/-- Returns true iff an EVEX instruction is reachable before any conditional branch. -/
+/-- Returns true iff an EVEX instruction is reachable without crossing an explicit CPU feature guard. -/
 def checkUnguardedEVEX (fn : Amd64FuncCFG) : Bool :=
   let n := fn.insns.size
   if hPos : 0 < n then
@@ -320,11 +584,12 @@ private def checkStateHazard (fn : Amd64FuncCFG) (seen : Array Bool)
     (idx : Nat) (hIdx : idx < fn.insns.size) (dirty : Bool) : Except VectorHazard Unit :=
   let ins := fn.insns[idx]
   let insnStr := ins.op ++ " " ++ ins.args
+  let isLast := decide (idx + 1 = fn.insns.size)
   if seen[stateKey idx dirty]? == some true then
     if insnLegacySSEHazard ins dirty then
       .error (VectorHazard.mk fn.name ins.addr .legacySSEWhileDirty insnStr)
     else
-      match insnDirtyExitOrCallHazard ins dirty with
+      match insnDirtyExitOrCallHazard ins isLast dirty with
       | some hkKind =>
         .error (VectorHazard.mk fn.name ins.addr hkKind insnStr)
       | none => .ok ()
@@ -346,7 +611,9 @@ termination_by fn.insns.size - idx
 def checkVectorCFG (fn : Amd64FuncCFG) : Except VectorHazard Unit :=
   let n := fn.insns.size
   if hPos : 0 < n then
-    if !fn.isAVX512Name && checkUnguardedEVEX fn then
+    if fn.insns.any (·.isPlan9) then
+      .error (VectorHazard.mk fn.name fn.insns[0].addr (.internalError "unsupported Plan 9 syntax") fn.name)
+    else if !fn.isAVX512Name && checkUnguardedEVEX fn then
       .error (VectorHazard.mk fn.name fn.insns[0].addr .unguardedEVEX fn.name)
     else
       let initSeen := (Array.replicate (2 * n) false).set 0 true (by simp; omega)
@@ -356,7 +623,7 @@ def checkVectorCFG (fn : Amd64FuncCFG) : Except VectorHazard Unit :=
       | some seen =>
         checkReachableHazardsGo fn seen 0
   else
-    .ok ()
+    .error (VectorHazard.mk fn.name "" (.internalError "empty function") fn.name)
 
 /-! ### Soundness Proofs Over Operational CFG Semantics -/
 
@@ -671,13 +938,36 @@ private theorem unguardedSucc_lt (fn : Amd64FuncCFG) (idx idx' : Nat)
     · simp at hMem
     · split at hMem
       · split at hMem
+        · simp at hMem
         · split at hMem
           · simp at hMem; omega
           · simp at hMem
-        · simp at hMem
       · split at hMem
-        · simp at hMem; omega
-        · simp at hMem
+        · split at hMem
+          · split at hMem
+            · simp at hMem; omega
+            · simp at hMem
+          · simp at hMem
+        · split at hMem
+          · split at hMem
+            · simp at hMem
+            · split at hMem
+              · split at hMem
+                · simp only [List.mem_cons] at hMem
+                  rcases hMem with hEq | hFall
+                  · cases hEq; assumption
+                  · split at hFall
+                    · simp at hFall; omega
+                    · simp at hFall
+                · split at hMem
+                  · simp at hMem; omega
+                  · simp at hMem
+              · split at hMem
+                · simp at hMem; omega
+                · simp at hMem
+          · split at hMem
+            · simp at hMem; omega
+            · simp at hMem
   · simp at hMem
 
 private def UnguardedBfsInv (fn : Amd64FuncCFG) (seen : Array Bool) (queue : List Nat) : Prop :=
@@ -758,7 +1048,7 @@ private theorem checkReachableHazardsGo_sound (fn : Amd64FuncCFG) (seen : Array 
     (hLe : start ≤ idx) (hIdx : idx < fn.insns.size)
     (hv : seen[stateKey idx dirty]? = some true) :
     insnLegacySSEHazard fn.insns[idx] dirty = false ∧
-    insnDirtyExitOrCallHazard fn.insns[idx] dirty = none := by
+    insnDirtyExitOrCallHazard fn.insns[idx] (decide (idx + 1 = fn.insns.size)) dirty = none := by
   unfold checkReachableHazardsGo at hOk
   split at hOk
   · next hStart =>
@@ -797,19 +1087,28 @@ private theorem checkReachableHazardsGo_sound (fn : Amd64FuncCFG) (seen : Array 
 termination_by fn.insns.size - start
 
 /-- Soundness theorem for `checkVectorCFG`:
-If `checkVectorCFG fn = .ok ()`, then for every state `(idx, dirty)` reachable from `(0, false)`:
+If `checkVectorCFG fn = .ok ()`, then `fn` is non-empty, contains no unparsed Plan 9 syntax,
+and for every state `(idx, dirty)` reachable from `(0, false)`:
 (a) no legacy SSE instruction executes while `dirty = true`,
-(b) every `ret`/`retq`, non-morestack `call`/`callq`, and external `jmp` exits/calls with `nextDirty = false`, and
-(c) if `!fn.isAVX512Name`, no EVEX instruction is reachable along any unguarded path from entry. -/
+(b) no reachable `jmp` or `jcc` is indirect or lacks a direct hexadecimal target,
+(c) every `ret`/`retq`/`rep ret`/`repz ret`, non-morestack/non-panic `call`, external `jmp`,
+    external `jcc`, and fall-off-end instruction exits with `nextDirty = false`, and
+(d) if `!fn.isAVX512Name`, no EVEX instruction is reachable without crossing an explicit
+    AVX-512 CPU feature check (`hasAVX512`/`x86HasAVX512`/`activeTier`). -/
 theorem checkVectorCFG_sound (fn : Amd64FuncCFG) (hOk : checkVectorCFG fn = .ok ()) :
+    0 < fn.insns.size ∧
+    fn.insns.any (·.isPlan9) = false ∧
     (∀ idx dirty, CfgReachable fn idx dirty → ∀ (hIdx : idx < fn.insns.size),
       insnLegacySSEHazard fn.insns[idx] dirty = false ∧
+      insnDirtyExitOrCallHazard fn.insns[idx] (decide (idx + 1 = fn.insns.size)) dirty = none ∧
       (fn.insns[idx].isRet = true → nextDirty dirty fn.insns[idx] = false) ∧
-      (fn.insns[idx].isCall = true → fn.insns[idx].isNoreturnPanic = false →
-        fn.insns[idx].isMorestackCall = false → nextDirty dirty fn.insns[idx] = false) ∧
-      (fn.insns[idx].isUncondJmp = true → fn.insns[idx].jmpTargetIdx = none →
-        fn.insns[idx].hasHexJmpTarget = true → fn.insns[idx].isMorestackCall = false →
-        nextDirty dirty fn.insns[idx] = false)) ∧
+      (fn.insns[idx].isUncondJmp = true → fn.insns[idx].isRet = false → fn.insns[idx].isTrap = false →
+        fn.insns[idx].isCall = false → fn.insns[idx].hasHexJmpTarget = true) ∧
+      (fn.insns[idx].isCondJmp = true → fn.insns[idx].isRet = false → fn.insns[idx].isTrap = false →
+        fn.insns[idx].isCall = false → fn.insns[idx].isUncondJmp = false →
+        fn.insns[idx].hasHexJmpTarget = true ∧
+        (fn.insns[idx].jmpTargetIdx = none → fn.insns[idx].isMorestackCall = false →
+          nextDirty dirty fn.insns[idx] = false))) ∧
     (fn.isAVX512Name = false →
       checkUnguardedEVEX fn = false ∧
       ∀ idx, UnguardedReachable fn idx → ∀ (hIdx : idx < fn.insns.size),
@@ -818,6 +1117,11 @@ theorem checkVectorCFG_sound (fn : Amd64FuncCFG) (hOk : checkVectorCFG fn = .ok 
   dsimp only at hOk
   split at hOk
   · next hPos =>
+    have hNotPlan9 : fn.insns.any (·.isPlan9) = false := by
+      by_cases hP : fn.insns.any (·.isPlan9) = true
+      · simp [hP] at hOk
+      · simp only [Bool.not_eq_true] at hP; exact hP
+    simp only [hNotPlan9, Bool.false_eq_true, ↓reduceIte] at hOk
     have hUnguardedFalse : fn.isAVX512Name = false → checkUnguardedEVEX fn = false := by
       intro hNot512
       by_cases hU : checkUnguardedEVEX fn = true
@@ -862,42 +1166,41 @@ theorem checkVectorCFG_sound (fn : Amd64FuncCFG) (hOk : checkVectorCFG fn = .ok 
               cases hv
       have hMain : ∀ idx dirty (hReach : CfgReachable fn idx dirty) (hIdx : idx < fn.insns.size),
           insnLegacySSEHazard fn.insns[idx] dirty = false ∧
+          insnDirtyExitOrCallHazard fn.insns[idx] (decide (idx + 1 = fn.insns.size)) dirty = none ∧
           (fn.insns[idx].isRet = true → nextDirty dirty fn.insns[idx] = false) ∧
-          (fn.insns[idx].isCall = true → fn.insns[idx].isNoreturnPanic = false →
-            fn.insns[idx].isMorestackCall = false → nextDirty dirty fn.insns[idx] = false) ∧
-          (fn.insns[idx].isUncondJmp = true → fn.insns[idx].jmpTargetIdx = none →
-            fn.insns[idx].hasHexJmpTarget = true → fn.insns[idx].isMorestackCall = false →
-            nextDirty dirty fn.insns[idx] = false) := by
+          (fn.insns[idx].isUncondJmp = true → fn.insns[idx].isRet = false → fn.insns[idx].isTrap = false →
+            fn.insns[idx].isCall = false → fn.insns[idx].hasHexJmpTarget = true) ∧
+          (fn.insns[idx].isCondJmp = true → fn.insns[idx].isRet = false → fn.insns[idx].isTrap = false →
+            fn.insns[idx].isCall = false → fn.insns[idx].isUncondJmp = false →
+            fn.insns[idx].hasHexJmpTarget = true ∧
+            (fn.insns[idx].jmpTargetIdx = none → fn.insns[idx].isMorestackCall = false →
+              nextDirty dirty fn.insns[idx] = false)) := by
         intro idx dirty hReach hIdx
         have hCov := bfsLoop_covers_reachable fn _ initSeen [(0, false)] seen hInitInv hBfs' hReach
         have hGo := checkReachableHazardsGo_sound fn seen 0 idx dirty hOk (Nat.zero_le idx) hIdx hCov.2
-        refine ⟨hGo.1, ?_, ?_, ?_⟩
+        refine ⟨hGo.1, hGo.2, ?_, ?_, ?_⟩
         · intro hRet
           have hNone := hGo.2
           unfold insnDirtyExitOrCallHazard at hNone
-          by_cases hNd : nextDirty dirty fn.insns[idx] = true
-          · simp [hRet, hNd] at hNone
-          · cases h : nextDirty dirty fn.insns[idx] <;> simp_all
-        · intro hCall hNotP hNotM
+          simp only [hRet, ↓reduceIte] at hNone
+          cases hNd : nextDirty dirty fn.insns[idx] <;> simp_all
+        · intro hUncond hNotRet hNotTrap hNotCall
           have hNone := hGo.2
           unfold insnDirtyExitOrCallHazard at hNone
-          by_cases hNd : nextDirty dirty fn.insns[idx] = true
-          · simp only [hCall, hNotP, hNotM, hNd, Bool.not_false, Bool.and_true, ↓reduceIte] at hNone
-            split at hNone <;> simp at hNone
-          · cases h : nextDirty dirty fn.insns[idx] <;> simp_all
-        · intro hUncond hJmpNone hHasHex hNotM
+          simp only [hNotRet, hNotTrap, hNotCall, hUncond, Bool.false_eq_true, ↓reduceIte] at hNone
+          cases hHex : fn.insns[idx].hasHexJmpTarget <;> simp_all
+        · intro hCond hNotRet hNotTrap hNotCall hNotUncond
           have hNone := hGo.2
           unfold insnDirtyExitOrCallHazard at hNone
-          by_cases hNd : nextDirty dirty fn.insns[idx] = true
-          · simp only [hUncond, hJmpNone, hHasHex, hNotM, hNd, Option.isNone_none,
-              Bool.not_false, Bool.and_true] at hNone
-            split at hNone
-            · simp at hNone
-            · split at hNone
-              · simp at hNone
-              · simp at hNone
-          · cases h : nextDirty dirty fn.insns[idx] <;> simp_all
-      refine ⟨hMain, ?_⟩
+          simp only [hNotRet, hNotTrap, hNotCall, hNotUncond, hCond, Bool.false_eq_true, ↓reduceIte] at hNone
+          have hHex : fn.insns[idx].hasHexJmpTarget = true := by
+            cases hH : fn.insns[idx].hasHexJmpTarget <;> simp_all
+          refine ⟨hHex, ?_⟩
+          intro hTgtNone hNotM
+          simp only [hHex, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hTgtNone, Option.isNone_none,
+            hNotM, Bool.not_false, Bool.true_and, Bool.and_true] at hNone
+          cases hNd : nextDirty dirty fn.insns[idx] <;> simp_all
+      refine ⟨hPos, hNotPlan9, hMain, ?_⟩
       intro hNot512
       have hUFalse := hUnguardedFalse hNot512
       refine ⟨hUFalse, ?_⟩
@@ -930,12 +1233,6 @@ theorem checkVectorCFG_sound (fn : Amd64FuncCFG) (hOk : checkVectorCFG fn = .ok 
                 cases hv
         have hUCov := unguardedBfsLoop_covers_reachable fn _ initU [0] uSeen hUInv hUBfs' hUReach
         exact scanEVEX_false_imp hUFalse (Nat.zero_le idx) hIdx hUCov.2
-  · next hNotPos =>
-    have hEmpty : fn.insns.size = 0 := Nat.eq_zero_of_not_pos hNotPos
-    constructor
-    · intro idx _ _ hIdx; omega
-    · intro _; constructor
-      · unfold checkUnguardedEVEX; simp [hNotPos]
-      · intro idx _ hIdx; omega
+  · simp at hOk
 
 end GoblinFormal.Track5C

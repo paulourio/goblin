@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -35,14 +36,135 @@ RE_LEAN_CHUNK_WORDS = re.compile(
 )
 RE_HEX_WORD = re.compile(r"0x[0-9a-fA-F]+")
 
+# Fail-closed allow-list matching Track5B.allowedZeroGCSyms.
+ALLOWED_ZEROGC_SYMS: frozenset[str] = frozenset(
+    {
+        "runtime.panicBounds",
+        "runtime.panicdivide",
+        "runtime.morestack_noctxt.abi0",
+        "runtime.memclrNoHeapPointers",
+        "runtime.selectnbrecv",
+        "math.Float64bits",
+        "math.IsInf",
+        "math.Nextafter",
+        "internal/simd.InitReducedRow64",
+        "internal/simd.ScanNearTightMatrix64Scalar",
+        "internal/simd.ScanNearTightRow64Scalar",
+        "assign.twoSumAssign",
+        "assign.exactReducedCost",
+        "assign.refillQueueIndirectScalar",
+        "assign.relaxRowIndirectScalar",
+        "assign.scanCancelRowsFallback",
+        "assign.buildCancelEdgesFallback",
+        "assign.projectCancelViolFallback",
+    }
+)
+
+# Internal fallback callees invoked from Track 5D hasPotentialCancellation (A4).
+FALLBACK_CALLEES: tuple[str, ...] = (
+    "assign.scanCancelRowsFallback",
+    "assign.buildCancelEdgesFallback",
+    "assign.projectCancelViolFallback",
+    "internal/simd.ScanNearTightMatrix64Scalar",
+    "internal/simd.ScanNearTightRow64Scalar",
+)
+
+# Expected 64-bit .rodata constants for every ADRP+LDR pair across verified routines (A15).
+EXPECTED_RODATA_CONSTANTS: dict[str, dict[int, int]] = {
+    "hasInfeasibleIntegerEqRow": {
+        25: 0x3E7AD7F29ABCAF48,  # 1e-7
+        43: 0x3E7AD7F29ABCAF48,  # 1e-7
+        70: 0x41CDCD6500000000,  # 1e9
+        79: 0x41CDCD6500000000,  # 1e9
+        82: 0x41CDCD6500000000,  # 1e9
+        92: 0x43D0000000000000,  # 2^62
+        96: 0x3EB0C6F7A0B5ED8D,  # 1e-6
+        112: 0x41CDCD6500000000,  # 1e9
+        115: 0x41CDCD6500000000,  # 1e9
+        118: 0x41CDCD6500000000,  # 1e9
+        120: 0x3E7AD7F29ABCAF48,  # 1e-7
+    },
+    "augmentRowScalar": {
+        62: 0x7FF0000000000000,  # +Inf
+    },
+    "initReducedRow64": {
+        19: 0x7FF0000000000000,  # +Inf
+        21: 0x7FF0000000000000,  # +Inf
+        23: 0x7FF0000000000000,  # +Inf
+        25: 0x7FF0000000000000,  # +Inf
+        29: 0x7FF0000000000000,  # +Inf
+    },
+    "refillQueueIndirectScalar": {
+        134: 0x7FEFFFFFFFFFFFFF,  # +MaxFloat64
+    },
+    "clampFinite": {
+        1: 0x7FEFFFFFFFFFFFFF,  # +MaxFloat64
+        5: 0xFFEFFFFFFFFFFFFF,  # -MaxFloat64
+    },
+    "exactReducedCost": {
+        33: 0x7FEFFFFFFFFFFFFF,  # +MaxFloat64
+    },
+    "hasPotentialCancellation": {
+        32: 0x7FEFFFFFFFFFFFFF,
+        36: 0x7F70000000000000,
+        131: 0x3CF0800000000000,
+        168: 0x7FEFFFFFFFFFFFFF,
+        172: 0x7F70000000000000,
+        213: 0x4130000000000000,
+        219: 0x3CE0000000000000,
+        253: 0x3FF0000000000010,
+        302: 0x4050000000000000,
+        305: 0x0000000000000001,  # SmallestNonzeroFloat64
+        309: 0x7FEFFFFFFFFFFFFF,
+        337: 0x3CF0000000000000,
+        340: 0x0000000000000008,  # 8 * SmallestNonzeroFloat64
+        342: 0x3FF0000000000020,
+        348: 0x7FB0000000000000,
+        510: 0x3CF0000000000000,
+        515: 0x0000000000000001,  # SmallestNonzeroFloat64
+        519: 0x7FEFFFFFFFFFFFFF,
+        531: 0x0000000000000004,  # 4 * SmallestNonzeroFloat64
+        533: 0x3FF0000000000010,
+        774: 0x7FEFFFFFFFFFFFFF,
+        778: 0x7FEFFFFFFFFFFFFF,
+        781: 0xFFEFFFFFFFFFFFFF,
+        785: 0xFFEFFFFFFFFFFFFF,
+        790: 0x7FEFFFFFFFFFFFFF,
+        846: 0xFFF0000000000000,  # -Inf
+        849: 0x7FEFFFFFFFFFFFFF,
+        853: 0x7FEFFFFFFFFFFFFF,
+        856: 0xFFEFFFFFFFFFFFFF,
+        860: 0xFFEFFFFFFFFFFFFF,
+        1066: 0x3C30000000000000,
+        1071: 0x3FF0000000000010,
+        1075: 0x3FF0000000000010,
+        1077: 0x3C30000000000000,
+        1146: 0x3CE0000000000000,
+        1318: 0x7FF0000000000000,  # +Inf
+    },
+}
+
+# Expected static symbol names for every ADRP+ADD pair across verified routines (A15).
+EXPECTED_DATA_SYMBOLS: dict[str, dict[int, str]] = {
+    "augmentRowScalar": {
+        75: "assign.ErrInfeasible",
+        222: "assign.errContextCanceled",
+    },
+    "refillQueueIndirectScalar": {
+        29: "assign.ErrInfeasible",
+        171: "assign.ErrInfeasible",
+    },
+}
+
 
 @dataclass(frozen=True)
 class RoutineBinary:
-    """Extracted AArch64 instruction words and external branch targets."""
+    """Extracted AArch64 instruction words, external branch targets, and addresses."""
 
     symbol: str
     words: tuple[int, ...]
     targets: dict[int, str]
+    addrs: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,7 +299,7 @@ def is_supported_arm64_word(word: int) -> bool:
         return True
     if (word & 0x1FE00800) == 0x1A800000:
         return ((word >> 30) & 1) == 0 and ((word >> 29) & 1) == 0
-    if (word & 0x5FE00000) == 0x1AC00000:
+    if (word & 0x7FE00000) == 0x1AC00000:
         return ((word >> 10) & 0x3F) in (2, 3)
     if (word & 0x7FE00000) == 0x1B000000:
         return True
@@ -219,8 +341,8 @@ def is_supported_arm64_word(word: int) -> bool:
         if is64 and rmode == 3 and opcode == 0:
             return True
         return is64 and rmode == 0 and opcode in (2, 6, 7)
-    # Track5D scalar binary64 extensions: FMADDD/FMSUBD and FMOVD $imm8.
-    if (word & 0xFFE00000) == 0x1F400000:
+    # Track5D scalar binary64 extensions: FMADDD/FMSUBD/FNMADDD/FNMSUBD and FMOVD $imm8.
+    if (word & 0xFFC00000) == 0x1F400000:
         return True
     return (word & 0xFFE01FE0) == 0x1E601000
 
@@ -294,10 +416,10 @@ def normalize_arm64_routine(
 def build_arm64_test_elf(
     repo_root: Path, out_elf: Path, go_pkg: str, noinline: bool
 ) -> None:
-    """Compile a static Linux arm64 test ELF binary for `go_pkg`."""
+    """Compile a static Linux arm64 test ELF binary for `go_pkg` with `-trimpath`."""
     env = os.environ.copy()
     env.update({"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"})
-    cmd = ["go", "test", "-c"]
+    cmd = ["go", "test", "-c", "-trimpath"]
     if noinline:
         cmd.append("-gcflags=-l")
     cmd.extend(["-o", str(out_elf), go_pkg])
@@ -312,6 +434,197 @@ def build_arm64_test_elf(
     if proc.returncode != 0:
         msg = f"command {' '.join(cmd)} failed:\n{proc.stderr}\n{proc.stdout}"
         raise RuntimeError(msg)
+
+
+def parse_elf64_sections(data: bytes) -> dict[str, tuple[int, int, int]]:
+    """Parse little-endian ELF64 section headers into name -> (vaddr, offset, size)."""
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        msg = "expected little-endian ELF64 binary"
+        raise ValueError(msg)
+    e_shoff = struct.unpack_from("<Q", data, 40)[0]
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", data, 58)
+    raw_secs: list[tuple[int, int, int, int]] = []
+    for i in range(e_shnum):
+        off = e_shoff + i * e_shentsize
+        sh_name, _sh_type, _sh_flags, sh_addr, sh_offset, sh_size = struct.unpack_from(
+            "<IIQQQQ", data, off
+        )
+        raw_secs.append((sh_name, sh_addr, sh_offset, sh_size))
+    str_off = raw_secs[e_shstrndx][2]
+    sections: dict[str, tuple[int, int, int]] = {}
+    for sh_name, sh_addr, sh_offset, sh_size in raw_secs:
+        end = data.find(b"\x00", str_off + sh_name)
+        name = data[str_off + sh_name : end].decode("utf-8", errors="replace")
+        sections[name] = (sh_addr, sh_offset, sh_size)
+    return sections
+
+
+def read_elf64_u64(
+    data: bytes, sections: dict[str, tuple[int, int, int]], vaddr: int
+) -> tuple[str, int]:
+    """Read an 8-byte little-endian word at virtual address `vaddr` from the ELF."""
+    for name, (sh_addr, sh_offset, sh_size) in sections.items():
+        if sh_addr != 0 and sh_addr <= vaddr and vaddr + 8 <= sh_addr + sh_size:
+            off = sh_offset + (vaddr - sh_addr)
+            return name, struct.unpack_from("<Q", data, off)[0]
+    msg = f"virtual address 0x{vaddr:x} not mapped in any ELF section"
+    raise ValueError(msg)
+
+
+def parse_elf_nm_symbols(
+    repo_root: Path, elf_path: Path, module_path: str
+) -> dict[int, list[str]]:
+    """Map ELF virtual addresses to module-stripped symbol names via `go tool nm`."""
+    proc = subprocess.run(
+        ["go", "tool", "nm", str(elf_path)],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        msg = f"go tool nm failed on {elf_path}:\n{proc.stderr}"
+        raise RuntimeError(msg)
+    by_addr: dict[int, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            addr = int(parts[0], 16)
+        except ValueError:
+            continue
+        by_addr.setdefault(addr, []).append(strip_module_prefixes(parts[2], module_path))
+    return by_addr
+
+
+def verify_adrp_targets(
+    lean_prefix: str,
+    routine: RoutineBinary,
+    elf_bytes: bytes,
+    sections: dict[str, tuple[int, int, int]],
+    nm_by_addr: dict[int, list[str]],
+) -> tuple[int, int]:
+    """Verify every ADRP+LDR .rodata constant and ADRP+ADD symbol target (A15)."""
+    if len(routine.addrs) != len(routine.words):
+        msg = f"{routine.symbol}: missing instruction addresses for ADRP verification"
+        raise ValueError(msg)
+
+    actual_rodata: dict[int, int] = {}
+    actual_data_syms: dict[int, list[str]] = {}
+
+    for idx in range(1, len(routine.words)):
+        w_prev = routine.words[idx - 1]
+        if (w_prev & 0x9F000000) != 0x90000000:
+            continue
+        rd_prev = w_prev & 0x1F
+        immlo = (w_prev >> 29) & 0x3
+        immhi = (w_prev >> 5) & 0x7FFFF
+        imm_pages = sign_extend((immhi << 2) | immlo, 21)
+        page = (routine.addrs[idx - 1] & ~0xFFF) + (imm_pages << 12)
+
+        w_cur = routine.words[idx]
+        rn_cur = (w_cur >> 5) & 0x1F
+        if rn_cur != rd_prev:
+            continue
+
+        if (w_cur & 0x3B000000) == 0x39000000:
+            size = (w_cur >> 30) & 0x3
+            opc = (w_cur >> 22) & 0x3
+            if size == 3 and opc == 1:
+                imm12 = ((w_cur >> 10) & 0xFFF) << 3
+                vaddr = page + imm12
+                sec_name, val = read_elf64_u64(elf_bytes, sections, vaddr)
+                if sec_name != ".rodata":
+                    msg = (
+                        f"{lean_prefix}[{idx}]: ADRP+LDR resolves to section "
+                        f"'{sec_name}' (expected '.rodata')"
+                    )
+                    raise ValueError(msg)
+                # Cross-check Go's $f64.<hex> symbol name whenever present at vaddr.
+                for sym_name in nm_by_addr.get(vaddr, ()):
+                    if sym_name.startswith("$f64."):
+                        sym_hex = int(sym_name[5:], 16)
+                        if sym_hex != val:
+                            msg = (
+                                f"{lean_prefix}[{idx}]: .rodata value 0x{val:016x} "
+                                f"disagrees with symbol {sym_name}"
+                            )
+                            raise ValueError(msg)
+                actual_rodata[idx] = val
+        elif (w_cur & 0x1F800000) == 0x11000000:
+            is64 = ((w_cur >> 31) & 1) == 1
+            is_sub = ((w_cur >> 30) & 1) == 1
+            set_flags = ((w_cur >> 29) & 1) == 1
+            if is64 and not is_sub and not set_flags:
+                shift = (w_cur >> 22) & 0x3
+                imm12 = ((w_cur >> 10) & 0xFFF) << (12 if shift == 1 else 0)
+                vaddr = page + imm12
+                actual_data_syms[idx] = nm_by_addr.get(vaddr, [])
+
+    expected_rodata = EXPECTED_RODATA_CONSTANTS.get(lean_prefix, {})
+    if actual_rodata != expected_rodata:
+        msg = (
+            f"{lean_prefix}: .rodata constant mismatch on ADRP+LDR pairs:\n"
+            f"  expected={ {k: hex(v) for k, v in sorted(expected_rodata.items())} }\n"
+            f"  actual  ={ {k: hex(v) for k, v in sorted(actual_rodata.items())} }"
+        )
+        raise ValueError(msg)
+
+    expected_syms = EXPECTED_DATA_SYMBOLS.get(lean_prefix, {})
+    if set(actual_data_syms) != set(expected_syms):
+        msg = (
+            f"{lean_prefix}: ADRP+ADD symbol indices mismatch: "
+            f"expected={sorted(expected_syms)}, actual={sorted(actual_data_syms)}"
+        )
+        raise ValueError(msg)
+    for idx, want_sym in expected_syms.items():
+        got_syms = actual_data_syms[idx]
+        if want_sym not in got_syms:
+            msg = (
+                f"{lean_prefix}[{idx}]: ADRP+ADD resolved to {got_syms}, "
+                f"expected '{want_sym}'"
+            )
+            raise ValueError(msg)
+
+    return len(actual_rodata), len(actual_data_syms)
+
+
+def verify_fallback_callees(
+    repo_root: Path, elf_path: Path, module_path: str
+) -> None:
+    """Verify internal fallback callees have zero allocating runtime calls (A4)."""
+    sym_regex = "|".join(re.escape(s.rsplit(".", maxsplit=1)[-1]) for s in FALLBACK_CALLEES)
+    routines = extract_routines_objdump(repo_root, elf_path, sym_regex, module_path)
+    for sym in FALLBACK_CALLEES:
+        if sym not in routines:
+            msg = f"fallback callee '{sym}' missing from arm64 ./assign ELF"
+            raise KeyError(msg)
+        routine = routines[sym]
+        for idx, word in enumerate(routine.words):
+            if not is_supported_arm64_word(word):
+                msg = (
+                    f"fallback callee {sym}[{idx}]: unsupported ARM64 word "
+                    f"0x{word:08x}"
+                )
+                raise ValueError(msg)
+            if (word & 0xFFFFFC1F) == 0xD65F0000 and ((word >> 5) & 0x1F) != 30:
+                msg = (
+                    f"fallback callee {sym}[{idx}]: non-X30 RET instruction "
+                    f"0x{word:08x}"
+                )
+                raise ValueError(msg)
+        for idx, tgt in sorted(routine.targets.items()):
+            if tgt not in ALLOWED_ZEROGC_SYMS:
+                msg = (
+                    f"fallback callee {sym}[{idx}]: forbidden/non-allowlisted "
+                    f"external call target '{tgt}'"
+                )
+                raise ValueError(msg)
+        print(
+            f"VERIFIED fallback callee {sym} "
+            f"({len(routine.words)} insns, {len(routine.targets)} ext relocs, ZeroGC allow-list clean)"
+        )
 
 
 def extract_routines_objdump(
@@ -332,7 +645,7 @@ def extract_routines_objdump(
         msg = f"go tool objdump failed on {elf_path}:\n{proc.stderr}"
         raise RuntimeError(msg)
 
-    raw_blocks: dict[str, list[tuple[int, str]]] = {}
+    raw_blocks: dict[str, list[tuple[int, int, str]]] = {}
     cur_sym: str | None = None
 
     for line in proc.stdout.splitlines():
@@ -347,22 +660,24 @@ def extract_routines_objdump(
             continue
         m_insn = RE_OBJDUMP_INSN.match(line)
         if m_insn is not None:
+            addr = int(m_insn.group(1), 16)
             word = int(m_insn.group(2), 16)
             disasm = m_insn.group(3).strip()
-            raw_blocks[cur_sym].append((word, disasm))
+            raw_blocks[cur_sym].append((addr, word, disasm))
 
     extracted: dict[str, RoutineBinary] = {}
     for sym_name, rows in raw_blocks.items():
         trimmed = list(rows)
-        while trimmed and trimmed[-1][0] == 0:
+        while trimmed and trimmed[-1][1] == 0:
             trimmed.pop()
         if not trimmed:
             continue
-        words = tuple(w for w, _ in trimmed)
+        addrs = tuple(a for a, _, _ in trimmed)
+        words = tuple(w for _, w, _ in trimmed)
         n_words = len(words)
         targets: dict[int, str] = {}
 
-        for idx, (word, disasm) in enumerate(trimmed):
+        for idx, (_addr, word, disasm) in enumerate(trimmed):
             top = word & 0xFC000000
             if top not in (0x14000000, 0x94000000):
                 continue
@@ -383,6 +698,7 @@ def extract_routines_objdump(
             symbol=sym_name,
             words=words,
             targets=targets,
+            addrs=addrs,
         )
 
     return extracted
@@ -522,6 +838,7 @@ def verify_all_tracks(repo_root: Path) -> None:
         build_groups.setdefault((spec.go_pkg, spec.noinline), []).append(spec)
 
     live_extracted: dict[tuple[str, bool, str], RoutineBinary] = {}
+    adrp_counts: dict[str, tuple[int, int]] = {}
     with tempfile.TemporaryDirectory(prefix="track5_elf_") as tmp_dir:
         tmp_path = Path(tmp_dir)
         for idx, ((go_pkg, noinline), specs) in enumerate(build_groups.items()):
@@ -534,6 +851,9 @@ def verify_all_tracks(repo_root: Path) -> None:
             routines = extract_routines_objdump(
                 repo_root, elf_path, sym_regex, module_path
             )
+            elf_bytes = elf_path.read_bytes()
+            sections = parse_elf64_sections(elf_bytes)
+            nm_by_addr = parse_elf_nm_symbols(repo_root, elf_path, module_path)
             for spec in specs:
                 if spec.go_symbol not in routines:
                     msg = (
@@ -541,9 +861,13 @@ def verify_all_tracks(repo_root: Path) -> None:
                         f"for package '{go_pkg}' (noinline={noinline})"
                     )
                     raise KeyError(msg)
-                live_extracted[(go_pkg, noinline, spec.go_symbol)] = routines[
-                    spec.go_symbol
-                ]
+                live_routine = routines[spec.go_symbol]
+                live_extracted[(go_pkg, noinline, spec.go_symbol)] = live_routine
+                adrp_counts[spec.lean_prefix] = verify_adrp_targets(
+                    spec.lean_prefix, live_routine, elf_bytes, sections, nm_by_addr
+                )
+            if go_pkg == "./assign" and not noinline:
+                verify_fallback_callees(repo_root, elf_path, module_path)
 
     verified_count = 0
     for spec in VERIFY_SPECS:
@@ -585,11 +909,12 @@ def verify_all_tracks(repo_root: Path) -> None:
                     )
                     raise ValueError(msg)
 
+        n_rodata, n_data = adrp_counts[spec.lean_prefix]
         verified_count += 1
         print(
             f"VERIFIED {spec.track_file}::{spec.lean_prefix} "
             f"<- {spec.go_symbol} ({len(live.words)} insns, "
-            f"{len(live.targets)} ext relocs)"
+            f"{len(live.targets)} ext relocs, {n_rodata} rodata consts, {n_data} data syms)"
         )
 
     print(f"ALL {verified_count} Track 5A/5B/5D arm64 ELF routines verified cleanly.")

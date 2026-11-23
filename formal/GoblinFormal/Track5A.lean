@@ -5,7 +5,6 @@ canonicalFloatBits, divCeilInt64, and gcdInt64.
 -/
 
 import GoblinFormal.Common.Basic
-import Std.Tactic.BVDecide
 
 namespace GoblinFormal.Track5A
 
@@ -16,6 +15,7 @@ inductive ExecStatus where
   | trapMorestack
   | trapPanicBounds
   | trapPanicDivide
+  | trapIllegal
   | callExternal (target : String)
   deriving DecidableEq, Repr, Inhabited
 
@@ -258,7 +258,7 @@ def decodeArm64Word (word : UInt32) : Arm64Insn :=
     if op == 0 && s == 0 then
       .condSel is64 (o2 == 1) cond rd rn rm
     else .unknown word
-  else if (w &&& 0x5fe00000) == 0x1ac00000 then
+  else if (w &&& 0x7fe00000) == 0x1ac00000 then
     let opcode := (w >>> 10) &&& 0x3f
     if opcode == 3 then .div is64 true rd rn rm
     else if opcode == 2 then .div is64 false rd rn rm
@@ -433,7 +433,7 @@ def evalCond (c : Arm64Cond) (f : NZCV) : Bool :=
   | .al => true
   | .nv => true
 
-/-- Compute AArch64 subtraction flags (`lhs - rhs`). -/
+/-- Compute AArch64 64-bit subtraction flags (`lhs - rhs`). -/
 def subFlags64 (lhs rhs : BitVec 64) : NZCV :=
   let res := lhs - rhs
   { n := res.msb
@@ -441,7 +441,21 @@ def subFlags64 (lhs rhs : BitVec 64) : NZCV :=
     c := !(BitVec.ult lhs rhs)
     v := (lhs.msb != rhs.msb) && (res.msb != lhs.msb) }
 
-/-- Compute AArch64 addition flags (`lhs + rhs`). -/
+/-- Compute AArch64 32-bit subtraction flags (`W` form: bit 31 N, 32-bit Z/C/V). -/
+def subFlags32 (lhs rhs : BitVec 64) : NZCV :=
+  let l32 := lhs.extractLsb' 0 32
+  let r32 := rhs.extractLsb' 0 32
+  let res := l32 - r32
+  { n := res.msb
+    z := res == 0#32
+    c := !(BitVec.ult l32 r32)
+    v := (l32.msb != r32.msb) && (res.msb != l32.msb) }
+
+/-- Compute AArch64 subtraction flags parameterized by register width `is64`. -/
+@[inline] def subFlags (is64 : Bool) (lhs rhs : BitVec 64) : NZCV :=
+  if is64 then subFlags64 lhs rhs else subFlags32 lhs rhs
+
+/-- Compute AArch64 64-bit addition flags (`lhs + rhs`). -/
 def addFlags64 (lhs rhs : BitVec 64) : NZCV :=
   let res := lhs + rhs
   { n := res.msb
@@ -449,9 +463,32 @@ def addFlags64 (lhs rhs : BitVec 64) : NZCV :=
     c := BitVec.ult res lhs
     v := (lhs.msb == rhs.msb) && (res.msb != lhs.msb) }
 
-/-- Compute AArch64 logical-flags (`ANDS`). -/
+/-- Compute AArch64 32-bit addition flags (`W` form: bit 31 N, 32-bit Z/C/V). -/
+def addFlags32 (lhs rhs : BitVec 64) : NZCV :=
+  let l32 := lhs.extractLsb' 0 32
+  let r32 := rhs.extractLsb' 0 32
+  let res := l32 + r32
+  { n := res.msb
+    z := res == 0#32
+    c := BitVec.ult res l32
+    v := (l32.msb == r32.msb) && (res.msb != l32.msb) }
+
+/-- Compute AArch64 addition flags parameterized by register width `is64`. -/
+@[inline] def addFlags (is64 : Bool) (lhs rhs : BitVec 64) : NZCV :=
+  if is64 then addFlags64 lhs rhs else addFlags32 lhs rhs
+
+/-- Compute AArch64 64-bit logical-flags (`ANDS X`). -/
 def logicFlags64 (res : BitVec 64) : NZCV :=
   { n := res.msb, z := res == 0#64, c := false, v := false }
+
+/-- Compute AArch64 32-bit logical-flags (`ANDS W` / `TST W`). -/
+def logicFlags32 (res : BitVec 64) : NZCV :=
+  let r32 := res.extractLsb' 0 32
+  { n := r32.msb, z := r32 == 0#32, c := false, v := false }
+
+/-- Compute AArch64 logical-flags parameterized by register width `is64`. -/
+@[inline] def logicFlags (is64 : Bool) (res : BitVec 64) : NZCV :=
+  if is64 then logicFlags64 res else logicFlags32 res
 
 def shiftVal (is64 : Bool) (sk : ShiftKind) (v : BitVec 64) (amt : Nat) : BitVec 64 :=
   if is64 then
@@ -569,25 +606,65 @@ def f64Cmp (lhs rhs : BitVec 64) : NZCV :=
       if lt then { n := true, z := false, c := false, v := false }
       else { n := false, z := false, c := true, v := false }
 
-/-- IEEE-754 `FMIND` (returns NaN if either is NaN, `-0 < +0`). -/
+/-- Set bit 51 to quiet a signaling NaN while preserving sign and payload (ARMv8 `FPCR.DN = 0`). -/
+def f64QuietNaN (b : BitVec 64) : BitVec 64 :=
+  b ||| 0x0008000000000000#64
+
+/-- Predicate for IEEE-754 binary64 signaling NaN (exponent `0x7ff`, nonzero mantissa, bit 51 = 0). -/
+def f64IsSNaN (b : BitVec 64) : Bool :=
+  f64IsNaN b && ((b &&& 0x0008000000000000#64) == 0#64)
+
+/-- IEEE-754 `FMIND` (Arm `FPProcessNaNs` quiets sNaNs with priority over qNaNs; `-0 < +0`). -/
 def f64Min (a b : BitVec 64) : BitVec 64 :=
-  if f64IsNaN a then a
-  else if f64IsNaN b then b
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
   else if f64IsZero a && f64IsZero b then
     if f64Sign a then a else b
   else
     let flags := f64Cmp a b
     if flags.n then a else b
 
-/-- IEEE-754 `FMAXD`. -/
+/-- IEEE-754 `FMAXD` (Arm `FPProcessNaNs` quiets sNaNs with priority over qNaNs; `-0 < +0`). -/
 def f64Max (a b : BitVec 64) : BitVec 64 :=
-  if f64IsNaN a then a
-  else if f64IsNaN b then b
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
   else if f64IsZero a && f64IsZero b then
     if !f64Sign a then a else b
   else
     let flags := f64Cmp a b
     if flags.n then b else a
+
+/-- IEEE-754 `FMAXNMD` (returns non-NaN operand against qNaN; quiets sNaNs). -/
+def f64MaxNum (a b : BitVec 64) : BitVec 64 :=
+  if f64IsSNaN a then f64QuietNaN a
+  else if f64IsSNaN b then f64QuietNaN b
+  else if f64IsNaN a && f64IsNaN b then a
+  else if f64IsNaN a then b
+  else if f64IsNaN b then a
+  else if f64IsZero a && f64IsZero b then
+    if !f64Sign a then a else b
+  else
+    let flags := f64Cmp a b
+    if flags.n then b else a
+
+/-- IEEE-754 `FMINNMD` (returns non-NaN operand against qNaN; quiets sNaNs). -/
+def f64MinNum (a b : BitVec 64) : BitVec 64 :=
+  if f64IsSNaN a then f64QuietNaN a
+  else if f64IsSNaN b then f64QuietNaN b
+  else if f64IsNaN a && f64IsNaN b then a
+  else if f64IsNaN a then b
+  else if f64IsNaN b then a
+  else if f64IsZero a && f64IsZero b then
+    if f64Sign a then a else b
+  else
+    let flags := f64Cmp a b
+    if flags.n then a else b
 
 private def natLog2Floor (n : Nat) : Nat :=
   let rec go (k fuel : Nat) : Nat :=
@@ -603,6 +680,11 @@ private def posRatToFloat64Bits (q : Rat) : BitVec 64 :=
     let num : Nat := q.num.toNat
     let den : Nat := q.den
     let eRaw : Int := (natLog2Floor num : Int) - (natLog2Floor den : Int) - 52
+    if eRaw > 975 then
+      0x7ff0000000000000#64
+    else if eRaw < -1130 then
+      0#64
+    else
     let shiftAdjust (e : Int) : Int :=
       let p2_52 : Int := (1 <<< 52 : Nat)
       let p2_53 : Int := (1 <<< 53 : Nat)
@@ -666,10 +748,13 @@ def ratToFloat64Bits (q : Rat) (negZero : Bool := false) : BitVec 64 :=
   else
     0x8000000000000000#64 ||| posRatToFloat64Bits (-q)
 
-/-- Exact IEEE-754 `FADDD`. -/
+/-- Exact IEEE-754 `FADDD` with ARMv8 NaN quieting (`FPCR.DN = 0`). -/
 def f64Add (a b : BitVec 64) : BitVec 64 :=
-  if f64IsNaN a then a
-  else if f64IsNaN b then b
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
   else if (f64IsPosInf a && f64IsNegInf b) || (f64IsNegInf a && f64IsPosInf b) then
     0x7ff8000000000000#64
   else if f64IsPosInf a || f64IsPosInf b then 0x7ff0000000000000#64
@@ -681,9 +766,80 @@ def f64Add (a b : BitVec 64) : BitVec 64 :=
       ratToFloat64Bits (qa + qb) negZ
     | _, _ => 0x7ff8000000000000#64
 
-/-- Exact IEEE-754 `FSUBD` (`a - b`). -/
+/-- Exact IEEE-754 `FSUBD` (`a - b`, preserving NaN sign on `b` per ARMv8 `FPSub`). -/
 def f64Sub (a b : BitVec 64) : BitVec 64 :=
-  f64Add a (f64Neg b)
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
+  else
+    f64Add a (f64Neg b)
+
+/-- Exact IEEE-754 `FMULD` (`a * b`) over `Rat` + `ratToFloat64Bits`. -/
+def f64Mul (a b : BitVec 64) : BitVec 64 :=
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
+  else
+    let neg := f64Sign a != f64Sign b
+    let aInf := f64IsPosInf a || f64IsNegInf a
+    let bInf := f64IsPosInf b || f64IsNegInf b
+    if (f64IsZero a && bInf) || (f64IsZero b && aInf) then
+      0x7ff8000000000000#64
+    else if aInf || bInf then
+      if neg then 0xfff0000000000000#64 else 0x7ff0000000000000#64
+    else
+      match float64BitsToRat (UInt64.ofNat a.toNat), float64BitsToRat (UInt64.ofNat b.toNat) with
+      | some qa, some qb => ratToFloat64Bits (qa * qb) neg
+      | _, _ => 0x7ff8000000000000#64
+
+/-- Exact IEEE-754 `FDIVD` (`a / b`) over `Rat` + `ratToFloat64Bits`. -/
+def f64Div (a b : BitVec 64) : BitVec 64 :=
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
+  else
+    let neg := f64Sign a != f64Sign b
+    let aInf := f64IsPosInf a || f64IsNegInf a
+    let bInf := f64IsPosInf b || f64IsNegInf b
+    if (aInf && bInf) || (f64IsZero a && f64IsZero b) then
+      0x7ff8000000000000#64
+    else if aInf || f64IsZero b then
+      if neg then 0xfff0000000000000#64 else 0x7ff0000000000000#64
+    else if bInf || f64IsZero a then
+      if neg then 0x8000000000000000#64 else 0#64
+    else
+      match float64BitsToRat (UInt64.ofNat a.toNat), float64BitsToRat (UInt64.ofNat b.toNat) with
+      | some qa, some qb => ratToFloat64Bits (qa / qb) neg
+      | _, _ => 0x7ff8000000000000#64
+
+/-- Exact IEEE-754 `FNMULD` (`-(a * b)`, preserving NaNs without negating per ARMv8). -/
+def f64NMul (a b : BitVec 64) : BitVec 64 :=
+  if f64IsNaN a || f64IsNaN b then
+    if f64IsSNaN a then f64QuietNaN a
+    else if f64IsSNaN b then f64QuietNaN b
+    else if f64IsNaN a then a
+    else b
+  else
+    let res := f64Mul a b
+    if f64IsNaN res then res else f64Neg res
+
+/-- Supported scalar binary64 1-source opcodes implemented in `execArm64Insn`. -/
+def isSupportedFpUnary (op : Nat) : Bool :=
+  match op with
+  | 0 | 1 | 2 | 8 | 9 | 10 | 11 | 12 => true
+  | _ => false
+
+/-- Supported scalar binary64 2-source opcodes implemented in `execArm64Insn`. -/
+def isSupportedFpBinary (op : Nat) : Bool :=
+  match op with
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => true
+  | _ => false
 
 inductive RoundMode where
   | nearestEven
@@ -693,7 +849,8 @@ inductive RoundMode where
   | trunc
 
 def f64RoundToInt (mode : RoundMode) (b : BitVec 64) : BitVec 64 :=
-  if f64IsNaN b || f64Exp b == 0x7ff || f64IsZero b then b
+  if f64IsNaN b then f64QuietNaN b
+  else if f64Exp b == 0x7ff || f64IsZero b then b
   else
     match float64BitsToRat (UInt64.ofNat b.toNat) with
     | none => b
@@ -769,7 +926,9 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
     (insn : Arm64Insn) (s : Arm64State) : Arm64State :=
   match insn with
   | .nop => advancePc s
-  | .ret _ => { s with status := .returned }
+  | .ret rn =>
+    if rn == 30#5 then { s with status := .returned }
+    else { s with status := .trapIllegal }
   | .b imm26 => jumpRel progLen extTargets false s imm26
   | .bl imm26 => jumpRel progLen extTargets true s imm26
   | .bCond cond imm19 =>
@@ -806,7 +965,7 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
     let resM := mask32IfNeeded is64 res
     let s1 :=
       if setFlags then
-        let fl := if isSub then subFlags64 lhs rhs else addFlags64 lhs rhs
+        let fl := if isSub then subFlags is64 lhs rhs else addFlags is64 lhs rhs
         writeGpr { s with nzcv := fl } rd resM
       else
         writeGprSP s rd resM
@@ -817,7 +976,7 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
     let res := mask32IfNeeded is64 (if isSub then lhs - rhs else lhs + rhs)
     let s1 :=
       if setFlags then
-        { s with nzcv := if isSub then subFlags64 lhs rhs else addFlags64 lhs rhs }
+        { s with nzcv := if isSub then subFlags is64 lhs rhs else addFlags is64 lhs rhs }
       else s
     advancePc (writeGpr s1 rd res)
   | .addSubExt is64 isSub setFlags ext imm3 rd rn rm =>
@@ -826,7 +985,7 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
     let res := mask32IfNeeded is64 (if isSub then lhs - rhs else lhs + rhs)
     let s1 :=
       if setFlags then
-        let fl := if isSub then subFlags64 lhs rhs else addFlags64 lhs rhs
+        let fl := if isSub then subFlags is64 lhs rhs else addFlags is64 lhs rhs
         writeGpr { s with nzcv := fl } rd res
       else
         writeGprSP s rd res
@@ -842,7 +1001,7 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
       | _ => lhs &&& rhs
     let resM := mask32IfNeeded is64 res
     let s1 :=
-      if opc == 3 then writeGpr { s with nzcv := logicFlags64 resM } rd resM
+      if opc == 3 then writeGpr { s with nzcv := logicFlags is64 resM } rd resM
       else writeGprSP s rd resM
     advancePc s1
   | .logicalReg is64 inv opc sk imm6 rd rn rm =>
@@ -856,7 +1015,7 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
       | 2 => lhs ^^^ rhs
       | _ => lhs &&& rhs
     let resM := mask32IfNeeded is64 res
-    let s1 := if opc == 3 then { s with nzcv := logicFlags64 resM } else s
+    let s1 := if opc == 3 then { s with nzcv := logicFlags is64 resM } else s
     advancePc (writeGpr s1 rd resM)
   | .bitfield is64 isSigned isInsert rd rn immr imms =>
     let res := execBitfield is64 isSigned isInsert (readGpr s rd) (readGpr s rn) immr imms
@@ -870,13 +1029,22 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
         if isInc then m + 1#64 else m
     advancePc (writeGpr s rd (mask32IfNeeded is64 val))
   | .div is64 isSigned rd rn rm =>
-    let lhs := mask32IfNeeded is64 (readGpr s rn)
-    let rhs := mask32IfNeeded is64 (readGpr s rm)
-    let res :=
-      if rhs == 0#64 then 0#64
-      else if isSigned then lhs.sdiv rhs
-      else lhs.udiv rhs
-    advancePc (writeGpr s rd (mask32IfNeeded is64 res))
+    if is64 then
+      let lhs := readGpr s rn
+      let rhs := readGpr s rm
+      let res :=
+        if rhs == 0#64 then 0#64
+        else if isSigned then lhs.sdiv rhs
+        else lhs.udiv rhs
+      advancePc (writeGpr s rd res)
+    else
+      let lhs32 := (readGpr s rn).extractLsb' 0 32
+      let rhs32 := (readGpr s rm).extractLsb' 0 32
+      let res32 :=
+        if rhs32 == 0#32 then 0#32
+        else if isSigned then lhs32.sdiv rhs32
+        else lhs32.udiv rhs32
+      advancePc (writeGpr s rd (res32.zeroExtend 64))
   | .mul3 is64 isSub rd rn rm ra =>
     let vn := mask32IfNeeded is64 (readGpr s rn)
     let vm := mask32IfNeeded is64 (readGpr s rm)
@@ -969,29 +1137,30 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
     advancePc { s with nzcv := f64Cmp lhs rhs }
   | .fpUnaryD op rd rn =>
     let src := s.fpRegs rn
-    let res :=
-      match op with
-      | 0 => src
-      | 1 => f64Abs src
-      | 2 => f64Neg src
-      | 8 => f64RoundToInt .nearestEven src
-      | 9 => f64RoundToInt .ceil src
-      | 10 => f64RoundToInt .floor src
-      | 11 => f64RoundToInt .trunc src
-      | 12 => f64RoundToInt .nearestAway src
-      | _ => src
-    advancePc (writeFp s rd res)
+    match op with
+    | 0 => advancePc (writeFp s rd src)
+    | 1 => advancePc (writeFp s rd (f64Abs src))
+    | 2 => advancePc (writeFp s rd (f64Neg src))
+    | 8 => advancePc (writeFp s rd (f64RoundToInt .nearestEven src))
+    | 9 => advancePc (writeFp s rd (f64RoundToInt .ceil src))
+    | 10 => advancePc (writeFp s rd (f64RoundToInt .floor src))
+    | 11 => advancePc (writeFp s rd (f64RoundToInt .trunc src))
+    | 12 => advancePc (writeFp s rd (f64RoundToInt .nearestAway src))
+    | _ => { s with status := .trapIllegal }
   | .fpBinaryD op rd rn rm =>
     let a := s.fpRegs rn
     let b := s.fpRegs rm
-    let res :=
-      match op with
-      | 2 => f64Add a b
-      | 3 => f64Sub a b
-      | 4 => f64Max a b
-      | 5 => f64Min a b
-      | _ => a
-    advancePc (writeFp s rd res)
+    match op with
+    | 0 => advancePc (writeFp s rd (f64Mul a b))
+    | 1 => advancePc (writeFp s rd (f64Div a b))
+    | 2 => advancePc (writeFp s rd (f64Add a b))
+    | 3 => advancePc (writeFp s rd (f64Sub a b))
+    | 4 => advancePc (writeFp s rd (f64Max a b))
+    | 5 => advancePc (writeFp s rd (f64Min a b))
+    | 6 => advancePc (writeFp s rd (f64MaxNum a b))
+    | 7 => advancePc (writeFp s rd (f64MinNum a b))
+    | 8 => advancePc (writeFp s rd (f64NMul a b))
+    | _ => { s with status := .trapIllegal }
   | .fpIntConv toInt isSigned gprToFp rd rn =>
     if toInt then
       let res := f64ToInt64 (s.fpRegs rn)
@@ -1006,14 +1175,14 @@ def execArm64Insn (progLen : Nat) (extTargets : Nat → Option String)
       advancePc (writeGpr s rd (s.fpRegs rn))
   | .unknown _ => { s with status := .trapPanicBounds }
 
-/-- Execute one step of `Arm64State` on decoded program `prog`. -/
+/-- Execute one step of `Arm64State` on decoded program `prog`. Running past `prog.size` traps. -/
 def stepArm64 (prog : Array Arm64Insn) (extTargets : Nat → Option String)
     (s : Arm64State) : Arm64State :=
   if s.status != .running then s
   else if h : s.pcIdx < prog.size then
     execArm64Insn prog.size extTargets prog[s.pcIdx] s
   else
-    { s with status := .returned }
+    { s with status := .trapIllegal }
 
 /-- Run `stepArm64` up to `fuel` cycles, halting when `status != .running`. -/
 def runArm64 (fuel : Nat) (prog : Array Arm64Insn) (extTargets : Nat → Option String)
@@ -1217,10 +1386,97 @@ theorem fpRegs_writeGprSP (s : Arm64State) (r : BitVec 5) (v : BitVec 64) :
     (writeGprSP s r v).fpRegs = s.fpRegs := by
   unfold writeGprSP; split <;> rfl
 
+private theorem add_offset_ne (a k j : BitVec 64) (hne : k ≠ j) :
+    (a + k == a + j) = false := by
+  apply beq_false_of_ne
+  intro hEq
+  apply hne
+  have hSub := congrArg (fun x => x - a) hEq
+  simpa using hSub
+
+private theorem byteLane_getLsbD (v : BitVec 64) (off i : Nat) (hi : i < 64) :
+    (((v.extractLsb' off 8).zeroExtend 64) <<< off).getLsbD i =
+      if off ≤ i ∧ i < off + 8 then v.getLsbD i else false := by
+  simp only [BitVec.getLsbD_shiftLeft, BitVec.zeroExtend, BitVec.getLsbD_setWidth,
+    BitVec.getLsbD_extractLsb', hi, decide_true, Bool.true_and]
+  by_cases h : off ≤ i ∧ i < off + 8
+  · have h1 : ¬ (i < off) := by omega
+    have h2 : i - off < 64 := by omega
+    have h3 : i - off < 8 := by omega
+    have h4 : off + (i - off) = i := by omega
+    simp [h, h1, h2, h3, h4]
+  · by_cases hlt : i < off
+    · simp [h, hlt]
+    · have hge : ¬ (i - off < 8) := by omega
+      simp [h, hlt, hge]
+
 theorem readU64_writeU64_eq (mem : BitVec 64 → BitVec 8) (a v : BitVec 64) :
     readU64 (writeU64 mem a v) a = v := by
   unfold readU64 writeU64 writeU8
-  bv_decide
+  have hNe : ∀ k j : BitVec 64, k ≠ j → (a + k == a + j) = false := add_offset_ne a
+  have h0 : ∀ j : BitVec 64, 0#64 ≠ j → (a == a + j) = false := by
+    intro j hj; simpa using hNe 0#64 j hj
+  simp only [
+    h0 7#64 (by decide), h0 6#64 (by decide), h0 5#64 (by decide), h0 4#64 (by decide),
+    h0 3#64 (by decide), h0 2#64 (by decide), h0 1#64 (by decide),
+    hNe 1#64 7#64 (by decide), hNe 1#64 6#64 (by decide), hNe 1#64 5#64 (by decide),
+    hNe 1#64 4#64 (by decide), hNe 1#64 3#64 (by decide), hNe 1#64 2#64 (by decide),
+    hNe 2#64 7#64 (by decide), hNe 2#64 6#64 (by decide), hNe 2#64 5#64 (by decide),
+    hNe 2#64 4#64 (by decide), hNe 2#64 3#64 (by decide),
+    hNe 3#64 7#64 (by decide), hNe 3#64 6#64 (by decide), hNe 3#64 5#64 (by decide),
+    hNe 3#64 4#64 (by decide),
+    hNe 4#64 7#64 (by decide), hNe 4#64 6#64 (by decide), hNe 4#64 5#64 (by decide),
+    hNe 5#64 7#64 (by decide), hNe 5#64 6#64 (by decide),
+    hNe 6#64 7#64 (by decide),
+    beq_self_eq_true, Bool.false_eq_true, ↓reduceIte]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hLane0 : ((v.extractLsb' 0 8).zeroExtend 64).getLsbD i =
+      if 0 ≤ i ∧ i < 0 + 8 then v.getLsbD i else false := by
+    simpa using byteLane_getLsbD v 0 i hi
+  simp only [BitVec.getLsbD_or, hLane0,
+    byteLane_getLsbD v 8 i hi, byteLane_getLsbD v 16 i hi, byteLane_getLsbD v 24 i hi,
+    byteLane_getLsbD v 32 i hi, byteLane_getLsbD v 40 i hi, byteLane_getLsbD v 48 i hi,
+    byteLane_getLsbD v 56 i hi]
+  by_cases h1 : i < 8
+  · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+          show ¬ (16 ≤ i ∧ i < 24) by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+          show ¬ (32 ≤ i ∧ i < 40) by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+          show ¬ (48 ≤ i ∧ i < 56) by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+  · by_cases h2 : i < 16
+    · simp [h1, show 8 ≤ i ∧ i < 16 by omega,
+            show ¬ (16 ≤ i ∧ i < 24) by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+            show ¬ (32 ≤ i ∧ i < 40) by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+            show ¬ (48 ≤ i ∧ i < 56) by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+    · by_cases h3 : i < 24
+      · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+              show 16 ≤ i ∧ i < 24 by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+              show ¬ (32 ≤ i ∧ i < 40) by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+              show ¬ (48 ≤ i ∧ i < 56) by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+      · by_cases h4 : i < 32
+        · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+                show ¬ (16 ≤ i ∧ i < 24) by omega, show 24 ≤ i ∧ i < 32 by omega,
+                show ¬ (32 ≤ i ∧ i < 40) by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+                show ¬ (48 ≤ i ∧ i < 56) by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+        · by_cases h5 : i < 40
+          · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+                  show ¬ (16 ≤ i ∧ i < 24) by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+                  show 32 ≤ i ∧ i < 40 by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+                  show ¬ (48 ≤ i ∧ i < 56) by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+          · by_cases h6 : i < 48
+            · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+                    show ¬ (16 ≤ i ∧ i < 24) by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+                    show ¬ (32 ≤ i ∧ i < 40) by omega, show 40 ≤ i ∧ i < 48 by omega,
+                    show ¬ (48 ≤ i ∧ i < 56) by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+            · by_cases h7 : i < 56
+              · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+                      show ¬ (16 ≤ i ∧ i < 24) by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+                      show ¬ (32 ≤ i ∧ i < 40) by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+                      show 48 ≤ i ∧ i < 56 by omega, show ¬ (56 ≤ i ∧ i < 64) by omega]
+              · simp [h1, show ¬ (8 ≤ i ∧ i < 16) by omega,
+                      show ¬ (16 ≤ i ∧ i < 24) by omega, show ¬ (24 ≤ i ∧ i < 32) by omega,
+                      show ¬ (32 ≤ i ∧ i < 40) by omega, show ¬ (40 ≤ i ∧ i < 48) by omega,
+                      show ¬ (48 ≤ i ∧ i < 56) by omega, show 56 ≤ i ∧ i < 64 by omega]
 
 private theorem readU8_writeU64_ne (mem : BitVec 64 → BitVec 8) (a b v : BitVec 64)
     (hNe : ∀ i : BitVec 64, BitVec.ult i 8#64 = true → (b == a + i) = false) :
@@ -1237,7 +1493,13 @@ theorem readU64_writeU64_disjoint (mem : BitVec 64 → BitVec 8) (a b v : BitVec
   have hNe : ∀ k : BitVec 64, BitVec.ult k 8#64 = true → ∀ i : BitVec 64, BitVec.ult i 8#64 = true →
       (b + k == a + i) = false := by
     intro k hk i hi
-    bv_decide
+    apply beq_false_of_ne
+    intro hEq
+    have hDiff : b - a = i - k := by
+      have hSub := congrArg (fun x => x - a - k) hEq
+      bv_omega
+    simp only [BitVec.ult, decide_eq_true_eq] at h1 h2 hk hi
+    bv_omega
   simp only [
     readU8_writeU64_ne mem a b v (by intro i hi; simpa using hNe 0#64 (by decide) i hi),
     readU8_writeU64_ne mem a (b + 1#64) v (hNe 1#64 (by decide)),
@@ -1303,9 +1565,10 @@ theorem step_mul64 (prog : Array Arm64Insn) (ext : Nat → Option String)
 theorem step_ret (prog : Array Arm64Insn) (ext : Nat → Option String)
     (s : Arm64State) (k n : Nat) (r : BitVec 5)
     (hRun : s.status = .running) (hPc : s.pcIdx = k) (hSize : prog.size = n)
-    (hFetch : prog[k]? = some (.ret r)) :
+    (hFetch : prog[k]? = some (.ret r)) (hLr : r = 30#5 := by rfl) :
     stepArm64 prog ext s = { s with status := .returned } := by
-  rw [stepArm64_insn prog ext s k n (.ret r) hRun hPc hSize hFetch]
+  subst hLr
+  rw [stepArm64_insn prog ext s k n (.ret 30#5) hRun hPc hSize hFetch]
   rfl
 
 theorem step_nop (prog : Array Arm64Insn) (ext : Nat → Option String)
@@ -1427,11 +1690,9 @@ theorem step_sdiv64 (prog : Array Arm64Insn) (ext : Nat → Option String)
     stepArm64 prog ext s = advancePc (writeGpr s rd ((readGpr s rn).sdiv (readGpr s rm))) := by
   rw [stepArm64_insn prog ext s k n (.div true true rd rn rm) hRun hPc hSize hFetch]
   dsimp only [execArm64Insn]
-  have hNe : (mask32IfNeeded true (readGpr s rm) == 0#64) = false := beq_false_of_ne hNz
-  rw [ite_true_eq]
-  split
-  · rename_i hZero; rw [hNe] at hZero; contradiction
-  · rfl
+  have hNe : (readGpr s rm == 0#64) = false := beq_false_of_ne hNz
+  rw [ite_true_eq, ite_true_eq, hNe]
+  rfl
 
 theorem step_msub64 (prog : Array Arm64Insn) (ext : Nat → Option String)
     (s : Arm64State) (k n : Nat) (rd rn rm ra : BitVec 5)
@@ -1550,39 +1811,94 @@ theorem step_bl_callExt (prog : Array Arm64Insn) (ext : Nat → Option String)
 theorem stackGuard_32_ok (sp sg : BitVec 64)
     (hSp : BitVec.ult 31#64 sp = true) (hSg : BitVec.ult sg (sp - 32#64) = true) :
     BitVec.ult sg sp = true := by
-  bv_decide
+  simp only [BitVec.ult, decide_eq_true_eq] at hSp hSg ⊢
+  bv_omega
 
 theorem evalCond_ls_subFlags64 (lhs rhs : BitVec 64) :
     evalCond .ls (subFlags64 lhs rhs) = !(BitVec.ult rhs lhs) := by
   unfold evalCond subFlags64
-  bv_decide
+  simp only [Bool.not_not, BitVec.ult]
+  by_cases hSub : lhs - rhs = 0#64
+  · have hEq : lhs = rhs := by bv_omega
+    subst hEq
+    simp
+  · have hNe : lhs ≠ rhs := fun h => hSub (by simp [h])
+    have hNeNat : lhs.toNat ≠ rhs.toNat := fun h => hNe (BitVec.eq_of_toNat_eq h)
+    have hBeq : (lhs - rhs == 0#64) = false := beq_false_of_ne hSub
+    rw [hBeq, Bool.or_false]
+    by_cases hlt : lhs.toNat < rhs.toNat
+    · have hNotGt : ¬ (rhs.toNat < lhs.toNat) := by omega
+      simp [hlt, hNotGt]
+    · have hGt : rhs.toNat < lhs.toNat := by omega
+      simp [hlt, hGt]
 
 theorem stackGuard_16_ok (sp sg : BitVec 64)
     (hSp : BitVec.ult 15#64 sp = true) (hSg : BitVec.ult sg (sp - 16#64) = true) :
     BitVec.ult sg sp = true := by
-  bv_decide
+  simp only [BitVec.ult, decide_eq_true_eq] at hSp hSg ⊢
+  bv_omega
 
 theorem stackGuard_240_ok (sp sg : BitVec 64)
     (hSp : BitVec.ult 239#64 sp = true) (hSg : BitVec.ult sg (sp - 240#64) = true) :
     BitVec.ult sg (sp - 112#64) = true := by
-  bv_decide
+  simp only [BitVec.ult, decide_eq_true_eq] at hSp hSg ⊢
+  bv_omega
 
 theorem evalCond_le_subFlags64_zero (rem : BitVec 64) :
     evalCond .le (subFlags64 rem 0#64) = !(BitVec.slt 0#64 rem) := by
   unfold evalCond subFlags64
-  bv_decide
+  dsimp only
+  have hSub0 : rem - 0#64 = rem := BitVec.sub_zero rem
+  have hZeroMsb : (0#64 : BitVec 64).msb = false := rfl
+  rw [hSub0, hZeroMsb]
+  have hV : ((rem.msb != false) && (rem.msb != rem.msb)) = false := by cases rem.msb <;> rfl
+  rw [hV]
+  have hSlt : BitVec.slt 0#64 rem = decide (0 < rem.toInt) := by
+    simp [BitVec.slt, BitVec.toInt_zero]
+  rw [hSlt]
+  have hMsb : rem.msb = decide (rem.toInt < 0) := by
+    rw [BitVec.msb_eq_decide, BitVec.toInt_eq_toNat_cond]
+    have hlt := rem.isLt
+    by_cases h : 2 * rem.toNat < 2 ^ 64
+    · simp only [h, ↓reduceIte]
+      have h1 : ¬ (2 ^ 63 ≤ rem.toNat) := by omega
+      have h2 : ¬ ((rem.toNat : Int) < 0) := by omega
+      simp [h1, h2]
+    · simp only [h, ↓reduceIte]
+      have h1 : 2 ^ 63 ≤ rem.toNat := by omega
+      simp [h1]; omega
+  have hZeroEq : (rem == 0#64) = decide (rem.toInt = 0) := by
+    by_cases hz : rem = 0#64
+    · subst hz; simp [BitVec.toInt_zero]
+    · have hNeInt : rem.toInt ≠ 0 := by
+        intro hI
+        apply hz
+        apply BitVec.eq_of_toInt_eq
+        simpa [BitVec.toInt_zero] using hI
+      simp [beq_false_of_ne hz, hNeInt]
+  rw [hZeroEq, hMsb]
+  cases h1 : decide (rem.toInt = 0) <;> cases h2 : decide (rem.toInt < 0) <;> cases h3 : decide (0 < rem.toInt) <;>
+    simp_all <;> omega
 
 private theorem f64IsZero_iff (b : BitVec 64) :
     f64IsZero b = true ↔ (b = 0#64 ∨ b = 0x8000000000000000#64) := by
   unfold f64IsZero
   constructor
   · intro h
-    by_cases h0 : b = 0#64
-    · exact Or.inl h0
+    have hEq : b &&& 0x7fffffffffffffff#64 = 0#64 := eq_of_beq h
+    have hMod : b.toNat % 2 ^ 63 = 0 := by
+      have hNat := congrArg BitVec.toNat hEq
+      rw [BitVec.toNat_and] at hNat
+      have hMask : (0x7fffffffffffffff#64 : BitVec 64).toNat = 2 ^ 63 - 1 := by decide
+      rw [hMask, Nat.and_two_pow_sub_one_eq_mod] at hNat
+      exact hNat
+    have hLt := b.isLt
+    by_cases h0 : b.toNat = 0
+    · left; exact BitVec.eq_of_toNat_eq h0
     · right
-      have hbv : (b &&& 0x7fffffffffffffff#64 == 0#64) = true →
-          b ≠ 0#64 → b = 0x8000000000000000#64 := by bv_decide
-      exact hbv h h0
+      apply BitVec.eq_of_toNat_eq
+      change b.toNat = 2 ^ 63
+      omega
   · intro h
     rcases h with rfl | rfl <;> decide
 
@@ -1631,7 +1947,7 @@ def splitmix64Spec (x : BitVec 64) : BitVec 64 :=
   let x3 := (x2 ^^^ (x2 >>> 27)) * 0x94d049bb133111eb#64
   x3 ^^^ (x3 >>> 31)
 
-/-- Stock Go 1.27 `GOARCH=arm64` ELF `.text` words for `presolveSplitmix64`. -/
+/-- Stock Go 1.27 `GOARCH=arm64` `-gcflags=-l` ELF `.text` words for non-inlined `presolveSplitmix64`. -/
 def splitmix64Words : Array UInt32 := #[
   0xd2907d61, 0xf2b016a1, 0xf2d0c8c1, 0xf2ec3901,
   0xcb010001, 0xca417821, 0xd29cb722, 0xf2a39c82,
@@ -1748,7 +2064,7 @@ theorem splitmix64_arm64_equiv (s : Arm64State) (x : BitVec 64)
     have h4 : stepArm64 splitmix64Decoded splitmix64Targets s4 = s5 :=
       step_sub64Reg _ _ s4 4 19 1#5 0#5 1#5 hRun4 hPc4 hLen rfl
     have hR1_5 : readGpr s5 1#5 = v1 := by
-      have hSh : c1 <<< (0 % 64) = c1 := by bv_decide
+      have hSh : c1 <<< (0 % 64) = c1 := by decide
       rw [show s5 = advancePc (writeGpr s4 1#5 _) from rfl, readGpr_advancePc,
         readGpr_writeGpr_eq _ _ _ (by decide), hR0_4, hR1_4, hSh]
     let s6 := advancePc (writeGpr s5 1#5 (readGpr s5 1#5 ^^^ (readGpr s5 1#5 >>> (30 % 64))))
@@ -1821,7 +2137,7 @@ theorem splitmix64_arm64_equiv (s : Arm64State) (x : BitVec 64)
       have hZR : readGpr s10 31#5 = 0#64 := rfl
       rw [show s11 = advancePc (writeGpr s10 1#5 _) from rfl, readGpr_advancePc,
         readGpr_writeGpr_eq _ _ _ (by decide), hZR, hR2_10, hR1_10]
-      bv_decide
+      rw [BitVec.zero_add, BitVec.mul_comm]
     let s12 := advancePc (writeGpr s11 1#5 (readGpr s11 1#5 ^^^ (readGpr s11 1#5 >>> (27 % 64))))
     have h11 : stepArm64 splitmix64Decoded splitmix64Targets s11 = s12 :=
       step_eor64Lsr _ _ s11 11 19 27 1#5 1#5 1#5
@@ -1896,7 +2212,7 @@ theorem splitmix64_arm64_equiv (s : Arm64State) (x : BitVec 64)
       have hZR : readGpr s16 31#5 = 0#64 := rfl
       rw [show s17 = advancePc (writeGpr s16 1#5 _) from rfl, readGpr_advancePc,
         readGpr_writeGpr_eq _ _ _ (by decide), hZR, hR2_16, hR1_16]
-      bv_decide
+      rw [BitVec.zero_add, BitVec.mul_comm]
     let s18 := advancePc (writeGpr s17 0#5 (readGpr s17 1#5 ^^^ (readGpr s17 1#5 >>> (31 % 64))))
     have h17 : stepArm64 splitmix64Decoded splitmix64Targets s17 = s18 :=
       step_eor64Lsr _ _ s17 17 19 31 0#5 1#5 1#5
@@ -1932,11 +2248,17 @@ theorem splitmix64_arm64_equiv (s : Arm64State) (x : BitVec 64)
   rw [hReg19]
   unfold splitmix64Spec
   dsimp [out, v3, v2b, v2, v1b, v1, c1, c2, c3]
-  bv_decide
+  have hSubAdd : x - 0x61c8864680b583eb#64 = x + 0x9e3779b97f4a7c15#64 := by
+    rw [BitVec.sub_eq_add_neg]
+    have hNeg : -(0x61c8864680b583eb#64 : BitVec 64) = 0x9e3779b97f4a7c15#64 := by decide
+    rw [hNeg]
+  rw [hSubAdd]
 
-/-! ### `canonicalFloatBits` Equivalence (Inlined & Frame-32 Variants) -/
+/-! ### `canonicalFloatBits` Equivalence (Inline-Lowering Snippet & `-gcflags=-l` Frame-32 Variant) -/
 
-/-- Stock Go 1.27 `GOARCH=arm64` ELF `.text` words for inlined `canonicalFloatBits`. -/
+/-- Hand-extracted inline-lowering AArch64 snippet (6 insns) modeling the inlined body of
+`canonicalFloatBits` (no standalone ELF symbol exists in either `-gcflags=-l` or optimized builds;
+standalone ELF provenance covers `canonicalFloatBitsWords`). -/
 def canonicalFloatBitsInlinedWords : Array UInt32 := #[
   0x1e602008, 0x54000061, 0xaa1f03e0, 0xd65f03c0, 0x9e660000, 0xd65f03c0
 ]
@@ -2114,7 +2436,7 @@ theorem canonicalFloatBits_arm64_equiv (s : Arm64State)
         readGpr_writeGpr_eq _ _ _ (by decide)]
     have hSp1 : readGprSP s1 31#5 = s.sp := rfl
     have hCmpVal : (readGpr s1 16#5) <<< (0 % 5) = s.gStackGuard0 := by
-      rw [hR16_1]; bv_decide
+      rw [hR16_1]; simp
     let s2 := advancePc (writeGpr { s1 with nzcv := subFlags64 s.sp s.gStackGuard0 } 31#5 (s.sp - s.gStackGuard0))
     have h1 : stepArm64 canonicalFloatBitsDecoded canonicalFloatBitsTargets s1 = s2 := by
       have hs := step_addSubExt_cmp64 canonicalFloatBitsDecoded canonicalFloatBitsTargets s1 1 21
@@ -2427,7 +2749,7 @@ theorem divCeilInt64_arm64_equiv (s : Arm64State) (a d : BitVec 64)
       have hs := step_addSubExt_cmp64 divCeilInt64Decoded divCeilInt64Targets s1 1 22
         31#5 16#5 hRun1 hPc1 hLen rfl
       have hSp1 : readGprSP s1 31#5 = s.sp := rfl
-      have hCmp : (readGpr s1 16#5) <<< (0 % 5) = s.gStackGuard0 := by rw [hR16_1]; bv_decide
+      have hCmp : (readGpr s1 16#5) <<< (0 % 5) = s.gStackGuard0 := by rw [hR16_1]; simp
       rw [hs, hSp1, hCmp]
     have hRun2 : s2.status = .running := by simp only [s2, status_advancePc, status_writeGpr, hRun1]
     have hPc2 : s2.pcIdx = 2 := by simp only [s2, pcIdx_advancePc, pcIdx_writeGpr, hPc1]
@@ -2827,9 +3149,9 @@ private theorem gcdInt64_loop (n : Nat) :
         have hs := step_orr64_lsl0 gcdInt64Decoded gcdInt64Targets s3 3 7 0#5 31#5 1#5
           hRun3 hPc3 hLen rfl
         have hZR : readGpr s3 31#5 = 0#64 := rfl
-        have hSh : b <<< (0 % 64) = b := by bv_decide
+        have hSh : b <<< (0 % 64) = b := by simp
         rw [hs, hZR, hR1_3, hSh]
-        have hOr0 : 0#64 ||| b = b := by bv_decide
+        have hOr0 : 0#64 ||| b = b := by simp
         rw [hOr0]
       have hRun4 : s4.status = .running := by rw [status_advancePc, status_writeGpr]; exact hRun3
       have hPc4 : s4.pcIdx = 4 := by rw [pcIdx_advancePc, pcIdx_writeGpr, hPc3]
@@ -2841,9 +3163,9 @@ private theorem gcdInt64_loop (n : Nat) :
         have hs := step_orr64_lsl0 gcdInt64Decoded gcdInt64Targets s4 4 7 1#5 31#5 2#5
           hRun4 hPc4 hLen rfl
         have hZR : readGpr s4 31#5 = 0#64 := rfl
-        have hSh : rem <<< (0 % 64) = rem := by bv_decide
+        have hSh : rem <<< (0 % 64) = rem := by simp
         rw [hs, hZR, hR2_4, hSh]
-        have hOr0 : 0#64 ||| rem = rem := by bv_decide
+        have hOr0 : 0#64 ||| rem = rem := by simp
         rw [hOr0]
       have hRun5 : s5.status = .running := by rw [status_advancePc, status_writeGpr]; exact hRun4
       have hPc5 : s5.pcIdx = 5 := by rw [pcIdx_advancePc, pcIdx_writeGpr, hPc4]

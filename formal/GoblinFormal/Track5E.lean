@@ -8,7 +8,6 @@ shipping `internal/simd` kernels (`allAbsLE64`, `minNoNaN64`, `initReducedRow64`
 import GoblinFormal.Common.Basic
 import GoblinFormal.Track5A
 import GoblinFormal.Track5D
-import Std.Tactic.BVDecide
 
 namespace GoblinFormal.Track5E
 
@@ -524,6 +523,7 @@ def decodeAmd64VecInsnWith (getB : Nat → Option UInt8) (off : Nat) : Option (A
           let rexB := ((p0.toNat >>> 5) &&& 1) == 0
           let evexR2 := ((p0.toNat >>> 4) &&& 1) == 0
           let emap := p0.toNat &&& 0x7
+          let evexW := ((p1.toNat >>> 7) &&& 1) == 1
           let vvvvLow := ((p1.toNat >>> 3) &&& 0xf) ^^^ 0xf
           let pp := p1.toNat &&& 0x3
           let zeroing := ((p2.toNat >>> 7) &&& 1) == 1
@@ -538,10 +538,16 @@ def decodeAmd64VecInsnWith (getB : Nat → Option UInt8) (off : Nat) : Option (A
           | none => none
           | some w =>
             let mask : EvexMask := { kmask := BitVec.ofNat 3 aaa, zeroing := zeroing, broadcast := bcast }
-            let dispScale := if bcast then 8 else match w with | .xmm128 => 16 | .ymm256 => 32 | .zmm512 => 64
+            let isTuple1Scalar64 := emap == 2 && pp == 1 && (op.toNat == 0x19 || op.toNat == 0x59)
+            let dispScale :=
+              if bcast || isTuple1Scalar64 then 8
+              else match w with | .xmm128 => 16 | .ymm256 => 32 | .zmm512 => 64
             match decodeModRMWith getB (off + 5) rexR rexX rexB evexR2 rexX dispScale with
             | none => none
             | some (reg5, rmOp, nextPos) =>
+              -- Reject unmodeled EVEX reg-reg embedded rounding (`EVEX.b = 1` with `mod = 3`).
+              if bcast && (match rmOp with | .reg _ => true | .mem _ => false) then none
+              else
               match emap, pp, op.toNat with
               | 1, 1, 0x5c => some (.vsubpd true w reg5 vvvv5 rmOp mask, nextPos)
               | 1, 1, 0x5d => some (.vminpd true w reg5 vvvv5 rmOp mask, nextPos)
@@ -557,7 +563,11 @@ def decodeAmd64VecInsnWith (getB : Nat → Option UInt8) (off : Nat) : Option (A
                 match getB nextPos with
                 | some imm8 => some (.vcmppdEvex w (BitVec.ofNat 3 reg5.toNat) vvvv5 rmOp imm8 mask, nextPos + 1)
                 | none => none
-              | 1, 1, 0xdb => some (.vpand true w reg5 vvvv5 rmOp mask, nextPos)
+              | 1, 1, 0xdb =>
+                -- Unmasked non-broadcast `vpandd` (`EVEX.W=0`) is bit-identical to `vpandq`;
+                -- reject masked or broadcast 32-bit `vpandd` since 32-bit lane masks are unmodeled.
+                if !evexW && (aaa != 0 || bcast) then none
+                else some (.vpand true w reg5 vvvv5 rmOp mask, nextPos)
               | 2, 1, 0x19 => some (.vbroadcastsd true w reg5 rmOp mask, nextPos)
               | 2, 1, 0x59 => some (.vpbroadcastq true w reg5 rmOp mask, nextPos)
               | 2, 2, 0x38 =>
@@ -663,9 +673,11 @@ def decodeAmd64VecInsnWith (getB : Nat → Option UInt8) (off : Nat) : Option (A
             | some (reg5, .mem addr, nextPos) => some (.lea64 (BitVec.ofNat 4 reg5.toNat) addr, nextPos)
             | _ => none
           else if op == 0x80 then
+            let hasRex := pos2 > pos1
             match decodeModRMWith getB posOp false rexX rexB with
             | some (reg5, .reg rm, nextPos) =>
-              if reg5.toNat == 7 then
+              -- Without a REX prefix, rm ∈ {4,5,6,7} addresses AH/CH/DH/BH rather than SPL/BPL/SIL/DIL.
+              if reg5.toNat == 7 && (hasRex || rm.toNat < 4) then
                 match getB nextPos with
                 | some imm8 => some (.cmpImm8 (BitVec.ofNat 4 rm.toNat) (BitVec.ofNat 8 imm8.toNat), nextPos + 1)
                 | none => none
@@ -893,7 +905,12 @@ structure Vec512 where
     (b v.l0 0 ||| b v.l1 1 ||| b v.l2 2 ||| b v.l3 3 |||
      b v.l4 4 ||| b v.l5 5 ||| b v.l6 6 ||| b v.l7 7)
 
-/-- Extract the sign bits of the 4 YMM lanes (`VMOVMSKPD`). -/
+/-- Extract the sign bits of the 2 XMM lanes (`VMOVMSKPD reg, xmm`). -/
+@[inline] def Vec512.movmskpd2 (v : Vec512) : BitVec 64 :=
+  let b (x : BitVec 64) (sh : Nat) : Nat := if x.msb then 1 <<< sh else 0
+  BitVec.ofNat 64 (b v.l0 0 ||| b v.l1 1)
+
+/-- Extract the sign bits of the 4 YMM lanes (`VMOVMSKPD reg, ymm`). -/
 @[inline] def Vec512.movmskpd4 (v : Vec512) : BitVec 64 :=
   let b (x : BitVec 64) (sh : Nat) : Nat := if x.msb then 1 <<< sh else 0
   BitVec.ofNat 64 (b v.l0 0 ||| b v.l1 1 ||| b v.l2 2 ||| b v.l3 3)
@@ -907,20 +924,73 @@ def vpblendvb64 (src1 src2 mask : BitVec 64) : BitVec 64 :=
   blendByte 0 ||| blendByte 8 ||| blendByte 16 ||| blendByte 24 |||
   blendByte 32 ||| blendByte 40 ||| blendByte 48 ||| blendByte 56
 
-/-- Intel SDM `VCMPPD` predicate evaluation on one binary64 lane (`imm8[4:0]`). -/
+/-- Intel SDM Vol. 2A Table 3-1 full 32-entry `VCMPPD` predicate evaluation on one binary64 lane
+(`imm8[4:0]`; bit 4 selects signaling vs quiet invalid-operation behavior without altering the
+boolean comparison result, so `imm8[3:0]` determines the exact mask bit for all 32 entries). -/
 def x86VcmppdPred (imm8 : UInt8) (a b : BitVec 64) : Bool :=
-  match imm8.toNat &&& 0x1f with
-  | 0 | 8 | 16 | 24 => f64Eq a b
-  | 1 | 17 => f64Lt a b
-  | 2 | 18 => f64Le a b
-  | 3 | 19 => f64IsNaN a || f64IsNaN b
-  | 4 | 20 => !f64Eq a b
-  | 5 | 21 => !f64Lt a b
-  | 6 | 22 => !f64Le a b
-  | 7 | 23 => !(f64IsNaN a || f64IsNaN b)
-  | 13 | 29 => f64Ge a b
-  | 14 | 30 => f64Lt b a
-  | _ => false
+  match imm8.toNat &&& 0x0f with
+  | 0  => f64Eq a b
+  | 1  => f64Lt a b
+  | 2  => f64Le a b
+  | 3  => f64IsNaN a || f64IsNaN b
+  | 4  => !f64Eq a b
+  | 5  => !f64Lt a b
+  | 6  => !f64Le a b
+  | 7  => !(f64IsNaN a || f64IsNaN b)
+  | 8  => f64Eq a b || f64IsNaN a || f64IsNaN b
+  | 9  => !f64Ge a b
+  | 10 => !f64Lt b a
+  | 11 => false
+  | 12 => !(f64IsNaN a || f64IsNaN b) && !f64Eq a b
+  | 13 => f64Ge a b
+  | 14 => f64Lt b a
+  | _  => true
+
+/-- Set the quiet bit (bit 51) on an x86-64 IEEE-754 binary64 NaN payload. -/
+@[inline] def x86QuietNaN64 (x : BitVec 64) : BitVec 64 :=
+  x ||| 0x0008000000000000#64
+
+/-- Intel x86-64 QNaN floating-point indefinite (`-qNaN`, `0xfff8000000000000`). -/
+def x86DefaultIndef64 : BitVec 64 :=
+  0xfff8000000000000#64
+
+/-- Intel SDM `VSUBPD` / `SUBSD` binary64 subtraction (`a - b`) with silicon-exact NaN
+semantics: `NaN(a)` quiets `a`; else `NaN(b)` quiets `b` preserving `b`'s sign bit (no negation);
+else same-sign infinity cancellation returns `x86DefaultIndef64` (`0xfff8000000000000`);
+else exact nearest-even rational `a - b` preserving IEEE-754 signed zero (`-0.0 - +0.0 = -0.0`). -/
+def x86F64Sub (a b : BitVec 64) : BitVec 64 :=
+  if f64IsNaN a then x86QuietNaN64 a
+  else if f64IsNaN b then x86QuietNaN64 b
+  else if (f64IsPosInf a && f64IsPosInf b) || (f64IsNegInf a && f64IsNegInf b) then
+    x86DefaultIndef64
+  else if f64IsPosInf a || f64IsNegInf b then
+    f64PosInf
+  else if f64IsNegInf a || f64IsPosInf b then
+    f64NegInf
+  else
+    match float64BitsToRat (UInt64.ofNat a.toNat), float64BitsToRat (UInt64.ofNat b.toNat) with
+    | some qa, some qb =>
+      let negZ := f64IsZero a && f64IsZero b && f64Sign a && !f64Sign b
+      ratToFloat64Bits (qa - qb) negZ
+    | _, _ => x86DefaultIndef64
+
+/-- Intel SDM `VADDPD` / `ADDSD` binary64 addition (`a + b`) with silicon-exact NaN semantics
+and `x86DefaultIndef64` (`0xfff8000000000000`) on opposite-sign infinity cancellation. -/
+def x86F64Add (a b : BitVec 64) : BitVec 64 :=
+  if f64IsNaN a then x86QuietNaN64 a
+  else if f64IsNaN b then x86QuietNaN64 b
+  else if (f64IsPosInf a && f64IsNegInf b) || (f64IsNegInf a && f64IsPosInf b) then
+    x86DefaultIndef64
+  else if f64IsPosInf a || f64IsPosInf b then
+    f64PosInf
+  else if f64IsNegInf a || f64IsNegInf b then
+    f64NegInf
+  else
+    match float64BitsToRat (UInt64.ofNat a.toNat), float64BitsToRat (UInt64.ofNat b.toNat) with
+    | some qa, some qb =>
+      let negZ := f64IsZero a && f64IsZero b && f64Sign a && f64Sign b
+      ratToFloat64Bits (qa + qb) negZ
+    | _, _ => x86DefaultIndef64
 
 /-- x86 `RFLAGS` subset exercised by Go 1.27 SIMD loops and `UCOMISD`. -/
 structure X86Flags where
@@ -951,6 +1021,11 @@ def evalX86Cond (c : X86Cond) (f : X86Flags) : Bool :=
   | .le => f.zf || (f.sf != f.of)
   | .g => !f.zf && (f.sf == f.of)
 
+/-- Hardware Intel SDM parity flag (PF): `true` iff the low byte has an even number of set bits. -/
+def x86Parity8 (b : BitVec 8) : Bool :=
+  !(b.getLsbD 0 ^^ b.getLsbD 1 ^^ b.getLsbD 2 ^^ b.getLsbD 3 ^^
+    b.getLsbD 4 ^^ b.getLsbD 5 ^^ b.getLsbD 6 ^^ b.getLsbD 7)
+
 /-- 64-bit x86 subtraction flags (`lhs - rhs`). -/
 def x86SubFlags64 (lhs rhs : BitVec 64) : X86Flags :=
   let res := lhs - rhs
@@ -958,7 +1033,7 @@ def x86SubFlags64 (lhs rhs : BitVec 64) : X86Flags :=
     cf := BitVec.ult lhs rhs
     sf := res.msb
     of := (lhs.msb != rhs.msb) && (res.msb != lhs.msb)
-    pf := false }
+    pf := x86Parity8 (res.extractLsb' 0 8) }
 
 /-- 8-bit x86 subtraction flags (`lhs - rhs`). -/
 def x86SubFlags8 (lhs rhs : BitVec 8) : X86Flags :=
@@ -967,12 +1042,12 @@ def x86SubFlags8 (lhs rhs : BitVec 8) : X86Flags :=
     cf := BitVec.ult lhs rhs
     sf := res.msb
     of := (lhs.msb != rhs.msb) && (res.msb != lhs.msb)
-    pf := false }
+    pf := x86Parity8 res }
 
 /-- 64-bit x86 `TEST` flags (`lhs &&& rhs`). -/
 def x86TestFlags64 (lhs rhs : BitVec 64) : X86Flags :=
   let res := lhs &&& rhs
-  { zf := res == 0#64, cf := false, sf := res.msb, of := false, pf := false }
+  { zf := res == 0#64, cf := false, sf := res.msb, of := false, pf := x86Parity8 (res.extractLsb' 0 8) }
 
 /-- 64-bit x86 `ADD` flags (`lhs + rhs`). -/
 def x86AddFlags64 (lhs rhs : BitVec 64) : X86Flags :=
@@ -981,7 +1056,7 @@ def x86AddFlags64 (lhs rhs : BitVec 64) : X86Flags :=
     cf := BitVec.ult res lhs
     sf := res.msb
     of := (lhs.msb == rhs.msb) && (res.msb != lhs.msb)
-    pf := false }
+    pf := x86Parity8 (res.extractLsb' 0 8) }
 
 /-- Hardware Intel SDM `UCOMISD lhs, rhs` flags. -/
 def x86UcomisdFlags (lhs rhs : BitVec 64) : X86Flags :=
@@ -1142,7 +1217,7 @@ def execAmd64VecInsn (rodata : Nat → Option (BitVec 64)) (extTargets : Nat →
     let sp := s.gpr 4#4
     let v := s.mem sp
     { base with gpr := setGpr (setGpr s.gpr 4#4 (sp + 8#64)) r v }
-  | .ret => { base with status := .returned }
+  | .ret => { base with gpr := setGpr s.gpr 4#4 (s.gpr 4#4 + 8#64), status := .returned }
   | .movRR64 dst src => { base with gpr := setGpr s.gpr dst (s.gpr src) }
   | .movMR64 addr src =>
     match evalMemAddr s.gpr addr with
@@ -1163,7 +1238,7 @@ def execAmd64VecInsn (rodata : Nat → Option (BitVec 64)) (extTargets : Nat →
     let r64 := r32.zeroExtend 64
     { base with
       gpr := setGpr s.gpr dst r64
-      flags := { zf := r32 == 0#32, cf := false, sf := r32.msb, of := false, pf := false } }
+      flags := { zf := r32 == 0#32, cf := false, sf := r32.msb, of := false, pf := x86Parity8 (r32.extractLsb' 0 8) } }
   | .addImm64 dst imm =>
     let lhs := s.gpr dst
     { base with gpr := setGpr s.gpr dst (lhs + imm), flags := x86AddFlags64 lhs imm }
@@ -1250,7 +1325,7 @@ def execAmd64VecInsn (rodata : Nat → Option (BitVec 64)) (extTargets : Nat →
     { base with flags := x86UcomisdFlags lv.l0 rv.l0 }
   -- VEX & EVEX vector and opmask instructions.
   | .vzeroupper =>
-    { base with zmm := fun r => (s.zmm r).zeroHi128 }
+    { base with zmm := fun r => if r.toNat < 16 then (s.zmm r).zeroHi128 else s.zmm r }
   | .vmovsdLoad dst addr =>
     match readMem64 rodata s.pc s.gpr s.mem addr with
     | some v => { base with zmm := setZmm s.zmm dst { l0 := v } }
@@ -1306,7 +1381,7 @@ def execAmd64VecInsn (rodata : Nat → Option (BitVec 64)) (extTargets : Nat →
   | .vsubpd _ w dst src1 src2 mask =>
     match evalVecRm s w src2 mask.broadcast with
     | some v2 =>
-      let raw := Vec512.zipWith f64Sub (s.zmm src1) v2
+      let raw := Vec512.zipWith x86F64Sub (s.zmm src1) v2
       let res := (Vec512.applyEvexMask mask.kmask (s.kmask mask.kmask) mask.zeroing (s.zmm dst) raw).applyWidth w
       { base with zmm := setZmm s.zmm dst res }
     | none => { base with status := .trapDecode s.pc }
@@ -1366,8 +1441,9 @@ def execAmd64VecInsn (rodata : Nat → Option (BitVec 64)) (extTargets : Nat →
           l6 := pick 6 v1.l6 v2.l6, l7 := pick 7 v1.l7 v2.l7 }
       { base with zmm := setZmm s.zmm dst (raw.applyWidth w) }
     | none => { base with status := .trapDecode s.pc }
-  | .vmovmskpd _ dst src =>
-    { base with gpr := setGpr s.gpr dst (s.zmm src).movmskpd4 }
+  | .vmovmskpd w dst src =>
+    let m := match w with | .xmm128 => (s.zmm src).movmskpd2 | _ => (s.zmm src).movmskpd4
+    { base with gpr := setGpr s.gpr dst m }
   | .vpmovm2q w dst srcK =>
     { base with zmm := setZmm s.zmm dst ((Vec512.ofOpmask8 (s.kmask srcK)).applyWidth w) }
   | .vpmovq2m w dstK src =>
@@ -2297,6 +2373,1215 @@ theorem initReducedRow64AVX512_abi_and_zeroGC_safe (s : Amd64VecState) (fuel : N
     (∀ tgt, s'.status ≠ .callExternal tgt) ∧ (s'.status = .returned → s'.upperDirty = false) :=
   checkDecodedAbiSafety_sound _ _ _ initReducedRow64AVX512_abi_cert s fuel hPc hRun hDirt hHaz
 
+/-!
+#### Static Frame & Callee/Go-ABI Register Preservation (`RSP`, `RBP`, `R14`, `X15`)
+-/
+
+/-- Abstract per-PC frame tracking state for Go amd64 ABI preservation verification. -/
+private structure FrameAbiSlot where
+  spDelta : BitVec 64
+  rbpSaved : Bool
+  rdxDelta : Option (BitVec 64)
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Returns true iff `insn` never modifies Go's goroutine pointer `R14` (`gpr 14#4`) or
+the low 128 bits (`l0`, `l1`) of Go's fixed-zero vector register `X15` (`zmm 15#5`). -/
+private def insnPreservesR14AndX15 : Amd64VecInsn → Bool
+  | .nop | .pushReg _ | .ret | .movMR64 _ _ | .testRR64 _ _ | .cmpRR64 _ _
+  | .cmpRM64 _ _ | .cmpImm64 _ _ | .cmpImm8 _ _ | .jmpRel _ | .jccRel _ _ | .callRel _
+  | .sseMovupsStore _ _ | .sseUcomisdRR _ _ | .vzeroupper
+  | .vmovdquStore _ _ _ _ _ | .vcmppdEvex _ _ _ _ _ _ | .vpmovq2m _ _ _ => true
+  | .popReg dst | .movRR64 dst _ | .movRM64 dst _ | .movImm32 dst _ | .movImm64 dst _
+  | .lea64 dst _ | .xorRR32 dst _ | .addImm64 dst _ | .subImm64 dst _ | .inc64 dst
+  | .vmovmskpd _ dst _ | .kmovbToGpr dst _ => dst != 14#4
+  | .sseMovupsRR dst _ | .sseMovupsLoad dst _ | .sseMovsdLoad dst _ | .sseMovqFromGpr dst _
+  | .sseXorpsRR dst _ | .ssePorRR dst _ | .sseMinsdRR dst _ => dst != 15#4
+  | .vmovsdLoad dst _ | .vmovsdRR dst _ _ | .vmovqFromGpr dst _
+  | .vbroadcastsd _ _ dst _ _ | .vpbroadcastq _ _ dst _ _
+  | .vmovdquLoad _ _ dst _ _ | .vmovdquRR _ _ dst _ _
+  | .vpand _ _ dst _ _ _ | .vsubpd _ _ dst _ _ _ | .vminpd _ _ dst _ _ _
+  | .vcmppdVex _ dst _ _ _ | .vpblendvb _ dst _ _ _ | .vpblendmq _ dst _ _ _
+  | .vpmovm2q _ dst _ => dst != 15#5
+
+private theorem bv4_zeroExtend5_ne_15 {r : BitVec 4} (h : r ≠ 15#4) :
+    (15#5 : BitVec 5) ≠ r.zeroExtend 5 := by
+  revert r h; decide
+
+private theorem execAmd64VecInsn_preserves_R14_X15
+    (rodata : Nat → Option (BitVec 64)) (ext : Nat → Option String)
+    (s : Amd64VecState) (insn : Amd64VecInsn) (nextOff : Nat)
+    (hP : insnPreservesR14AndX15 insn = true) :
+    let s' := execAmd64VecInsn rodata ext s insn nextOff
+    s'.gpr 14#4 = s.gpr 14#4 ∧
+    (s'.zmm 15#5).l0 = (s.zmm 15#5).l0 ∧
+    (s'.zmm 15#5).l1 = (s.zmm 15#5).l1 := by
+  have h4ne14 : (14#4 : BitVec 4) ≠ 4#4 := by decide
+  cases insn with
+  | nop | ret | testRR64 _ _ | cmpRR64 _ _ | cmpImm64 _ _ | cmpImm8 _ _
+  | sseUcomisdRR _ _ | vpmovq2m _ _ _ =>
+    simp [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne14]
+  | pushReg r =>
+    simp [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne14]
+  | popReg dst =>
+    have hNe : (14#4 : BitVec 4) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    simp [execAmd64VecInsn, setGpr, beq_false_of_ne hNe, beq_false_of_ne h4ne14]
+  | movRR64 dst _ | movImm32 dst _ | movImm64 dst _ | xorRR32 dst _
+  | addImm64 dst _ | subImm64 dst _ | inc64 dst | vmovmskpd _ dst _ | kmovbToGpr dst _ =>
+    have hNe : (14#4 : BitVec 4) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    simp [execAmd64VecInsn, setGpr, beq_false_of_ne hNe]
+  | movMR64 addr _ | sseMovupsStore addr _ | vmovdquStore _ _ addr _ _ =>
+    cases hEa : evalMemAddr s.gpr addr <;> simp [execAmd64VecInsn, hEa]
+  | movRM64 dst addr =>
+    have hNe : (14#4 : BitVec 4) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;>
+      simp [execAmd64VecInsn, hRd, setGpr, beq_false_of_ne hNe]
+  | lea64 dst addr =>
+    have hNe : (14#4 : BitVec 4) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hEa : evalMemAddr s.gpr addr <;>
+      simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne hNe]
+  | cmpRM64 _ addr =>
+    cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;> simp [execAmd64VecInsn, hRd]
+  | jmpRel rel =>
+    cases hT : nextTargetPc nextOff rel <;> simp [execAmd64VecInsn, hT]
+  | jccRel cond rel =>
+    cases hC : evalX86Cond cond s.flags
+    · simp [execAmd64VecInsn, hC]
+    · cases hT : nextTargetPc nextOff rel <;> simp [execAmd64VecInsn, hC, hT]
+  | callRel _ =>
+    cases hE : ext s.pc with
+    | none => simp [execAmd64VecInsn, hE]
+    | some sym =>
+      simp only [execAmd64VecInsn, hE]
+      split <;> simp
+  | sseMovupsRR dst _ | sseMovqFromGpr dst _ | sseXorpsRR dst _ | ssePorRR dst _ | sseMinsdRR dst _ =>
+    have hNe : (15#5 : BitVec 5) ≠ dst.zeroExtend 5 := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP
+      exact bv4_zeroExtend5_ne_15 hP
+    simp [execAmd64VecInsn, setZmm, beq_false_of_ne hNe]
+  | sseMovupsLoad dst addr =>
+    have hNe : (15#5 : BitVec 5) ≠ dst.zeroExtend 5 := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP
+      exact bv4_zeroExtend5_ne_15 hP
+    cases hEa : evalMemAddr s.gpr addr <;> simp [execAmd64VecInsn, hEa, setZmm, beq_false_of_ne hNe]
+  | sseMovsdLoad dst addr =>
+    have hNe : (15#5 : BitVec 5) ≠ dst.zeroExtend 5 := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP
+      exact bv4_zeroExtend5_ne_15 hP
+    cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;> simp [execAmd64VecInsn, hRd, setZmm, beq_false_of_ne hNe]
+  | vzeroupper =>
+    simp [execAmd64VecInsn, Vec512.zeroHi128]
+  | vmovsdLoad dst addr =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;> simp [execAmd64VecInsn, hRd, setZmm, beq_false_of_ne hNe]
+  | vmovsdRR dst _ _ | vmovqFromGpr dst _ | vmovdquRR _ _ dst _ _ | vpmovm2q _ dst _ =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    simp [execAmd64VecInsn, setZmm, beq_false_of_ne hNe]
+  | vbroadcastsd _ _ dst src _ | vpbroadcastq _ _ dst src _ =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases src with
+    | reg _ => simp [execAmd64VecInsn, setZmm, beq_false_of_ne hNe]
+    | mem addr =>
+      cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;> simp [execAmd64VecInsn, hRd, setZmm, beq_false_of_ne hNe]
+  | vmovdquLoad _ _ dst addr _ =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hEa : evalMemAddr s.gpr addr <;> simp [execAmd64VecInsn, hEa, setZmm, beq_false_of_ne hNe]
+  | vpand _ w dst _ src2 mask | vsubpd _ w dst _ src2 mask | vminpd _ w dst _ src2 mask =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hRm : evalVecRm s w src2 mask.broadcast <;> simp [execAmd64VecInsn, hRm, setZmm, beq_false_of_ne hNe]
+  | vcmppdVex w dst _ src2 _ | vpblendvb w dst _ src2 _ =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hRm : evalVecRm s w src2 false <;> simp [execAmd64VecInsn, hRm, setZmm, beq_false_of_ne hNe]
+  | vpblendmq w dst _ src2 mask =>
+    have hNe : (15#5 : BitVec 5) ≠ dst := by
+      simp only [insnPreservesR14AndX15, bne_iff_ne] at hP; exact Ne.symm hP
+    cases hRm : evalVecRm s w src2 mask.broadcast <;> simp [execAmd64VecInsn, hRm, setZmm, beq_false_of_ne hNe]
+  | vcmppdEvex w _ _ src2 _ mask =>
+    cases hRm : evalVecRm s w src2 mask.broadcast <;> simp [execAmd64VecInsn, hRm]
+
+private def vecLanes : VecWidth → Nat
+  | .xmm128 => 2
+  | .ymm256 => 4
+  | .zmm512 => 8
+
+private def storeSafeFromSavedRbp (slot : FrameAbiSlot) (addr : MemAddr) (nLanes : Nat) : Bool :=
+  if !slot.rbpSaved then true
+  else
+    match addr with
+    | .baseIdxDisp (some baseReg) none disp =>
+      let baseDelta? : Option (BitVec 64) :=
+        if baseReg == 4#4 then some slot.spDelta
+        else if baseReg == 2#4 then slot.rdxDelta
+        else none
+      match baseDelta? with
+      | none => false
+      | some bd =>
+        let baseOff := bd + BitVec.ofInt 64 disp
+        (List.range nLanes).all (fun k => baseOff + BitVec.ofNat 64 (k * 8) != 0xfffffffffffffff8#64)
+    | _ => false
+
+/-- Abstract step on `(spDelta, rbpSaved, rdxDelta)` for Go ABI frame verification.
+When `checkRbp = false`, skips checking `RBP` restoration and memory non-aliasing with `[sp0 - 8]`. -/
+private def frameAbiStep (checkRbp : Bool) (slot : FrameAbiSlot) (insn : Amd64VecInsn) :
+    Option FrameAbiSlot :=
+  if !insnPreservesR14AndX15 insn then none
+  else
+    let updRdx (dst : BitVec 4) : Option (BitVec 64) :=
+      if dst == 2#4 then none else slot.rdxDelta
+    match insn with
+    | .pushReg r =>
+      if r == 5#4 then
+        if !slot.rbpSaved && slot.spDelta == 0#64 then
+          some { slot with spDelta := slot.spDelta - 8#64, rbpSaved := true }
+        else if !checkRbp then
+          some { slot with spDelta := slot.spDelta - 8#64 }
+        else none
+      else if !checkRbp || (!slot.rbpSaved || slot.spDelta - 8#64 != 0xfffffffffffffff8#64) then
+        some { slot with spDelta := slot.spDelta - 8#64 }
+      else none
+    | .popReg r =>
+      if r == 4#4 then none
+      else if r == 5#4 then
+        if slot.rbpSaved && slot.spDelta == 0xfffffffffffffff8#64 then
+          some { spDelta := 0#64, rbpSaved := false, rdxDelta := slot.rdxDelta }
+        else if !checkRbp then
+          some { spDelta := slot.spDelta + 8#64, rbpSaved := false, rdxDelta := slot.rdxDelta }
+        else none
+      else
+        some { slot with spDelta := slot.spDelta + 8#64, rdxDelta := updRdx r }
+    | .ret =>
+      if slot.spDelta == 0#64 && (!checkRbp || !slot.rbpSaved) then
+        some { slot with spDelta := 8#64 }
+      else none
+    | .addImm64 dst imm =>
+      if dst == 4#4 then
+        some { slot with spDelta := slot.spDelta + imm }
+      else if checkRbp && dst == 5#4 && !slot.rbpSaved then none
+      else some { slot with rdxDelta := updRdx dst }
+    | .subImm64 dst imm =>
+      if dst == 4#4 then
+        some { slot with spDelta := slot.spDelta - imm }
+      else if checkRbp && dst == 5#4 && !slot.rbpSaved then none
+      else some { slot with rdxDelta := updRdx dst }
+    | .lea64 dst addr =>
+      if dst == 4#4 then none
+      else if checkRbp && dst == 5#4 && !slot.rbpSaved then none
+      else if dst == 2#4 then
+        match addr with
+        | .baseIdxDisp (some 4#4) none disp =>
+          some { slot with rdxDelta := some (slot.spDelta + BitVec.ofInt 64 disp) }
+        | _ => some { slot with rdxDelta := none }
+      else some slot
+    | .movRR64 dst _ | .movRM64 dst _ | .movImm32 dst _ | .movImm64 dst _
+    | .xorRR32 dst _ | .inc64 dst | .vmovmskpd _ dst _ | .kmovbToGpr dst _ =>
+      if dst == 4#4 then none
+      else if checkRbp && dst == 5#4 && !slot.rbpSaved then none
+      else some { slot with rdxDelta := updRdx dst }
+    | .movMR64 addr _ =>
+      if checkRbp && !storeSafeFromSavedRbp slot addr 1 then none else some slot
+    | .sseMovupsStore addr _ =>
+      if checkRbp && !storeSafeFromSavedRbp slot addr 2 then none else some slot
+    | .vmovdquStore _ w addr _ _ =>
+      if checkRbp && !storeSafeFromSavedRbp slot addr (vecLanes w) then none else some slot
+    | _ => some slot
+
+private def frameNextIndices (insns : Array DecodedAmd64Insn) (idx : Nat) : Option (List Nat) :=
+  if h : idx < insns.size then
+    let d := insns[idx]
+    match d.insn with
+    | .ret | .callRel _ => some []
+    | .jmpRel rel =>
+      match nextTargetPc d.nextOffset rel >>= findInsnIdxByOff insns with
+      | some t => some [t]
+      | none => none
+    | .jccRel _ rel =>
+      match findInsnIdxByOff insns d.nextOffset, nextTargetPc d.nextOffset rel >>= findInsnIdxByOff insns with
+      | some f, some t => some [f, t]
+      | _, _ => none
+    | _ =>
+      match findInsnIdxByOff insns d.nextOffset with
+      | some f => some [f]
+      | none => none
+  else none
+
+private def computeFrameTableLoop (checkRbp : Bool) (insns : Array DecodedAmd64Insn) :
+    Nat → Array (Option FrameAbiSlot) → List Nat → Option (Array (Option FrameAbiSlot))
+  | 0, tbl, [] => some tbl
+  | 0, _, _ :: _ => none
+  | _ + 1, tbl, [] => some tbl
+  | fuel + 1, tbl, idx :: rest =>
+    match tbl[idx]? with
+    | some (some slot) =>
+      if h : idx < insns.size then
+        match frameAbiStep checkRbp slot insns[idx].insn, frameNextIndices insns idx with
+        | some slot', some succs =>
+          let pushRes := succs.foldl (fun (acc : Option (Array (Option FrameAbiSlot) × List Nat)) (nxt : Nat) =>
+            match acc with
+            | none => none
+            | some (t, q) =>
+              if hNxt : nxt < t.size then
+                match t[nxt] with
+                | none => some (t.set nxt (some slot') hNxt, nxt :: q)
+                | some prev => if prev == slot' then some (t, q) else none
+              else none) (some (tbl, rest))
+          match pushRes with
+          | none => none
+          | some (tbl', q') => computeFrameTableLoop checkRbp insns fuel tbl' q'
+        | _, _ => none
+      else none
+    | _ => none
+
+private def verifyFrameTableGo (checkRbp : Bool) (insns : Array DecodedAmd64Insn)
+    (tbl : Array (Option FrameAbiSlot)) : Nat → Nat → Bool
+  | 0, _ => true
+  | rem + 1, idx =>
+    if h : idx < insns.size then
+      let okHere :=
+        match tbl[idx]? with
+        | some (some slot) =>
+          match frameAbiStep checkRbp slot insns[idx].insn, frameNextIndices insns idx with
+          | some slot', some succs =>
+            succs.all (fun nxt => tbl[nxt]? == some (some slot'))
+          | _, _ => false
+        | _ => true
+      okHere && verifyFrameTableGo checkRbp insns tbl rem (idx + 1)
+    else true
+
+private theorem verifyFrameTableGo_sound (checkRbp : Bool) (insns : Array DecodedAmd64Insn)
+    (tbl : Array (Option FrameAbiSlot)) :
+    ∀ (rem start idx : Nat) (slot : FrameAbiSlot),
+      verifyFrameTableGo checkRbp insns tbl rem start = true →
+      start ≤ idx → idx < start + rem → (hIdx : idx < insns.size) →
+      tbl[idx]? = some (some slot) →
+      ∃ slot' succs,
+        frameAbiStep checkRbp slot insns[idx].insn = some slot' ∧
+        frameNextIndices insns idx = some succs ∧
+        ∀ nxt ∈ succs, tbl[nxt]? = some (some slot') := by
+  intro rem
+  induction rem with
+  | zero => intro start idx _ _ hLe hLt; omega
+  | succ r ih =>
+    intro start idx slot hOk hLe hLt hIdx hSlot
+    unfold verifyFrameTableGo at hOk
+    have hStart : start < insns.size := by omega
+    simp only [hStart, ↓reduceDIte, Bool.and_eq_true] at hOk
+    by_cases hEq : start = idx
+    · subst hEq
+      have hHere := hOk.1
+      simp only [hSlot] at hHere
+      cases hStep : frameAbiStep checkRbp slot insns[start].insn with
+      | none => simp [hStep] at hHere
+      | some slot' =>
+        cases hNext : frameNextIndices insns start with
+        | none => simp [hStep, hNext] at hHere
+        | some succs =>
+          simp only [hStep, hNext, List.all_eq_true, beq_iff_eq] at hHere
+          exact ⟨slot', succs, rfl, rfl, hHere⟩
+    · exact ih (start + 1) idx slot hOk.2 (by omega) (by omega) hIdx hSlot
+
+private def verifyFrameTable (checkRbp : Bool) (insns : Array DecodedAmd64Insn)
+    (tbl : Array (Option FrameAbiSlot)) : Bool :=
+  if hPos : 0 < insns.size then
+    tbl.size == insns.size &&
+    insns[0].offset == 0 &&
+    tbl[0]? == some (some { spDelta := 0#64, rbpSaved := false, rdxDelta := none }) &&
+    verifyFrameTableGo checkRbp insns tbl insns.size 0
+  else false
+
+private def checkDecodedFrameAbi (checkRbp : Bool) (bytes : Array UInt8) : Bool :=
+  match decodeAmd64Program bytes with
+  | none => false
+  | some insns =>
+    if hPos : 0 < insns.size then
+      let tbl0 := (Array.replicate insns.size none).set 0
+        (some { spDelta := 0#64, rbpSaved := false, rdxDelta := none }) (by simp [hPos])
+      match computeFrameTableLoop checkRbp insns (4 * insns.size + 2) tbl0 [0] with
+      | none => false
+      | some tbl => verifyFrameTable checkRbp insns tbl
+    else false
+
+private def checkDecodedFrameAbiChunks (checkRbp : Bool) (chunks : List (List UInt8)) : Bool :=
+  match decodeAmd64ProgramChunks chunks with
+  | none => false
+  | some insns =>
+    if hPos : 0 < insns.size then
+      let tbl0 := (Array.replicate insns.size none).set 0
+        (some { spDelta := 0#64, rbpSaved := false, rdxDelta := none }) (by simp [hPos])
+      match computeFrameTableLoop checkRbp insns (4 * insns.size + 2) tbl0 [0] with
+      | none => false
+      | some tbl => verifyFrameTable checkRbp insns tbl
+    else false
+
+private theorem checkDecodedFrameAbi_of_chunks (checkRbp : Bool) (chunks : List (List UInt8))
+    (hWf : chunks16WellFormed chunks = true)
+    (hCert : checkDecodedFrameAbiChunks checkRbp chunks = true) :
+    checkDecodedFrameAbi checkRbp ⟨chunks.flatten⟩ = true := by
+  unfold checkDecodedFrameAbi
+  rw [decodeAmd64ProgramChunks_eq chunks hWf]
+  exact hCert
+
+private def FrameSlotHolds (checkRbp : Bool) (s0 s : Amd64VecState) (slot : FrameAbiSlot) : Prop :=
+  s.gpr 4#4 = s0.gpr 4#4 + slot.spDelta ∧
+  (∀ bd, slot.rdxDelta = some bd → s.gpr 2#4 = s0.gpr 4#4 + bd) ∧
+  (checkRbp = true →
+    (slot.rbpSaved = false → s.gpr 5#4 = s0.gpr 5#4) ∧
+    (slot.rbpSaved = true → s.mem (s0.gpr 4#4 - 8#64) = s0.gpr 5#4))
+
+private theorem storeSafeFromSavedRbp_ea_ne {s0 s : Amd64VecState} {slot : FrameAbiSlot}
+    {addr : MemAddr} {nLanes : Nat} {ea : BitVec 64}
+    (hHolds : FrameSlotHolds true s0 s slot)
+    (hSaved : slot.rbpSaved = true)
+    (hSafe : storeSafeFromSavedRbp slot addr nLanes = true)
+    (hEa : evalMemAddr s.gpr addr = some ea) :
+    ∀ k < nLanes, ea + BitVec.ofNat 64 (k * 8) ≠ s0.gpr 4#4 - 8#64 := by
+  unfold storeSafeFromSavedRbp at hSafe
+  simp only [hSaved, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hSafe
+  cases addr with
+  | ripRel _ => simp at hSafe
+  | baseIdxDisp baseOpt idxOpt disp =>
+    cases baseOpt with
+    | none => simp at hSafe
+    | some baseReg =>
+      cases idxOpt with
+      | some _ => simp at hSafe
+      | none =>
+        dsimp only at hSafe
+        have hBd : ∃ bd, s.gpr baseReg = s0.gpr 4#4 + bd ∧
+            (List.range nLanes).all (fun k => bd + BitVec.ofInt 64 disp + BitVec.ofNat 64 (k * 8) != 0xfffffffffffffff8#64) = true := by
+          by_cases h4 : baseReg = 4#4
+          · subst h4
+            simp only [beq_self_eq_true, ↓reduceIte] at hSafe
+            exact ⟨slot.spDelta, hHolds.1, hSafe⟩
+          · simp only [beq_false_of_ne h4, Bool.false_eq_true, ↓reduceIte] at hSafe
+            by_cases h2 : baseReg = 2#4
+            · subst h2
+              simp only [beq_self_eq_true, ↓reduceIte] at hSafe
+              cases hRdx : slot.rdxDelta with
+              | none => simp [hRdx] at hSafe
+              | some bd =>
+                simp only [hRdx] at hSafe
+                exact ⟨bd, hHolds.2.1 bd hRdx, hSafe⟩
+            · simp [beq_false_of_ne h2] at hSafe
+        rcases hBd with ⟨bd, hRegEq, hAll⟩
+        simp only [evalMemAddr, Option.some.injEq] at hEa
+        rw [hRegEq] at hEa
+        simp only [List.all_eq_true, List.mem_range, bne_iff_ne] at hAll
+        intro k hk
+        have hNe := hAll k hk
+        rw [← hEa]
+        bv_omega
+
+private theorem write64_storeVecMem_preserves_ne {m : BitVec 64 → BitVec 64} {w : VecWidth}
+    {ea target : BitVec 64} {v : Vec512} {kmask : BitVec 3} {kVal : BitVec 8}
+    (hNe : ∀ k < vecLanes w, ea + BitVec.ofNat 64 (k * 8) ≠ target) :
+    storeVecMem m w ea v kmask kVal target = m target := by
+  have hWr : ∀ (m0 : BitVec 64 → BitVec 64) (i : Nat) (val : BitVec 64),
+      ea + BitVec.ofNat 64 (i * 8) ≠ target →
+      (if kmask == 0#3 || Vec512.maskBit kVal i then write64 m0 (ea + BitVec.ofNat 64 (i * 8)) val else m0) target = m0 target := by
+    intro m0 i val hN
+    split
+    · simp only [write64, beq_false_of_ne (Ne.symm hN), Bool.false_eq_true, ↓reduceIte]
+    · rfl
+  cases w with
+  | xmm128 =>
+    unfold storeVecMem; dsimp only
+    rw [hWr _ 1 _ (hNe 1 (by decide)), hWr _ 0 _ (hNe 0 (by decide))]
+  | ymm256 =>
+    unfold storeVecMem; dsimp only
+    rw [hWr _ 3 _ (hNe 3 (by decide)), hWr _ 2 _ (hNe 2 (by decide)),
+        hWr _ 1 _ (hNe 1 (by decide)), hWr _ 0 _ (hNe 0 (by decide))]
+  | zmm512 =>
+    unfold storeVecMem; dsimp only
+    rw [hWr _ 7 _ (hNe 7 (by decide)), hWr _ 6 _ (hNe 6 (by decide)),
+        hWr _ 5 _ (hNe 5 (by decide)), hWr _ 4 _ (hNe 4 (by decide)),
+        hWr _ 3 _ (hNe 3 (by decide)), hWr _ 2 _ (hNe 2 (by decide)),
+        hWr _ 1 _ (hNe 1 (by decide)), hWr _ 0 _ (hNe 0 (by decide))]
+
+private theorem execAmd64VecInsn_frameAbi_step
+    (checkRbp : Bool) (insns : Array DecodedAmd64Insn)
+    (rodata : Nat → Option (BitVec 64)) (ext : Nat → Option String)
+    (idx : Nat) (hIdx : idx < insns.size) (s0 s : Amd64VecState)
+    (slot slot' : FrameAbiSlot) (succs : List Nat)
+    (hRun : s.status = .running)
+    (hHolds : FrameSlotHolds checkRbp s0 s slot)
+    (hStep : frameAbiStep checkRbp slot insns[idx].insn = some slot')
+    (hSuccs : frameNextIndices insns idx = some succs) :
+    let s' := execAmd64VecInsn rodata ext s insns[idx].insn insns[idx].nextOffset
+    s'.gpr 14#4 = s.gpr 14#4 ∧
+    (s'.zmm 15#5).l0 = (s.zmm 15#5).l0 ∧
+    (s'.zmm 15#5).l1 = (s.zmm 15#5).l1 ∧
+    (s'.status = .returned →
+      s'.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+      (checkRbp = true → s'.gpr 5#4 = s0.gpr 5#4)) ∧
+    (s'.status = .running →
+      FrameSlotHolds checkRbp s0 s' slot' ∧
+      ∃ nxt ∈ succs, ∃ (hNxt : nxt < insns.size), s'.pc = insns[nxt].offset) := by
+  have hP : insnPreservesR14AndX15 insns[idx].insn = true := by
+    unfold frameAbiStep at hStep
+    cases h : insnPreservesR14AndX15 insns[idx].insn
+    · simp [h] at hStep
+    · rfl
+  have hR14X15 := execAmd64VecInsn_preserves_R14_X15 rodata ext s insns[idx].insn insns[idx].nextOffset hP
+  refine ⟨hR14X15.1, hR14X15.2.1, hR14X15.2.2, ?_, ?_⟩
+  · -- Returned case: only `.ret` sets `status = .returned`.
+    intro hRet
+    cases hI : insns[idx].insn with
+    | ret =>
+      rw [hI] at hStep
+      unfold frameAbiStep at hStep
+      dsimp only [insnPreservesR14AndX15] at hStep
+      have hCond : (slot.spDelta == 0#64 && (!checkRbp || !slot.rbpSaved)) = true := by
+        cases hc : (slot.spDelta == 0#64 && (!checkRbp || !slot.rbpSaved))
+        · simp [hc] at hStep
+        · rfl
+      simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true, Bool.not_eq_true'] at hCond
+      have hSp : s.gpr 4#4 = s0.gpr 4#4 := by rw [hHolds.1, hCond.1]; bv_omega
+      have h4ne5 : (5#4 : BitVec 4) ≠ 4#4 := by decide
+      refine ⟨?_, ?_⟩
+      · simp [execAmd64VecInsn, setGpr, hSp]
+      · intro hChk
+        have hNotSaved : slot.rbpSaved = false := by rcases hCond.2 with hF | hF <;> simp_all
+        simp [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne5, (hHolds.2.2 hChk).1 hNotSaved]
+    | callRel _ =>
+      cases hE : ext s.pc with
+      | none => simp [execAmd64VecInsn, hI, hE] at hRet
+      | some sym =>
+        simp only [execAmd64VecInsn, hI, hE] at hRet
+        split at hRet <;> simp at hRet
+    | jmpRel rel =>
+      cases hT : nextTargetPc insns[idx].nextOffset rel <;> simp [execAmd64VecInsn, hI, hT, hRun] at hRet
+    | jccRel cond rel =>
+      cases hC : evalX86Cond cond s.flags
+      · simp [execAmd64VecInsn, hI, hC, hRun] at hRet
+      · cases hT : nextTargetPc insns[idx].nextOffset rel <;> simp [execAmd64VecInsn, hI, hC, hT, hRun] at hRet
+    | movMR64 addr _ | lea64 _ addr | sseMovupsLoad _ addr | sseMovupsStore addr _
+    | vmovdquLoad _ _ _ addr _ | vmovdquStore _ _ addr _ _ =>
+      cases hEa : evalMemAddr s.gpr addr <;> simp [execAmd64VecInsn, hI, hEa, hRun] at hRet
+    | movRM64 _ addr | cmpRM64 _ addr | sseMovsdLoad _ addr | vmovsdLoad _ addr =>
+      cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;> simp [execAmd64VecInsn, hI, hRd, hRun] at hRet
+    | vbroadcastsd _ _ _ src _ | vpbroadcastq _ _ _ src _ =>
+      cases src with
+      | reg _ => simp [execAmd64VecInsn, hI, hRun] at hRet
+      | mem addr => cases hRd : readMem64 rodata s.pc s.gpr s.mem addr <;> simp [execAmd64VecInsn, hI, hRd, hRun] at hRet
+    | vpand _ w _ _ src2 mask | vsubpd _ w _ _ src2 mask | vminpd _ w _ _ src2 mask
+    | vcmppdEvex w _ _ src2 _ mask | vpblendmq w _ _ src2 mask =>
+      cases hRm : evalVecRm s w src2 mask.broadcast <;> simp [execAmd64VecInsn, hI, hRm, hRun] at hRet
+    | vcmppdVex w _ _ src2 _ | vpblendvb w _ _ src2 _ =>
+      cases hRm : evalVecRm s w src2 false <;> simp [execAmd64VecInsn, hI, hRm, hRun] at hRet
+    | nop | pushReg _ | popReg _ | movRR64 _ _ | movImm32 _ _ | movImm64 _ _
+    | xorRR32 _ _ | addImm64 _ _ | subImm64 _ _ | inc64 _ | testRR64 _ _
+    | cmpRR64 _ _ | cmpImm64 _ _ | cmpImm8 _ _ | sseMovupsRR _ _ | sseMovqFromGpr _ _
+    | sseXorpsRR _ _ | ssePorRR _ _ | sseMinsdRR _ _ | sseUcomisdRR _ _
+    | vzeroupper | vmovsdRR _ _ _ | vmovqFromGpr _ _ | vmovdquRR _ _ _ _ _
+    | vmovmskpd _ _ _ | vpmovm2q _ _ _ | vpmovq2m _ _ _ | kmovbToGpr _ _ =>
+      simp [execAmd64VecInsn, hI, hRun] at hRet
+  · -- Running case: show `FrameSlotHolds` and successor PC in `succs`.
+    intro hRun'
+    have hFall : ∀ {f : Nat}, findInsnIdxByOff insns insns[idx].nextOffset = some f →
+        succs = [f] →
+        ∃ nxt ∈ succs, ∃ (hNxt : nxt < insns.size), insns[idx].nextOffset = insns[nxt].offset := by
+      intro f hF hEq
+      subst hEq
+      rcases findInsnIdxByOff_sound insns _ _ hF with ⟨hLt, hOff⟩
+      exact ⟨f, List.Mem.head [], hLt, hOff.symm⟩
+    unfold frameNextIndices at hSuccs
+    simp only [hIdx, ↓reduceDIte] at hSuccs
+    unfold frameAbiStep at hStep
+    simp only [hP, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep
+    cases hI : insns[idx].insn <;> simp only [hI] at hStep hSuccs hRun' ⊢
+    case ret => simp [execAmd64VecInsn] at hRun'
+    case callRel _ =>
+      cases hE : ext s.pc with
+      | none => simp [execAmd64VecInsn, hE] at hRun'
+      | some sym =>
+        simp only [execAmd64VecInsn, hE] at hRun'
+        split at hRun' <;> simp at hRun'
+    case jmpRel rel =>
+      cases hStep
+      cases hT : nextTargetPc insns[idx].nextOffset rel with
+      | none => simp [hT] at hSuccs
+      | some tgtOff =>
+        simp only [hT, Option.bind_eq_bind, Option.bind_some] at hSuccs
+        cases hF : findInsnIdxByOff insns tgtOff with
+        | none => simp [hF] at hSuccs
+        | some t =>
+          simp only [hF, Option.some.injEq] at hSuccs
+          rcases findInsnIdxByOff_sound insns _ _ hF with ⟨hLt, hOff⟩
+          refine ⟨?_, t, by rw [← hSuccs]; exact List.Mem.head [], hLt, by simp [execAmd64VecInsn, hT, hOff]⟩
+          simpa [execAmd64VecInsn, hT, FrameSlotHolds] using hHolds
+    case jccRel cond rel =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        cases hT : nextTargetPc insns[idx].nextOffset rel with
+        | none => simp [hF, hT] at hSuccs
+        | some tgtOff =>
+          simp only [hF, hT, Option.bind_eq_bind, Option.bind_some] at hSuccs
+          cases hFt : findInsnIdxByOff insns tgtOff with
+          | none => simp [hFt] at hSuccs
+          | some t =>
+            simp only [hFt, Option.some.injEq] at hSuccs
+            rcases findInsnIdxByOff_sound insns _ _ hF with ⟨hFLt, hFOff⟩
+            rcases findInsnIdxByOff_sound insns _ _ hFt with ⟨hTLt, hTOff⟩
+            cases hC : evalX86Cond cond s.flags
+            · refine ⟨by simpa [execAmd64VecInsn, hC, FrameSlotHolds] using hHolds,
+                f, by rw [← hSuccs]; exact List.Mem.head _, hFLt, by simp [execAmd64VecInsn, hC, hFOff]⟩
+            · refine ⟨by simpa [execAmd64VecInsn, hC, hT, FrameSlotHolds] using hHolds,
+                t, by rw [← hSuccs]; exact List.Mem.tail _ (List.Mem.head _), hTLt,
+                by simp [execAmd64VecInsn, hC, hT, hTOff]⟩
+    case pushReg r =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        have h4ne2 : (2#4 : BitVec 4) ≠ 4#4 := by decide
+        have h4ne5 : (5#4 : BitVec 4) ≠ 4#4 := by decide
+        refine ⟨?_, hFall hF hSuccs.symm⟩
+        by_cases hr5 : r = 5#4
+        · subst hr5
+          simp only [beq_self_eq_true, ↓reduceIte] at hStep
+          by_cases hSave : (!slot.rbpSaved && slot.spDelta == 0#64) = true
+          · simp only [hSave, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            simp only [Bool.and_eq_true, Bool.not_eq_true', beq_iff_eq] at hSave
+            refine ⟨?_, ?_, ?_⟩
+            · simp only [execAmd64VecInsn, setGpr, beq_self_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+            · intro bd hBd; simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne2, Bool.false_eq_true, ↓reduceIte]
+              exact hHolds.2.1 bd hBd
+            · intro hChk
+              refine ⟨fun h => Bool.noConfusion h, fun _ => ?_⟩
+              have hSp0 : s.gpr 4#4 = s0.gpr 4#4 := by rw [hHolds.1, hSave.2]; bv_omega
+              simp only [execAmd64VecInsn, write64, hSp0, beq_self_eq_true, ↓reduceIte]
+              exact (hHolds.2.2 hChk).1 hSave.1
+          · simp only [hSave, Bool.false_eq_true, ↓reduceIte] at hStep
+            cases checkRbp with
+            | true => simp at hStep
+            | false =>
+              simp only [Bool.not_false, ↓reduceIte, Option.some.injEq] at hStep
+              subst hStep
+              refine ⟨?_, ?_, fun h => Bool.noConfusion h⟩
+              · simp only [execAmd64VecInsn, setGpr, beq_self_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+              · intro bd hBd; simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne2, Bool.false_eq_true, ↓reduceIte]
+                exact hHolds.2.1 bd hBd
+        · simp only [beq_false_of_ne hr5, Bool.false_eq_true, ↓reduceIte] at hStep
+          have hOk : (!checkRbp || (!slot.rbpSaved || slot.spDelta - 8#64 != 0xfffffffffffffff8#64)) = true := by
+            cases hc : (!checkRbp || (!slot.rbpSaved || slot.spDelta - 8#64 != 0xfffffffffffffff8#64))
+            · simp [hc] at hStep
+            · rfl
+          simp only [hOk, ↓reduceIte, Option.some.injEq] at hStep
+          subst hStep
+          refine ⟨?_, ?_, ?_⟩
+          · simp only [execAmd64VecInsn, setGpr, beq_self_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+          · intro bd hBd; simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne2, Bool.false_eq_true, ↓reduceIte]
+            exact hHolds.2.1 bd hBd
+          · intro hChk
+            simp only [hChk, Bool.not_true, Bool.false_or, Bool.or_eq_true, Bool.not_eq_true', bne_iff_ne] at hOk
+            refine ⟨fun hNS => by simp [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne5, (hHolds.2.2 hChk).1 hNS],
+              fun hS => ?_⟩
+            have hNe : slot.spDelta - 8#64 ≠ 0xfffffffffffffff8#64 := by rcases hOk with hF | hN <;> simp_all
+            have hAddrNe : s0.gpr 4#4 - 8#64 ≠ s.gpr 4#4 - 8#64 := by rw [hHolds.1]; bv_omega
+            simp only [execAmd64VecInsn, write64, beq_false_of_ne hAddrNe, Bool.false_eq_true, ↓reduceIte]
+            exact (hHolds.2.2 hChk).2 hS
+    case popReg r =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        by_cases hr4 : r = 4#4
+        · subst hr4; simp at hStep
+        · simp only [beq_false_of_ne hr4, Bool.false_eq_true, ↓reduceIte] at hStep
+          have h4neR : (4#4 : BitVec 4) ≠ r := Ne.symm hr4
+          have h4ne2 : (2#4 : BitVec 4) ≠ 4#4 := by decide
+          refine ⟨?_, hFall hF hSuccs.symm⟩
+          by_cases hr5 : r = 5#4
+          · subst hr5
+            simp only [beq_self_eq_true, ↓reduceIte] at hStep
+            by_cases hRest : (slot.rbpSaved && slot.spDelta == 0xfffffffffffffff8#64) = true
+            · simp only [hRest, ↓reduceIte, Option.some.injEq] at hStep
+              subst hStep
+              simp only [Bool.and_eq_true, beq_iff_eq] at hRest
+              have h5ne2 : (2#4 : BitVec 4) ≠ 5#4 := by decide
+              refine ⟨?_, ?_, ?_⟩
+              · simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4neR, beq_self_eq_true, Bool.false_eq_true,
+                  ↓reduceIte, hHolds.1, hRest.2]; bv_omega
+              · intro bd hBd
+                simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h5ne2, beq_false_of_ne h4ne2,
+                  Bool.false_eq_true, ↓reduceIte]
+                exact hHolds.2.1 bd hBd
+              · intro hChk
+                refine ⟨fun _ => ?_, fun h => Bool.noConfusion h⟩
+                have hSpNeg8 : s.gpr 4#4 = s0.gpr 4#4 - 8#64 := by rw [hHolds.1, hRest.2]; bv_omega
+                simp only [execAmd64VecInsn, setGpr, beq_self_eq_true, ↓reduceIte, hSpNeg8]
+                exact (hHolds.2.2 hChk).2 hRest.1
+            · simp only [hRest, Bool.false_eq_true, ↓reduceIte] at hStep
+              cases checkRbp with
+              | true => simp at hStep
+              | false =>
+                simp only [Bool.not_false, ↓reduceIte, Option.some.injEq] at hStep
+                subst hStep
+                have h5ne2 : (2#4 : BitVec 4) ≠ 5#4 := by decide
+                refine ⟨?_, ?_, fun h => Bool.noConfusion h⟩
+                · simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4neR, beq_self_eq_true,
+                    Bool.false_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+                · intro bd hBd
+                  simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h5ne2, beq_false_of_ne h4ne2,
+                    Bool.false_eq_true, ↓reduceIte]
+                  exact hHolds.2.1 bd hBd
+          · simp only [beq_false_of_ne hr5, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            have h5neR : (5#4 : BitVec 4) ≠ r := Ne.symm hr5
+            have h4ne5 : (5#4 : BitVec 4) ≠ 4#4 := by decide
+            refine ⟨?_, ?_, ?_⟩
+            · simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4neR, beq_self_eq_true,
+                Bool.false_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+            · intro bd hBd
+              by_cases hr2 : r = 2#4
+              · subst hr2; simp at hBd
+              · simp only [beq_false_of_ne hr2, Bool.false_eq_true, ↓reduceIte] at hBd
+                simp only [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hr2), beq_false_of_ne h4ne2,
+                  Bool.false_eq_true, ↓reduceIte]
+                exact hHolds.2.1 bd hBd
+            · intro hChk
+              refine ⟨fun hNS => by
+                simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h5neR, beq_false_of_ne h4ne5,
+                  Bool.false_eq_true, ↓reduceIte]
+                exact (hHolds.2.2 hChk).1 hNS,
+                fun hS => (hHolds.2.2 hChk).2 hS⟩
+    case addImm64 dst imm =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        refine ⟨?_, hFall hF hSuccs.symm⟩
+        by_cases hd4 : dst = 4#4
+        · subst hd4
+          simp only [beq_self_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+          subst hStep
+          have h4ne2 : (2#4 : BitVec 4) ≠ 4#4 := by decide
+          have h4ne5 : (5#4 : BitVec 4) ≠ 4#4 := by decide
+          refine ⟨?_, ?_, ?_⟩
+          · simp only [execAmd64VecInsn, setGpr, beq_self_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+          · intro bd hBd; simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne2, Bool.false_eq_true, ↓reduceIte]
+            exact hHolds.2.1 bd hBd
+          · intro hChk
+            exact ⟨fun hNS => by simp [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne5, (hHolds.2.2 hChk).1 hNS],
+                   fun hS => (hHolds.2.2 hChk).2 hS⟩
+        · simp only [beq_false_of_ne hd4, Bool.false_eq_true, ↓reduceIte] at hStep
+          by_cases hd5 : (checkRbp && dst == 5#4 && !slot.rbpSaved) = true
+          · simp [hd5] at hStep
+          · simp only [hd5, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            refine ⟨?_, ?_, ?_⟩
+            · simp only [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hd4), Bool.false_eq_true, ↓reduceIte]
+              exact hHolds.1
+            · intro bd hBd
+              by_cases hd2 : dst = 2#4
+              · subst hd2; simp at hBd
+              · simp only [beq_false_of_ne hd2, Bool.false_eq_true, ↓reduceIte] at hBd
+                simp only [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hd2), Bool.false_eq_true, ↓reduceIte]
+                exact hHolds.2.1 bd hBd
+            · intro hChk
+              refine ⟨fun hNS => ?_, fun hS => (hHolds.2.2 hChk).2 hS⟩
+              have h5neD : (5#4 : BitVec 4) ≠ dst := by
+                intro hEq; subst hEq; dsimp only at hNS; simp [hChk, hNS] at hd5
+              simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h5neD, Bool.false_eq_true, ↓reduceIte]
+              exact (hHolds.2.2 hChk).1 hNS
+    case subImm64 dst imm =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        refine ⟨?_, hFall hF hSuccs.symm⟩
+        by_cases hd4 : dst = 4#4
+        · subst hd4
+          simp only [beq_self_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+          subst hStep
+          have h4ne2 : (2#4 : BitVec 4) ≠ 4#4 := by decide
+          have h4ne5 : (5#4 : BitVec 4) ≠ 4#4 := by decide
+          refine ⟨?_, ?_, ?_⟩
+          · simp only [execAmd64VecInsn, setGpr, beq_self_eq_true, ↓reduceIte, hHolds.1]; bv_omega
+          · intro bd hBd; simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne2, Bool.false_eq_true, ↓reduceIte]
+            exact hHolds.2.1 bd hBd
+          · intro hChk
+            exact ⟨fun hNS => by simp [execAmd64VecInsn, setGpr, beq_false_of_ne h4ne5, (hHolds.2.2 hChk).1 hNS],
+                   fun hS => (hHolds.2.2 hChk).2 hS⟩
+        · simp only [beq_false_of_ne hd4, Bool.false_eq_true, ↓reduceIte] at hStep
+          by_cases hd5 : (checkRbp && dst == 5#4 && !slot.rbpSaved) = true
+          · simp [hd5] at hStep
+          · simp only [hd5, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            refine ⟨?_, ?_, ?_⟩
+            · simp only [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hd4), Bool.false_eq_true, ↓reduceIte]
+              exact hHolds.1
+            · intro bd hBd
+              by_cases hd2 : dst = 2#4
+              · subst hd2; simp at hBd
+              · simp only [beq_false_of_ne hd2, Bool.false_eq_true, ↓reduceIte] at hBd
+                simp only [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hd2), Bool.false_eq_true, ↓reduceIte]
+                exact hHolds.2.1 bd hBd
+            · intro hChk
+              refine ⟨fun hNS => ?_, fun hS => (hHolds.2.2 hChk).2 hS⟩
+              have h5neD : (5#4 : BitVec 4) ≠ dst := by
+                intro hEq; subst hEq; dsimp only at hNS; simp [hChk, hNS] at hd5
+              simp only [execAmd64VecInsn, setGpr, beq_false_of_ne h5neD, Bool.false_eq_true, ↓reduceIte]
+              exact (hHolds.2.2 hChk).1 hNS
+    case lea64 dst addr =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hEa : evalMemAddr s.gpr addr with
+        | none => simp [execAmd64VecInsn, hEa] at hRun'
+        | some ea =>
+          by_cases hd4 : dst = 4#4
+          · subst hd4; simp at hStep
+          · simp only [beq_false_of_ne hd4, Bool.false_eq_true, ↓reduceIte] at hStep
+            by_cases hd5 : (checkRbp && dst == 5#4 && !slot.rbpSaved) = true
+            · simp [hd5] at hStep
+            · simp only [hd5, Bool.false_eq_true, ↓reduceIte] at hStep
+              refine ⟨?_, by simpa [execAmd64VecInsn, hEa] using hFall hF hSuccs.symm⟩
+              by_cases hd2 : dst = 2#4
+              · subst hd2
+                simp only [beq_self_eq_true, ↓reduceIte] at hStep
+                have h5ne2 : (5#4 : BitVec 4) ≠ 2#4 := by decide
+                cases addr with
+                | baseIdxDisp bOpt iOpt disp =>
+                  cases bOpt with
+                  | some bReg =>
+                    by_cases hb4 : bReg = 4#4
+                    · subst hb4
+                      cases iOpt with
+                      | none =>
+                        simp only [Option.some.injEq] at hStep
+                        subst hStep
+                        simp only [evalMemAddr, Option.some.injEq] at hEa
+                        refine ⟨by simp [execAmd64VecInsn, evalMemAddr, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1],
+                          ?_, ?_⟩
+                        · intro bd hBd
+                          simp only [Option.some.injEq] at hBd; subst hBd
+                          simp only [execAmd64VecInsn, evalMemAddr, setGpr, beq_self_eq_true, ↓reduceIte, hHolds.1]
+                          bv_omega
+                        · intro hChk
+                          exact ⟨fun hNS => by simp [execAmd64VecInsn, evalMemAddr, setGpr, beq_false_of_ne h5ne2, (hHolds.2.2 hChk).1 hNS],
+                                 fun hS => by simp [execAmd64VecInsn, evalMemAddr, (hHolds.2.2 hChk).2 hS]⟩
+                      | some _ =>
+                        simp only [Option.some.injEq] at hStep; subst hStep
+                        refine ⟨by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1],
+                          fun _ h => by simp at h, fun hChk =>
+                          ⟨fun hNS => by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne h5ne2, (hHolds.2.2 hChk).1 hNS],
+                           fun hS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).2 hS]⟩⟩
+                    · have hStep' : some { slot with rdxDelta := none } = some slot' := by
+                        revert hStep; split <;> simp_all
+                      cases hStep'
+                      refine ⟨by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1],
+                        fun _ h => by simp at h, fun hChk =>
+                        ⟨fun hNS => by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne h5ne2, (hHolds.2.2 hChk).1 hNS],
+                         fun hS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).2 hS]⟩⟩
+                  | none =>
+                    simp only [Option.some.injEq] at hStep; subst hStep
+                    refine ⟨by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1],
+                      fun _ h => by simp at h, fun hChk =>
+                      ⟨fun hNS => by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne h5ne2, (hHolds.2.2 hChk).1 hNS],
+                       fun hS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).2 hS]⟩⟩
+                | ripRel _ => simp [evalMemAddr] at hEa
+              · simp only [beq_false_of_ne hd2, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+                subst hStep
+                refine ⟨by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1],
+                  fun bd hBd => by simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne (Ne.symm hd2), hHolds.2.1 bd hBd],
+                  fun hChk => ⟨fun hNS => by
+                    have h5neD : (5#4 : BitVec 4) ≠ dst := by intro hEq; subst hEq; simp [hChk, hNS] at hd5
+                    simp [execAmd64VecInsn, hEa, setGpr, beq_false_of_ne h5neD, (hHolds.2.2 hChk).1 hNS],
+                    fun hS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).2 hS]⟩⟩
+    case movRR64 dst _ | movImm32 dst _ | movImm64 dst _ | xorRR32 dst _
+      | inc64 dst | vmovmskpd _ dst _ | kmovbToGpr dst _ =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        by_cases hd4 : dst = 4#4
+        · subst hd4; simp at hStep
+        · simp only [beq_false_of_ne hd4, Bool.false_eq_true, ↓reduceIte] at hStep
+          by_cases hd5 : (checkRbp && dst == 5#4 && !slot.rbpSaved) = true
+          · simp [hd5] at hStep
+          · simp only [hd5, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            refine ⟨⟨by simp [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1], ?_, ?_⟩,
+              hFall hF hSuccs.symm⟩
+            · intro bd hBd
+              by_cases hd2 : dst = 2#4
+              · subst hd2; simp at hBd
+              · simp only [beq_false_of_ne hd2, Bool.false_eq_true, ↓reduceIte] at hBd
+                simp [execAmd64VecInsn, setGpr, beq_false_of_ne (Ne.symm hd2), hHolds.2.1 bd hBd]
+            · intro hChk
+              refine ⟨fun hNS => ?_, fun hS => (hHolds.2.2 hChk).2 hS⟩
+              have h5neD : (5#4 : BitVec 4) ≠ dst := by intro hEq; subst hEq; dsimp only at hNS; simp [hChk, hNS] at hd5
+              simp [execAmd64VecInsn, setGpr, beq_false_of_ne h5neD, (hHolds.2.2 hChk).1 hNS]
+    case movRM64 dst addr =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hRd : readMem64 rodata s.pc s.gpr s.mem addr with
+        | none => simp [execAmd64VecInsn, hRd] at hRun'
+        | some v =>
+          by_cases hd4 : dst = 4#4
+          · subst hd4; simp at hStep
+          · simp only [beq_false_of_ne hd4, Bool.false_eq_true, ↓reduceIte] at hStep
+            by_cases hd5 : (checkRbp && dst == 5#4 && !slot.rbpSaved) = true
+            · simp [hd5] at hStep
+            · simp only [hd5, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+              subst hStep
+              refine ⟨⟨by simp [execAmd64VecInsn, hRd, setGpr, beq_false_of_ne (Ne.symm hd4), hHolds.1], ?_, ?_⟩,
+                by simpa [execAmd64VecInsn, hRd] using hFall hF hSuccs.symm⟩
+              · intro bd hBd
+                by_cases hd2 : dst = 2#4
+                · subst hd2; simp at hBd
+                · simp only [beq_false_of_ne hd2, Bool.false_eq_true, ↓reduceIte] at hBd
+                  simp [execAmd64VecInsn, hRd, setGpr, beq_false_of_ne (Ne.symm hd2), hHolds.2.1 bd hBd]
+              · intro hChk
+                refine ⟨fun hNS => ?_, fun hS => by simp [execAmd64VecInsn, hRd, (hHolds.2.2 hChk).2 hS]⟩
+                have h5neD : (5#4 : BitVec 4) ≠ dst := by intro hEq; subst hEq; dsimp only at hNS; simp [hChk, hNS] at hd5
+                simp [execAmd64VecInsn, hRd, setGpr, beq_false_of_ne h5neD, (hHolds.2.2 hChk).1 hNS]
+    case movMR64 addr src =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hEa : evalMemAddr s.gpr addr with
+        | none => simp [execAmd64VecInsn, hEa] at hRun'
+        | some ea =>
+          by_cases hBad : (checkRbp && !storeSafeFromSavedRbp slot addr 1) = true
+          · simp [hBad] at hStep
+          · simp only [hBad, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            refine ⟨⟨by simp [execAmd64VecInsn, hEa, hHolds.1],
+              fun bd hBd => by simp [execAmd64VecInsn, hEa, hHolds.2.1 bd hBd], ?_⟩,
+              by simpa [execAmd64VecInsn, hEa] using hFall hF hSuccs.symm⟩
+            intro hChk
+            refine ⟨fun hNS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).1 hNS], fun hS => ?_⟩
+            have hSafe : storeSafeFromSavedRbp slot addr 1 = true := by
+              cases hs : storeSafeFromSavedRbp slot addr 1
+              · simp [hChk, hs] at hBad
+              · rfl
+            have hNe0 := storeSafeFromSavedRbp_ea_ne (hChk ▸ hHolds) hS hSafe hEa 0 (by omega)
+            have hAddrNe : s0.gpr 4#4 - 8#64 ≠ ea := by
+              have h0 : ea + 0#64 = ea := BitVec.add_zero ea
+              simpa [h0] using Ne.symm hNe0
+            simp only [execAmd64VecInsn, hEa, write64, beq_false_of_ne hAddrNe, Bool.false_eq_true, ↓reduceIte]
+            exact (hHolds.2.2 hChk).2 hS
+    case sseMovupsStore addr src =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hEa : evalMemAddr s.gpr addr with
+        | none => simp [execAmd64VecInsn, hEa] at hRun'
+        | some ea =>
+          by_cases hBad : (checkRbp && !storeSafeFromSavedRbp slot addr 2) = true
+          · simp [hBad] at hStep
+          · simp only [hBad, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            refine ⟨⟨by simp [execAmd64VecInsn, hEa, hHolds.1],
+              fun bd hBd => by simp [execAmd64VecInsn, hEa, hHolds.2.1 bd hBd], ?_⟩,
+              by simpa [execAmd64VecInsn, hEa] using hFall hF hSuccs.symm⟩
+            intro hChk
+            refine ⟨fun hNS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).1 hNS], fun hS => ?_⟩
+            have hSafe : storeSafeFromSavedRbp slot addr 2 = true := by
+              cases hs : storeSafeFromSavedRbp slot addr 2
+              · simp [hChk, hs] at hBad
+              · rfl
+            have hNe0 := storeSafeFromSavedRbp_ea_ne (hChk ▸ hHolds) hS hSafe hEa 0 (by omega)
+            have hNe1 := storeSafeFromSavedRbp_ea_ne (hChk ▸ hHolds) hS hSafe hEa 1 (by omega)
+            have hA0 : s0.gpr 4#4 - 8#64 ≠ ea := by simpa [BitVec.add_zero] using Ne.symm hNe0
+            have hA1 : s0.gpr 4#4 - 8#64 ≠ ea + 8#64 := Ne.symm hNe1
+            simp only [execAmd64VecInsn, hEa, write64, beq_false_of_ne hA1, beq_false_of_ne hA0,
+              Bool.false_eq_true, ↓reduceIte]
+            exact (hHolds.2.2 hChk).2 hS
+    case vmovdquStore _ w addr src mask =>
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hEa : evalMemAddr s.gpr addr with
+        | none => simp [execAmd64VecInsn, hEa] at hRun'
+        | some ea =>
+          by_cases hBad : (checkRbp && !storeSafeFromSavedRbp slot addr (vecLanes w)) = true
+          · simp [hBad] at hStep
+          · simp only [hBad, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hStep
+            subst hStep
+            refine ⟨⟨by simp [execAmd64VecInsn, hEa, hHolds.1],
+              fun bd hBd => by simp [execAmd64VecInsn, hEa, hHolds.2.1 bd hBd], ?_⟩,
+              by simpa [execAmd64VecInsn, hEa] using hFall hF hSuccs.symm⟩
+            intro hChk
+            refine ⟨fun hNS => by simp [execAmd64VecInsn, hEa, (hHolds.2.2 hChk).1 hNS], fun hS => ?_⟩
+            have hSafe : storeSafeFromSavedRbp slot addr (vecLanes w) = true := by
+              cases hs : storeSafeFromSavedRbp slot addr (vecLanes w)
+              · simp [hChk, hs] at hBad
+              · rfl
+            have hNeAll := storeSafeFromSavedRbp_ea_ne (hChk ▸ hHolds) hS hSafe hEa
+            simp only [execAmd64VecInsn, hEa]
+            rw [write64_storeVecMem_preserves_ne hNeAll]
+            exact (hHolds.2.2 hChk).2 hS
+    case nop | testRR64 _ _ | cmpRR64 _ _ | cmpImm64 _ _ | cmpImm8 _ _
+      | sseMovupsRR _ _ | sseMovqFromGpr _ _ | sseXorpsRR _ _ | ssePorRR _ _
+      | sseMinsdRR _ _ | sseUcomisdRR _ _ | vzeroupper | vmovsdRR _ _ _
+      | vmovqFromGpr _ _ | vmovdquRR _ _ _ _ _ | vpmovm2q _ _ _ | vpmovq2m _ _ _ =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        exact ⟨by simpa [execAmd64VecInsn, FrameSlotHolds] using hHolds, hFall hF hSuccs.symm⟩
+    case cmpRM64 _ addr | sseMovsdLoad _ addr | vmovsdLoad _ addr =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hRd : readMem64 rodata s.pc s.gpr s.mem addr with
+        | none => simp [execAmd64VecInsn, hRd] at hRun'
+        | some v =>
+          exact ⟨by simpa [execAmd64VecInsn, hRd, FrameSlotHolds] using hHolds,
+            by simpa [execAmd64VecInsn, hRd] using hFall hF hSuccs.symm⟩
+    case sseMovupsLoad _ addr | vmovdquLoad _ _ _ addr _ =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hEa : evalMemAddr s.gpr addr with
+        | none => simp [execAmd64VecInsn, hEa] at hRun'
+        | some ea =>
+          exact ⟨by simpa [execAmd64VecInsn, hEa, FrameSlotHolds] using hHolds,
+            by simpa [execAmd64VecInsn, hEa] using hFall hF hSuccs.symm⟩
+    case vbroadcastsd _ _ _ src _ | vpbroadcastq _ _ _ src _ =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases src with
+        | reg _ =>
+          exact ⟨by simpa [execAmd64VecInsn, FrameSlotHolds] using hHolds, hFall hF hSuccs.symm⟩
+        | mem addr =>
+          cases hRd : readMem64 rodata s.pc s.gpr s.mem addr with
+          | none => simp [execAmd64VecInsn, hRd] at hRun'
+          | some v =>
+            exact ⟨by simpa [execAmd64VecInsn, hRd, FrameSlotHolds] using hHolds,
+              by simpa [execAmd64VecInsn, hRd] using hFall hF hSuccs.symm⟩
+    case vpand _ w _ _ src2 mask | vsubpd _ w _ _ src2 mask | vminpd _ w _ _ src2 mask
+      | vcmppdEvex w _ _ src2 _ mask | vpblendmq w _ _ src2 mask =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hRm : evalVecRm s w src2 mask.broadcast with
+        | none => simp [execAmd64VecInsn, hRm] at hRun'
+        | some v2 =>
+          exact ⟨by simpa [execAmd64VecInsn, hRm, FrameSlotHolds] using hHolds,
+            by simpa [execAmd64VecInsn, hRm] using hFall hF hSuccs.symm⟩
+    case vcmppdVex w _ _ src2 _ | vpblendvb w _ _ src2 _ =>
+      cases hStep
+      cases hF : findInsnIdxByOff insns insns[idx].nextOffset with
+      | none => simp [hF] at hSuccs
+      | some f =>
+        simp only [hF, Option.some.injEq] at hSuccs
+        cases hRm : evalVecRm s w src2 false with
+        | none => simp [execAmd64VecInsn, hRm] at hRun'
+        | some v2 =>
+          exact ⟨by simpa [execAmd64VecInsn, hRm, FrameSlotHolds] using hHolds,
+            by simpa [execAmd64VecInsn, hRm] using hFall hF hSuccs.symm⟩
+
+/-- Soundness theorem for static Go amd64 ABI register/frame preservation (`RSP`, `RBP`, `R14`, `X15`). -/
+theorem checkDecodedFrameAbi_sound (checkRbp : Bool) (bytes : Array UInt8)
+    (rodata : Nat → Option (BitVec 64)) (extTargets : Nat → Option String)
+    (hCert : checkDecodedFrameAbi checkRbp bytes = true)
+    (s0 : Amd64VecState) (fuel : Nat) (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel bytes rodata extTargets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned →
+      sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+      (checkRbp = true → sf.gpr 5#4 = s0.gpr 5#4)) := by
+  unfold checkDecodedFrameAbi at hCert
+  cases hProg : decodeAmd64Program bytes with
+  | none => simp [hProg] at hCert
+  | some insns =>
+    simp only [hProg] at hCert
+    split at hCert
+    · next hPos =>
+      cases hComp : computeFrameTableLoop checkRbp insns (4 * insns.size + 2)
+          ((Array.replicate insns.size none).set 0
+            (some { spDelta := 0#64, rbpSaved := false, rdxDelta := none }) (by simp [hPos])) [0] with
+      | none => simp [hComp] at hCert
+      | some tbl =>
+        simp only [hComp] at hCert
+        unfold verifyFrameTable at hCert
+        simp only [hPos, ↓reduceDIte, Bool.and_eq_true, beq_iff_eq] at hCert
+        rcases hCert with ⟨⟨⟨_, hOff0⟩, hTbl0⟩, hGo⟩
+        suffices hLoop : ∀ (k : Nat) (s : Amd64VecState),
+            s.gpr 14#4 = s0.gpr 14#4 →
+            (s.zmm 15#5).l0 = (s0.zmm 15#5).l0 →
+            (s.zmm 15#5).l1 = (s0.zmm 15#5).l1 →
+            (s.status = .returned →
+              s.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+              (checkRbp = true → s.gpr 5#4 = s0.gpr 5#4)) →
+            (s.status = .running →
+              ∃ idx, ∃ (_ : idx < insns.size), ∃ slot,
+                s.pc = insns[idx].offset ∧ tbl[idx]? = some (some slot) ∧
+                FrameSlotHolds checkRbp s0 s slot) →
+            let sf := runAmd64Vec k bytes rodata extTargets s
+            sf.gpr 14#4 = s0.gpr 14#4 ∧
+            (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+            (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+            (sf.status = .returned →
+              sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+              (checkRbp = true → sf.gpr 5#4 = s0.gpr 5#4)) by
+          apply hLoop fuel s0 rfl rfl rfl (fun h => by rw [hRun] at h; cases h)
+          intro _
+          refine ⟨0, hPos, { spDelta := 0#64, rbpSaved := false, rdxDelta := none },
+            by rw [hPc, hOff0], hTbl0, ?_⟩
+          refine ⟨by bv_omega, fun _ h => by simp at h,
+            fun _ => ⟨fun _ => rfl, fun h => Bool.noConfusion h⟩⟩
+        intro k
+        induction k with
+        | zero =>
+          intro s h14 hX0 hX1 hRet _
+          exact ⟨h14, hX0, hX1, hRet⟩
+        | succ k ih =>
+          intro s h14 hX0 hX1 hRet hReach
+          by_cases hR : s.status = .running
+          · have hB : (s.status == .running) = true := beq_iff_eq.mpr hR
+            dsimp only
+            rw [runAmd64Vec]
+            simp only [hB, ↓reduceIte]
+            rcases hReach hR with ⟨idx, hIdx, slot, hPcEq, hSlotEq, hHolds⟩
+            have hStepDec := decodeAmd64Program_elem_decodes bytes insns hProg idx hIdx
+            rw [← hPcEq] at hStepDec
+            rw [stepAmd64Vec_at bytes rodata extTargets s insns[idx].insn insns[idx].nextOffset hR hStepDec]
+            rcases verifyFrameTableGo_sound checkRbp insns tbl insns.size 0 idx slot hGo (Nat.zero_le idx) (by omega) hIdx hSlotEq with
+              ⟨slot', succs, hFStep, hFSuccs, hAllSuccs⟩
+            have hSt := execAmd64VecInsn_frameAbi_step checkRbp insns rodata extTargets idx hIdx
+              s0 s slot slot' succs hR hHolds hFStep hFSuccs
+            apply ih _ (hSt.1.trans h14) (hSt.2.1.trans hX0) (hSt.2.2.1.trans hX1) hSt.2.2.2.1
+            intro hRun'
+            rcases hSt.2.2.2.2 hRun' with ⟨hHolds', nxt, hMemNxt, hNxtLt, hPcNxt⟩
+            exact ⟨nxt, hNxtLt, slot', hPcNxt, hAllSuccs nxt hMemNxt, hHolds'⟩
+          · have hB : (s.status == .running) = false := beq_false_of_ne hR
+            dsimp only
+            rw [runAmd64Vec]
+            simp only [hB, Bool.false_eq_true, ↓reduceIte]
+            exact ⟨h14, hX0, hX1, hRet⟩
+    · simp at hCert
+
+set_option maxRecDepth 4096 in
+private theorem allAbsLE64AVX2_frame_cert :
+    checkDecodedFrameAbi true allAbsLE64AVX2Bytes = true :=
+  checkDecodedFrameAbi_of_chunks true allAbsLE64AVX2ByteChunks (by decide) (by decide)
+
+set_option maxRecDepth 4096 in
+private theorem allAbsLE64AVX512_frame_cert :
+    checkDecodedFrameAbi true allAbsLE64AVX512Bytes = true :=
+  checkDecodedFrameAbi_of_chunks true allAbsLE64AVX512ByteChunks (by decide) (by decide)
+
+set_option maxRecDepth 4096 in
+private theorem minNoNaN64AVX2_frame_cert :
+    checkDecodedFrameAbi true minNoNaN64AVX2Bytes = true :=
+  checkDecodedFrameAbi_of_chunks true minNoNaN64AVX2ByteChunks (by decide) (by decide)
+
+set_option maxRecDepth 4096 in
+private theorem minNoNaN64AVX512_frame_cert :
+    checkDecodedFrameAbi true minNoNaN64AVX512Bytes = true :=
+  checkDecodedFrameAbi_of_chunks true minNoNaN64AVX512ByteChunks (by decide) (by decide)
+
+set_option maxRecDepth 4096 in
+private theorem initReducedRow64AVX2_frame_cert :
+    checkDecodedFrameAbi false initReducedRow64AVX2Bytes = true :=
+  checkDecodedFrameAbi_of_chunks false initReducedRow64AVX2ByteChunks (by decide) (by decide)
+
+set_option maxRecDepth 4096 in
+private theorem initReducedRow64AVX512_frame_cert :
+    checkDecodedFrameAbi false initReducedRow64AVX512Bytes = true :=
+  checkDecodedFrameAbi_of_chunks false initReducedRow64AVX512ByteChunks (by decide) (by decide)
+
+/-- Universal Go ABI register preservation (`RSP`, `RBP`, `R14`, `X15`) for decoded `allAbsLE64AVX2`. -/
+theorem allAbsLE64AVX2_abi_reg_preserved (s0 : Amd64VecState) (fuel : Nat)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel allAbsLE64AVX2Bytes allAbsLE64AVX2Rodata allAbsLE64AVX2Targets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned → sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧ sf.gpr 5#4 = s0.gpr 5#4) := by
+  have h := checkDecodedFrameAbi_sound true allAbsLE64AVX2Bytes allAbsLE64AVX2Rodata allAbsLE64AVX2Targets allAbsLE64AVX2_frame_cert s0 fuel hPc hRun
+  exact ⟨h.1, h.2.1, h.2.2.1, fun hR => ⟨(h.2.2.2 hR).1, (h.2.2.2 hR).2 rfl⟩⟩
+
+/-- Universal Go ABI register preservation (`RSP`, `RBP`, `R14`, `X15`) for decoded `allAbsLE64AVX512`. -/
+theorem allAbsLE64AVX512_abi_reg_preserved (s0 : Amd64VecState) (fuel : Nat)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel allAbsLE64AVX512Bytes allAbsLE64AVX512Rodata allAbsLE64AVX512Targets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned → sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧ sf.gpr 5#4 = s0.gpr 5#4) := by
+  have h := checkDecodedFrameAbi_sound true allAbsLE64AVX512Bytes allAbsLE64AVX512Rodata allAbsLE64AVX512Targets allAbsLE64AVX512_frame_cert s0 fuel hPc hRun
+  exact ⟨h.1, h.2.1, h.2.2.1, fun hR => ⟨(h.2.2.2 hR).1, (h.2.2.2 hR).2 rfl⟩⟩
+
+/-- Universal Go ABI register preservation (`RSP`, `RBP`, `R14`, `X15`) for decoded `minNoNaN64AVX2`. -/
+theorem minNoNaN64AVX2_abi_reg_preserved (s0 : Amd64VecState) (fuel : Nat)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel minNoNaN64AVX2Bytes minNoNaN64AVX2Rodata minNoNaN64AVX2Targets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned → sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧ sf.gpr 5#4 = s0.gpr 5#4) := by
+  have h := checkDecodedFrameAbi_sound true minNoNaN64AVX2Bytes minNoNaN64AVX2Rodata minNoNaN64AVX2Targets minNoNaN64AVX2_frame_cert s0 fuel hPc hRun
+  exact ⟨h.1, h.2.1, h.2.2.1, fun hR => ⟨(h.2.2.2 hR).1, (h.2.2.2 hR).2 rfl⟩⟩
+
+/-- Universal Go ABI register preservation (`RSP`, `RBP`, `R14`, `X15`) for decoded `minNoNaN64AVX512`. -/
+theorem minNoNaN64AVX512_abi_reg_preserved (s0 : Amd64VecState) (fuel : Nat)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel minNoNaN64AVX512Bytes minNoNaN64AVX512Rodata minNoNaN64AVX512Targets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned → sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧ sf.gpr 5#4 = s0.gpr 5#4) := by
+  have h := checkDecodedFrameAbi_sound true minNoNaN64AVX512Bytes minNoNaN64AVX512Rodata minNoNaN64AVX512Targets minNoNaN64AVX512_frame_cert s0 fuel hPc hRun
+  exact ⟨h.1, h.2.1, h.2.2.1, fun hR => ⟨(h.2.2.2 hR).1, (h.2.2.2 hR).2 rfl⟩⟩
+
+/-- Universal Go ABI register preservation (`RSP`, `R14`, `X15`) for decoded `initReducedRow64AVX2`. -/
+theorem initReducedRow64AVX2_abi_reg_preserved (s0 : Amd64VecState) (fuel : Nat)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned → sf.gpr 4#4 = s0.gpr 4#4 + 8#64) := by
+  have h := checkDecodedFrameAbi_sound false initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets initReducedRow64AVX2_frame_cert s0 fuel hPc hRun
+  exact ⟨h.1, h.2.1, h.2.2.1, fun hR => (h.2.2.2 hR).1⟩
+
+/-- Universal Go ABI register preservation (`RSP`, `R14`, `X15`) for decoded `initReducedRow64AVX512`. -/
+theorem initReducedRow64AVX512_abi_reg_preserved (s0 : Amd64VecState) (fuel : Nat)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) :
+    let sf := runAmd64Vec fuel initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s0
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (sf.status = .returned → sf.gpr 4#4 = s0.gpr 4#4 + 8#64) := by
+  have h := checkDecodedFrameAbi_sound false initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets initReducedRow64AVX512_frame_cert s0 fuel hPc hRun
+  exact ⟨h.1, h.2.1, h.2.2.1, fun hR => (h.2.2.2 hR).1⟩
+
 /-- Adversarial negative control: stripping `VZEROUPPER` (`C5 F8 77`) at offset `0x9d` from
 `allAbsLE64AVX2` (replacing with 3 `NOP` bytes `90 90 90`) is immediately rejected. -/
 private def replaceByteInChunks (chunks : List (List UInt8)) (pos : Nat) (val : UInt8) :
@@ -2374,8 +3659,7 @@ theorem elemAddr_add (base : BitVec 64) (j k : Nat) :
     simp [BitVec.toNat_mul, Nat.mul_mod]
   have hAdd : BitVec.ofNat 64 (j + k) = BitVec.ofNat 64 j + BitVec.ofNat 64 k :=
     (bitVec_ofNat_add j k).symm
-  rw [hMul, hAdd]
-  bv_decide
+  rw [hMul, hAdd, BitVec.add_mul, BitVec.add_assoc]
 
 theorem elemAddr_plus_0 (base : BitVec 64) (j : Nat) :
     elemAddr base j + 0#64 = elemAddr base j := by simp
@@ -2408,15 +3692,70 @@ theorem elemAddr_plus_64 (base : BitVec 64) (j : Nat) :
 
 private theorem x86SubFlags64_ge_bv (a b : BitVec 64) (ha : a.msb = false) (hb : b.msb = false) :
     evalX86Cond .ge (x86SubFlags64 a b) = BitVec.ule b a := by
-  unfold evalX86Cond x86SubFlags64 at *; bv_decide
+  unfold evalX86Cond x86SubFlags64
+  simp only [ha, hb, bne_self_eq_false, Bool.false_and, beq_false]
+  rw [BitVec.msb_eq_decide] at ha hb
+  rw [BitVec.msb_eq_decide, BitVec.ule_eq_decide]
+  simp only [decide_eq_false_iff_not, BitVec.toNat_sub] at ha hb ⊢
+  apply Bool.eq_iff_iff.mpr
+  simp only [Bool.not_eq_true', decide_eq_false_iff_not, decide_eq_true_eq]
+  omega
 
 private theorem x86SubFlags64_le_bv (a b : BitVec 64) (ha : a.msb = false) (hb : b.msb = false) :
     evalX86Cond .le (x86SubFlags64 a b) = BitVec.ule a b := by
-  unfold evalX86Cond x86SubFlags64 at *; bv_decide
+  unfold evalX86Cond x86SubFlags64
+  have hBneFalse : ∀ x : Bool, (x != false) = x := fun x => by cases x <;> rfl
+  simp only [ha, hb, bne_self_eq_false, Bool.false_and, hBneFalse]
+  rw [BitVec.msb_eq_decide] at ha hb
+  rw [BitVec.msb_eq_decide, BitVec.ule_eq_decide]
+  simp only [decide_eq_false_iff_not] at ha hb
+  apply Bool.eq_iff_iff.mpr
+  simp only [Bool.or_eq_true, beq_iff_eq, decide_eq_true_eq]
+  constructor
+  · rintro (hEq | hMsb)
+    · have hNat := congrArg BitVec.toNat hEq
+      simp only [BitVec.toNat_sub, BitVec.toNat_ofNat] at hNat
+      omega
+    · simp only [BitVec.toNat_sub] at hMsb
+      omega
+  · intro hLe
+    by_cases hEq : a.toNat = b.toNat
+    · left
+      apply BitVec.eq_of_toNat_eq
+      simp only [BitVec.toNat_sub, BitVec.toNat_ofNat]
+      omega
+    · right
+      simp only [BitVec.toNat_sub]
+      omega
 
 private theorem x86SubFlags64_g_bv (a b : BitVec 64) (ha : a.msb = false) (hb : b.msb = false) :
     evalX86Cond .g (x86SubFlags64 a b) = BitVec.ult b a := by
-  unfold evalX86Cond x86SubFlags64 at *; bv_decide
+  unfold evalX86Cond x86SubFlags64
+  simp only [ha, hb, bne_self_eq_false, Bool.false_and, beq_false]
+  rw [BitVec.msb_eq_decide] at ha hb
+  rw [BitVec.msb_eq_decide, BitVec.ult_eq_decide]
+  simp only [decide_eq_false_iff_not] at ha hb
+  apply Bool.eq_iff_iff.mpr
+  simp only [Bool.and_eq_true, Bool.not_eq_true', beq_eq_false_iff_ne, decide_eq_false_iff_not,
+    decide_eq_true_eq]
+  constructor
+  · rintro ⟨hNe, hNotMsb⟩
+    simp only [BitVec.toNat_sub] at hNotMsb
+    have hNeNat : a.toNat ≠ b.toNat := by
+      intro hEq
+      apply hNe
+      apply BitVec.eq_of_toNat_eq
+      simp only [BitVec.toNat_sub, BitVec.toNat_ofNat]
+      omega
+    omega
+  · intro hLt
+    refine ⟨?_, ?_⟩
+    · intro hEq
+      have hNat := congrArg BitVec.toNat hEq
+      simp only [BitVec.toNat_sub, BitVec.toNat_ofNat] at hNat
+      omega
+    · simp only [BitVec.toNat_sub]
+      omega
 
 private theorem bitVec_ofNat_msb_false {n : Nat} (h : n < 2 ^ 63) :
     (BitVec.ofNat 64 n).msb = false := by
@@ -2458,16 +3797,96 @@ theorem evalX86Cond_be_test64_self {n : Nat} (hPos : 0 < n) (hLt : n < 2 ^ 64) :
 
 theorem evalX86Cond_be_sub64_unsigned (a b : BitVec 64) :
     evalX86Cond .be (x86SubFlags64 a b) = BitVec.ule a b := by
-  unfold evalX86Cond x86SubFlags64; bv_decide
+  unfold evalX86Cond x86SubFlags64
+  rw [BitVec.ult_eq_decide, BitVec.ule_eq_decide]
+  apply Bool.eq_iff_iff.mpr
+  simp only [Bool.or_eq_true, decide_eq_true_eq, beq_iff_eq]
+  constructor
+  · rintro (hLt | hEq)
+    · omega
+    · have hNat := congrArg BitVec.toNat hEq
+      simp only [BitVec.toNat_sub, BitVec.toNat_ofNat] at hNat
+      omega
+  · intro hLe
+    by_cases hLt : a.toNat < b.toNat
+    · exact Or.inl hLt
+    · right
+      apply BitVec.eq_of_toNat_eq
+      simp only [BitVec.toNat_sub, BitVec.toNat_ofNat]
+      omega
 
 theorem evalX86Cond_e_sub8 (a b : BitVec 8) :
     evalX86Cond .e (x86SubFlags8 a b) = (a == b) := by
-  unfold evalX86Cond x86SubFlags8; bv_decide
+  unfold evalX86Cond x86SubFlags8
+  apply Bool.eq_iff_iff.mpr
+  simp only [beq_iff_eq]
+  constructor
+  · intro h
+    apply BitVec.eq_of_toNat_eq
+    have hNat := congrArg BitVec.toNat h
+    simp only [BitVec.toNat_sub, BitVec.toNat_ofNat] at hNat
+    omega
+  · intro h; subst h; simp
 
 /-! #### IEEE-754 SIMD Lane Algebra & `Track5D` Bridge Theorems -/
 
+private theorem f64IsZero_iff (x : BitVec 64) :
+    f64IsZero x = true ↔ x = 0#64 ∨ x = 0x8000000000000000#64 := by
+  unfold f64IsZero
+  simp only [beq_iff_eq]
+  constructor
+  · intro h
+    have hNat := congrArg BitVec.toNat h
+    have hMask : (0x7fffffffffffffff#64 : BitVec 64).toNat = 2 ^ 63 - 1 := by decide
+    rw [BitVec.toNat_and, hMask, Nat.and_two_pow_sub_one_eq_mod] at hNat
+    simp only [BitVec.toNat_ofNat] at hNat
+    have hLt := x.isLt
+    by_cases hBig : x.toNat < 2 ^ 63
+    · left; apply BitVec.eq_of_toNat_eq; simp; omega
+    · right; apply BitVec.eq_of_toNat_eq; simp; omega
+  · rintro (rfl | rfl) <;> decide
+
+private theorem f64IsZero_false_of_isNaN {x : BitVec 64} (h : f64IsNaN x = true) :
+    f64IsZero x = false := by
+  cases hz : f64IsZero x
+  · rfl
+  · rcases (f64IsZero_iff x).mp hz with rfl | rfl <;> simp [f64IsNaN] at h
+
+private theorem f64IsNaN_false_of_isZero {x : BitVec 64} (h : f64IsZero x = true) :
+    f64IsNaN x = false := by
+  rcases (f64IsZero_iff x).mp h with rfl | rfl <;> decide
+
+private theorem canonZero64_notNaN {x : BitVec 64} (h : f64NotNaN x = true) :
+    f64NotNaN (canonZero64 x) = true := by
+  unfold canonZero64
+  split
+  · decide
+  · exact h
+
+private theorem canonZero64_idem (x : BitVec 64) :
+    canonZero64 (canonZero64 x) = canonZero64 x := by
+  unfold canonZero64
+  cases hz : f64IsZero x
+  · simp [hz]
+  · simp [f64PosZero, f64IsZero]
+
+private theorem f64NumKey_canonZero64 (x : BitVec 64) :
+    f64NumKey (canonZero64 x) = f64NumKey x := by
+  unfold f64NumKey
+  rw [canonZero64_idem]
+
+private theorem canonZero64_eq_of_numKey_eq {a b : BitVec 64}
+    (h : f64NumKey a = f64NumKey b) : canonZero64 a = canonZero64 b := by
+  have hB : (f64NumKey a == f64NumKey b) = true := beq_iff_eq.mpr h
+  rw [f64NumKey_eq_iff] at hB
+  simp only [Bool.or_eq_true, beq_iff_eq, Bool.and_eq_true] at hB
+  rcases hB with rfl | ⟨ha, hb⟩
+  · rfl
+  · simp [canonZero64, ha, hb]
+
 theorem f64Eq_self_eq_notNaN (x : BitVec 64) : f64Eq x x = !f64IsNaN x := by
-  unfold f64Eq f64IsNaN f64IsZero; bv_decide
+  unfold f64Eq
+  cases f64IsNaN x <;> simp
 
 theorem maskLane64_and (a b : Bool) :
     maskLane64 a &&& maskLane64 b = maskLane64 (a && b) := by
@@ -2486,34 +3905,174 @@ theorem toOpmask8_maskVec8_eq_0xff (b0 b1 b2 b3 b4 b5 b6 b7 : Bool) :
   cases b0 <;> cases b1 <;> cases b2 <;> cases b3 <;>
     cases b4 <;> cases b5 <;> cases b6 <;> cases b7 <;> decide
 
+private theorem bitVec_0xff_getLsbD {k : Nat} (hk : k < 8) :
+    (0xff#64 : BitVec 64).getLsbD k = true := by
+  match k with
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 => decide
+  | _ + 8 => omega
+
+private theorem bitVec_getLsbD_byteSlice (x : BitVec 64) (sh i : Nat) (hi : i < 64) :
+    ((((x >>> sh) &&& 0xff#64) <<< sh).getLsbD i) =
+      (decide (sh ≤ i ∧ i < sh + 8) && x.getLsbD i) := by
+  simp only [BitVec.getLsbD_shiftLeft, BitVec.getLsbD_and, BitVec.getLsbD_ushiftRight, hi,
+    decide_true, Bool.true_and]
+  by_cases hGe : sh ≤ i
+  · have hNotLt : ¬(i < sh) := by omega
+    simp only [hNotLt, decide_false, Bool.not_false, Bool.true_and, hGe, true_and]
+    by_cases hLt8 : i - sh < 8
+    · have hLt : i < sh + 8 := by omega
+      have hMask : (0xff#64 : BitVec 64).getLsbD (i - sh) = true := bitVec_0xff_getLsbD hLt8
+      have hAdd : sh + (i - sh) = i := by omega
+      simp [hLt, hMask, hAdd]
+    · have hNotLt8 : ¬(i < sh + 8) := by omega
+      have hMask : (0xff#64 : BitVec 64).getLsbD (i - sh) = false := by
+        rw [BitVec.getLsbD]
+        simp only [BitVec.toNat_ofNat]
+        have hMod : 0xff % 2 ^ 64 = 255 := by decide
+        rw [hMod]
+        exact Nat.testBit_lt_two_pow (by
+          have hPow : 2 ^ 8 ≤ 2 ^ (i - sh) := Nat.pow_le_pow_right (by omega) (by omega)
+          omega)
+      simp [hNotLt8, hMask]
+  · have hLt : i < sh := by omega
+    simp [hLt, hGe]
+
+private theorem reassemble_bytes64 (x : BitVec 64) :
+    (((x >>> 0) &&& 0xff#64) <<< 0 ||| ((x >>> 8) &&& 0xff#64) <<< 8 |||
+     ((x >>> 16) &&& 0xff#64) <<< 16 ||| ((x >>> 24) &&& 0xff#64) <<< 24 |||
+     ((x >>> 32) &&& 0xff#64) <<< 32 ||| ((x >>> 40) &&& 0xff#64) <<< 40 |||
+     ((x >>> 48) &&& 0xff#64) <<< 48 ||| ((x >>> 56) &&& 0xff#64) <<< 56) = x := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [BitVec.getLsbD_or, bitVec_getLsbD_byteSlice x _ i hi]
+  by_cases h0 : i < 8
+  · simp [show ¬(8 ≤ i) by omega, show ¬(16 ≤ i) by omega, show ¬(24 ≤ i) by omega,
+          show ¬(32 ≤ i) by omega, show ¬(40 ≤ i) by omega, show ¬(48 ≤ i) by omega,
+          show ¬(56 ≤ i) by omega, h0]
+  · by_cases h1 : i < 16
+    · simp [h0, h1, show 8 ≤ i by omega, show ¬(16 ≤ i) by omega, show ¬(24 ≤ i) by omega,
+            show ¬(32 ≤ i) by omega, show ¬(40 ≤ i) by omega, show ¬(48 ≤ i) by omega,
+            show ¬(56 ≤ i) by omega]
+    · by_cases h2 : i < 24
+      · simp [show ¬(i < 8) by omega, show ¬(i < 16) by omega, show 16 ≤ i by omega, h2,
+              show ¬(24 ≤ i) by omega, show ¬(32 ≤ i) by omega, show ¬(40 ≤ i) by omega,
+              show ¬(48 ≤ i) by omega, show ¬(56 ≤ i) by omega]
+      · by_cases h3 : i < 32
+        · simp [show ¬(i < 8) by omega, show ¬(i < 16) by omega, show ¬(i < 24) by omega,
+                show 24 ≤ i by omega, h3, show ¬(32 ≤ i) by omega, show ¬(40 ≤ i) by omega,
+                show ¬(48 ≤ i) by omega, show ¬(56 ≤ i) by omega]
+        · by_cases h4 : i < 40
+          · simp [show ¬(i < 8) by omega, show ¬(i < 16) by omega, show ¬(i < 24) by omega,
+                  show ¬(i < 32) by omega, show 32 ≤ i by omega, h4, show ¬(40 ≤ i) by omega,
+                  show ¬(48 ≤ i) by omega, show ¬(56 ≤ i) by omega]
+          · by_cases h5 : i < 48
+            · simp [show ¬(i < 8) by omega, show ¬(i < 16) by omega, show ¬(i < 24) by omega,
+                    show ¬(i < 32) by omega, show ¬(i < 40) by omega, show 40 ≤ i by omega, h5,
+                    show ¬(48 ≤ i) by omega, show ¬(56 ≤ i) by omega]
+            · by_cases h6 : i < 56
+              · simp [show ¬(i < 8) by omega, show ¬(i < 16) by omega, show ¬(i < 24) by omega,
+                      show ¬(i < 32) by omega, show ¬(i < 40) by omega, show ¬(i < 48) by omega,
+                      show 48 ≤ i by omega, h6, show ¬(56 ≤ i) by omega]
+              · simp [show ¬(i < 8) by omega, show ¬(i < 16) by omega, show ¬(i < 24) by omega,
+                      show ¬(i < 32) by omega, show ¬(i < 40) by omega, show ¬(i < 48) by omega,
+                      show ¬(i < 56) by omega, show 56 ≤ i by omega, hi]
+
 /-- `VPBLENDVB` lane identity when mask lane comes from `VCMPPD` (all-1s or all-0s). -/
 theorem vpblendvb64_maskLane (src1 src2 : BitVec 64) (cond : Bool) :
     vpblendvb64 src1 src2 (maskLane64 cond) = if cond then src2 else src1 := by
-  cases cond <;> unfold vpblendvb64 maskLane64 <;> bv_decide
+  cases cond <;> unfold vpblendvb64 maskLane64 <;> dsimp only
+  · exact reassemble_bytes64 src1
+  · exact reassemble_bytes64 src2
 
 /-- Hardware `UCOMISD` + `JA` matches strict `f64Lt v res` (skipping NaN and equal values). -/
 theorem evalX86Cond_a_ucomisd (res v : BitVec 64) :
     evalX86Cond .a (x86UcomisdFlags res v) = f64Lt v res := by
-  unfold evalX86Cond x86UcomisdFlags f64Lt f64Eq f64IsNaN f64IsZero; bv_decide
+  unfold evalX86Cond x86UcomisdFlags
+  by_cases hNaN : (f64IsNaN res || f64IsNaN v) = true
+  · simp only [hNaN, ↓reduceIte]
+    have hNaNRev : (f64IsNaN v || f64IsNaN res) = true := by rw [Bool.or_comm]; exact hNaN
+    unfold f64Lt
+    simp [hNaNRev]
+  · simp only [hNaN, Bool.false_eq_true, ↓reduceIte]
+    simp only [Bool.or_eq_true, not_or, Bool.not_eq_true] at hNaN
+    have hResOk : f64NotNaN res = true := by simp [f64NotNaN, hNaN.1]
+    have hVOk : f64NotNaN v = true := by simp [f64NotNaN, hNaN.2]
+    rw [f64Eq_iff_eq_numKey res v hResOk hVOk,
+        f64Lt_iff_ult_numKey res v hResOk hVOk,
+        f64Lt_iff_ult_numKey v res hVOk hResOk]
+    by_cases hEq : (f64NumKey res == f64NumKey v) = true
+    · simp only [hEq, ↓reduceIte, BitVec.ult_eq_decide]
+      have hK : f64NumKey res = f64NumKey v := beq_iff_eq.mp hEq
+      simp [hK]
+    · simp only [hEq, Bool.false_eq_true, ↓reduceIte]
+      have hNeNat : (f64NumKey res).toNat ≠ (f64NumKey v).toNat := by
+        intro hN; apply hEq; exact beq_iff_eq.mpr (BitVec.eq_of_toNat_eq hN)
+      by_cases hLt : BitVec.ult (f64NumKey res) (f64NumKey v) = true
+      · have hLtN : (f64NumKey res).toNat < (f64NumKey v).toNat := by
+          simpa [BitVec.ult_eq_decide] using hLt
+        simp only [hLt, ↓reduceIte, BitVec.ult_eq_decide]
+        simp [show ¬((f64NumKey v).toNat < (f64NumKey res).toNat) by omega]
+      · have hNotLtN : ¬((f64NumKey res).toNat < (f64NumKey v).toNat) := by
+          simpa [BitVec.ult_eq_decide] using hLt
+        simp only [hLt, Bool.false_eq_true, ↓reduceIte, BitVec.ult_eq_decide]
+        simp [show (f64NumKey v).toNat < (f64NumKey res).toNat by omega]
 
 /-- Go 1.27's signed-zero canonicalization (`XORPS; UCOMISD; JNE; JP; XORPS`) equals `Track5D.canonZero64`. -/
 theorem x86_ucomisd_zero_canon_eq_canonZero64 (res : BitVec 64) :
     (if evalX86Cond .ne (x86UcomisdFlags res 0#64) || evalX86Cond .p (x86UcomisdFlags res 0#64)
      then res else 0#64) = canonZero64 res := by
-  unfold evalX86Cond x86UcomisdFlags canonZero64 f64PosZero f64Eq f64Lt f64IsNaN f64IsZero
-  bv_decide
+  unfold evalX86Cond x86UcomisdFlags canonZero64 f64PosZero
+  by_cases hNaN : f64IsNaN res = true
+  · have hNotZ : f64IsZero res = false := f64IsZero_false_of_isNaN hNaN
+    simp [hNaN, hNotZ]
+  · simp only [Bool.not_eq_true] at hNaN
+    have hZ0 : f64IsNaN 0#64 = false := by decide
+    have hZZero : f64IsZero 0#64 = true := by decide
+    simp only [hNaN, hZ0, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+    cases hz : f64IsZero res
+    · have hNotEq : f64Eq res 0#64 = false := by
+        unfold f64Eq
+        have hNe0 : res ≠ 0#64 := by
+          intro hEq; subst hEq; simp [f64IsZero] at hz
+        simp [hNaN, hZ0, hz, beq_false_of_ne hNe0]
+      simp only [hNotEq, Bool.false_eq_true, ↓reduceIte]
+      by_cases hLt : f64Lt res 0#64 = true <;> simp [hLt]
+    · have hEq : f64Eq res 0#64 = true := by
+        unfold f64Eq; simp [hNaN, hZ0, hz, hZZero]
+      simp [hEq]
 
 /-- Go 1.27's branchless x86 `min(a, b)` lowering (`MINSD b, a; MINSD a, t; POR`) equals
 IEEE-754 `Track5A.f64Min a b` (preserving `-0.0 < +0.0`) on all non-NaN binary64 inputs. -/
 theorem minsd_por_eq_f64Min (a b : BitVec 64)
     (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     (vminpdLane (vminpdLane a b) a ||| vminpdLane a b) = f64Min a b := by
+  have haN : f64IsNaN a = false := by simpa [f64NotNaN] using ha
+  have hbN : f64IsNaN b = false := by simpa [f64NotNaN] using hb
   have hLt := f64Lt_eq_f64Cmp_n a b
-  unfold f64Min vminpdLane at *
-  dsimp only at *
-  rw [← hLt]
-  unfold f64Lt f64Sign f64NotNaN f64IsNaN f64IsZero at *
-  bv_decide
+  unfold f64Min vminpdLane
+  simp only [haN, hbN, Bool.or_self, Bool.false_eq_true, ↓reduceIte, ← hLt]
+  by_cases hBothZ : (f64IsZero a && f64IsZero b) = true
+  · simp only [Bool.and_eq_true] at hBothZ
+    rcases (f64IsZero_iff a).mp hBothZ.1 with rfl | rfl <;>
+    rcases (f64IsZero_iff b).mp hBothZ.2 with rfl | rfl <;> decide
+  · simp only [hBothZ, Bool.false_eq_true, ↓reduceIte]
+    by_cases hab : f64Lt a b = true
+    · have haa : f64Lt a a = false := by
+        rw [f64Lt_iff_ult_numKey a a ha ha, BitVec.ult_eq_decide]; simp
+      simp [hab, haa]
+    · simp only [hab, Bool.false_eq_true, ↓reduceIte]
+      by_cases hba : f64Lt b a = true
+      · simp [hba]
+      · simp only [hba, Bool.false_eq_true, ↓reduceIte]
+        rw [f64Lt_iff_ult_numKey a b ha hb, BitVec.ult_eq_decide] at hab
+        rw [f64Lt_iff_ult_numKey b a hb ha, BitVec.ult_eq_decide] at hba
+        have hK : f64NumKey a = f64NumKey b :=
+          BitVec.eq_of_toNat_eq (by simp only [decide_eq_true_eq] at hab hba; omega)
+        have hEq : (a == b || f64IsZero a && f64IsZero b) = true := by
+          rw [← f64NumKey_eq_iff a b]; exact beq_iff_eq.mpr hK
+        simp only [hBothZ, Bool.or_false, beq_iff_eq] at hEq
+        subst hEq
+        simp
 
 /-- Direct bridge to `Track5D`: `VMINPD` exhibits x86 signed-zero asymmetry, yet canonicalized
 `canonZero64 (vminpdLane a b)` is commutative, associative, and equal to `canonZero64 (f64Min a b)`. -/
@@ -2526,13 +4085,18 @@ theorem vminpd_track5d_canon_bridge (a b : BitVec 64)
     f64NotNaN (vminpdLane a b) = true := by
   refine ⟨vminpdLane_signed_zero_asymmetry.1, vminpdLane_signed_zero_asymmetry.2, ?_,
     (vminpdLane_numKey_assoc_comm a b a ha hb ha).2.1, ?_⟩
-  · have hLt := f64Lt_eq_f64Cmp_n a b
-    unfold f64Min vminpdLane at *
-    dsimp only at *
-    rw [← hLt]
-    unfold canonZero64 f64PosZero f64Lt f64Sign f64NotNaN f64IsNaN f64IsZero at *
-    bv_decide
-  · unfold vminpdLane f64NotNaN f64IsNaN f64Lt f64IsZero at *; bv_decide
+  · have haN : f64IsNaN a = false := by simpa [f64NotNaN] using ha
+    have hbN : f64IsNaN b = false := by simpa [f64NotNaN] using hb
+    have hLt := f64Lt_eq_f64Cmp_n a b
+    unfold f64Min vminpdLane
+    simp only [haN, hbN, Bool.or_self, Bool.false_eq_true, ↓reduceIte, ← hLt]
+    by_cases hBothZ : (f64IsZero a && f64IsZero b) = true
+    · simp only [Bool.and_eq_true] at hBothZ
+      rcases (f64IsZero_iff a).mp hBothZ.1 with rfl | rfl <;>
+      rcases (f64IsZero_iff b).mp hBothZ.2 with rfl | rfl <;> decide
+    · simp [hBothZ]
+  · unfold vminpdLane
+    split <;> assumption
 
 /-- Chunk-accelerated single-step lemma for symbolic execution over raw ELF `.text` bytes. -/
 private theorem runAmd64Vec_step_chunk (k : Nat) (chunks : List (List UInt8))
@@ -2802,7 +4366,7 @@ private theorem allAbsLE64AVX2_prologue (base : BitVec 64) (x : Nat → BitVec 6
     s1.pc = 0x68 ∧ AllAbsLE2Inv base x limit n 0 s1 := by
   have hBe : evalX86Cond .be (x86TestFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 n)) = false :=
     evalX86Cond_be_test64_self hPos (by omega)
-  have hRsp : s0.gpr 4#4 - 8#64 + 16#64 = s0.gpr 4#4 + 8#64 := by bv_decide
+  have hRsp : s0.gpr 4#4 - 8#64 + 16#64 = s0.gpr 4#4 + 8#64 := by bv_omega
   have hJmp : nextTargetPc 63 41 = some 0x68 := by decide
   dsimp only [allAbsLE64AVX2Bytes]
   have hStep0 := runAmd64Vec_block_seq 12 allAbsLE64AVX2ByteChunks allAbsLE64AVX2_chunks_wf
@@ -3373,7 +4937,9 @@ ELF `.text` bytes of `internal/simd.allAbsLE64AVX2`:
 1. Never hits `runtime.panicBounds`, `morestack`, or any external runtime/GC call;
 2. Terminates with `status = .returned`, `upperDirty = false` (`VZEROUPPER` ABI safety), and
    `sseHazard = false`;
-3. Returns bit-exact `RAX = if specAllAbsLE x limit (4 * (n / 4)) then 1 else 0`. -/
+3. Returns bit-exact `RAX = if specAllAbsLE x limit (4 * (n / 4)) then 1 else 0`;
+4. Preserves Go amd64 ABI registers: `RSP = s0.gpr 4#4 + 8#64`, `RBP = s0.gpr 5#4`,
+   `R14 = s0.gpr 14#4`, and `X15` low 128 bits (`l0`, `l1`). -/
 theorem allAbsLE64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 64)
     (limit : BitVec 64) (n fuel : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running)
@@ -3388,7 +4954,12 @@ theorem allAbsLE64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 6
     sf.status = .returned ∧
     sf.upperDirty = false ∧
     sf.sseHazard = false ∧
-    sf.gpr 0#4 = (if specAllAbsLE x limit (4 * (n / 4)) then 1#64 else 0#64) := by
+    sf.gpr 0#4 = (if specAllAbsLE x limit (4 * (n / 4)) then 1#64 else 0#64) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 := by
   have hPro := allAbsLE64AVX2_prologue base x limit n s0 hPc hRun hHaz hPos hN hRax hRbx hLim hX hDisj
   have hL8 := allAbsLE64AVX2_loop8_iter base x limit n hN (n / 8) 0 _ (by omega) hPro.1 hPro.2
   have hEx8 := allAbsLE64AVX2_loop8_exit base x limit n (8 * (n / 8)) _
@@ -3418,9 +4989,16 @@ theorem allAbsLE64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 6
         hEx8.1 hEx8.2 (by omega) hN (by omega)
       simpa [h4Eq] using hRet
   have hSplit : fuel = allAbsLE64AVX2Steps n + (fuel - allAbsLE64AVX2Steps n) := by omega
-  dsimp only
-  rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
-  exact hExact
+  have hAbi := allAbsLE64AVX2_abi_reg_preserved s0 fuel hPc hRun
+  have hCore :
+      let sf := runAmd64Vec fuel allAbsLE64AVX2Bytes allAbsLE64AVX2Rodata allAbsLE64AVX2Targets s0
+      sf.status = .returned ∧ sf.upperDirty = false ∧ sf.sseHazard = false ∧
+      sf.gpr 0#4 = (if specAllAbsLE x limit (4 * (n / 4)) then 1#64 else 0#64) := by
+    dsimp only
+    rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
+    exact hExact
+  have hSpRbp := hAbi.2.2.2 hCore.1
+  exact ⟨hCore.1, hCore.2.1, hCore.2.2.1, hCore.2.2.2, hSpRbp.1, hSpRbp.2, hAbi.1, hAbi.2.1, hAbi.2.2.1⟩
 
 /-! #### AVX-512 (`allAbsLE64AVX512`) Inductive Functional Equivalence -/
 
@@ -3618,7 +5196,7 @@ private theorem allAbsLE64AVX512_prologue (base : BitVec 64) (x : Nat → BitVec
     s1.pc = 0x80 ∧ AllAbsLE512Inv base x limit n 0 s1 := by
   have hBe : evalX86Cond .be (x86TestFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 n)) = false :=
     evalX86Cond_be_test64_self hPos (by omega)
-  have hRsp : s0.gpr 4#4 - 8#64 + 16#64 = s0.gpr 4#4 + 8#64 := by bv_decide
+  have hRsp : s0.gpr 4#4 - 8#64 + 16#64 = s0.gpr 4#4 + 8#64 := by bv_omega
   have hJmp : nextTargetPc 75 53 = some 0x80 := by decide
   dsimp only [allAbsLE64AVX512Bytes]
   have hStep0 := runAmd64Vec_block_seq 13 allAbsLE64AVX512ByteChunks allAbsLE64AVX512_chunks_wf
@@ -4105,7 +5683,9 @@ ELF `.text` bytes of `internal/simd.allAbsLE64AVX512` (exercising EVEX opmask co
 1. Never hits `runtime.panicBounds`, `morestack`, or any external runtime/GC call;
 2. Terminates with `status = .returned`, `upperDirty = false` (`VZEROUPPER` ABI safety), and
    `sseHazard = false`;
-3. Returns bit-exact `RAX = if specAllAbsLE x limit (8 * (n / 8)) then 1 else 0`. -/
+3. Returns bit-exact `RAX = if specAllAbsLE x limit (8 * (n / 8)) then 1 else 0`;
+4. Preserves Go amd64 ABI registers: `RSP = s0.gpr 4#4 + 8#64`, `RBP = s0.gpr 5#4`,
+   `R14 = s0.gpr 14#4`, and `X15` low 128 bits (`l0`, `l1`). -/
 theorem allAbsLE64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec 64)
     (limit : BitVec 64) (n fuel : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running)
@@ -4120,7 +5700,12 @@ theorem allAbsLE64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec
     sf.status = .returned ∧
     sf.upperDirty = false ∧
     sf.sseHazard = false ∧
-    sf.gpr 0#4 = (if specAllAbsLE x limit (8 * (n / 8)) then 1#64 else 0#64) := by
+    sf.gpr 0#4 = (if specAllAbsLE x limit (8 * (n / 8)) then 1#64 else 0#64) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 := by
   have hPro := allAbsLE64AVX512_prologue base x limit n s0 hPc hRun hHaz hPos hN hRax hRbx hLim hX hDisj
   have hL16 := allAbsLE64AVX512_loop16_iter base x limit n hN (n / 16) 0 _ (by omega) hPro.1 hPro.2
   have hEx16 := allAbsLE64AVX512_loop16_exit base x limit n (16 * (n / 16)) _
@@ -4150,9 +5735,16 @@ theorem allAbsLE64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec
         hEx16.1 hEx16.2 (by omega) hN (by omega)
       simpa [h8Eq] using hRet
   have hSplit : fuel = allAbsLE64AVX512Steps n + (fuel - allAbsLE64AVX512Steps n) := by omega
-  dsimp only
-  rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
-  exact hExact
+  have hAbi := allAbsLE64AVX512_abi_reg_preserved s0 fuel hPc hRun
+  have hCore :
+      let sf := runAmd64Vec fuel allAbsLE64AVX512Bytes allAbsLE64AVX512Rodata allAbsLE64AVX512Targets s0
+      sf.status = .returned ∧ sf.upperDirty = false ∧ sf.sseHazard = false ∧
+      sf.gpr 0#4 = (if specAllAbsLE x limit (8 * (n / 8)) then 1#64 else 0#64) := by
+    dsimp only
+    rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
+    exact hExact
+  have hSpRbp := hAbi.2.2.2 hCore.1
+  exact ⟨hCore.1, hCore.2.1, hCore.2.2.1, hCore.2.2.2, hSpRbp.1, hSpRbp.2, hAbi.1, hAbi.2.1, hAbi.2.2.1⟩
 
 /-- Cross-ISA bit-exact equivalence between decoded AVX2 (`allAbsLE64AVX2`) and decoded
 AVX-512 (`allAbsLE64AVX512`) on all 8-aligned non-empty slices (`n = 8q > 0`). -/
@@ -4174,7 +5766,7 @@ theorem allAbsLE64_avx2_eq_avx512_mult8 (base : BitVec 64) (x : Nat → BitVec 6
     hPc hRun hHaz (by omega) hN hRax hRbx hLim hX hDisj hFuel512
   have hEq4 : 4 * (8 * q / 4) = 8 * q := by omega
   have hEq8 : 8 * (8 * q / 8) = 8 * q := by omega
-  rw [h2.2.2.2, h512.2.2.2, hEq4, hEq8]
+  rw [h2.2.2.2.1, h512.2.2.2.1, hEq4, hEq8]
 
 /-!
 ### Part VI.B: Inductive Functional Equivalence — `minNoNaN64AVX2` & `minNoNaN64AVX512`
@@ -4202,44 +5794,100 @@ associative and commutative on all `BitVec 64`. -/
 def cmin64 (a b : BitVec 64) : BitVec 64 :=
   canonZero64 (vminpdLane (sanitizeNaNInf a) (sanitizeNaNInf b))
 
+theorem f64PosInf_notNaN : f64NotNaN f64PosInf = true := by decide
+
+theorem sanitizeNaNInf_notNaN (v : BitVec 64) : f64NotNaN (sanitizeNaNInf v) = true := by
+  unfold sanitizeNaNInf
+  cases h : f64IsNaN v
+  · simp [f64NotNaN, h]
+  · simp [f64PosInf_notNaN]
+
+private theorem sanitizeNaNInf_of_notNaN {v : BitVec 64} (h : f64NotNaN v = true) :
+    sanitizeNaNInf v = v := by
+  have hF : f64IsNaN v = false := by simpa [f64NotNaN] using h
+  simp [sanitizeNaNInf, hF]
+
+theorem vminpdLane_notNaN {a b : BitVec 64} (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
+    f64NotNaN (vminpdLane a b) = true := by
+  unfold vminpdLane
+  split <;> assumption
+
+theorem minStepNoNaN_notNaN {a : BitVec 64} (v : BitVec 64) (ha : f64NotNaN a = true) :
+    f64NotNaN (minStepNoNaN a v) = true := by
+  unfold minStepNoNaN
+  split
+  · next hLt =>
+    cases hNaN : f64IsNaN v
+    · simp [f64NotNaN, hNaN]
+    · unfold f64Lt at hLt; simp [hNaN] at hLt
+  · exact ha
+
+private theorem f64NumKey_vminpdLane {a b : BitVec 64}
+    (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
+    f64NumKey (vminpdLane a b) =
+      if BitVec.ult (f64NumKey a) (f64NumKey b) then f64NumKey a else f64NumKey b := by
+  unfold vminpdLane
+  rw [f64Lt_iff_ult_numKey a b ha hb]
+  split <;> rfl
+
+private theorem f64NumKey_cmin64 (a b : BitVec 64) :
+    f64NumKey (cmin64 a b) =
+      if BitVec.ult (f64NumKey (sanitizeNaNInf a)) (f64NumKey (sanitizeNaNInf b))
+      then f64NumKey (sanitizeNaNInf a)
+      else f64NumKey (sanitizeNaNInf b) := by
+  unfold cmin64
+  rw [f64NumKey_canonZero64]
+  exact f64NumKey_vminpdLane (sanitizeNaNInf_notNaN a) (sanitizeNaNInf_notNaN b)
+
+theorem cmin64_notNaN (a b : BitVec 64) : f64NotNaN (cmin64 a b) = true := by
+  unfold cmin64
+  exact canonZero64_notNaN (vminpdLane_notNaN (sanitizeNaNInf_notNaN a) (sanitizeNaNInf_notNaN b))
+
 theorem cmin64_comm (a b : BitVec 64) : cmin64 a b = cmin64 b a := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero
-  bv_decide
+  unfold cmin64
+  exact (vminpdLane_numKey_assoc_comm (sanitizeNaNInf a) (sanitizeNaNInf b) (sanitizeNaNInf a)
+    (sanitizeNaNInf_notNaN a) (sanitizeNaNInf_notNaN b) (sanitizeNaNInf_notNaN a)).2.1
 
 theorem cmin64_assoc (a b c : BitVec 64) : cmin64 (cmin64 a b) c = cmin64 a (cmin64 b c) := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero
-  bv_decide
+  have hL : cmin64 (cmin64 a b) c = canonZero64 (cmin64 (cmin64 a b) c) := by
+    unfold cmin64; rw [canonZero64_idem]
+  have hR : cmin64 a (cmin64 b c) = canonZero64 (cmin64 a (cmin64 b c)) := by
+    unfold cmin64; rw [canonZero64_idem]
+  rw [hL, hR]
+  apply canonZero64_eq_of_numKey_eq
+  rw [f64NumKey_cmin64, f64NumKey_cmin64,
+      sanitizeNaNInf_of_notNaN (cmin64_notNaN a b),
+      sanitizeNaNInf_of_notNaN (cmin64_notNaN b c),
+      f64NumKey_cmin64, f64NumKey_cmin64]
+  apply BitVec.eq_of_toNat_eq
+  simp only [BitVec.ult_eq_decide]
+  by_cases hab : (f64NumKey (sanitizeNaNInf a)).toNat < (f64NumKey (sanitizeNaNInf b)).toNat <;>
+    by_cases hbc : (f64NumKey (sanitizeNaNInf b)).toNat < (f64NumKey (sanitizeNaNInf c)).toNat <;>
+    by_cases hac : (f64NumKey (sanitizeNaNInf a)).toNat < (f64NumKey (sanitizeNaNInf c)).toNat <;>
+    simp [hab, hbc, hac] <;> omega
 
 instance : Std.Commutative cmin64 := ⟨cmin64_comm⟩
 instance : Std.Associative cmin64 := ⟨cmin64_assoc⟩
 
-theorem sanitizeNaNInf_notNaN (v : BitVec 64) : f64NotNaN (sanitizeNaNInf v) = true := by
-  unfold f64NotNaN sanitizeNaNInf f64PosInf f64IsNaN; bv_decide
-
-theorem f64PosInf_notNaN : f64NotNaN f64PosInf = true := by decide
-
-theorem vminpdLane_notNaN {a b : BitVec 64} (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
-    f64NotNaN (vminpdLane a b) = true := by
-  unfold f64NotNaN vminpdLane f64IsNaN f64Lt f64IsZero at *; bv_decide
-
-theorem minStepNoNaN_notNaN {a : BitVec 64} (v : BitVec 64) (ha : f64NotNaN a = true) :
-    f64NotNaN (minStepNoNaN a v) = true := by
-  unfold f64NotNaN minStepNoNaN f64Lt f64IsNaN f64IsZero at *; bv_decide
-
-theorem cmin64_notNaN (a b : BitVec 64) : f64NotNaN (cmin64 a b) = true := by
-  unfold f64NotNaN cmin64 sanitizeNaNInf canonZero64 vminpdLane f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero
-  bv_decide
-
 theorem cmin64_vminpdLane_eq {a b : BitVec 64} (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     canonZero64 (vminpdLane a b) = cmin64 a b := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64NotNaN f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero at *
-  bv_decide
+  unfold cmin64
+  rw [sanitizeNaNInf_of_notNaN ha, sanitizeNaNInf_of_notNaN hb]
 
 theorem cmin64_vminpdLane_left {a b : BitVec 64} (c : BitVec 64)
     (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     cmin64 (vminpdLane a b) c = cmin64 (cmin64 a b) c := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64NotNaN f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero at *
-  bv_decide
+  have hL : cmin64 (vminpdLane a b) c = canonZero64 (cmin64 (vminpdLane a b) c) := by
+    unfold cmin64; rw [canonZero64_idem]
+  have hR : cmin64 (cmin64 a b) c = canonZero64 (cmin64 (cmin64 a b) c) := by
+    unfold cmin64; rw [canonZero64_idem]
+  rw [hL, hR]
+  apply canonZero64_eq_of_numKey_eq
+  rw [f64NumKey_cmin64, f64NumKey_cmin64,
+      sanitizeNaNInf_of_notNaN (vminpdLane_notNaN ha hb),
+      sanitizeNaNInf_of_notNaN (cmin64_notNaN a b),
+      f64NumKey_vminpdLane ha hb, f64NumKey_cmin64,
+      sanitizeNaNInf_of_notNaN ha, sanitizeNaNInf_of_notNaN hb]
 
 theorem cmin64_vminpdLane_right (a : BitVec 64) {b c : BitVec 64}
     (hb : f64NotNaN b = true) (hc : f64NotNaN c = true) :
@@ -4247,29 +5895,53 @@ theorem cmin64_vminpdLane_right (a : BitVec 64) {b c : BitVec 64}
   rw [cmin64_comm a (vminpdLane b c), cmin64_vminpdLane_left a hb hc, cmin64_comm]
 
 theorem cmin64_sanitize_left (a b : BitVec 64) : cmin64 (sanitizeNaNInf a) b = cmin64 a b := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero
-  bv_decide
+  unfold cmin64
+  rw [sanitizeNaNInf_of_notNaN (sanitizeNaNInf_notNaN a)]
 
 theorem cmin64_sanitize_right (a b : BitVec 64) : cmin64 a (sanitizeNaNInf b) = cmin64 a b := by
   rw [cmin64_comm, cmin64_sanitize_left, cmin64_comm]
 
 theorem cmin64_canonZero_left (a b : BitVec 64) : cmin64 (canonZero64 a) b = cmin64 a b := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero
-  bv_decide
+  have hL : cmin64 (canonZero64 a) b = canonZero64 (cmin64 (canonZero64 a) b) := by
+    unfold cmin64; rw [canonZero64_idem]
+  have hR : cmin64 a b = canonZero64 (cmin64 a b) := by
+    unfold cmin64; rw [canonZero64_idem]
+  rw [hL, hR]
+  apply canonZero64_eq_of_numKey_eq
+  rw [f64NumKey_cmin64, f64NumKey_cmin64]
+  have hK : f64NumKey (sanitizeNaNInf (canonZero64 a)) = f64NumKey (sanitizeNaNInf a) := by
+    cases hNaN : f64IsNaN a
+    · have ha : f64NotNaN a = true := by simp [f64NotNaN, hNaN]
+      rw [sanitizeNaNInf_of_notNaN (canonZero64_notNaN ha), sanitizeNaNInf_of_notNaN ha,
+          f64NumKey_canonZero64]
+    · have hNotZ : f64IsZero a = false := f64IsZero_false_of_isNaN hNaN
+      simp [canonZero64, hNotZ]
+  rw [hK]
 
 theorem cmin64_canonZero_right (a b : BitVec 64) : cmin64 a (canonZero64 b) = cmin64 a b := by
   rw [cmin64_comm, cmin64_canonZero_left, cmin64_comm]
 
 theorem cmin64_posInf_left (a : BitVec 64) : cmin64 f64PosInf a = canonZero64 (sanitizeNaNInf a) := by
-  unfold cmin64 sanitizeNaNInf canonZero64 vminpdLane f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero
-  bv_decide
+  unfold cmin64
+  rw [sanitizeNaNInf_of_notNaN f64PosInf_notNaN]
+  have hLt : f64Lt f64PosInf (sanitizeNaNInf a) = false :=
+    (f64PosInf_top_of_notNaN (sanitizeNaNInf a) (sanitizeNaNInf_notNaN a)).2.2.1
+  simp [vminpdLane, hLt]
 
 theorem cmin64_posInf_posInf : cmin64 f64PosInf f64PosInf = f64PosInf := by decide
 
 theorem cmin64_minStepNoNaN {a : BitVec 64} (v : BitVec 64) (ha : f64NotNaN a = true) :
     canonZero64 (minStepNoNaN a v) = cmin64 a v := by
-  unfold cmin64 sanitizeNaNInf canonZero64 minStepNoNaN vminpdLane f64NotNaN f64PosInf f64PosZero f64Lt f64IsNaN f64IsZero at *
-  bv_decide
+  cases hNaN : f64IsNaN v
+  · have hv : f64NotNaN v = true := by simp [f64NotNaN, hNaN]
+    have hEq : minStepNoNaN a v = vminpdLane v a := rfl
+    rw [hEq, cmin64_vminpdLane_eq hv ha, cmin64_comm]
+  · have hLtF : f64Lt v a = false := by unfold f64Lt; simp [hNaN]
+    unfold minStepNoNaN
+    simp only [hLtF, Bool.false_eq_true, ↓reduceIte]
+    rw [cmin64_comm]
+    have hSan : sanitizeNaNInf v = f64PosInf := by simp [sanitizeNaNInf, hNaN]
+    rw [← cmin64_sanitize_left, hSan, cmin64_posInf_left, sanitizeNaNInf_of_notNaN ha]
 
 theorem cmin64_f64Min {a b : BitVec 64} (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     canonZero64 (f64Min a b) = cmin64 a b := by
@@ -4572,8 +6244,8 @@ private theorem minNoNaN64AVX2_prologue (base : BitVec 64) (x : Nat → BitVec 6
     s1.pc = 101 ∧ MinNoNaN2Inv base (s0.gpr 4#4 - 72#64) x n 0 s1 := by
   have hBe : evalX86Cond .be (x86TestFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 n)) = false :=
     evalX86Cond_be_test64_self hPos (by omega)
-  have hSpF : s0.gpr 4#4 - 8#64 - 0x40#64 = s0.gpr 4#4 - 72#64 := by bv_decide
-  have hSp80 : s0.gpr 4#4 - 8#64 - 0x40#64 + 80#64 = s0.gpr 4#4 + 8#64 := by bv_decide
+  have hSpF : s0.gpr 4#4 - 8#64 - 0x40#64 = s0.gpr 4#4 - 72#64 := by bv_omega
+  have hSp80 : s0.gpr 4#4 - 8#64 - 0x40#64 + 80#64 = s0.gpr 4#4 + 8#64 := by bv_omega
   have hJmp : nextTargetPc 48 53 = some 101 := by decide
   have hRo23 : minNoNaN64AVX2Rodata 23 = some f64PosInf := by decide
   dsimp only [minNoNaN64AVX2Bytes]
@@ -4955,7 +6627,7 @@ private theorem stackSlot_ne_offset (spF : BitVec 64) (k1 k2 : Nat)
     spF + BitVec.ofNat 64 (k1 * 8) ≠ spF + BitVec.ofNat 64 (k2 * 8) := by
   intro hEq
   have hDiff : BitVec.ofNat 64 (k1 * 8) = BitVec.ofNat 64 (k2 * 8) := by
-    bv_decide
+    bv_omega
   have hNat := congrArg BitVec.toNat hDiff
   simp only [BitVec.toNat_ofNat] at hNat
   rw [Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)] at hNat
@@ -5095,10 +6767,10 @@ private theorem minNoNaN64AVX2_spill_and_vzu (base spF : BitVec 64) (x : Nat →
       minNoNaN64AVX2Rodata minNoNaN64AVX2Targets sA 170 min2BlkSpillB hARun hAPc min2BlkSpillB_ok
   rw [hSB]
   simp only [runAmd64Vec]
-  have hA32_8 : spF + 32#64 + 8#64 = spF + 40#64 := by bv_decide
-  have hA16_8 : spF + 16#64 + 8#64 = spF + 24#64 := by bv_decide
-  have hA32_16 : spF + 32#64 + 16#64 = spF + 48#64 := by bv_decide
-  have hA48_8 : spF + 48#64 + 8#64 = spF + 56#64 := by bv_decide
+  have hA32_8 : spF + 32#64 + 8#64 = spF + 40#64 := by bv_omega
+  have hA16_8 : spF + 16#64 + 8#64 = spF + 24#64 := by bv_omega
+  have hA32_16 : spF + 32#64 + 16#64 = spF + 48#64 := by bv_omega
+  have hA48_8 : spF + 48#64 + 8#64 = spF + 56#64 := by bv_omega
   have h24 : spF + 16#64 ≠ spF + 32#64 := hSlotNe 2 4 (by decide) (by omega) (by omega)
   have h25 : spF + 16#64 ≠ spF + 40#64 := hSlotNe 2 5 (by decide) (by omega) (by omega)
   have h34 : spF + 24#64 ≠ spF + 32#64 := hSlotNe 3 4 (by decide) (by omega) (by omega)
@@ -5705,7 +7377,9 @@ asymmetry, subnormals, `±Inf`, and `NaN` replacement):
 1. Never hits `runtime.panicBounds`, `morestack`, or any external runtime/GC call;
 2. Terminates with `status = .returned`, `upperDirty = false` (`VZEROUPPER` ABI safety before
    every legacy SSE instruction and before `RET`), and `sseHazard = false`;
-3. Returns bit-exact `XMM0.l0 = specMinNoNaN64 x n` (`Track5D.canonZero64` of sequential min). -/
+3. Returns bit-exact `XMM0.l0 = specMinNoNaN64 x n` (`Track5D.canonZero64` of sequential min);
+4. Preserves Go amd64 ABI registers: `RSP = s0.gpr 4#4 + 8#64`, `RBP = s0.gpr 5#4`,
+   `R14 = s0.gpr 14#4`, and `X15` low 128 bits (`l0`, `l1`). -/
 theorem minNoNaN64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 64)
     (n fuel : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
@@ -5721,7 +7395,12 @@ theorem minNoNaN64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 6
     sf.status = .returned ∧
     sf.upperDirty = false ∧
     sf.sseHazard = false ∧
-    (sf.zmm 0#5).l0 = specMinNoNaN64 x n := by
+    (sf.zmm 0#5).l0 = specMinNoNaN64 x n ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 := by
   let spF := s0.gpr 4#4 - 72#64
   have hPro := minNoNaN64AVX2_prologue base x n s0 hPc hRun hHaz hPos hN hRax hRbx hX
     (fun j hj => ⟨(hDisj j hj).1, (hDisj j hj).2.1⟩)
@@ -5741,10 +7420,10 @@ theorem minNoNaN64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 6
     rcases hSpill with ⟨hPcSp, hRdxSp, hSc0, l0, l1, l2, l3,
       hM0, hM1, hM2, hM3, hl0, hl1, hl2, hl3, hLanesEq⟩
     let sSp := runAmd64Vec 17 minNoNaN64AVX2Bytes minNoNaN64AVX2Rodata minNoNaN64AVX2Targets sVec
-    have hAddr0 : spF + BitVec.ofNat 64 (0 * 8) + 32#64 = spF + 32#64 := by bv_decide
-    have hAddr1 : spF + BitVec.ofNat 64 (1 * 8) + 32#64 = spF + 40#64 := by bv_decide
-    have hAddr2 : spF + BitVec.ofNat 64 (2 * 8) + 32#64 = spF + 48#64 := by bv_decide
-    have hAddr3 : spF + BitVec.ofNat 64 (3 * 8) + 32#64 = spF + 56#64 := by bv_decide
+    have hAddr0 : spF + BitVec.ofNat 64 (0 * 8) + 32#64 = spF + 32#64 := by bv_omega
+    have hAddr1 : spF + BitVec.ofNat 64 (1 * 8) + 32#64 = spF + 40#64 := by bv_omega
+    have hAddr2 : spF + BitVec.ofNat 64 (2 * 8) + 32#64 = spF + 48#64 := by bv_omega
+    have hAddr3 : spF + BitVec.ofNat 64 (3 * 8) + 32#64 = spF + 56#64 := by bv_omega
     have hH0 := minNoNaN64AVX2_horiz_step base spF x n (4 * (n / 4)) 0 f64PosInf l0 sSp
       hPcSp (by omega) hRdxSp hSc0 (by rw [hAddr0]; exact hM0)
     rcases hH0 with ⟨st0, hSt0, hPc0, hRdx0, hMem0, hInv0⟩
@@ -5809,9 +7488,16 @@ theorem minNoNaN64AVX2_functional_equiv (base : BitVec 64) (x : Nat → BitVec 6
       exact hFin
   rcases hExist with ⟨stTotal, hStLe, hExact⟩
   have hSplit : fuel = stTotal + (fuel - stTotal) := by omega
-  dsimp only
-  rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
-  exact hExact
+  have hAbi := minNoNaN64AVX2_abi_reg_preserved s0 fuel hPc hRun
+  have hCore :
+      let sf := runAmd64Vec fuel minNoNaN64AVX2Bytes minNoNaN64AVX2Rodata minNoNaN64AVX2Targets s0
+      sf.status = .returned ∧ sf.upperDirty = false ∧ sf.sseHazard = false ∧
+      (sf.zmm 0#5).l0 = specMinNoNaN64 x n := by
+    dsimp only
+    rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
+    exact hExact
+  have hSpRbp := hAbi.2.2.2 hCore.1
+  exact ⟨hCore.1, hCore.2.1, hCore.2.2.1, hCore.2.2.2, hSpRbp.1, hSpRbp.2, hAbi.1, hAbi.2.1, hAbi.2.2.1⟩
 
 /-! #### AVX-512 (`minNoNaN64AVX512`) Inductive Functional Equivalence -/
 
@@ -6019,7 +7705,9 @@ private theorem min512BlkRet_ok : checkBlockSeq minNoNaN64AVX512ByteChunks minNo
 
 private theorem bitVec_ule_false_of_ult_rev {a b : BitVec 64} (h : BitVec.ult b a = true) :
     BitVec.ule a b = false := by
-  bv_decide
+  simp only [BitVec.ult_eq_decide, decide_eq_true_eq] at h
+  simp only [BitVec.ule_eq_decide, decide_eq_false_iff_not]
+  omega
 
 private theorem minNoNaN64AVX512_prologue_guard (base : BitVec 64) (n : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
@@ -6063,8 +7751,8 @@ private theorem minNoNaN64AVX512_prologue (base : BitVec 64) (x : Nat → BitVec
   rcases hG with ⟨hGRun, hGPc, hGHaz, hGRax, hGRbx, hGRsp, hGMem⟩
   have hBe : evalX86Cond .be (x86TestFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 n)) = false :=
     evalX86Cond_be_test64_self hPos (by omega)
-  have hSpF : s0.gpr 4#4 - 8#64 + 0xffffffffffffff80#64 = s0.gpr 4#4 - 136#64 := by bv_decide
-  have hSp144 : s0.gpr 4#4 - 8#64 + 0xffffffffffffff80#64 + 144#64 = s0.gpr 4#4 + 8#64 := by bv_decide
+  have hSpF : s0.gpr 4#4 - 8#64 + 0xffffffffffffff80#64 = s0.gpr 4#4 - 136#64 := by bv_omega
+  have hSp144 : s0.gpr 4#4 - 8#64 + 0xffffffffffffff80#64 + 144#64 = s0.gpr 4#4 + 8#64 := by bv_omega
   have hJmp : nextTargetPc 72 65 = some 137 := by decide
   have hRo42 : minNoNaN64AVX512Rodata 42 = some f64PosInf := rfl
   have hSplit : (17 : Nat) = 3 + 14 := rfl
@@ -6653,10 +8341,10 @@ private theorem minNoNaN64AVX512_spill_and_vzu (base spF : BitVec 64) (x : Nat �
       Amd64VecInsn.dirtiesUpper, Amd64VecInsn.isLegacySSE, hADirt, hAHaz]
   have hB1Gpr : sB1.gpr = sA.gpr := by
     simp [sB1, min512BlkSpillB1, execDecodedSeq, execAmd64VecInsn, evalMemAddr]
-  have h64_8 : spF + 64#64 + 8#64 = spF + 72#64 := by bv_decide
-  have h64_16 : spF + 64#64 + 16#64 = spF + 80#64 := by bv_decide
-  have h80_8 : spF + 80#64 + 8#64 = spF + 88#64 := by bv_decide
-  have h16_8 : spF + 16#64 + 8#64 = spF + 24#64 := by bv_decide
+  have h64_8 : spF + 64#64 + 8#64 = spF + 72#64 := by bv_omega
+  have h64_16 : spF + 64#64 + 16#64 = spF + 80#64 := by bv_omega
+  have h80_8 : spF + 80#64 + 8#64 = spF + 88#64 := by bv_omega
+  have h16_8 : spF + 16#64 + 8#64 = spF + 24#64 := by bv_omega
   have hB1MemEq : sB1.mem =
       write64 (write64 (write64 (write64 sA.mem
         (spF + 64#64) l0) (spF + 72#64) l1) (spF + 80#64) l2) (spF + 88#64) l3 := by
@@ -6698,12 +8386,12 @@ private theorem minNoNaN64AVX512_spill_and_vzu (base spF : BitVec 64) (x : Nat �
       minNoNaN64AVX512Rodata minNoNaN64AVX512Targets sB1 234 min512BlkSpillB2 hB1Run hB1Pc min512BlkSpillB2_ok
   rw [hSB2]
   simp only [runAmd64Vec]
-  have h64_32 : spF + 64#64 + 32#64 = spF + 96#64 := by bv_decide
-  have h96_8 : spF + 96#64 + 8#64 = spF + 104#64 := by bv_decide
-  have h64_48 : spF + 64#64 + 48#64 = spF + 112#64 := by bv_decide
-  have h112_8 : spF + 112#64 + 8#64 = spF + 120#64 := by bv_decide
-  have h32_8 : spF + 32#64 + 8#64 = spF + 40#64 := by bv_decide
-  have h48_8 : spF + 48#64 + 8#64 = spF + 56#64 := by bv_decide
+  have h64_32 : spF + 64#64 + 32#64 = spF + 96#64 := by bv_omega
+  have h96_8 : spF + 96#64 + 8#64 = spF + 104#64 := by bv_omega
+  have h64_48 : spF + 64#64 + 48#64 = spF + 112#64 := by bv_omega
+  have h112_8 : spF + 112#64 + 8#64 = spF + 120#64 := by bv_omega
+  have h32_8 : spF + 32#64 + 8#64 = spF + 40#64 := by bv_omega
+  have h48_8 : spF + 48#64 + 8#64 = spF + 56#64 := by bv_omega
   have hMemFinal :
       (execDecodedSeq minNoNaN64AVX512Rodata minNoNaN64AVX512Targets sB1 min512BlkSpillB2).mem =
         write64 (write64 (write64 (write64 sB1.mem
@@ -7327,15 +9015,18 @@ def minNoNaN64AVX512FuelBound (n : Nat) : Nat :=
   17 + 15 * (n / 16) + 4 + 9 + 21 + 74 + 9 * (n % 8) + 10
 
 /-- **Top-Level Decoded Machine-Code Functional Equivalence (`minNoNaN64AVX512`)**:
-For arbitrary slice length `n = 8q + r` (`0 < n`, `n + 32 < 2^63`, with Go stack-guard available
-`g.stackguard0 < rsp - 8`, covering 2x-unrolled 16-wide EVEX 512-bit loop with `VCMPUNORDPD -> k`
-and `VPBLENDMQ {k}`, 8-wide EVEX vector tail with reversed `VMINPD` operand order, 8-lane
-horizontal SSE loop, arbitrary scalar tail `r ∈ {0..7}`, zero-trip vector cases `n < 8` / `n < 16`,
-signed-zero asymmetry, subnormals, `±Inf`, and `NaN` replacement):
-1. Proves both `runtime.morestack_noctxt.abi0` and `runtime.panicBounds` unreachable;
+For arbitrary slice length `n = 8q + r` (`0 < n`, `n + 32 < 2^63`), assuming sufficient goroutine
+stack headroom (`hGuard : g.stackguard0 < rsp - 8`, covering 2x-unrolled 16-wide EVEX 512-bit
+loop with `VCMPUNORDPD -> k` and `VPBLENDMQ {k}`, 8-wide EVEX vector tail with reversed `VMINPD`
+operand order, 8-lane horizontal SSE loop, arbitrary scalar tail `r ∈ {0..7}`, zero-trip vector
+cases `n < 8` / `n < 16`, signed-zero asymmetry, subnormals, `±Inf`, and `NaN` replacement):
+1. Under the stack-headroom hypothesis `hGuard`, proves the `runtime.morestack_noctxt.abi0`
+   stack-split branch is not taken and `runtime.panicBounds` is unreachable;
 2. Terminates with `status = .returned`, `upperDirty = false` (`VZEROUPPER` ABI safety before
    every legacy SSE instruction and before `RET`), and `sseHazard = false`;
-3. Returns bit-exact `XMM0.l0 = specMinNoNaN64 x n` (`Track5D.canonZero64` of sequential min). -/
+3. Returns bit-exact `XMM0.l0 = specMinNoNaN64 x n` (`Track5D.canonZero64` of sequential min);
+4. Preserves Go amd64 ABI registers: `RSP = s0.gpr 4#4 + 8#64`, `RBP = s0.gpr 5#4`,
+   `R14 = s0.gpr 14#4`, and `X15` low 128 bits (`l0`, `l1`). -/
 theorem minNoNaN64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec 64)
     (n fuel : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
@@ -7352,7 +9043,12 @@ theorem minNoNaN64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec
     sf.status = .returned ∧
     sf.upperDirty = false ∧
     sf.sseHazard = false ∧
-    (sf.zmm 0#5).l0 = specMinNoNaN64 x n := by
+    (sf.zmm 0#5).l0 = specMinNoNaN64 x n ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 := by
   let spF := s0.gpr 4#4 - 136#64
   have hPro := minNoNaN64AVX512_prologue base x n s0 hPc hRun hHaz hGuard hPos hN hRax hRbx hX
     (fun j hj => ⟨(hDisj j hj).1, (hDisj j hj).2.1⟩)
@@ -7372,14 +9068,14 @@ theorem minNoNaN64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec
       hM0, hM1, hM2, hM3, hM4, hM5, hM6, hM7,
       hl0, hl1, hl2, hl3, hl4, hl5, hl6, hl7, hLanesEq⟩
     let sSp := runAmd64Vec 21 minNoNaN64AVX512Bytes minNoNaN64AVX512Rodata minNoNaN64AVX512Targets sVec
-    have hA0 : spF + BitVec.ofNat 64 (0 * 8) + 64#64 = spF + 64#64 := by bv_decide
-    have hA1 : spF + BitVec.ofNat 64 (1 * 8) + 64#64 = spF + 72#64 := by bv_decide
-    have hA2 : spF + BitVec.ofNat 64 (2 * 8) + 64#64 = spF + 80#64 := by bv_decide
-    have hA3 : spF + BitVec.ofNat 64 (3 * 8) + 64#64 = spF + 88#64 := by bv_decide
-    have hA4 : spF + BitVec.ofNat 64 (4 * 8) + 64#64 = spF + 96#64 := by bv_decide
-    have hA5 : spF + BitVec.ofNat 64 (5 * 8) + 64#64 = spF + 104#64 := by bv_decide
-    have hA6 : spF + BitVec.ofNat 64 (6 * 8) + 64#64 = spF + 112#64 := by bv_decide
-    have hA7 : spF + BitVec.ofNat 64 (7 * 8) + 64#64 = spF + 120#64 := by bv_decide
+    have hA0 : spF + BitVec.ofNat 64 (0 * 8) + 64#64 = spF + 64#64 := by bv_omega
+    have hA1 : spF + BitVec.ofNat 64 (1 * 8) + 64#64 = spF + 72#64 := by bv_omega
+    have hA2 : spF + BitVec.ofNat 64 (2 * 8) + 64#64 = spF + 80#64 := by bv_omega
+    have hA3 : spF + BitVec.ofNat 64 (3 * 8) + 64#64 = spF + 88#64 := by bv_omega
+    have hA4 : spF + BitVec.ofNat 64 (4 * 8) + 64#64 = spF + 96#64 := by bv_omega
+    have hA5 : spF + BitVec.ofNat 64 (5 * 8) + 64#64 = spF + 104#64 := by bv_omega
+    have hA6 : spF + BitVec.ofNat 64 (6 * 8) + 64#64 = spF + 112#64 := by bv_omega
+    have hA7 : spF + BitVec.ofNat 64 (7 * 8) + 64#64 = spF + 120#64 := by bv_omega
     rcases minNoNaN64AVX512_horiz_step base spF x n (8 * (n / 8)) 0 f64PosInf l0 sSp
       hPcSp (by omega) hRdxSp hSc0 (by rw [hA0]; exact hM0) with ⟨st0, hSt0, hPc0, hRdx0, hMem0, hInv0⟩
     rcases minNoNaN64AVX512_horiz_step base spF x n (8 * (n / 8)) 1 _ l1 _
@@ -7460,9 +9156,16 @@ theorem minNoNaN64AVX512_functional_equiv (base : BitVec 64) (x : Nat → BitVec
       exact hFin
   rcases hExist with ⟨stTotal, hStLe, hExact⟩
   have hSplit : fuel = stTotal + (fuel - stTotal) := by omega
-  dsimp only
-  rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
-  exact hExact
+  have hAbi := minNoNaN64AVX512_abi_reg_preserved s0 fuel hPc hRun
+  have hCore :
+      let sf := runAmd64Vec fuel minNoNaN64AVX512Bytes minNoNaN64AVX512Rodata minNoNaN64AVX512Targets s0
+      sf.status = .returned ∧ sf.upperDirty = false ∧ sf.sseHazard = false ∧
+      (sf.zmm 0#5).l0 = specMinNoNaN64 x n := by
+    dsimp only
+    rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hExact.1])]
+    exact hExact
+  have hSpRbp := hAbi.2.2.2 hCore.1
+  exact ⟨hCore.1, hCore.2.1, hCore.2.2.1, hCore.2.2.2, hSpRbp.1, hSpRbp.2, hAbi.1, hAbi.2.1, hAbi.2.2.1⟩
 
 /-- **Cross-ISA Bit-Exact Equivalence (`minNoNaN64AVX2` = `minNoNaN64AVX512` = `specMinNoNaN64`)**:
 For EVERY non-empty slice length `n` (`0 < n`, `n + 32 < 2^63`, arbitrary `n = 4q + r` and
@@ -7492,15 +9195,15 @@ theorem minNoNaN64_avx2_eq_avx512 (base : BitVec 64) (x : Nat → BitVec 64)
     hPc hRun hHaz hPos (by omega) hRax hRbx hX hDisj2 hFuel2
   have h512 := minNoNaN64AVX512_functional_equiv base x n fuel512 s0
     hPc hRun hHaz hGuard hPos hN hRax hRbx hX hDisj512 hFuel512
-  rw [h2.2.2.2, h512.2.2.2]
+  rw [h2.2.2.2.1, h512.2.2.2.1]
 
 /-!
 ### Part VI.C: Full Decoded Functional Equivalence for `initReducedRow64AVX2` and `initReducedRow64AVX512`
 -/
 
-/-- IEEE-754 binary64 reduced cost `costRow[j] - v[j] - ui`. -/
+/-- Intel SDM x86-64 IEEE-754 binary64 reduced cost `(costRow[j] - v[j]) - ui` matching hardware `VSUBPD`. -/
 def specReducedElem (c v : Nat → BitVec 64) (ui : BitVec 64) (j : Nat) : BitVec 64 :=
-  f64Sub (f64Sub (c j) (v j)) ui
+  x86F64Sub (x86F64Sub (c j) (v j)) ui
 
 /-- Sequential NaN-free check over the reduced-cost prefix `0 .. m - 1`. -/
 def specAllReducedNotNaN (c v : Nat → BitVec 64) (ui : BitVec 64) : Nat → Bool
@@ -7513,7 +9216,7 @@ def specInitReducedMin (c v : Nat → BitVec 64) (ui : BitVec 64) : Nat → BitV
   | k + 1 => cmin64 (specInitReducedMin c v ui k) (specReducedElem c v ui k)
 
 private theorem bv_add_left_cancel_64 {b x y : BitVec 64} (h : b + x = b + y) : x = y := by
-  bv_decide
+  bv_omega
 
 private theorem elemAddr_inj {base : BitVec 64} {j1 j2 : Nat}
     (h1 : j1 < 2 ^ 61) (h2 : j2 < 2 ^ 61) (hNe : j1 ≠ j2) :
@@ -7537,12 +9240,13 @@ private theorem minsd_por_comm_eq_f64Min (a b : BitVec 64)
 private theorem f64Min_notNaN {a b : BitVec 64}
     (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     f64NotNaN (f64Min a b) = true := by
-  have hLt := f64Lt_eq_f64Cmp_n a b
-  unfold f64Min at *
-  dsimp only at *
-  rw [← hLt]
-  unfold f64Lt f64Sign f64NotNaN f64IsNaN f64IsZero at *
-  bv_decide
+  have haN : f64IsNaN a = false := by simpa [f64NotNaN] using ha
+  have hbN : f64IsNaN b = false := by simpa [f64NotNaN] using hb
+  unfold f64Min
+  simp only [haN, hbN, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+  split
+  · split <;> assumption
+  · split <;> assumption
 
 private theorem cmin64_f64Min_tree4 {l0 l1 l2 l3 : BitVec 64}
     (h0 : f64NotNaN l0 = true) (h1 : f64NotNaN l1 = true)
@@ -7589,9 +9293,9 @@ private theorem storeVecMem_ymm256_at (m : BitVec 64 → BitVec 64) (base : BitV
       write64 (write64 (write64 (write64 m base v.l0) (base + 8#64) v.l1)
         (base + 16#64) v.l2) (base + 24#64) v.l3 := by
     simp [storeVecMem, h0]
-  have h01 : base ≠ base + 8#64 := by bv_decide
-  have h02 : base ≠ base + 16#64 := by bv_decide
-  have h03 : base ≠ base + 24#64 := by bv_decide
+  have h01 : base ≠ base + 8#64 := by bv_omega
+  have h02 : base ≠ base + 16#64 := by bv_omega
+  have h03 : base ≠ base + 24#64 := by bv_omega
   have h12 : base + 8#64 ≠ base + 16#64 := hS 1 2 (by decide) (by omega) (by omega)
   have h13 : base + 8#64 ≠ base + 24#64 := hS 1 3 (by decide) (by omega) (by omega)
   have h23 : base + 16#64 ≠ base + 24#64 := hS 2 3 (by decide) (by omega) (by omega)
@@ -7799,7 +9503,7 @@ private theorem vpand_maskVec8 (m0 m1 m2 m3 m4 m5 m6 m7 p0 p1 p2 p3 p4 p5 p6 p7 
   simp [Vec512.zipWith, maskVec8, maskLane64_and]
 
 /-- Loop invariant at `pc = 200` (8-wide header) and `pc = 257` (4-wide header) of `initReducedRow64AVX2`. -/
-private structure InitReduced2Inv (dstBase costBase vBase spF : BitVec 64)
+private structure InitReduced2Inv (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState) : Prop where
   statusRun : s.status = .running
   upperDirtyT : s.upperDirty = true
@@ -7814,6 +9518,7 @@ private structure InitReduced2Inv (dstBase costBase vBase spF : BitVec 64)
   memCost : ∀ j < n, s.mem (elemAddr costBase j) = c j
   memV : ∀ j < n, s.mem (elemAddr vBase j) = v j
   memDst : DstMemState dstBase c v dst0 ui n i s.mem
+  savedRbp : s.mem (spF + 32#64) = rbp0
   ordMasks : ∃ m0 m1 m2 m3 p0 p1 p2 p3 : Bool,
     s.zmm 2#5 = maskVec4 m0 m1 m2 m3 ∧
     s.zmm 3#5 = maskVec4 p0 p1 p2 p3 ∧
@@ -8028,13 +9733,17 @@ private theorem initReducedRow64AVX2_prologue (dstBase costBase vBase : BitVec 6
       elemAddr base j ≠ s0.gpr 4#4 + 32#64 ∧
       elemAddr base j ≠ s0.gpr 4#4 + 56#64) :
     let s1 := runAmd64Vec 25 initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s0
-    s1.pc = 200 ∧ InitReduced2Inv dstBase costBase vBase (s0.gpr 4#4 - 40#64) c v dst0 ui n 0 s1 := by
+    s1.pc = 200 ∧ InitReduced2Inv dstBase costBase vBase (s0.gpr 4#4 - 40#64) (s0.gpr 5#4) c v dst0 ui n 0 s1 := by
   let sp0 := s0.gpr 4#4
   let spF := sp0 - 40#64
-  have hSub40 : sp0 - 8#64 - 0x20#64 = spF := by bv_decide
-  have hSp48 : spF + 48#64 = sp0 + 8#64 := by bv_decide
-  have hSp72 : spF + 72#64 = sp0 + 32#64 := by bv_decide
-  have hSp96 : spF + 96#64 = sp0 + 56#64 := by bv_decide
+  have hSub40 : sp0 - 8#64 - 0x20#64 = spF := by dsimp only [spF]; bv_omega
+  have hSp32 : spF + 32#64 = sp0 - 8#64 := by dsimp only [spF]; bv_omega
+  have hSp48 : spF + 48#64 = sp0 + 8#64 := by dsimp only [spF]; bv_omega
+  have hSp72 : spF + 72#64 = sp0 + 32#64 := by dsimp only [spF]; bv_omega
+  have hSp96 : spF + 96#64 = sp0 + 56#64 := by dsimp only [spF]; bv_omega
+  have hRbpNe8 : sp0 - 8#64 ≠ sp0 + 8#64 := by bv_omega
+  have hRbpNe32 : sp0 - 8#64 ≠ sp0 + 32#64 := by bv_omega
+  have hRbpNe56 : sp0 - 8#64 ≠ sp0 + 56#64 := by bv_omega
   have hBeN := evalX86Cond_be_test64_self hPos (by omega)
   have hBeC := evalX86Cond_be_test64_self hPosC hLenC
   have hBeV := evalX86Cond_be_test64_self hPosV hLenV
@@ -8132,6 +9841,8 @@ private theorem initReducedRow64AVX2_prologue (dstBase costBase vBase : BitVec 6
      by intro j hj; rw [hMemFinal, hPres j hj costBase (by simp)]; exact hMemC j hj,
      by intro j hj; rw [hMemFinal, hPres j hj vBase (by simp)]; exact hMemV j hj,
      ⟨fun _ h => by omega, fun j _ hj => by rw [hMemFinal, hPres j hj dstBase (by simp)]; exact hMemD j hj⟩,
+     by rw [hMemFinal, hSp32, hAMemEq, write64_ne _ _ hRbpNe56, write64_ne _ _ hRbpNe32,
+          write64_ne _ _ hRbpNe8, write64_eq],
      ⟨true, true, true, true, true, true, true, true,
       by simp [init2BlkPro2, execDecodedSeq, execAmd64VecInsn, readMem64, evalVecRm, setZmm,
            Vec512.applyEvexMask, Vec512.applyWidth, Vec512.zeroHi256, Vec512.broadcast, Vec512.zipWith,
@@ -8150,14 +9861,15 @@ private theorem initReducedRow64AVX2_prologue (dstBase costBase vBase : BitVec 6
       by simp [specInitReducedMin, cmin64_posInf_posInf]⟩⟩⟩
 
 set_option maxRecDepth 4096 in
-private theorem initReducedRow64AVX2_loop8_step (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX2_loop8_step (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 200) (hInv : InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 200) (hInv : InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hStep : i + 8 ≤ n) (hN : n + 16 < 2 ^ 61)
     (hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2)
-    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2) :
+    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2)
+    (hDisjRbp : ∀ j < n, spF + 32#64 ≠ elemAddr dstBase j) :
     let s' := runAmd64Vec 27 initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s
-    s'.pc = 200 ∧ InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n (i + 8) s' := by
+    s'.pc = 200 ∧ InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n (i + 8) s' := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 8))) = true := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_true hStep
   have hAdd8 : BitVec.ofNat 64 i + 8#64 = BitVec.ofNat 64 (i + 8) := bitVec_ofNat_add i 8
@@ -8256,8 +9968,8 @@ private theorem initReducedRow64AVX2_loop8_step (dstBase costBase vBase spF : Bi
       applyEvexMask_zero, Vec512.applyWidth, Vec512.zeroHi256, Vec512.broadcast, Vec512.zipWith,
       vd0, specReducedElem]
   have hAZ6 : sA.zmm 6#5 =
-      { l0 := f64Sub (c (i + 4)) (v (i + 4)), l1 := f64Sub (c (i + 5)) (v (i + 5))
-        l2 := f64Sub (c (i + 6)) (v (i + 6)), l3 := f64Sub (c (i + 7)) (v (i + 7)) } := by
+      { l0 := x86F64Sub (c (i + 4)) (v (i + 4)), l1 := x86F64Sub (c (i + 5)) (v (i + 5))
+        l2 := x86F64Sub (c (i + 6)) (v (i + 6)), l3 := x86F64Sub (c (i + 7)) (v (i + 7)) } := by
     simp [sA, init2BlkLoop8BodyA, execDecodedSeq, execAmd64VecInsn, evalVecRm, evalMemAddr, loadVecMem,
       setGpr, setZmm, hHRcx, hHRdi, hHR9, hHMem, hCBase, hVBase,
       elemAddr_plus_32, elemAddr_plus_8, elemAddr_plus_16, elemAddr_plus_24,
@@ -8338,6 +10050,15 @@ private theorem initReducedRow64AVX2_loop8_step (dstBase costBase vBase spF : Bi
         hB1MemEq, hAt1.2.2.2.2 _ (hDisjVD j hj _ (by omega)) (hDisjVD j hj _ (by omega))
         (hDisjVD j hj _ (by omega)) (hDisjVD j hj _ (by omega))]
     exact hInv.memV j hj
+  have hB2Rbp : sB2.mem (spF + 32#64) = rbp0 := by
+    have hAt1 := storeVecMem_ymm256_at s.mem (elemAddr dstBase i) vd0 (sA.kmask 0#3)
+    have hAt2 := storeVecMem_ymm256_at sB1.mem (elemAddr dstBase (i + 4)) vd1 (sB1.kmask 0#3)
+    rw [elemAddr_plus_8, elemAddr_plus_16, elemAddr_plus_24] at hAt1 hAt2
+    rw [hB2MemEq, hAt2.2.2.2.2 _ (hDisjRbp _ (by omega)) (hDisjRbp _ (by omega))
+        (hDisjRbp _ (by omega)) (hDisjRbp _ (by omega)),
+        hB1MemEq, hAt1.2.2.2.2 _ (hDisjRbp _ (by omega)) (hDisjRbp _ (by omega))
+        (hDisjRbp _ (by omega)) (hDisjRbp _ (by omega))]
+    exact hInv.savedRbp
   -- Step 5: Loop8BodyC (7 steps: 171 -> 200, update ord0/ord1/vmin0/vmin1/rcx).
   have hSC : runAmd64Vec 7 ⟨initReducedRow64AVX2ByteChunks.flatten⟩ initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sB2 =
       runAmd64Vec 0 ⟨initReducedRow64AVX2ByteChunks.flatten⟩ initReducedRow64AVX2Rodata initReducedRow64AVX2Targets
@@ -8363,6 +10084,7 @@ private theorem initReducedRow64AVX2_loop8_step (dstBase costBase vBase spF : Bi
      by intro j hj; rw [hCMem]; exact hB2MemCost j hj,
      by intro j hj; rw [hCMem]; exact hB2MemV j hj,
      by rw [hCMem]; exact hB2Dst,
+     by rw [hCMem]; exact hB2Rbp,
      ⟨f64NotNaN (specReducedElem c v ui i) && m0,
       f64NotNaN (specReducedElem c v ui (i + 1)) && m1,
       f64NotNaN (specReducedElem c v ui (i + 2)) && m2,
@@ -8407,21 +10129,22 @@ private theorem initReducedRow64AVX2_loop8_step (dstBase costBase vBase spF : Bi
       specInitReducedMin_add8, specInitReducedMin_add4, ← hCmin]
   ac_rfl
 
-private theorem initReducedRow64AVX2_loop8_iter (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX2_loop8_iter (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n : Nat) (hN : n + 16 < 2 ^ 61)
     (hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2)
-    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2) :
+    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2)
+    (hDisjRbp : ∀ j < n, spF + 32#64 ≠ elemAddr dstBase j) :
     ∀ k i s, i + 8 * k ≤ n → s.pc = 200 →
-      InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n i s →
+      InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s →
       let s' := runAmd64Vec (27 * k) initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s
-      s'.pc = 200 ∧ InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n (i + 8 * k) s' := by
+      s'.pc = 200 ∧ InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n (i + 8 * k) s' := by
   intro k
   induction k with
   | zero => intro i s _ hPc hInv; simpa [runAmd64Vec] using ⟨hPc, hInv⟩
   | succ m ih =>
     intro i s hLe hPc hInv
-    have hStep := initReducedRow64AVX2_loop8_step dstBase costBase vBase spF c v dst0 ui n i s
-      hPc hInv (by omega) hN hDisjCD hDisjVD
+    have hStep := initReducedRow64AVX2_loop8_step dstBase costBase vBase spF rbp0 c v dst0 ui n i s
+      hPc hInv (by omega) hN hDisjCD hDisjVD hDisjRbp
     have hRest := ih (i + 8) _ (by omega) hStep.1 hStep.2
     have hAdd : 27 * (m + 1) = 27 + 27 * m := by omega
     have hIdx : i + 8 + 8 * m = i + 8 * (m + 1) := by omega
@@ -8429,12 +10152,12 @@ private theorem initReducedRow64AVX2_loop8_iter (dstBase costBase vBase spF : Bi
     rw [hAdd, runAmd64Vec_add, ← hIdx]
     exact hRest
 
-private theorem initReducedRow64AVX2_loop8_exit (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX2_loop8_exit (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 200) (hInv : InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 200) (hInv : InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hLt : n < i + 8) (hN : n + 16 < 2 ^ 61) (hi : i ≤ n) :
     let s' := runAmd64Vec 4 initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s
-    s'.pc = 257 ∧ InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n i s' := by
+    s'.pc = 257 ∧ InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s' := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 8))) = false := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_false (by omega)
   have hAdd8 : BitVec.ofNat 64 i + 8#64 = BitVec.ofNat 64 (i + 8) := bitVec_ofNat_add i 8
@@ -8486,6 +10209,10 @@ private theorem initReducedRow64AVX2_loop8_exit (dstBase costBase vBase spF : Bi
           simp [sMid, init2BlkLoop8Exit, init2BlkLoop8Hdr, execDecodedSeq, execAmd64VecInsn, evalMemAddr, setGpr,
             hInv.rcxEq, hInv.rbxEq, hAdd8, hGe, hJmp]
         rw [hM]; exact hInv.memDst,
+     by have hM : (execDecodedSeq initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sMid init2BlkLoop8Exit).mem = s.mem := by
+          simp [sMid, init2BlkLoop8Exit, init2BlkLoop8Hdr, execDecodedSeq, execAmd64VecInsn, evalMemAddr, setGpr,
+            hInv.rcxEq, hInv.rbxEq, hAdd8, hGe, hJmp]
+        rw [hM]; exact hInv.savedRbp,
      by have hZ : (execDecodedSeq initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sMid init2BlkLoop8Exit).zmm = s.zmm := by
           simp [sMid, init2BlkLoop8Exit, init2BlkLoop8Hdr, execDecodedSeq, execAmd64VecInsn, evalMemAddr, setGpr,
             hInv.rcxEq, hInv.rbxEq, hAdd8, hGe, hJmp]
@@ -8496,14 +10223,15 @@ private theorem initReducedRow64AVX2_loop8_exit (dstBase costBase vBase spF : Bi
         rw [hZ]; exact hInv.minAccs⟩⟩
 
 set_option maxRecDepth 4096 in
-private theorem initReducedRow64AVX2_loop4_step (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX2_loop4_step (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 257) (hInv : InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 257) (hInv : InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hStep : i + 4 ≤ n) (hN : n + 16 < 2 ^ 61)
     (hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2)
-    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2) :
+    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2)
+    (hDisjRbp : ∀ j < n, spF + 32#64 ≠ elemAddr dstBase j) :
     let s' := runAmd64Vec 14 initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s
-    s'.pc = 257 ∧ InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n (i + 4) s' := by
+    s'.pc = 257 ∧ InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n (i + 4) s' := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 4))) = true := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_true hStep
   have hAdd4 : BitVec.ofNat 64 i + 4#64 = BitVec.ofNat 64 (i + 4) := bitVec_ofNat_add i 4
@@ -8601,6 +10329,12 @@ private theorem initReducedRow64AVX2_loop4_step (dstBase costBase vBase spF : Bi
     rw [hBMemEq, hAt.2.2.2.2 _ (hDisjVD j hj _ (by omega)) (hDisjVD j hj _ (by omega))
         (hDisjVD j hj _ (by omega)) (hDisjVD j hj _ (by omega))]
     exact hInv.memV j hj
+  have hBRbp : sB.mem (spF + 32#64) = rbp0 := by
+    have hAt := storeVecMem_ymm256_at s.mem (elemAddr dstBase i) vd0 (sA.kmask 0#3)
+    rw [elemAddr_plus_8, elemAddr_plus_16, elemAddr_plus_24] at hAt
+    rw [hBMemEq, hAt.2.2.2.2 _ (hDisjRbp _ (by omega)) (hDisjRbp _ (by omega))
+        (hDisjRbp _ (by omega)) (hDisjRbp _ (by omega))]
+    exact hInv.savedRbp
   have hSC : runAmd64Vec 4 ⟨initReducedRow64AVX2ByteChunks.flatten⟩ initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sB =
       runAmd64Vec 0 ⟨initReducedRow64AVX2ByteChunks.flatten⟩ initReducedRow64AVX2Rodata initReducedRow64AVX2Targets
         (execDecodedSeq initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sB init2BlkLoop4BodyC) :=
@@ -8625,6 +10359,7 @@ private theorem initReducedRow64AVX2_loop4_step (dstBase costBase vBase spF : Bi
      by intro j hj; rw [hCMem]; exact hBMemCost j hj,
      by intro j hj; rw [hCMem]; exact hBMemV j hj,
      by rw [hCMem]; exact hBDst,
+     by rw [hCMem]; exact hBRbp,
      ⟨m0 && f64NotNaN (specReducedElem c v ui i),
       m1 && f64NotNaN (specReducedElem c v ui (i + 1)),
       m2 && f64NotNaN (specReducedElem c v ui (i + 2)),
@@ -8660,9 +10395,9 @@ private theorem initReducedRow64AVX2_loop4_step (dstBase costBase vBase spF : Bi
   ac_rfl
 
 set_option maxRecDepth 4096 in
-private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 257) (hInv : InitReduced2Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 257) (hInv : InitReduced2Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hLt : n < i + 4) (hN : n + 16 < 2 ^ 61) (hi : i ≤ n)
     (hDisjSpill : ∀ j < n, ∀ k < 4, elemAddr dstBase j ≠ spF + BitVec.ofNat 64 (k * 8)) :
     ∃ st ≤ 32,
@@ -8671,7 +10406,8 @@ private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitV
       DstMemState dstBase c v dst0 ui n i sf.mem ∧
       (specAllReducedNotNaN c v ui i = false → (sf.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
       (specAllReducedNotNaN c v ui i = true →
-        f64NotNaN (sf.zmm 0#5).l0 = true ∧ canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui i) := by
+        f64NotNaN (sf.zmm 0#5).l0 = true ∧ canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui i) ∧
+      sf.gpr 5#4 = rbp0 := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 4))) = false := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_false (by omega)
   have hAdd4 : BitVec.ofNat 64 i + 4#64 = BitVec.ofNat 64 (i + 4) := bitVec_ofNat_add i 4
@@ -8713,6 +10449,13 @@ private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitV
         (hDisjSpill j hj 1 (by omega)) (hDisjSpill j hj 2 (by omega)) (hDisjSpill j hj 3 (by omega))
     exact ⟨fun j hj => (hPres j (by omega)).trans (hInv.memDst.1 j hj),
            fun j hge hj => (hPres j hj).trans (hInv.memDst.2 j hge hj)⟩
+  have hERbp : sE.mem (spF + 32#64) = rbp0 := by
+    rw [hEMemEq]
+    have h0 : spF + 32#64 ≠ spF := by bv_omega
+    have h1 : spF + 32#64 ≠ spF + 8#64 := by bv_omega
+    have h2 : spF + 32#64 ≠ spF + 16#64 := by bv_omega
+    have h3 : spF + 32#64 ≠ spF + 24#64 := by bv_omega
+    exact (hEAt.2.2.2.2 _ h0 h1 h2 h3).trans hInv.savedRbp
   cases hOrd : specAllReducedNotNaN c v ui i
   · -- NaN branch: 3 + 6 + 7 = 16 steps.
     refine ⟨16, by omega, ?_⟩
@@ -8739,6 +10482,10 @@ private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitV
       simp [sE, init2BlkEpiCmp, execDecodedSeq, execAmd64VecInsn, Amd64VecInsn.isLegacySSE, evalVecRm, evalMemAddr,
         setZmm, setGpr, hHRsp, hHZmm, hZ2M, hZ3M, applyEvexMask_zero, Vec512.applyWidth,
         vpand_maskVec4, hMskEq, hOrd, hHHaz]
+    have hERsp : sE.gpr 4#4 = spF := by
+      simp [sE, init2BlkEpiCmp, execDecodedSeq, execAmd64VecInsn, evalVecRm, evalMemAddr,
+        setZmm, setGpr, hHRsp, hHZmm, hZ2M, hZ3M, applyEvexMask_zero, Vec512.applyWidth,
+        vpand_maskVec4, hMskEq, hOrd]
     have hS2 : runAmd64Vec 7 ⟨initReducedRow64AVX2ByteChunks.flatten⟩ initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sE =
         runAmd64Vec 0 ⟨initReducedRow64AVX2ByteChunks.flatten⟩ initReducedRow64AVX2Rodata initReducedRow64AVX2Targets
           (execDecodedSeq initReducedRow64AVX2Rodata initReducedRow64AVX2Targets sE init2BlkRetNaN) :=
@@ -8753,7 +10500,8 @@ private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitV
       by simp [init2BlkRetNaN, execDecodedSeq, execAmd64VecInsn, Amd64VecInsn.isLegacySSE, Amd64VecInsn.dirtiesUpper, hEHaz],
       by rw [hRetMem]; exact hEDst,
       fun _ => by simp [init2BlkRetNaN, execDecodedSeq, execAmd64VecInsn, setGpr, setZmm],
-      fun h => Bool.noConfusion h⟩
+      fun h => Bool.noConfusion h,
+      by simp [init2BlkRetNaN, execDecodedSeq, execAmd64VecInsn, setGpr, hERsp, hERbp]⟩
   · -- Ordered branch: 3 + 6 + 8 + 7 + 8 = 32 steps.
     refine ⟨32, by omega, ?_⟩
     dsimp only [initReducedRow64AVX2Bytes]
@@ -8832,6 +10580,7 @@ private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitV
     have h2Haz : s2.sseHazard = false := by
       simp [s2, init2BlkHoriz23, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr,
         Amd64VecInsn.dirtiesUpper, Amd64VecInsn.isLegacySSE, h1Dirt, h1Haz]
+    have h2Rsp : s2.gpr 4#4 = spF := by simp [s2, init2BlkHoriz23, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, h1Rsp]
     have h2Mem : s2.mem = sE.mem := by simp [s2, init2BlkHoriz23, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, h1Mem]
     have h2Z2 : (s2.zmm 2#5).l0 = f64Min l0 l1 := by
       simp [s2, init2BlkHoriz23, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, setZmm, h1Z2]
@@ -8861,7 +10610,8 @@ private theorem initReducedRow64AVX2_epilogue (dstBase costBase vBase spF : BitV
            Amd64VecInsn.isLegacySSE, h2Dirt, h2Haz],
       by rw [hFinMem]; exact hEDst,
       fun h => Bool.noConfusion h,
-      fun _ => ?_⟩
+      fun _ => ?_,
+      by simp [init2BlkHorizFin, execDecodedSeq, execAmd64VecInsn, setGpr, h2Rsp, h2Mem, hERbp]⟩
     rw [hZ0Fin]
     refine ⟨hTree.1, ?_⟩
     rw [hTree.2]
@@ -8873,20 +10623,23 @@ def initReducedRow64AVX2FuelBound (n : Nat) : Nat :=
   27 * (n / 8) + 75
 
 /-- **Top-Level Decoded Machine-Code Functional Equivalence (`initReducedRow64AVX2`)**:
-For arbitrary non-empty slices (`n = 4q + r`, `0 < n`, `0 < lenCost`, `0 < lenV`, `n + 16 < 2^61`)
-and non-aliasing `dst`/`costRow`/`v`/stack memory, running the raw ELF `.text` bytes of
-`internal/simd.initReducedRow64AVX2`:
+For arbitrary non-empty 8-byte-aligned slices (`n = 4q + r`, `0 < n`, `n ≤ lenDst`, `n ≤ lenCost`,
+`n ≤ lenV`, `n + 16 < 2^61`) and non-aliasing `dst`/`costRow`/`v`/stack memory, running the raw ELF
+`.text` bytes of `internal/simd.initReducedRow64AVX2`:
 1. Terminates cleanly at `RET` with `upperDirty = false` and `sseHazard = false` (all 3
    `runtime.panicBounds` guards are provably unreachable);
-2. Writes bit-exact IEEE-754 `dst[j] = (costRow[j] - v[j]) - ui` for all `j < 4 * (n / 4)` while
-   leaving tail lanes `4 * (n / 4) ≤ j < n` unmodified;
+2. Writes bit-exact x86-64 IEEE-754 `dst[j] = x86F64Sub (x86F64Sub costRow[j] v[j]) ui` for all
+   `j < 4 * (n / 4)` (matching Intel SDM `VSUBPD` NaN quieting and negative indefinite NaN
+   `0xfff8000000000000#64`) while leaving tail lanes `4 * (n / 4) ≤ j < n` unmodified;
 3. Returns exact quiet-NaN sentinel `0x7ff8000000000001#64` iff any reduced element in `0..4*(n/4)`
-   is NaN, and otherwise returns a non-NaN minimum whose `canonZero64` equals `specInitReducedMin`. -/
+   is NaN, and otherwise returns a non-NaN minimum whose `canonZero64` equals `specInitReducedMin`;
+4. Preserves Go ABI registers: `RSP = RSP0 + 8`, `RBP = RBP0`, `R14 = R14_0`, and `XMM15 = XMM15_0`. -/
 theorem initReducedRow64AVX2_functional_equiv (dstBase costBase vBase : BitVec 64)
-    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n lenCost lenV fuel : Nat) (s0 : Amd64VecState)
+    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n lenDst lenCost lenV fuel : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
-    (hPos : 0 < n) (hPosC : 0 < lenCost) (hPosV : 0 < lenV)
-    (hN : n + 16 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV : lenV < 2 ^ 64)
+    (hPos : 0 < n) (hLenDst : n ≤ lenDst) (hLenCost : n ≤ lenCost) (hLenV : n ≤ lenV)
+    (hN : n + 16 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV64 : lenV < 2 ^ 64)
+    (hAlign : dstBase.toNat % 8 = 0 ∧ costBase.toNat % 8 = 0 ∧ vBase.toNat % 8 = 0)
     (hRax : s0.gpr 0#4 = dstBase) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
     (hRdi : s0.gpr 7#4 = costBase) (hRsi : s0.gpr 6#4 = BitVec.ofNat 64 lenCost)
     (hR9 : s0.gpr 9#4 = vBase) (hR10 : s0.gpr 10#4 = BitVec.ofNat 64 lenV)
@@ -8910,13 +10663,25 @@ theorem initReducedRow64AVX2_functional_equiv (dstBase costBase vBase : BitVec 6
     (specAllReducedNotNaN c v ui (4 * (n / 4)) = false → (sf.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
     (specAllReducedNotNaN c v ui (4 * (n / 4)) = true →
       f64NotNaN (sf.zmm 0#5).l0 = true ∧
-      canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui (4 * (n / 4))) := by
+      canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui (4 * (n / 4))) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 := by
+  have _ := And.intro hLenDst hAlign
   let spF := s0.gpr 4#4 - 40#64
+  let rbp0 := s0.gpr 5#4
+  have hDisjRbp : ∀ j < n, spF + 32#64 ≠ elemAddr dstBase j := by
+    intro j hj
+    have hEq : spF + 32#64 = s0.gpr 4#4 - 8#64 := by dsimp only [spF]; bv_omega
+    rw [hEq]
+    exact (hDisjPro j hj dstBase (by simp)).1.symm
   have hPro := initReducedRow64AVX2_prologue dstBase costBase vBase c v dst0 ui n lenCost lenV s0
-    hPc hRun hHaz hPos hPosC hPosV hN hLenC hLenV hRax hRbx hRdi hRsi hR9 hR10 hUi hMemC hMemV hMemD hDisjPro
-  have hL8 := initReducedRow64AVX2_loop8_iter dstBase costBase vBase spF c v dst0 ui n hN hDisjCD hDisjVD
+    hPc hRun hHaz hPos (by omega) (by omega) hN hLenC hLenV64 hRax hRbx hRdi hRsi hR9 hR10 hUi hMemC hMemV hMemD hDisjPro
+  have hL8 := initReducedRow64AVX2_loop8_iter dstBase costBase vBase spF rbp0 c v dst0 ui n hN hDisjCD hDisjVD hDisjRbp
     (n / 8) 0 _ (by omega) hPro.1 hPro.2
-  have hEx8 := initReducedRow64AVX2_loop8_exit dstBase costBase vBase spF c v dst0 ui n (8 * (n / 8)) _
+  have hEx8 := initReducedRow64AVX2_loop8_exit dstBase costBase vBase spF rbp0 c v dst0 ui n (8 * (n / 8)) _
     hL8.1 (by simpa using hL8.2) (by omega) hN (by omega)
   have hExist : ∃ stTotal ≤ initReducedRow64AVX2FuelBound n,
       let se := runAmd64Vec stTotal initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s0
@@ -8925,13 +10690,14 @@ theorem initReducedRow64AVX2_functional_equiv (dstBase costBase vBase : BitVec 6
       (specAllReducedNotNaN c v ui (4 * (n / 4)) = false → (se.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
       (specAllReducedNotNaN c v ui (4 * (n / 4)) = true →
         f64NotNaN (se.zmm 0#5).l0 = true ∧
-        canonZero64 (se.zmm 0#5).l0 = specInitReducedMin c v ui (4 * (n / 4))) := by
+        canonZero64 (se.zmm 0#5).l0 = specInitReducedMin c v ui (4 * (n / 4))) ∧
+      se.gpr 5#4 = rbp0 := by
     unfold initReducedRow64AVX2FuelBound
     by_cases hRem : 8 * (n / 8) + 4 ≤ n
     · have h4Eq : 8 * (n / 8) + 4 = 4 * (n / 4) := by omega
-      have hL4 := initReducedRow64AVX2_loop4_step dstBase costBase vBase spF c v dst0 ui n (8 * (n / 8)) _
-        hEx8.1 hEx8.2 hRem hN hDisjCD hDisjVD
-      rcases initReducedRow64AVX2_epilogue dstBase costBase vBase spF c v dst0 ui n (4 * (n / 4)) _
+      have hL4 := initReducedRow64AVX2_loop4_step dstBase costBase vBase spF rbp0 c v dst0 ui n (8 * (n / 8)) _
+        hEx8.1 hEx8.2 hRem hN hDisjCD hDisjVD hDisjRbp
+      rcases initReducedRow64AVX2_epilogue dstBase costBase vBase spF rbp0 c v dst0 ui n (4 * (n / 4)) _
         hL4.1 (by simpa [h4Eq] using hL4.2) (by omega) hN (by omega) hDisjSpill with ⟨stE, hStE, hEpi⟩
       refine ⟨25 + 27 * (n / 8) + 4 + 14 + stE, by omega, ?_⟩
       dsimp only
@@ -8941,7 +10707,7 @@ theorem initReducedRow64AVX2_functional_equiv (dstBase costBase vBase : BitVec 6
           runAmd64Vec_add 25 (27 * (n / 8))]
       exact hEpi
     · have h4Eq : 8 * (n / 8) = 4 * (n / 4) := by omega
-      rcases initReducedRow64AVX2_epilogue dstBase costBase vBase spF c v dst0 ui n (4 * (n / 4)) _
+      rcases initReducedRow64AVX2_epilogue dstBase costBase vBase spF rbp0 c v dst0 ui n (4 * (n / 4)) _
         hEx8.1 (by simpa [h4Eq] using hEx8.2) (by omega) hN (by omega) hDisjSpill with ⟨stE, hStE, hEpi⟩
       refine ⟨25 + 27 * (n / 8) + 4 + stE, by omega, ?_⟩
       dsimp only
@@ -8949,11 +10715,16 @@ theorem initReducedRow64AVX2_functional_equiv (dstBase costBase vBase : BitVec 6
           runAmd64Vec_add (25 + 27 * (n / 8)) 4,
           runAmd64Vec_add 25 (27 * (n / 8))]
       exact hEpi
-  rcases hExist with ⟨stTotal, hStLe, hStat, hDirt, hHazF, hDst, hNaN, hOrd⟩
+  have hAbi := initReducedRow64AVX2_abi_reg_preserved s0 fuel hPc hRun
+  rcases hExist with ⟨stTotal, hStLe, hStat, hDirt, hHazF, hDst, hNaN, hOrd, hRbp⟩
   have hSplit : fuel = stTotal + (fuel - stTotal) := by omega
+  have hSfStat : (runAmd64Vec fuel initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s0).status = .returned := by
+    rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hStat])]; exact hStat
+  have hRsp := hAbi.2.2.2 hSfStat
   dsimp only
   rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hStat])]
-  exact ⟨hStat, hDirt, hHazF, hDst.1, hDst.2, hNaN, hOrd⟩
+  rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hStat])] at hAbi hRsp
+  exact ⟨hStat, hDirt, hHazF, hDst.1, hDst.2, hNaN, hOrd, hRsp, hRbp, hAbi.1, hAbi.2.1, hAbi.2.2.1⟩
 
 private theorem specAllReducedNotNaN_add16 (c v : Nat → BitVec 64) (ui : BitVec 64) (i : Nat) :
     specAllReducedNotNaN c v ui (i + 16) =
@@ -8975,7 +10746,7 @@ private theorem specInitReducedMin_add16 (c v : Nat → BitVec 64) (ui : BitVec 
   simp only [specInitReducedMin]
 
 /-- Loop invariant at `pc = 240` (16-wide header) and `pc = 313` (8-wide header) of `initReducedRow64AVX512`. -/
-private structure InitReduced512Inv (dstBase costBase vBase spF : BitVec 64)
+private structure InitReduced512Inv (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState) : Prop where
   statusRun : s.status = .running
   upperDirtyT : s.upperDirty = true
@@ -8990,6 +10761,7 @@ private structure InitReduced512Inv (dstBase costBase vBase spF : BitVec 64)
   memCost : ∀ j < n, s.mem (elemAddr costBase j) = c j
   memV : ∀ j < n, s.mem (elemAddr vBase j) = v j
   memDst : DstMemState dstBase c v dst0 ui n i s.mem
+  savedRbp : s.mem (spF + 64#64) = rbp0
   ordMasks : ∃ m0 m1 m2 m3 m4 m5 m6 m7 p0 p1 p2 p3 p4 p5 p6 p7 : Bool,
     s.zmm 2#5 = maskVec8 m0 m1 m2 m3 m4 m5 m6 m7 ∧
     s.zmm 3#5 = maskVec8 p0 p1 p2 p3 p4 p5 p6 p7 ∧
@@ -9252,13 +11024,17 @@ private theorem initReducedRow64AVX512_prologue (dstBase costBase vBase : BitVec
       elemAddr base j ≠ s0.gpr 4#4 + 32#64 ∧
       elemAddr base j ≠ s0.gpr 4#4 + 56#64) :
     let s1 := runAmd64Vec 26 initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s0
-    s1.pc = 240 ∧ InitReduced512Inv dstBase costBase vBase (s0.gpr 4#4 - 72#64) c v dst0 ui n 0 s1 := by
+    s1.pc = 240 ∧ InitReduced512Inv dstBase costBase vBase (s0.gpr 4#4 - 72#64) (s0.gpr 5#4) c v dst0 ui n 0 s1 := by
   let sp0 := s0.gpr 4#4
   let spF := sp0 - 72#64
-  have hSub72 : sp0 - 8#64 - 0x40#64 = spF := by bv_decide
-  have hSp80 : spF + 80#64 = sp0 + 8#64 := by bv_decide
-  have hSp104 : spF + 104#64 = sp0 + 32#64 := by bv_decide
-  have hSp128 : spF + 128#64 = sp0 + 56#64 := by bv_decide
+  have hSub72 : sp0 - 8#64 - 0x40#64 = spF := by dsimp only [spF]; bv_omega
+  have hSp64 : spF + 64#64 = sp0 - 8#64 := by dsimp only [spF]; bv_omega
+  have hSp80 : spF + 80#64 = sp0 + 8#64 := by dsimp only [spF]; bv_omega
+  have hSp104 : spF + 104#64 = sp0 + 32#64 := by dsimp only [spF]; bv_omega
+  have hSp128 : spF + 128#64 = sp0 + 56#64 := by dsimp only [spF]; bv_omega
+  have hRbpNe8 : sp0 - 8#64 ≠ sp0 + 8#64 := by bv_omega
+  have hRbpNe32 : sp0 - 8#64 ≠ sp0 + 32#64 := by bv_omega
+  have hRbpNe56 : sp0 - 8#64 ≠ sp0 + 56#64 := by bv_omega
   have hBeN := evalX86Cond_be_test64_self hPos (by omega)
   have hBeC := evalX86Cond_be_test64_self hPosC hLenC
   have hBeV := evalX86Cond_be_test64_self hPosV hLenV
@@ -9357,6 +11133,8 @@ private theorem initReducedRow64AVX512_prologue (dstBase costBase vBase : BitVec
      by intro j hj; rw [hMemFinal, hPres j hj costBase (by simp)]; exact hMemC j hj,
      by intro j hj; rw [hMemFinal, hPres j hj vBase (by simp)]; exact hMemV j hj,
      ⟨fun _ h => by omega, fun j _ hj => by rw [hMemFinal, hPres j hj dstBase (by simp)]; exact hMemD j hj⟩,
+     by rw [hMemFinal, hSp64, hAMemEq, write64_ne _ _ hRbpNe56, write64_ne _ _ hRbpNe32,
+          write64_ne _ _ hRbpNe8, write64_eq],
      ⟨true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
       by simp [init512BlkPro2, execDecodedSeq, execAmd64VecInsn, readMem64, evalVecRm, setZmm, setKmask,
            Vec512.applyEvexMask, Vec512.applyWidth, Vec512.broadcast, x86VcmppdPred, hEqInf, hRo63, hJmp, hOfMaskTrue],
@@ -9376,14 +11154,15 @@ private theorem initReducedRow64AVX512_prologue (dstBase costBase vBase : BitVec
       by simp [specInitReducedMin, cmin64_posInf_posInf]⟩⟩⟩
 
 set_option maxRecDepth 4096 in
-private theorem initReducedRow64AVX512_loop16_step (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX512_loop16_step (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 240) (hInv : InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 240) (hInv : InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hStep : i + 16 ≤ n) (hN : n + 32 < 2 ^ 61)
     (hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2)
-    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2) :
+    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2)
+    (hDisjRbp : ∀ j < n, spF + 64#64 ≠ elemAddr dstBase j) :
     let s' := runAmd64Vec 27 initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s
-    s'.pc = 240 ∧ InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n (i + 16) s' := by
+    s'.pc = 240 ∧ InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n (i + 16) s' := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 16))) = true := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_true hStep
   have hAdd16 : BitVec.ofNat 64 i + 16#64 = BitVec.ofNat 64 (i + 16) := bitVec_ofNat_add i 16
@@ -9471,10 +11250,10 @@ private theorem initReducedRow64AVX512_loop16_step (dstBase costBase vBase spF :
       hC0, hC1, hC2, hC3, hC4, hC5, hC6, hC7, hV0, hV1, hV2, hV3, hV4, hV5, hV6, hV7,
       applyEvexMask_zero, Vec512.applyWidth, Vec512.broadcast, Vec512.zipWith, vd0, specReducedElem]
   have hAZ6 : sA.zmm 6#5 =
-      { l0 := f64Sub (c (i + 8)) (v (i + 8)), l1 := f64Sub (c (i + 9)) (v (i + 9))
-        l2 := f64Sub (c (i + 10)) (v (i + 10)), l3 := f64Sub (c (i + 11)) (v (i + 11))
-        l4 := f64Sub (c (i + 12)) (v (i + 12)), l5 := f64Sub (c (i + 13)) (v (i + 13))
-        l6 := f64Sub (c (i + 14)) (v (i + 14)), l7 := f64Sub (c (i + 15)) (v (i + 15)) } := by
+      { l0 := x86F64Sub (c (i + 8)) (v (i + 8)), l1 := x86F64Sub (c (i + 9)) (v (i + 9))
+        l2 := x86F64Sub (c (i + 10)) (v (i + 10)), l3 := x86F64Sub (c (i + 11)) (v (i + 11))
+        l4 := x86F64Sub (c (i + 12)) (v (i + 12)), l5 := x86F64Sub (c (i + 13)) (v (i + 13))
+        l6 := x86F64Sub (c (i + 14)) (v (i + 14)), l7 := x86F64Sub (c (i + 15)) (v (i + 15)) } := by
     simp [sA, init512BlkLoop16BodyA, execDecodedSeq, execAmd64VecInsn, evalVecRm, evalMemAddr, loadVecMem,
       setGpr, setZmm, hHRcx, hHRdi, hHR9, hHMem, hCBase, hVBase, elemAddr_plus_64,
       elemAddr_plus_8, elemAddr_plus_16, elemAddr_plus_24, elemAddr_plus_32, elemAddr_plus_40,
@@ -9544,6 +11323,12 @@ private theorem initReducedRow64AVX512_loop16_step (dstBase costBase vBase spF :
     rw [hB2MemEq, hAt2.2.2.2.2.2.2.2.2 _ (fun k hk => by rw [elemAddr_add]; exact hDisjVD j hj _ (by omega)),
         hB1MemEq, hAt1.2.2.2.2.2.2.2.2 _ (fun k hk => by rw [elemAddr_add]; exact hDisjVD j hj _ (by omega))]
     exact hInv.memV j hj
+  have hB2Rbp : sB2.mem (spF + 64#64) = rbp0 := by
+    have hAt1 := storeVecMem_zmm512_at s.mem (elemAddr dstBase i) vd0 (sA.kmask 0#3)
+    have hAt2 := storeVecMem_zmm512_at sB1.mem (elemAddr dstBase (i + 8)) vd1 (sB1.kmask 0#3)
+    rw [hB2MemEq, hAt2.2.2.2.2.2.2.2.2 _ (fun k hk => by rw [elemAddr_add]; exact hDisjRbp _ (by omega)),
+        hB1MemEq, hAt1.2.2.2.2.2.2.2.2 _ (fun k hk => by rw [elemAddr_add]; exact hDisjRbp _ (by omega))]
+    exact hInv.savedRbp
   -- Step 5: Loop16BodyC (7 steps: 199 -> 240, EVEX vcmppd + zero-masked vmovdqu64 + vminpd).
   have hSC : runAmd64Vec 7 ⟨initReducedRow64AVX512ByteChunks.flatten⟩ initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sB2 =
       runAmd64Vec 0 ⟨initReducedRow64AVX512ByteChunks.flatten⟩ initReducedRow64AVX512Rodata initReducedRow64AVX512Targets
@@ -9569,6 +11354,7 @@ private theorem initReducedRow64AVX512_loop16_step (dstBase costBase vBase spF :
      by intro j hj; rw [hCMem]; exact hB2MemCost j hj,
      by intro j hj; rw [hCMem]; exact hB2MemV j hj,
      by rw [hCMem]; exact hB2Dst,
+     by rw [hCMem]; exact hB2Rbp,
      ⟨m0 && f64NotNaN (specReducedElem c v ui i),
       m1 && f64NotNaN (specReducedElem c v ui (i + 1)),
       m2 && f64NotNaN (specReducedElem c v ui (i + 2)),
@@ -9634,21 +11420,22 @@ private theorem initReducedRow64AVX512_loop16_step (dstBase costBase vBase spF :
       specInitReducedMin_add16, specInitReducedMin_add8, specInitReducedMin_add4, ← hCmin]
   ac_rfl
 
-private theorem initReducedRow64AVX512_loop16_iter (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX512_loop16_iter (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n : Nat) (hN : n + 32 < 2 ^ 61)
     (hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2)
-    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2) :
+    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2)
+    (hDisjRbp : ∀ j < n, spF + 64#64 ≠ elemAddr dstBase j) :
     ∀ k i s, i + 16 * k ≤ n → s.pc = 240 →
-      InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n i s →
+      InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s →
       let s' := runAmd64Vec (27 * k) initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s
-      s'.pc = 240 ∧ InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n (i + 16 * k) s' := by
+      s'.pc = 240 ∧ InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n (i + 16 * k) s' := by
   intro k
   induction k with
   | zero => intro i s _ hPc hInv; simpa [runAmd64Vec] using ⟨hPc, hInv⟩
   | succ m ih =>
     intro i s hLe hPc hInv
-    have hStep := initReducedRow64AVX512_loop16_step dstBase costBase vBase spF c v dst0 ui n i s
-      hPc hInv (by omega) hN hDisjCD hDisjVD
+    have hStep := initReducedRow64AVX512_loop16_step dstBase costBase vBase spF rbp0 c v dst0 ui n i s
+      hPc hInv (by omega) hN hDisjCD hDisjVD hDisjRbp
     have hRest := ih (i + 16) _ (by omega) hStep.1 hStep.2
     have hAdd : 27 * (m + 1) = 27 + 27 * m := by omega
     have hIdx : i + 16 + 16 * m = i + 16 * (m + 1) := by omega
@@ -9656,12 +11443,12 @@ private theorem initReducedRow64AVX512_loop16_iter (dstBase costBase vBase spF :
     rw [hAdd, runAmd64Vec_add, ← hIdx]
     exact hRest
 
-private theorem initReducedRow64AVX512_loop16_exit (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX512_loop16_exit (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 240) (hInv : InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 240) (hInv : InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hLt : n < i + 16) (hN : n + 32 < 2 ^ 61) (hi : i ≤ n) :
     let s' := runAmd64Vec 4 initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s
-    s'.pc = 313 ∧ InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n i s' := by
+    s'.pc = 313 ∧ InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s' := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 16))) = false := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_false (by omega)
   have hAdd16 : BitVec.ofNat 64 i + 16#64 = BitVec.ofNat 64 (i + 16) := bitVec_ofNat_add i 16
@@ -9713,6 +11500,10 @@ private theorem initReducedRow64AVX512_loop16_exit (dstBase costBase vBase spF :
           simp [sMid, init512BlkLoop16Exit, init512BlkLoop16Hdr, execDecodedSeq, execAmd64VecInsn, evalMemAddr, setGpr,
             hInv.rcxEq, hInv.rbxEq, hAdd16, hGe, hJmp]
         rw [hM]; exact hInv.memDst,
+     by have hM : (execDecodedSeq initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sMid init512BlkLoop16Exit).mem = s.mem := by
+          simp [sMid, init512BlkLoop16Exit, init512BlkLoop16Hdr, execDecodedSeq, execAmd64VecInsn, evalMemAddr, setGpr,
+            hInv.rcxEq, hInv.rbxEq, hAdd16, hGe, hJmp]
+        rw [hM]; exact hInv.savedRbp,
      by have hZ : (execDecodedSeq initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sMid init512BlkLoop16Exit).zmm = s.zmm := by
           simp [sMid, init512BlkLoop16Exit, init512BlkLoop16Hdr, execDecodedSeq, execAmd64VecInsn, evalMemAddr, setGpr,
             hInv.rcxEq, hInv.rbxEq, hAdd16, hGe, hJmp]
@@ -9723,14 +11514,15 @@ private theorem initReducedRow64AVX512_loop16_exit (dstBase costBase vBase spF :
         rw [hZ]; exact hInv.minAccs⟩⟩
 
 set_option maxRecDepth 4096 in
-private theorem initReducedRow64AVX512_loop8_step (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX512_loop8_step (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 313) (hInv : InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 313) (hInv : InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hStep : i + 8 ≤ n) (hN : n + 32 < 2 ^ 61)
     (hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2)
-    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2) :
+    (hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2)
+    (hDisjRbp : ∀ j < n, spF + 64#64 ≠ elemAddr dstBase j) :
     let s' := runAmd64Vec 15 initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s
-    s'.pc = 313 ∧ InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n (i + 8) s' := by
+    s'.pc = 313 ∧ InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n (i + 8) s' := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 8))) = true := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_true hStep
   have hAdd8 : BitVec.ofNat 64 i + 8#64 = BitVec.ofNat 64 (i + 8) := bitVec_ofNat_add i 8
@@ -9827,6 +11619,10 @@ private theorem initReducedRow64AVX512_loop8_step (dstBase costBase vBase spF : 
     have hAt := storeVecMem_zmm512_at s.mem (elemAddr dstBase i) vd0 (sA.kmask 0#3)
     rw [hBMemEq, hAt.2.2.2.2.2.2.2.2 _ (fun k hk => by rw [elemAddr_add]; exact hDisjVD j hj _ (by omega))]
     exact hInv.memV j hj
+  have hBRbp : sB.mem (spF + 64#64) = rbp0 := by
+    have hAt := storeVecMem_zmm512_at s.mem (elemAddr dstBase i) vd0 (sA.kmask 0#3)
+    rw [hBMemEq, hAt.2.2.2.2.2.2.2.2 _ (fun k hk => by rw [elemAddr_add]; exact hDisjRbp _ (by omega))]
+    exact hInv.savedRbp
   have hSC : runAmd64Vec 4 ⟨initReducedRow64AVX512ByteChunks.flatten⟩ initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sB =
       runAmd64Vec 0 ⟨initReducedRow64AVX512ByteChunks.flatten⟩ initReducedRow64AVX512Rodata initReducedRow64AVX512Targets
         (execDecodedSeq initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sB init512BlkLoop8BodyC) :=
@@ -9851,6 +11647,7 @@ private theorem initReducedRow64AVX512_loop8_step (dstBase costBase vBase spF : 
      by intro j hj; rw [hCMem]; exact hBMemCost j hj,
      by intro j hj; rw [hCMem]; exact hBMemV j hj,
      by rw [hCMem]; exact hBDst,
+     by rw [hCMem]; exact hBRbp,
      ⟨m0 && f64NotNaN (specReducedElem c v ui i),
       m1 && f64NotNaN (specReducedElem c v ui (i + 1)),
       m2 && f64NotNaN (specReducedElem c v ui (i + 2)),
@@ -9896,9 +11693,9 @@ private theorem initReducedRow64AVX512_loop8_step (dstBase costBase vBase spF : 
   ac_rfl
 
 set_option maxRecDepth 4096 in
-private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : BitVec 64)
+private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF rbp0 : BitVec 64)
     (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n i : Nat) (s : Amd64VecState)
-    (hPc : s.pc = 313) (hInv : InitReduced512Inv dstBase costBase vBase spF c v dst0 ui n i s)
+    (hPc : s.pc = 313) (hInv : InitReduced512Inv dstBase costBase vBase spF rbp0 c v dst0 ui n i s)
     (hLt : n < i + 8) (hN : n + 32 < 2 ^ 61) (hi : i ≤ n)
     (hDisjSpill : ∀ j < n, ∀ k < 8, elemAddr dstBase j ≠ spF + BitVec.ofNat 64 (k * 8)) :
     ∃ st ≤ 59,
@@ -9907,7 +11704,8 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
       DstMemState dstBase c v dst0 ui n i sf.mem ∧
       (specAllReducedNotNaN c v ui i = false → (sf.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
       (specAllReducedNotNaN c v ui i = true →
-        f64NotNaN (sf.zmm 0#5).l0 = true ∧ canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui i) := by
+        f64NotNaN (sf.zmm 0#5).l0 = true ∧ canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui i) ∧
+      sf.gpr 5#4 = rbp0 := by
   have hGe : evalX86Cond .ge (x86SubFlags64 (BitVec.ofNat 64 n) (BitVec.ofNat 64 (i + 8))) = false := by
     rw [evalX86Cond_ge_sub64 (by omega) (by omega)]; exact decide_eq_false (by omega)
   have hAdd8 : BitVec.ofNat 64 i + 8#64 = BitVec.ofNat 64 (i + 8) := bitVec_ofNat_add i 8
@@ -9947,6 +11745,12 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
       exact hEAt.2.2.2.2.2.2.2.2 _ (fun k hk => hDisjSpill j hj k hk)
     exact ⟨fun j hj => (hPres j (by omega)).trans (hInv.memDst.1 j hj),
            fun j hge hj => (hPres j hj).trans (hInv.memDst.2 j hge hj)⟩
+  have hERbp : sE.mem (spF + 64#64) = rbp0 := by
+    rw [hEMemEq]
+    refine (hEAt.2.2.2.2.2.2.2.2 _ ?_).trans hInv.savedRbp
+    intro k hk
+    have hk8 : (BitVec.ofNat 64 (k * 8)).toNat = k * 8 := Nat.mod_eq_of_lt (by omega)
+    bv_omega
   cases hOrd : specAllReducedNotNaN c v ui i
   · -- NaN branch: 4 + 7 + 7 = 18 steps.
     refine ⟨18, by omega, ?_⟩
@@ -9973,6 +11777,10 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
       simp [sE, init512BlkEpiCmp, execDecodedSeq, execAmd64VecInsn, Amd64VecInsn.isLegacySSE, evalVecRm, evalMemAddr,
         setZmm, setGpr, setKmask, hHRsp, hHZmm, hZ2M, hZ3M, applyEvexMask_zero, Vec512.applyWidth,
         vpand_maskVec8, hMskEq, hOrd, hHHaz]
+    have hERsp : sE.gpr 4#4 = spF := by
+      simp [sE, init512BlkEpiCmp, execDecodedSeq, execAmd64VecInsn, evalVecRm, evalMemAddr,
+        setZmm, setGpr, setKmask, hHRsp, hHZmm, hZ2M, hZ3M, applyEvexMask_zero, Vec512.applyWidth,
+        vpand_maskVec8, hMskEq, hOrd]
     have hS2 : runAmd64Vec 7 ⟨initReducedRow64AVX512ByteChunks.flatten⟩ initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sE =
         runAmd64Vec 0 ⟨initReducedRow64AVX512ByteChunks.flatten⟩ initReducedRow64AVX512Rodata initReducedRow64AVX512Targets
           (execDecodedSeq initReducedRow64AVX512Rodata initReducedRow64AVX512Targets sE init512BlkRetNaN) :=
@@ -9987,7 +11795,8 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
       by simp [init512BlkRetNaN, execDecodedSeq, execAmd64VecInsn, Amd64VecInsn.isLegacySSE, Amd64VecInsn.dirtiesUpper, hEHaz],
       by rw [hRetMem]; exact hEDst,
       fun _ => by simp [init512BlkRetNaN, execDecodedSeq, execAmd64VecInsn, setGpr, setZmm],
-      fun h => Bool.noConfusion h⟩
+      fun h => Bool.noConfusion h,
+      by simp [init512BlkRetNaN, execDecodedSeq, execAmd64VecInsn, setGpr, hERsp, hERbp]⟩
   · -- Ordered branch: 4 + 7 + 8 + 7 + 5 + 7 + 7 + 5 + 9 = 59 steps.
     refine ⟨59, by omega, ?_⟩
     dsimp only [initReducedRow64AVX512Bytes]
@@ -10120,6 +11929,7 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
     have h5Pc : s5.pc = 523 := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr]
     have h5Dirt : s5.upperDirty = false := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, Amd64VecInsn.dirtiesUpper, h4Dirt]
     have h5Haz : s5.sseHazard = false := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, Amd64VecInsn.dirtiesUpper, Amd64VecInsn.isLegacySSE, h4Dirt, h4Haz]
+    have h5Rsp : s5.gpr 4#4 = spF := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, h4Rsp]
     have h5Mem : s5.mem = sE.mem := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, h4Mem]
     have h5Z0 : (s5.zmm 0#5).l0 = f64Min (f64Min l0 l1) (f64Min l2 l3) := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, setZmm, h4Z0]
     have h5Z2 : (s5.zmm 2#5).l0 = f64Min l4 l5 := by simp [s5, init512BlkH67, execDecodedSeq, execAmd64VecInsn, readMem64, evalMemAddr, setZmm, h4Z2]
@@ -10137,6 +11947,7 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
     have h6Pc : s6.pc = 541 := by simp [s6, init512BlkH47, execDecodedSeq, execAmd64VecInsn]
     have h6Dirt : s6.upperDirty = false := by simp [s6, init512BlkH47, execDecodedSeq, execAmd64VecInsn, Amd64VecInsn.dirtiesUpper, h5Dirt]
     have h6Haz : s6.sseHazard = false := by simp [s6, init512BlkH47, execDecodedSeq, execAmd64VecInsn, Amd64VecInsn.dirtiesUpper, Amd64VecInsn.isLegacySSE, h5Dirt, h5Haz]
+    have h6Rsp : s6.gpr 4#4 = spF := by simp [s6, init512BlkH47, execDecodedSeq, execAmd64VecInsn, h5Rsp]
     have h6Mem : s6.mem = sE.mem := by simp [s6, init512BlkH47, execDecodedSeq, execAmd64VecInsn, h5Mem]
     have h6Z0 : (s6.zmm 0#5).l0 = f64Min (f64Min l0 l1) (f64Min l2 l3) := by simp [s6, init512BlkH47, execDecodedSeq, execAmd64VecInsn, setZmm, h5Z0]
     have h6Z2 : (s6.zmm 2#5).l0 = f64Min (f64Min l4 l5) (f64Min l6 l7) := by
@@ -10163,7 +11974,8 @@ private theorem initReducedRow64AVX512_epilogue (dstBase costBase vBase spF : Bi
            Amd64VecInsn.isLegacySSE, h6Dirt, h6Haz],
       by rw [hFinMem]; exact hEDst,
       fun h => Bool.noConfusion h,
-      fun _ => ?_⟩
+      fun _ => ?_,
+      by simp [init512BlkHFin, execDecodedSeq, execAmd64VecInsn, setGpr, h6Rsp, h6Mem, hERbp]⟩
     rw [hZ0Fin]
     refine ⟨hTree.1, ?_⟩
     rw [hTree.2]
@@ -10174,21 +11986,24 @@ def initReducedRow64AVX512FuelBound (n : Nat) : Nat :=
   27 * (n / 16) + 104
 
 /-- **Top-Level Decoded Machine-Code Functional Equivalence (`initReducedRow64AVX512`)**:
-For arbitrary non-empty slices (`n = 8q + r`, `0 < n`, `0 < lenCost`, `0 < lenV`, `n + 32 < 2^61`)
-and non-aliasing `dst`/`costRow`/`v`/stack memory, running the raw 512-bit EVEX ELF `.text` bytes of
-`internal/simd.initReducedRow64AVX512`:
+For arbitrary non-empty 8-byte-aligned slices (`n = 8q + r`, `0 < n`, `n ≤ lenDst`, `n ≤ lenCost`,
+`n ≤ lenV`, `n + 32 < 2^61`) and non-aliasing `dst`/`costRow`/`v`/stack memory, running the raw
+512-bit EVEX ELF `.text` bytes of `internal/simd.initReducedRow64AVX512`:
 1. Terminates cleanly at `RET` with `upperDirty = false` and `sseHazard = false` (all 3
    `runtime.panicBounds` guards are provably unreachable);
-2. Writes bit-exact IEEE-754 `dst[j] = (costRow[j] - v[j]) - ui` for all `j < 8 * (n / 8)` while
-   leaving tail lanes `8 * (n / 8) ≤ j < n` unmodified;
+2. Writes bit-exact x86-64 IEEE-754 `dst[j] = x86F64Sub (x86F64Sub costRow[j] v[j]) ui` for all
+   `j < 8 * (n / 8)` (matching Intel SDM `VSUBPD` NaN quieting and negative indefinite NaN
+   `0xfff8000000000000#64`) while leaving tail lanes `8 * (n / 8) ≤ j < n` unmodified;
 3. Returns exact quiet-NaN sentinel `0x7ff8000000000001#64` iff any reduced element in `0..8*(n/8)`
    is NaN (verified directly through EVEX `VCMPPD k`, zero-masked `VMOVDQU64 {k}{z}`, `VPMOVQ2M`,
-   and `KMOVB`), and otherwise returns a non-NaN minimum whose `canonZero64` equals `specInitReducedMin`. -/
+   and `KMOVB`), and otherwise returns a non-NaN minimum whose `canonZero64` equals `specInitReducedMin`;
+4. Preserves Go ABI registers: `RSP = RSP0 + 8`, `RBP = RBP0`, `R14 = R14_0`, and `XMM15 = XMM15_0`. -/
 theorem initReducedRow64AVX512_functional_equiv (dstBase costBase vBase : BitVec 64)
-    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n lenCost lenV fuel : Nat) (s0 : Amd64VecState)
+    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n lenDst lenCost lenV fuel : Nat) (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
-    (hPos : 0 < n) (hPosC : 0 < lenCost) (hPosV : 0 < lenV)
-    (hN : n + 32 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV : lenV < 2 ^ 64)
+    (hPos : 0 < n) (hLenDst : n ≤ lenDst) (hLenCost : n ≤ lenCost) (hLenV : n ≤ lenV)
+    (hN : n + 32 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV64 : lenV < 2 ^ 64)
+    (hAlign : dstBase.toNat % 8 = 0 ∧ costBase.toNat % 8 = 0 ∧ vBase.toNat % 8 = 0)
     (hRax : s0.gpr 0#4 = dstBase) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
     (hRdi : s0.gpr 7#4 = costBase) (hRsi : s0.gpr 6#4 = BitVec.ofNat 64 lenCost)
     (hR9 : s0.gpr 9#4 = vBase) (hR10 : s0.gpr 10#4 = BitVec.ofNat 64 lenV)
@@ -10212,13 +12027,25 @@ theorem initReducedRow64AVX512_functional_equiv (dstBase costBase vBase : BitVec
     (specAllReducedNotNaN c v ui (8 * (n / 8)) = false → (sf.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
     (specAllReducedNotNaN c v ui (8 * (n / 8)) = true →
       f64NotNaN (sf.zmm 0#5).l0 = true ∧
-      canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui (8 * (n / 8))) := by
+      canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui (8 * (n / 8))) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 := by
+  have _ := And.intro hLenDst hAlign
   let spF := s0.gpr 4#4 - 72#64
+  let rbp0 := s0.gpr 5#4
+  have hDisjRbp : ∀ j < n, spF + 64#64 ≠ elemAddr dstBase j := by
+    intro j hj
+    have hEq : spF + 64#64 = s0.gpr 4#4 - 8#64 := by dsimp only [spF]; bv_omega
+    rw [hEq]
+    exact (hDisjPro j hj dstBase (by simp)).1.symm
   have hPro := initReducedRow64AVX512_prologue dstBase costBase vBase c v dst0 ui n lenCost lenV s0
-    hPc hRun hHaz hPos hPosC hPosV hN hLenC hLenV hRax hRbx hRdi hRsi hR9 hR10 hUi hMemC hMemV hMemD hDisjPro
-  have hL16 := initReducedRow64AVX512_loop16_iter dstBase costBase vBase spF c v dst0 ui n hN hDisjCD hDisjVD
+    hPc hRun hHaz hPos (by omega) (by omega) hN hLenC hLenV64 hRax hRbx hRdi hRsi hR9 hR10 hUi hMemC hMemV hMemD hDisjPro
+  have hL16 := initReducedRow64AVX512_loop16_iter dstBase costBase vBase spF rbp0 c v dst0 ui n hN hDisjCD hDisjVD hDisjRbp
     (n / 16) 0 _ (by omega) hPro.1 hPro.2
-  have hEx16 := initReducedRow64AVX512_loop16_exit dstBase costBase vBase spF c v dst0 ui n (16 * (n / 16)) _
+  have hEx16 := initReducedRow64AVX512_loop16_exit dstBase costBase vBase spF rbp0 c v dst0 ui n (16 * (n / 16)) _
     hL16.1 (by simpa using hL16.2) (by omega) hN (by omega)
   have hExist : ∃ stTotal ≤ initReducedRow64AVX512FuelBound n,
       let se := runAmd64Vec stTotal initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s0
@@ -10227,13 +12054,14 @@ theorem initReducedRow64AVX512_functional_equiv (dstBase costBase vBase : BitVec
       (specAllReducedNotNaN c v ui (8 * (n / 8)) = false → (se.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
       (specAllReducedNotNaN c v ui (8 * (n / 8)) = true →
         f64NotNaN (se.zmm 0#5).l0 = true ∧
-        canonZero64 (se.zmm 0#5).l0 = specInitReducedMin c v ui (8 * (n / 8))) := by
+        canonZero64 (se.zmm 0#5).l0 = specInitReducedMin c v ui (8 * (n / 8))) ∧
+      se.gpr 5#4 = rbp0 := by
     unfold initReducedRow64AVX512FuelBound
     by_cases hRem : 16 * (n / 16) + 8 ≤ n
     · have h8Eq : 16 * (n / 16) + 8 = 8 * (n / 8) := by omega
-      have hL8 := initReducedRow64AVX512_loop8_step dstBase costBase vBase spF c v dst0 ui n (16 * (n / 16)) _
-        hEx16.1 hEx16.2 hRem hN hDisjCD hDisjVD
-      rcases initReducedRow64AVX512_epilogue dstBase costBase vBase spF c v dst0 ui n (8 * (n / 8)) _
+      have hL8 := initReducedRow64AVX512_loop8_step dstBase costBase vBase spF rbp0 c v dst0 ui n (16 * (n / 16)) _
+        hEx16.1 hEx16.2 hRem hN hDisjCD hDisjVD hDisjRbp
+      rcases initReducedRow64AVX512_epilogue dstBase costBase vBase spF rbp0 c v dst0 ui n (8 * (n / 8)) _
         hL8.1 (by simpa [h8Eq] using hL8.2) (by omega) hN (by omega) hDisjSpill with ⟨stE, hStE, hEpi⟩
       refine ⟨26 + 27 * (n / 16) + 4 + 15 + stE, by omega, ?_⟩
       dsimp only
@@ -10243,7 +12071,7 @@ theorem initReducedRow64AVX512_functional_equiv (dstBase costBase vBase : BitVec
           runAmd64Vec_add 26 (27 * (n / 16))]
       exact hEpi
     · have h8Eq : 16 * (n / 16) = 8 * (n / 8) := by omega
-      rcases initReducedRow64AVX512_epilogue dstBase costBase vBase spF c v dst0 ui n (8 * (n / 8)) _
+      rcases initReducedRow64AVX512_epilogue dstBase costBase vBase spF rbp0 c v dst0 ui n (8 * (n / 8)) _
         hEx16.1 (by simpa [h8Eq] using hEx16.2) (by omega) hN (by omega) hDisjSpill with ⟨stE, hStE, hEpi⟩
       refine ⟨26 + 27 * (n / 16) + 4 + stE, by omega, ?_⟩
       dsimp only
@@ -10251,23 +12079,30 @@ theorem initReducedRow64AVX512_functional_equiv (dstBase costBase vBase : BitVec
           runAmd64Vec_add (26 + 27 * (n / 16)) 4,
           runAmd64Vec_add 26 (27 * (n / 16))]
       exact hEpi
-  rcases hExist with ⟨stTotal, hStLe, hStat, hDirt, hHazF, hDst, hNaN, hOrd⟩
+  have hAbi := initReducedRow64AVX512_abi_reg_preserved s0 fuel hPc hRun
+  rcases hExist with ⟨stTotal, hStLe, hStat, hDirt, hHazF, hDst, hNaN, hOrd, hRbp⟩
   have hSplit : fuel = stTotal + (fuel - stTotal) := by omega
+  have hSfStat : (runAmd64Vec fuel initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s0).status = .returned := by
+    rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hStat])]; exact hStat
+  have hRsp := hAbi.2.2.2 hSfStat
   dsimp only
   rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hStat])]
-  exact ⟨hStat, hDirt, hHazF, hDst.1, hDst.2, hNaN, hOrd⟩
+  rw [hSplit, runAmd64Vec_add, runAmd64Vec_of_not_running _ _ _ _ _ (by simp [hStat])] at hAbi hRsp
+  exact ⟨hStat, hDirt, hHazF, hDst.1, hDst.2, hNaN, hOrd, hRsp, hRbp, hAbi.1, hAbi.2.1, hAbi.2.2.1⟩
 
 /-- **Cross-ISA Equivalence (`initReducedRow64AVX2` = `initReducedRow64AVX512` on every multiple of 8)**:
-For any positive multiple-of-8 slice length `n = 8 * q > 0`, running the decoded 256-bit VEX AVX2
-and 512-bit EVEX AVX-512 ELF bytes writes bit-identical IEEE-754 reduced-cost slices `dst[0..n)`,
-agrees bit-for-bit on the quiet-NaN sentinel `0x7ff8000000000001#64` whenever any reduced cost is
-NaN, and returns canonicalized (`canonZero64`) equal minima on all NaN-free rows. -/
+For any positive multiple-of-8 8-byte-aligned slice length `n = 8 * q > 0`, running the decoded
+256-bit VEX AVX2 and 512-bit EVEX AVX-512 ELF bytes writes bit-identical x86-64 IEEE-754
+reduced-cost slices `dst[0..n)`, agrees bit-for-bit on the quiet-NaN sentinel
+`0x7ff8000000000001#64` whenever any reduced cost is NaN, and returns canonicalized (`canonZero64`)
+equal minima on all NaN-free rows. -/
 theorem initReducedRow64_avx2_eq_avx512_mult8 (dstBase costBase vBase : BitVec 64)
-    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (q lenCost lenV fuel2 fuel512 : Nat)
+    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (q lenDst lenCost lenV fuel2 fuel512 : Nat)
     (s0 : Amd64VecState)
     (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
-    (hPosQ : 0 < q) (hPosC : 0 < lenCost) (hPosV : 0 < lenV)
-    (hN : 8 * q + 32 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV : lenV < 2 ^ 64)
+    (hPosQ : 0 < q) (hLenDst : 8 * q ≤ lenDst) (hLenCost : 8 * q ≤ lenCost) (hLenV : 8 * q ≤ lenV)
+    (hN : 8 * q + 32 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV64 : lenV < 2 ^ 64)
+    (hAlign : dstBase.toNat % 8 = 0 ∧ costBase.toNat % 8 = 0 ∧ vBase.toNat % 8 = 0)
     (hRax : s0.gpr 0#4 = dstBase) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 (8 * q))
     (hRdi : s0.gpr 7#4 = costBase) (hRsi : s0.gpr 6#4 = BitVec.ofNat 64 lenCost)
     (hR9 : s0.gpr 9#4 = vBase) (hR10 : s0.gpr 10#4 = BitVec.ofNat 64 lenV)
@@ -10292,11 +12127,11 @@ theorem initReducedRow64_avx2_eq_avx512_mult8 (dstBase costBase vBase : BitVec 6
     (specAllReducedNotNaN c v ui (8 * q) = false → (sf2.zmm 0#5).l0 = (sf512.zmm 0#5).l0) ∧
     (specAllReducedNotNaN c v ui (8 * q) = true →
       canonZero64 (sf2.zmm 0#5).l0 = canonZero64 (sf512.zmm 0#5).l0) := by
-  have h2 := initReducedRow64AVX2_functional_equiv dstBase costBase vBase c v dst0 ui (8 * q) lenCost lenV fuel2 s0
-    hPc hRun hHaz (by omega) hPosC hPosV (by omega) hLenC hLenV hRax hRbx hRdi hRsi hR9 hR10 hUi
+  have h2 := initReducedRow64AVX2_functional_equiv dstBase costBase vBase c v dst0 ui (8 * q) lenDst lenCost lenV fuel2 s0
+    hPc hRun hHaz (by omega) hLenDst hLenCost hLenV (by omega) hLenC hLenV64 hAlign hRax hRbx hRdi hRsi hR9 hR10 hUi
     hMemC hMemV hMemD hDisjCD hDisjVD hDisjPro hDisjSpill2 hFuel2
-  have h512 := initReducedRow64AVX512_functional_equiv dstBase costBase vBase c v dst0 ui (8 * q) lenCost lenV fuel512 s0
-    hPc hRun hHaz (by omega) hPosC hPosV hN hLenC hLenV hRax hRbx hRdi hRsi hR9 hR10 hUi
+  have h512 := initReducedRow64AVX512_functional_equiv dstBase costBase vBase c v dst0 ui (8 * q) lenDst lenCost lenV fuel512 s0
+    hPc hRun hHaz (by omega) hLenDst hLenCost hLenV hN hLenC hLenV64 hAlign hRax hRbx hRdi hRsi hR9 hR10 hUi
     hMemC hMemV hMemD hDisjCD hDisjVD hDisjPro hDisjSpill512 hFuel512
   have hDiv4 : 4 * (8 * q / 4) = 8 * q := by omega
   have hDiv8 : 8 * (8 * q / 8) = 8 * q := by omega
@@ -10304,6 +12139,6 @@ theorem initReducedRow64_avx2_eq_avx512_mult8 (dstBase costBase vBase : BitVec 6
   rw [hDiv8] at h512
   refine ⟨fun j hj => (h2.2.2.2.1 j hj).trans (h512.2.2.2.1 j hj).symm,
     fun hF => (h2.2.2.2.2.2.1 hF).trans (h512.2.2.2.2.2.1 hF).symm,
-    fun hT => (h2.2.2.2.2.2.2 hT).2.trans (h512.2.2.2.2.2.2 hT).2.symm⟩
+    fun hT => (h2.2.2.2.2.2.2.1 hT).2.trans (h512.2.2.2.2.2.2.1 hT).2.symm⟩
 
 end GoblinFormal.Track5E

@@ -173,16 +173,21 @@ def vfpExpandImm64 (imm8 : Nat) : BitVec 64 :=
   let hi16 := (b7 <<< 15) ||| (notB6 <<< 14) ||| (repB6 <<< 6) ||| low6
   (BitVec.ofNat 64 hi16) <<< 48
 
-/-- Exact IEEE-754 single-rounding scalar binary64 fused multiply-add (`FMADDD`/`FMSUBD`/`FNMADDD`/`FNMSUBD`). -/
+/-- Exact IEEE-754 single-rounding scalar binary64 fused multiply-add (`FMADDD`/`FMSUBD`/`FNMADDD`/`FNMSUBD`).
+Follows ARMv8 `FPMulAdd(a=ra, b=rn, c=rm)` NaN propagation: sNaNs quiet in `(ra, rn, rm)` order,
+qNaN addend with `0 * Inf` produces default qNaN `0x7ff8000000000000`, otherwise qNaNs propagate in `(ra, rn, rm)` order. -/
 def f64MulAdd (o1 o0 : Bool) (rn rm ra : BitVec 64) : BitVec 64 :=
-  if f64IsNaN rn then rn
-  else if f64IsNaN rm then rm
-  else if f64IsNaN ra then ra
+  if f64IsSNaN ra then f64QuietNaN ra
+  else if f64IsSNaN rn then f64QuietNaN rn
+  else if f64IsSNaN rm then f64QuietNaN rm
   else
     let prodInvalid :=
       (f64IsZero rn && (f64IsPosInf rm || f64IsNegInf rm)) ||
       (f64IsZero rm && (f64IsPosInf rn || f64IsNegInf rn))
     if prodInvalid then 0x7ff8000000000000#64
+    else if f64IsNaN ra then ra
+    else if f64IsNaN rn then rn
+    else if f64IsNaN rm then rm
     else
       let aEff := if o1 then f64Neg ra else ra
       let prodNegRaw := f64Sign rn != f64Sign rm
@@ -203,7 +208,7 @@ def f64MulAdd (o1 o0 : Bool) (rn rm ra : BitVec 64) : BitVec 64 :=
           ratToFloat64Bits (qa + qp) negZ
         | _, _, _ => 0x7ff8000000000000#64
 
-/-- Conservative extension of `Arm64Insn` adding scalar binary64 `FMADD` and immediate `FMOVD`. -/
+/-- Conservative extension of `Arm64Insn` adding scalar binary64 `FMADD`/`FMSUB`/`FNMADD`/`FNMSUB` and immediate `FMOVD`. -/
 inductive Arm64InsnD where
   | base (insn : Arm64Insn)
   | fmaddD (o1 o0 : Bool) (rd rn rm ra : BitVec 5)
@@ -216,7 +221,7 @@ def decodeArm64WordD (word : UInt32) : Arm64InsnD :=
   | .unknown _ =>
     let w : Nat := word.toNat
     let rd : BitVec 5 := BitVec.ofNat 5 (w &&& 0x1f)
-    if (w &&& 0xffe00000) == 0x1f400000 then
+    if (w &&& 0xffc00000) == 0x1f400000 then
       let o1 := ((w >>> 21) &&& 1) == 1
       let rm : BitVec 5 := BitVec.ofNat 5 ((w >>> 16) &&& 0x1f)
       let o0 := ((w >>> 15) &&& 1) == 1
@@ -262,7 +267,7 @@ def stepArm64D (prog : Array Arm64InsnD) (extTargets : Nat → Option String)
   else if h : s.pcIdx < prog.size then
     execArm64InsnD prog.size extTargets prog[s.pcIdx] s
   else
-    { s with status := .returned }
+    { s with status := .trapIllegal }
 
 def runArm64D (fuel : Nat) (prog : Array Arm64InsnD) (extTargets : Nat → Option String)
     (s : Arm64State) : Arm64State :=
@@ -508,12 +513,14 @@ theorem twoSumAssign_arm64_equiv (s : Arm64State) (a b : BitVec 64)
 /-! ### Frameless Leaf Safety Analyzer (`twoSumAssign`, `clampFinite`, `exactReducedCost`) -/
 
 def framelessLeafInsnOk (progSize : Nat) (idx : Nat) (insn : Arm64Insn) : Bool :=
-  match insn with
-  | .unknown _ | .bl _ => false
-  | .b imm26 => !isOutOfBoundsRel progSize idx imm26
-  | .bCond _ imm19 | .cbz _ _ _ imm19 => !isOutOfBoundsRel progSize idx imm19
-  | .tbz _ _ _ imm14 => !isOutOfBoundsRel progSize idx imm14
-  | _ => true
+  if !insnDecodedValid insn then false
+  else
+    match insn with
+    | .unknown _ | .bl _ => false
+    | .b imm26 => !isOutOfBoundsRel progSize idx imm26
+    | .bCond _ imm19 | .cbz _ _ _ imm19 => !isOutOfBoundsRel progSize idx imm19
+    | .tbz _ _ _ imm14 => !isOutOfBoundsRel progSize idx imm14
+    | _ => true
 
 def checkFramelessLeaf (prog : Array Arm64Insn) : Bool :=
   everyWithIdx 0 prog.toList (framelessLeafInsnOk prog.size)
@@ -532,7 +539,8 @@ private theorem jumpRel_inBounds_running (progLen : Nat) (ext : Nat → Option S
 
 private theorem checkFramelessLeaf_step (prog : Array Arm64Insn) (ext : Nat → Option String)
     (hOk : checkFramelessLeaf prog = true) (s : Arm64State) (hRun : s.status = .running) :
-    (stepArm64 prog ext s).status = .running ∨ (stepArm64 prog ext s).status = .returned := by
+    (stepArm64 prog ext s).status = .running ∨ (stepArm64 prog ext s).status = .returned ∨
+    (stepArm64 prog ext s).status = .trapIllegal := by
   have hAt := everyWithIdx_getElem?_zero prog.toList (framelessLeafInsnOk prog.size) hOk
   unfold stepArm64
   have hNotStop : (s.status != .running) = false := by simp [hRun]
@@ -543,41 +551,49 @@ private theorem checkFramelessLeaf_step (prog : Array Arm64Insn) (ext : Nat → 
       Array.getElem?_toList.trans (Array.getElem?_eq_getElem hLt)
     have hI := hAt s.pcIdx prog[s.pcIdx] hGet
     cases hInsn : prog[s.pcIdx] with
-    | unknown _ | bl _ => rw [hInsn] at hI; simp [framelessLeafInsnOk] at hI
-    | ret _ => right; rfl
+    | unknown _ | bl _ => rw [hInsn] at hI; simp [framelessLeafInsnOk, insnDecodedValid] at hI
+    | ret rn =>
+      unfold execArm64Insn; dsimp only
+      split
+      · right; left; rfl
+      · right; right; rfl
     | b imm26 =>
       rw [hInsn] at hI
       left
-      exact jumpRel_inBounds_running prog.size ext false s imm26 hRun (by simpa [framelessLeafInsnOk] using hI)
+      exact jumpRel_inBounds_running prog.size ext false s imm26 hRun (by simpa [framelessLeafInsnOk, insnDecodedValid] using hI)
     | bCond cond imm19 =>
       rw [hInsn] at hI
       left
       dsimp only [execArm64Insn]
       split
-      · exact jumpRel_inBounds_running prog.size ext false s imm19 hRun (by simpa [framelessLeafInsnOk] using hI)
+      · exact jumpRel_inBounds_running prog.size ext false s imm19 hRun (by simpa [framelessLeafInsnOk, insnDecodedValid] using hI)
       · simp [advancePc, hRun]
     | cbz is64 isNz rt imm19 =>
       rw [hInsn] at hI
       left
       dsimp only [execArm64Insn]
       cases isNz <;> simp only [↓reduceIte, Bool.false_eq_true] <;> split
-      · exact jumpRel_inBounds_running prog.size ext false s imm19 hRun (by simpa [framelessLeafInsnOk] using hI)
+      · exact jumpRel_inBounds_running prog.size ext false s imm19 hRun (by simpa [framelessLeafInsnOk, insnDecodedValid] using hI)
       · simp [advancePc, hRun]
-      · exact jumpRel_inBounds_running prog.size ext false s imm19 hRun (by simpa [framelessLeafInsnOk] using hI)
+      · exact jumpRel_inBounds_running prog.size ext false s imm19 hRun (by simpa [framelessLeafInsnOk, insnDecodedValid] using hI)
       · simp [advancePc, hRun]
     | tbz isNz bit rt imm14 =>
       rw [hInsn] at hI
       left
       dsimp only [execArm64Insn]
       cases isNz <;> simp only [↓reduceIte, Bool.false_eq_true] <;> split
-      · exact jumpRel_inBounds_running prog.size ext false s imm14 hRun (by simpa [framelessLeafInsnOk] using hI)
+      · exact jumpRel_inBounds_running prog.size ext false s imm14 hRun (by simpa [framelessLeafInsnOk, insnDecodedValid] using hI)
       · simp [advancePc, hRun]
-      · exact jumpRel_inBounds_running prog.size ext false s imm14 hRun (by simpa [framelessLeafInsnOk] using hI)
+      · exact jumpRel_inBounds_running prog.size ext false s imm14 hRun (by simpa [framelessLeafInsnOk, insnDecodedValid] using hI)
       · simp [advancePc, hRun]
     | nop => left; exact hRun
     | adrp _ _ | movWide _ _ _ _ _ | bitfield _ _ _ _ _ _ _
-    | condSel _ _ _ _ _ _ | div _ _ _ _ _ | mul3 _ _ _ _ _ =>
+    | condSel _ _ _ _ _ _ | mul3 _ _ _ _ _ =>
       left; unfold execArm64Insn; dsimp only; simp only [advancePc, status_writeGpr, hRun]
+    | div is64 _ _ _ _ =>
+      cases is64
+      · left; unfold execArm64Insn; dsimp only; simp only [Bool.false_eq_true, ↓reduceIte, advancePc, status_writeGpr, hRun]
+      · left; unfold execArm64Insn; dsimp only; simp only [↓reduceIte, advancePc, status_writeGpr, hRun]
     | addSubImm _ _ _ _ _ _ | addSubExt _ _ _ _ _ _ _ _ | logicalImm _ _ _ _ _ =>
       left; unfold execArm64Insn; dsimp only; split <;> simp only [advancePc, status_writeGpr, status_writeGprSP, hRun]
     | addSubReg _ _ _ _ _ _ _ _ | logicalReg _ _ _ _ _ _ _ _ =>
@@ -592,9 +608,32 @@ private theorem checkFramelessLeaf_step (prog : Array Arm64Insn) (ext : Nat → 
       left; unfold execArm64Insn; dsimp only; split <;> try split <;> try split <;> try split
       all_goals simp only [advancePc, status_writeGpr, status_writeGprSP, writeFp, hRun]
     | fcmpD _ _ _ => left; exact hRun
-    | fpUnaryD _ _ _ | fpBinaryD _ _ _ _ =>
-      left; unfold execArm64Insn; dsimp only; exact hRun
-  · right; simp [hLt]
+    | fpUnaryD op _ _ =>
+      unfold execArm64Insn; dsimp only
+      split
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · right; right; rfl
+    | fpBinaryD op _ _ _ =>
+      unfold execArm64Insn; dsimp only
+      split
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · left; exact hRun
+      · right; right; rfl
+  · right; right; simp [hLt]
 
 /-- Soundness of `checkFramelessLeaf`: any frameless leaf routine executes with zero external calls, zero `morestack` traps, and zero `panicBounds` traps for all fuels and stack pointers. -/
 theorem checkFramelessLeaf_run_sound (prog : Array Arm64Insn) (ext : Nat → Option String)
@@ -612,10 +651,13 @@ theorem checkFramelessLeaf_run_sound (prog : Array Arm64Insn) (ext : Nat → Opt
   | succ k ih =>
     intro s hRun
     rw [runArm64_succ_running k prog ext s hRun]
-    rcases checkFramelessLeaf_step prog ext hOk s hRun with hRun1 | hRet1
+    rcases checkFramelessLeaf_step prog ext hOk s hRun with hRun1 | hRet1 | hTrap1
     · exact ih (stepArm64 prog ext s) hRun1
     · have hStop : (stepArm64 prog ext s).status ≠ .running := by rw [hRet1]; decide
       rw [runArm64_of_not_running k prog ext _ hStop, hRet1]
+      exact ⟨(fun _ h => by cases h), by decide, by decide⟩
+    · have hStop : (stepArm64 prog ext s).status ≠ .running := by rw [hTrap1]; decide
+      rw [runArm64_of_not_running k prog ext _ hStop, hTrap1]
       exact ⟨(fun _ h => by cases h), by decide, by decide⟩
 
 /-! ### Chunked Safety Certificates & Theorems for Track 5D Routines -/
@@ -793,9 +835,9 @@ theorem hasPotentialCancellation_stackGuard :
   have hGetFun : (fun i => (decodeArm64ProgCfg hasPotentialCancellationWords)[i]?) =
       chunkDecodeCfg hasPotentialCancellationChunks := (funext chunkDecodeCfg_cancel).symm
   have hAll : (!everyWithIdx 0 (decodeArm64ProgCfg hasPotentialCancellationWords).toList
-      (bodyInsnStackSafe 1353 3 1331 hasPotentialCancellationTargets)) = false := by
+      (bodyInsnStackSafe 1353 3 1331 (704 + 128) (chunkDecodeCfg hasPotentialCancellationChunks) hasPotentialCancellationTargets)) = false := by
     have hT : everyWithIdx 0 (decodeArm64ProgCfg hasPotentialCancellationWords).toList
-        (bodyInsnStackSafe 1353 3 1331 hasPotentialCancellationTargets) = true := by
+        (bodyInsnStackSafe 1353 3 1331 (704 + 128) (chunkDecodeCfg hasPotentialCancellationChunks) hasPotentialCancellationTargets) = true := by
       change everyWithIdx 0 (hasPotentialCancellationChunks.flatten.map decodeArm64WordCfg) _ = true
       rw [everyWithIdx_map, everyWithIdx_flatten]
       decide
@@ -836,7 +878,8 @@ private theorem cancel_stack_headroom_832 (sp sg : BitVec 64)
     (hSp : BitVec.ult 831#64 sp = true)
     (hGuard : BitVec.ult sg (sp - 832#64) = true) :
     BitVec.ult 703#64 sp = true ∧ BitVec.ult sg (sp - 704#64) = true := by
-  bv_decide
+  simp only [BitVec.ult, decide_eq_true_eq] at hSp hGuard ⊢
+  constructor <;> bv_omega
 
 /-- Tier 5D binary safety theorem for the 1353-instruction zero-allocation Kahn DAG cycle checker `assign.hasPotentialCancellation` via `Track5B` analyzers (`noAllocCall`, `checkStackGuard_sound`, `checkPanicBoundsReachability_run_safe`). -/
 theorem hasPotentialCancellation_elf_safe (s : Arm64State)
@@ -996,38 +1039,244 @@ def f64Ge (a b : BitVec 64) : Bool :=
 def vminpdLane (a b : BitVec 64) : BitVec 64 :=
   if f64Lt a b then a else b
 
+private theorem bv64_and_abs_toNat (x : BitVec 64) :
+    (x &&& 0x7fffffffffffffff#64).toNat = x.toNat % 2 ^ 63 := by
+  rw [BitVec.toNat_and]
+  exact Nat.and_two_pow_sub_one_eq_mod x.toNat 63
+
+private theorem bv64_and_mant_toNat (x : BitVec 64) :
+    (x &&& 0x000fffffffffffff#64).toNat = x.toNat % 2 ^ 52 := by
+  rw [BitVec.toNat_and]
+  exact Nat.and_two_pow_sub_one_eq_mod x.toNat 52
+
+private theorem bv64_and_exp_toNat (x : BitVec 64) :
+    (x &&& 0x7ff0000000000000#64).toNat = (x.toNat % 2 ^ 63 / 2 ^ 52) * 2 ^ 52 := by
+  have hEq : x &&& 0x7ff0000000000000#64 = ((x &&& 0x7fffffffffffffff#64) >>> 52) <<< 52 := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    simp only [BitVec.getLsbD_and, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_ushiftRight, hi,
+      decide_true, Bool.true_and]
+    by_cases h52 : i < 52
+    · have hM : (0x7ff0000000000000#64 : BitVec 64).getLsbD i = false := by
+        change Nat.testBit (0x7ff * 2 ^ 52) i = false
+        rw [Nat.testBit_eq_decide_div_mod_eq]
+        have hP : 2 ^ 52 = 2 ^ i * 2 ^ (52 - i) := by rw [← Nat.pow_add]; congr 1; omega
+        have hDiv : (0x7ff * 2 ^ 52) / 2 ^ i = 0x7ff * 2 ^ (52 - i) := by
+          rw [hP, ← Nat.mul_assoc, Nat.mul_right_comm, Nat.mul_div_cancel _ (Nat.two_pow_pos i)]
+        rw [hDiv]
+        have hSub : 52 - i = (51 - i) + 1 := by omega
+        rw [hSub, Nat.pow_succ]
+        exact decide_eq_false (by omega)
+      simp [h52, hM]
+    · by_cases h63 : i < 63
+      · have hM : (0x7ff0000000000000#64 : BitVec 64).getLsbD i = true := by
+          change Nat.testBit (0x7ff * 2 ^ 52) i = true
+          rw [Nat.testBit_eq_decide_div_mod_eq]
+          have hP : 2 ^ i = 2 ^ 52 * 2 ^ (i - 52) := by rw [← Nat.pow_add]; congr 1; omega
+          have hDiv : (0x7ff * 2 ^ 52) / 2 ^ i = 0x7ff / 2 ^ (i - 52) := by
+            rw [hP, Nat.mul_comm 0x7ff (2 ^ 52), Nat.mul_div_mul_left _ _ (Nat.two_pow_pos 52)]
+          rw [hDiv]
+          have hRange : i - 52 < 11 := by omega
+          have hTb : Nat.testBit 0x7ff (i - 52) = true := by
+            have hk : 0x7ff = 2 ^ 11 - 1 := by decide
+            rw [hk, Nat.testBit_two_pow_sub_one]; exact decide_eq_true hRange
+          rwa [Nat.testBit_eq_decide_div_mod_eq] at hTb
+        have hA : (0x7fffffffffffffff#64 : BitVec 64).getLsbD i = true := by
+          change Nat.testBit (2 ^ 63 - 1) i = true
+          rw [Nat.testBit_two_pow_sub_one]; exact decide_eq_true h63
+        have hAdd : 52 + (i - 52) = i := by omega
+        simp [h52, hM, hAdd, hA]
+      · have hi63 : i = 63 := by omega
+        subst hi63
+        simp
+  rw [hEq, BitVec.toNat_shiftLeft, BitVec.toNat_ushiftRight, BitVec.toNat_and]
+  have hMod := Nat.and_two_pow_sub_one_eq_mod x.toNat 63
+  change (((x.toNat &&& (2 ^ 63 - 1)) >>> 52) <<< 52) % 2 ^ 64 = (x.toNat % 2 ^ 63 / 2 ^ 52) * 2 ^ 52
+  rw [hMod, Nat.shiftRight_eq_div_pow, Nat.shiftLeft_eq]
+  have : x.toNat % 2 ^ 63 < 2 ^ 63 := Nat.mod_lt _ (by decide)
+  exact Nat.mod_eq_of_lt (by omega)
+
+private theorem bv64_msb_eq (x : BitVec 64) :
+    x.msb = decide (2 ^ 63 ≤ x.toNat) := by
+  have hlt := x.isLt
+  rw [BitVec.msb_eq_getLsbD_last]
+  change Nat.testBit x.toNat 63 = decide (2 ^ 63 ≤ x.toNat)
+  rw [Nat.testBit_eq_decide_div_mod_eq]
+  by_cases h : 2 ^ 63 ≤ x.toNat
+  · have hDiv : x.toNat / 2 ^ 63 = 1 := by omega
+    simp [h, hDiv]
+  · have hDiv : x.toNat / 2 ^ 63 = 0 := by omega
+    simp [h, hDiv]
+
+private theorem bv64_xor_sign_toNat (x : BitVec 64) (hx : x.toNat < 2 ^ 63) :
+    (x ^^^ 0x8000000000000000#64).toNat = x.toNat + 2 ^ 63 := by
+  rw [BitVec.toNat_xor]
+  change x.toNat ^^^ 2 ^ 63 = x.toNat + 2 ^ 63
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_xor, Nat.testBit_two_pow]
+  by_cases hlt : i < 63
+  · have hne : decide (63 = i) = false := decide_eq_false (by omega)
+    rw [hne, Bool.xor_false]
+    rw [Nat.testBit_eq_decide_div_mod_eq, Nat.testBit_eq_decide_div_mod_eq]
+    have hPow : 2 ^ 63 = 2 ^ i * 2 ^ (63 - i) := by rw [← Nat.pow_add]; congr 1; omega
+    rw [hPow, Nat.add_mul_div_left _ _ (Nat.two_pow_pos i)]
+    have hSub : 63 - i = (62 - i) + 1 := by omega
+    rw [hSub, Nat.pow_succ, Nat.add_mul_mod_self_right]
+  · by_cases heq : i = 63
+    · subst heq
+      have h0 : Nat.testBit x.toNat 63 = false := Nat.testBit_lt_two_pow hx
+      rw [h0, Nat.testBit_eq_decide_div_mod_eq, show (x.toNat + 2 ^ 63) / 2 ^ 63 = 1 by omega]
+      rfl
+    · have hne : decide (63 = i) = false := decide_eq_false (by omega)
+      rw [hne, Bool.xor_false]
+      have hPow : 2 ^ 64 ≤ 2 ^ i := Nat.pow_le_pow_right (by decide) (by omega)
+      rw [Nat.testBit_lt_two_pow (by omega), Nat.testBit_lt_two_pow (by omega)]
+
+private theorem f64TotalKey_toNat (x : BitVec 64) :
+    (f64TotalKey x).toNat =
+      if 2 ^ 63 ≤ x.toNat then 2 ^ 64 - 1 - x.toNat else x.toNat + 2 ^ 63 := by
+  unfold f64TotalKey
+  rw [bv64_msb_eq]
+  by_cases h : 2 ^ 63 ≤ x.toNat
+  · simp only [h, decide_true, ↓reduceIte, BitVec.toNat_not]
+  · simp only [h, decide_false, Bool.false_eq_true, ↓reduceIte]
+    exact bv64_xor_sign_toNat x (by omega)
+
+private theorem f64IsZero_eq_decide (x : BitVec 64) :
+    f64IsZero x = decide (x.toNat = 0 ∨ x.toNat = 2 ^ 63) := by
+  have hlt := x.isLt
+  unfold f64IsZero
+  by_cases h : x.toNat = 0 ∨ x.toNat = 2 ^ 63
+  · rw [decide_eq_true h]
+    apply beq_iff_eq.mpr
+    apply BitVec.eq_of_toNat_eq
+    rw [bv64_and_abs_toNat]
+    change x.toNat % 2 ^ 63 = 0
+    omega
+  · rw [decide_eq_false h]
+    apply beq_false_of_ne
+    intro hEq
+    have hN := congrArg BitVec.toNat hEq
+    rw [bv64_and_abs_toNat] at hN
+    change x.toNat % 2 ^ 63 = 0 at hN
+    omega
+
+private theorem f64NumKey_toNat (x : BitVec 64) :
+    (f64NumKey x).toNat =
+      if x.toNat = 0 ∨ x.toNat = 2 ^ 63 then 2 ^ 63
+      else if 2 ^ 63 ≤ x.toNat then 2 ^ 64 - 1 - x.toNat
+      else x.toNat + 2 ^ 63 := by
+  unfold f64NumKey canonZero64 f64PosZero
+  rw [f64IsZero_eq_decide]
+  by_cases hz : x.toNat = 0 ∨ x.toNat = 2 ^ 63
+  · simp only [hz, decide_true, ↓reduceIte]; rfl
+  · simp only [hz, decide_false, Bool.false_eq_true, ↓reduceIte, f64TotalKey_toNat]
+
 theorem f64NotNaN_iff_abs_ule_posInf (x : BitVec 64) :
     f64NotNaN x = BitVec.ule (x &&& 0x7fffffffffffffff#64) f64PosInf := by
-  unfold f64NotNaN f64IsNaN f64PosInf; bv_decide
+  unfold f64NotNaN f64IsNaN f64PosInf
+  rw [BitVec.ule_eq_decide, bv64_and_abs_toNat]
+  change (!((x &&& 0x7ff0000000000000#64 == 0x7ff0000000000000#64) &&
+            (x &&& 0x000fffffffffffff#64 != 0#64))) = decide (x.toNat % 2 ^ 63 ≤ 0x7ff0000000000000)
+  have hExp : (x &&& 0x7ff0000000000000#64 == 0x7ff0000000000000#64) =
+      decide (x.toNat % 2 ^ 63 / 2 ^ 52 = 0x7ff) := by
+    by_cases h : x.toNat % 2 ^ 63 / 2 ^ 52 = 0x7ff
+    · rw [decide_eq_true h]; apply beq_iff_eq.mpr; apply BitVec.eq_of_toNat_eq
+      rw [bv64_and_exp_toNat, h]; rfl
+    · rw [decide_eq_false h]; apply beq_false_of_ne; intro hEq
+      have hN := congrArg BitVec.toNat hEq; rw [bv64_and_exp_toNat] at hN; change _ = 0x7ff0000000000000 at hN; omega
+  have hMant : (x &&& 0x000fffffffffffff#64 != 0#64) = decide (x.toNat % 2 ^ 52 ≠ 0) := by
+    by_cases h : x.toNat % 2 ^ 52 = 0
+    · have hEq : x &&& 0x000fffffffffffff#64 = 0#64 := BitVec.eq_of_toNat_eq (by rw [bv64_and_mant_toNat, h]; rfl)
+      simp [h, hEq]
+    · have hNe : (x &&& 0x000fffffffffffff#64 == 0#64) = false := beq_false_of_ne fun hEq => by
+        have hN := congrArg BitVec.toNat hEq; rw [bv64_and_mant_toNat] at hN; change x.toNat % 2 ^ 52 = 0 at hN; exact h hN
+      simp [bne, hNe, h]
+  rw [hExp, hMant]
+  have hMod : x.toNat % 2 ^ 63 % 2 ^ 52 = x.toNat % 2 ^ 52 := by
+    have hDvd : 2 ^ 52 ∣ 2 ^ 63 := Nat.pow_dvd_pow 2 (by decide)
+    exact Nat.mod_mod_of_dvd x.toNat hDvd
+  have hLt63 : x.toNat % 2 ^ 63 < 2 ^ 63 := Nat.mod_lt _ (by decide)
+  by_cases h1 : x.toNat % 2 ^ 63 / 2 ^ 52 = 0x7ff <;> by_cases h2 : x.toNat % 2 ^ 52 = 0 <;> simp [h1, h2] <;> omega
 
 theorem f64TotalKey_inj (a b : BitVec 64) :
     (f64TotalKey a == f64TotalKey b) = (a == b) := by
-  unfold f64TotalKey; bv_decide
+  have ha := a.isLt; have hb := b.isLt
+  by_cases hab : a = b
+  · subst hab; simp
+  · rw [beq_false_of_ne hab]
+    apply beq_false_of_ne
+    intro hEq
+    have hN := congrArg BitVec.toNat hEq
+    rw [f64TotalKey_toNat, f64TotalKey_toNat] at hN
+    apply hab; apply BitVec.eq_of_toNat_eq
+    split at hN <;> split at hN <;> omega
 
 theorem f64NumKey_eq_iff (a b : BitVec 64) :
     (f64NumKey a == f64NumKey b) = ((a == b) || (f64IsZero a && f64IsZero b)) := by
-  unfold f64NumKey f64TotalKey canonZero64 f64IsZero f64PosZero; bv_decide
+  unfold f64NumKey
+  rw [f64TotalKey_inj]
+  unfold canonZero64 f64PosZero
+  rw [f64IsZero_eq_decide a, f64IsZero_eq_decide b]
+  have ha := a.isLt; have hb := b.isLt
+  by_cases hza : a.toNat = 0 ∨ a.toNat = 2 ^ 63 <;> by_cases hzb : b.toNat = 0 ∨ b.toNat = 2 ^ 63
+  · simp [hza, hzb]
+  · simp only [hza, hzb, decide_true, decide_false, ↓reduceIte, Bool.false_eq_true, Bool.and_false, Bool.or_false]
+    have h1 : (0#64 == b) = false := beq_false_of_ne (fun h => hzb (Or.inl (by simpa using (congrArg BitVec.toNat h).symm)))
+    have h2 : (a == b) = false := beq_false_of_ne (fun h => hzb (h ▸ hza))
+    rw [h1, h2]
+  · simp only [hza, hzb, decide_true, decide_false, ↓reduceIte, Bool.false_eq_true, Bool.false_and, Bool.or_false]
+    have h1 : (a == 0#64) = false := beq_false_of_ne (fun h => hza (Or.inl (by simpa using congrArg BitVec.toNat h)))
+    have h2 : (a == b) = false := beq_false_of_ne (fun h => hza (h ▸ hzb))
+    rw [h1, h2]
+  · simp [hza, hzb]
 
 theorem f64Lt_iff_ult_numKey (a b : BitVec 64)
     (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     f64Lt a b = BitVec.ult (f64NumKey a) (f64NumKey b) := by
-  unfold f64Lt f64NumKey f64TotalKey canonZero64 f64NotNaN f64IsNaN f64IsZero f64PosZero at *; bv_decide
-
-theorem f64Le_iff_ule_numKey (a b : BitVec 64)
-    (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
-    f64Le a b = BitVec.ule (f64NumKey a) (f64NumKey b) := by
-  unfold f64Le f64Lt f64Eq f64NumKey f64TotalKey canonZero64 f64NotNaN f64IsNaN f64IsZero f64PosZero at *; bv_decide
+  have hNa : f64IsNaN a = false := by unfold f64NotNaN at ha; simpa using ha
+  have hNb : f64IsNaN b = false := by unfold f64NotNaN at hb; simpa using hb
+  unfold f64Lt
+  simp only [hNa, hNb, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+  rw [f64IsZero_eq_decide a, f64IsZero_eq_decide b, bv64_msb_eq a, bv64_msb_eq b,
+      BitVec.ult_eq_decide, BitVec.ult_eq_decide, BitVec.ult_eq_decide,
+      bv64_and_abs_toNat a, bv64_and_abs_toNat b, f64NumKey_toNat a, f64NumKey_toNat b]
+  have hla := a.isLt; have hlb := b.isLt
+  by_cases hza : a.toNat = 0 ∨ a.toNat = 2 ^ 63 <;>
+    by_cases hzb : b.toNat = 0 ∨ b.toNat = 2 ^ 63 <;>
+    by_cases hma : 2 ^ 63 ≤ a.toNat <;>
+    by_cases hmb : 2 ^ 63 ≤ b.toNat <;>
+    simp [hza, hzb, hma, hmb] <;>
+    omega
 
 theorem f64Eq_iff_eq_numKey (a b : BitVec 64)
     (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     f64Eq a b = (f64NumKey a == f64NumKey b) := by
-  unfold f64Eq f64NumKey f64TotalKey canonZero64 f64NotNaN f64IsNaN f64IsZero f64PosZero at *; bv_decide
+  have hNa : f64IsNaN a = false := by unfold f64NotNaN at ha; simpa using ha
+  have hNb : f64IsNaN b = false := by unfold f64NotNaN at hb; simpa using hb
+  unfold f64Eq
+  simp only [hNa, hNb, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+  exact (f64NumKey_eq_iff a b).symm
+
+theorem f64Le_iff_ule_numKey (a b : BitVec 64)
+    (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
+    f64Le a b = BitVec.ule (f64NumKey a) (f64NumKey b) := by
+  unfold f64Le
+  rw [f64Lt_iff_ult_numKey a b ha hb, f64Eq_iff_eq_numKey a b ha hb, BitVec.ult_eq_decide, BitVec.ule_eq_decide]
+  by_cases hEq : f64NumKey a = f64NumKey b
+  · rw [hEq]; simp
+  · rw [beq_false_of_ne hEq, Bool.or_false]
+    have hNeNat : (f64NumKey a).toNat ≠ (f64NumKey b).toNat := fun h => hEq (BitVec.eq_of_toNat_eq h)
+    by_cases hLt : (f64NumKey a).toNat < (f64NumKey b).toNat <;> simp [hLt] <;> omega
 
 /-- Soundness of the AVX2/AVX-512 `Min2ReducedRow64` lane filter (`!(c >= u2) == (c < u2)` on non-NaN lanes). -/
 theorem not_f64Ge_eq_f64Lt (a b : BitVec 64)
     (ha : f64NotNaN a = true) (hb : f64NotNaN b = true) :
     (!f64Ge a b) = f64Lt a b := by
-  unfold f64Ge f64Le f64Lt f64Eq f64NotNaN f64IsNaN f64IsZero at *; bv_decide
+  unfold f64Ge
+  rw [f64Le_iff_ule_numKey b a hb ha, f64Lt_iff_ult_numKey a b ha hb, BitVec.ule_eq_decide, BitVec.ult_eq_decide]
+  by_cases h : (f64NumKey b).toNat ≤ (f64NumKey a).toNat <;> simp [h] <;> omega
 
 /-- `+Inf` (`0x7ff0000000000000`) is the strict top sentinel of `f64NumKey` over all non-NaN float64 lanes. -/
 theorem f64PosInf_top_of_notNaN (x : BitVec 64) (hx : f64NotNaN x = true) :
@@ -1036,8 +1285,37 @@ theorem f64PosInf_top_of_notNaN (x : BitVec 64) (hx : f64NotNaN x = true) :
       f64Lt f64PosInf x = false ∧
       f64Lt x f64PosInf = (x != f64PosInf) ∧
       (f64NumKey x == f64NumKey f64PosInf) = (x == f64PosInf) := by
-  unfold f64Ge f64Le f64Lt f64Eq f64NumKey f64TotalKey canonZero64 f64NotNaN f64IsNaN f64IsZero f64PosZero f64PosInf at *
-  bv_decide
+  have hInf : f64NotNaN f64PosInf = true := by decide
+  have hAbs : x.toNat % 2 ^ 63 ≤ 0x7ff0000000000000 := by
+    have h := f64NotNaN_iff_abs_ule_posInf x
+    rw [hx, BitVec.ule_eq_decide, bv64_and_abs_toNat] at h
+    exact of_decide_eq_true h.symm
+  have hInfKey : (f64NumKey f64PosInf).toNat = 0x7ff0000000000000 + 2 ^ 63 := by decide
+  have hUle : BitVec.ule (f64NumKey x) (f64NumKey f64PosInf) = true := by
+    rw [BitVec.ule_eq_decide, f64NumKey_toNat x, hInfKey]
+    have hlt := x.isLt
+    split <;> try split
+    all_goals exact decide_eq_true (by omega)
+  have hEq : (f64NumKey x == f64NumKey f64PosInf) = (x == f64PosInf) := by
+    rw [f64NumKey_eq_iff x f64PosInf]
+    have hInfNz : f64IsZero f64PosInf = false := by decide
+    simp [hInfNz]
+  have hGe : f64Ge f64PosInf x = true := by
+    unfold f64Ge; rw [f64Le_iff_ule_numKey x f64PosInf hx hInf]; exact hUle
+  have hLtInfX : f64Lt f64PosInf x = false := by
+    rw [← not_f64Ge_eq_f64Lt f64PosInf x hInf hx]
+    unfold f64Ge; rw [f64Le_iff_ule_numKey x f64PosInf hx hInf, hUle]; rfl
+  have hLtXInf : f64Lt x f64PosInf = (x != f64PosInf) := by
+    rw [f64Lt_iff_ult_numKey x f64PosInf hx hInf, BitVec.ult_eq_decide]
+    have hUleNat : (f64NumKey x).toNat ≤ (f64NumKey f64PosInf).toNat := by
+      rw [BitVec.ule_eq_decide] at hUle; exact of_decide_eq_true hUle
+    by_cases hX : x = f64PosInf
+    · subst hX; simp
+    · have hNe : (f64NumKey x == f64NumKey f64PosInf) = false := by rw [hEq]; exact beq_false_of_ne hX
+      have hNeNat : (f64NumKey x).toNat ≠ (f64NumKey f64PosInf).toNat := fun h => by
+        have := beq_iff_eq.mpr (BitVec.eq_of_toNat_eq h); rw [hNe] at this; cases this
+      simp [bne, beq_false_of_ne hX, show (f64NumKey x).toNat < (f64NumKey f64PosInf).toNat by omega]
+  exact ⟨hUle, hGe, hLtInfX, hLtXInf, hEq⟩
 
 /-- Exact bridge between `BitVec 64` `f64Lt` and `Track5A.f64Cmp`'s negative flag `N`. -/
 theorem f64Lt_eq_f64Cmp_n (a b : BitVec 64) :
@@ -1092,8 +1370,31 @@ theorem vminpdLane_numKey_assoc_comm (a b c : BitVec 64)
     canonZero64 (vminpdLane a b) = canonZero64 (vminpdLane b a) ∧
     f64NumKey (vminpdLane (vminpdLane a b) c) = f64NumKey (vminpdLane a (vminpdLane b c)) ∧
     canonZero64 (vminpdLane (vminpdLane a b) c) = canonZero64 (vminpdLane a (vminpdLane b c)) := by
-  unfold vminpdLane f64Lt f64NumKey f64TotalKey canonZero64 f64NotNaN f64IsNaN f64IsZero f64PosZero at *
-  bv_decide
+  have hCanonInj : ∀ x y : BitVec 64, f64NumKey x = f64NumKey y → canonZero64 x = canonZero64 y := by
+    intro x y h
+    have hEq := beq_iff_eq.mpr h
+    unfold f64NumKey at hEq
+    rw [f64TotalKey_inj] at hEq
+    exact beq_iff_eq.mp hEq
+  have hMinKey : ∀ x y : BitVec 64, f64NotNaN x = true → f64NotNaN y = true →
+      (f64NumKey (vminpdLane x y)).toNat = min (f64NumKey x).toNat (f64NumKey y).toNat := by
+    intro x y hx hy
+    unfold vminpdLane
+    rw [f64Lt_iff_ult_numKey x y hx hy, BitVec.ult_eq_decide]
+    by_cases hlt : (f64NumKey x).toNat < (f64NumKey y).toNat <;> simp [hlt, Nat.min_def] <;> omega
+  have hNotNaNMin : ∀ x y : BitVec 64, f64NotNaN x = true → f64NotNaN y = true →
+      f64NotNaN (vminpdLane x y) = true := by
+    intro x y hx hy
+    unfold vminpdLane
+    split <;> assumption
+  have hComm : f64NumKey (vminpdLane a b) = f64NumKey (vminpdLane b a) := by
+    apply BitVec.eq_of_toNat_eq
+    rw [hMinKey a b ha hb, hMinKey b a hb ha, Nat.min_comm]
+  have hAssoc : f64NumKey (vminpdLane (vminpdLane a b) c) = f64NumKey (vminpdLane a (vminpdLane b c)) := by
+    apply BitVec.eq_of_toNat_eq
+    rw [hMinKey _ c (hNotNaNMin a b ha hb) hc, hMinKey a b ha hb,
+        hMinKey a _ ha (hNotNaNMin b c hb hc), hMinKey b c hb hc, Nat.min_assoc]
+  exact ⟨hComm, hCanonInj _ _ hComm, hAssoc, hCanonInj _ _ hAssoc⟩
 
 
 /-! ### 4-Lane (AVX2) & 8-Lane (AVX-512) Masked `+Inf` Tail & `Min2` Reduction Equivalence -/
@@ -2049,5 +2350,78 @@ theorem min2FilteredStep_eq_scalarMin2Step (st : Min2Pair) (j : Nat) (r : BitVec
     min2FilteredStep st j r = scalarMin2Step st j r := by
   unfold min2FilteredStep scalarMin2Step
   cases f64Ge r st.2.val <;> rfl
+
+/-! ### PC-Relative / RODATA Normalization for Extended Track 5D ELF Verification -/
+
+/-- Canonicalized extended ARM64 instruction form (`Arm64InsnD`) for validating Track 5D ELF binaries
+with full fidelity on `FMADDD`/`FMSUBD`/`FNMADDD`/`FNMSUBD` and `FMOVD $imm8`. -/
+inductive NormArm64InsnD where
+  | exact (insn : Arm64InsnD)
+  | blExt (target : String)
+  | bExt (target : String)
+  | adrpNorm (rd : BitVec 5)
+  | adrpLoad64Norm (isFP : Bool) (rt rn : BitVec 5)
+  | adrpAdd64Norm (rd rn : BitVec 5)
+  deriving DecidableEq, Repr, Inhabited
+
+/-- Normalize a decoded `Arm64InsnD` program given external call targets indexed by `pcIdx`. -/
+def normalizeArm64ProgD (insns : Array Arm64InsnD) (extTargets : Nat → Option String) :
+    Except String (Array NormArm64InsnD) := do
+  let mut out : Array NormArm64InsnD := #[]
+  let n := insns.size
+  for i in [0:n] do
+    let insn := insns[i]!
+    let prevIsAdrp : Option (BitVec 5) :=
+      if i > 0 then
+        match insns[i - 1]! with
+        | .base (.adrp rd _) => some rd
+        | _ => none
+      else none
+    match insn with
+    | .base (.unknown w) =>
+      throw s!"unknown ARM64 instruction word at idx {i}: {w}"
+    | .base (.bl imm26) =>
+      let tgtInt : Int := (i : Int) + imm26
+      if 0 <= tgtInt && tgtInt.toNat < n then
+        out := out.push (.exact insn)
+      else
+        match extTargets i with
+        | some sym => out := out.push (.blExt sym)
+        | none => throw s!"missing external BL target metadata at idx {i}"
+    | .base (.b imm26) =>
+      let tgtInt : Int := (i : Int) + imm26
+      if 0 <= tgtInt && tgtInt.toNat < n then
+        out := out.push (.exact insn)
+      else
+        match extTargets i with
+        | some sym => out := out.push (.bExt sym)
+        | none => throw s!"missing external B target metadata at idx {i}"
+    | .base (.adrp rd _) =>
+      out := out.push (.adrpNorm rd)
+    | .base (.ldrStrUImm true isFP 8 _ rt rn) =>
+      if prevIsAdrp == some rn then
+        out := out.push (.adrpLoad64Norm isFP rt rn)
+      else
+        out := out.push (.exact insn)
+    | .base (.addSubImm true false false rd rn _) =>
+      if prevIsAdrp == some rn then
+        out := out.push (.adrpAdd64Norm rd rn)
+      else
+        out := out.push (.exact insn)
+    | _ =>
+      out := out.push (.exact insn)
+  return out
+
+/-- Compare freshly extracted ELF words + external targets against a verified embedded Track 5D routine. -/
+def arm64ProgramMatchesD (expectedWords : Array UInt32) (expectedExt : Nat → Option String)
+    (liveWords : Array UInt32) (liveExt : Nat → Option String) : Except String Unit := do
+  let expNorm ← normalizeArm64ProgD (decodeArm64ProgD expectedWords) expectedExt
+  let liveNorm ← normalizeArm64ProgD (decodeArm64ProgD liveWords) liveExt
+  if expNorm.size != liveNorm.size then
+    throw s!"instruction count mismatch: expected {expNorm.size}, got {liveNorm.size}"
+  for i in [0:expNorm.size] do
+    if expNorm[i]! != liveNorm[i]! then
+      throw s!"normalized ARM64D mismatch at idx {i}: expected {repr (expNorm[i]!)}, got {repr (liveNorm[i]!)}"
+  return ()
 
 end GoblinFormal.Track5D

@@ -390,17 +390,18 @@ def normalize_amd64_routine(routine: Amd64RoutineBinary) -> bytes:
 
 
 def build_amd64_simd_test_elf(repo_root: Path, out_elf: Path, go_pkg: str) -> None:
-    """Compile a static Linux amd64 GOEXPERIMENT=simd test binary."""
+    """Compile a deterministic static Linux amd64 GOEXPERIMENT=simd test binary."""
     env = os.environ.copy()
     env.update(
         {
             "CGO_ENABLED": "0",
             "GOOS": "linux",
             "GOARCH": "amd64",
+            "GOAMD64": "v1",
             "GOEXPERIMENT": "simd",
         }
     )
-    cmd = ["go", "test", "-c", "-o", str(out_elf), go_pkg]
+    cmd = ["go", "test", "-c", "-trimpath", "-o", str(out_elf), go_pkg]
     proc = subprocess.run(
         cmd,
         cwd=repo_root,
