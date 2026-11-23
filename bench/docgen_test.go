@@ -298,3 +298,44 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 		t.Fatal("expected error when goblin_certified_vipr links encoding/json symbols")
 	}
 }
+
+func TestRenderReadmeSummaryBlocks(t *testing.T) {
+	tb, err := LoadTelemetryBundle(
+		"results/python_baseline.json",
+		"results/goblin_scalar.json",
+		"results/goblin_simd.json",
+	)
+	if err != nil {
+		t.Fatalf("LoadTelemetryBundle: %v", err)
+	}
+
+	milp, err := RenderBlock("README_MILP_SUMMARY_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(README_MILP_SUMMARY_TABLE): %v", err)
+	}
+	if !strings.Contains(milp, "| Workload | Families (Trials) | Go Sum (ms) | Python Sum (ms) |") {
+		t.Fatalf("unexpected MILP README header:\n%s", milp)
+	}
+	if strings.Contains(milp, "CBC") {
+		t.Fatalf("README MILP table should omit in-process CBC columns:\n%s", milp)
+	}
+
+	mad, err := RenderBlock("README_MAD_SUMMARY_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(README_MAD_SUMMARY_TABLE): %v", err)
+	}
+	if !strings.Contains(mad, "| Problem | $G \\times I$ | Trials | Go (ms) | Python (ms) | Speedup |") {
+		t.Fatalf("unexpected MAD README header:\n%s", mad)
+	}
+	if strings.Contains(mad, "SIMD") || strings.Contains(mad, "CBC") {
+		t.Fatalf("README MAD table should omit SIMD and CBC columns:\n%s", mad)
+	}
+
+	assignTbl, err := RenderBlock("README_ASSIGN_SUMMARY_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(README_ASSIGN_SUMMARY_TABLE): %v", err)
+	}
+	if !strings.Contains(assignTbl, "| Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) |") {
+		t.Fatalf("unexpected assign README header:\n%s", assignTbl)
+	}
+}

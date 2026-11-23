@@ -55,7 +55,7 @@ How to read the aggregate table:
 
 ---
 
-## 3. MAD Group-Item Allocation Formulation (`G` Groups $\times$ `I` Items)
+## 3. MAD Group-Item Allocation Formulation
 
 The synthetic `MAD` group-item allocation family ([`BuildMADFromWeights`](../bench/corpus.go)) models multi-period balanced assignment across $G$ groups, $I$ items, and $T = 6$ time periods with central-level roundness penalties.
 
@@ -336,7 +336,7 @@ The 22-family synthetic Linear Sum Assignment corpus ([`bench/assign_corpus.go`]
 | `a3_unif_2000x2000` | $2000 \times 2000$ | `uniform` | **4.72x** | 29.480 | 143.705 | 40.202 | 186.631 | $30.191 \pm 3.938$ | $141.831 \pm 9.622$ | 16450.52 | `OK` |
 <!-- END GENERATED:ASSIGN_PIPELINE_TABLE -->
 
-### 7.3 LSAP Scalar vs. `GOEXPERIMENT=simd` (`AllAbsLE64`, `MinReducedSkip64`, `InitReducedRow64`, and `Min2ReducedRow64`)
+### 7.3 LSAP Scalar vs. `GOEXPERIMENT=simd`
 
 In [`assign/solver.go`](../assign/solver.go), [`simd.AllAbsLE64With`](../internal/simd/kernels_amd64.go) and [`simd.ValidateAndNegate64With`](../internal/simd/assign_amd64.go) validate finite cost bounds via AVX2 checks whenever `len(cost) >= 32` (while the fused `colReduceValidateSquare` fast path skips `AllAbsLE64With` on finite square `Minimize` matrices and dispatches `ColReduceValidateRows64With` only for $n \ge 32$), [`simd.Transpose64With`](../internal/simd/assign_amd64.go) handles tall transposes with $\text{rows} \ge 8$ and $\text{cols} \ge 8$, [`simd.MinReducedSkip64With`](../internal/simd/assign_amd64.go) accelerates reduction-transfer slack scans in `preprocessSquareJV` ($n \ge 32$), [`simd.Min2ReducedRow64With`](../internal/simd/kernels_amd64.go) accelerates first/second reduced-minimum scans in `preprocessRectangularBV` and `augmentingRowReduction` at `minAVX2Min2Len = 256` (`minAVX512Min2Len = 128`), and [`simd.InitReducedRow64With`](../internal/simd/kernels_amd64.go) runs on a slice of length $\max(m, n) \ge 32$ at the start of each Dijkstra augmentation. All vector kernels clean upper `YMM` state via `StoreArray` + `ClearAVXUpperBits()` (`VZEROUPPER`) before scalar operations; exact per-family verdicts appear in the generated table below.
 
@@ -389,8 +389,108 @@ The `goblin-bench -binary-size` mode compiles four standalone `CGO_ENABLED=0` pr
 
 ---
 
-## 9. Keeping Documentation and Benchmarks Synchronized
+## 9. Pure-Go vs. In-Process C++ CBC Performance Analysis
 
-1. **Regenerate telemetry** from a clean, committed tree in a single pinned session so that all eight telemetry files record identical `git_commit`, `source_fingerprint`, and `uname_release`: run the commands in the [README](../README.md#verification-benchmarking-and-documentation-sync-commands).
-2. **Regenerate tables**: `go run ./cmd/goblin-bench -sync-docs`.
-3. **Verify**: `go run ./cmd/goblin-bench -check-docs`, or `go test ./...`, which runs `TestDocumentationAndBenchmarkSync`. The gate validates corpus dimensions, parity, symbol identifiers, and provenance, and checks every generated block in `README.md`, `docs/benchmarks.md`, and `bench/results/final_report.md`.
+Comparing isolated unpresolved `Root LP` timings, paired trial ratios, and solver-core checkpoints (`CP5 +Presolve`, `CP6 +Cuts`, `CP7 Full`) between `BackendGo` and in-process `BackendCBC` (`c1c171ec`) highlights four structural trade-offs on large degenerate LPs and heavy-tail branch-and-cut models.
+
+### 9.1 MAD Group-Item Allocation (`BackendGo` vs. `BackendCBC` and `COIN-OR CLP`)
+
+The 11 MAD corpus families ($N = G(I + T + 3)$ variables, $M = G(2T + 3) + I$ constraints) separate solver behavior into three scaling regimes:
+
+<!-- BEGIN GENERATED:MAD_CBC_GAP_TABLE -->
+| Problem ID | $G \times I$ ($N \times M$) | Paired `Go / CBC` | Go Total Med (ms) | CBC Total Med (ms) | Root LP (`Go / CBC`) | Go Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go Root LP (ms / iters) | CBC Root LP (ms / iters) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `t1_mad_g2_i4` | $2 \times 4$ ($26 \times 34$) | **0.03x** | 0.06 | 2.44 | 0.64x | 0.04 (1 / 19) | 2.41 (0 / 0) | 0.086 (28) | 0.136 (19) |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ ($26 \times 34$) | **0.05x** | 0.48 | 11.14 | 0.69x | 0.46 (2 / 58) | 11.10 (6 / 83) | 0.100 (30) | 0.144 (18) |
+| `t2_mad_g2_i8` | $2 \times 8$ ($34 \times 38$) | **0.09x** | 0.16 | 1.81 | 0.69x | 0.13 (1 / 26) | 1.77 (0 / 0) | 0.103 (33) | 0.148 (21) |
+| `t2_mad_g3_i9` | $3 \times 9$ ($54 \times 54$) | **0.07x** | 0.17 | 2.57 | 0.87x | 0.13 (1 / 40) | 2.52 (0 / 0) | 0.247 (58) | 0.283 (40) |
+| `t2_mad_g4_i12` | $4 \times 12$ ($84 \times 72$) | **0.11x** | 0.41 | 3.32 | 0.88x | 0.32 (1 / 51) | 3.24 (0 / 0) | 0.364 (80) | 0.412 (63) |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ ($34 \times 38$) | **0.25x** | 3.52 | 16.86 | 0.99x | 3.45 (43 / 437) | 16.81 (12 / 216) | 0.155 (38) | 0.156 (24) |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ ($54 \times 54$) | **0.24x** | 16.45 | 90.37 | 0.99x | 16.38 (201 / 2102) | 90.31 (198 / 1300) | 0.279 (65) | 0.281 (54) |
+| `t3_mad_g5_i20` | $5 \times 20$ ($145 \times 95$) | **0.07x** | 0.55 | 8.19 | 1.04x | 0.43 (1 / 75) | 8.06 (0 / 0) | 0.655 (91) | 0.627 (94) |
+| `t3_mad_g6_i30` | $6 \times 30$ ($234 \times 120$) | **0.15x** | 1.01 | 7.42 | 1.53x | 0.83 (1 / 98) | 7.22 (0 / 0) | 1.602 (244) | 1.044 (149) |
+| `t3_mad_g10_i100` | $10 \times 100$ ($1090 \times 250$) | **0.29x** | 8.44 | 35.87 | 0.74x | 7.38 (2 / 364) | 35.07 (0 / 0) | 2.673 (224) | 3.610 (319) |
+| `t3_mad_g4_i1000` | $4 \times 1000$ ($4036 \times 1060$) | **0.17x** | 34.20 | 276.89 | 1.60x | 30.52 (1 / 2439) | 273.32 (0 / 0) | 56.410 (1900) | 35.168 (3128) |
+<!-- END GENERATED:MAD_CBC_GAP_TABLE -->
+
+1. **Small-to-Medium Planted-Gap MAD (`t1_mad_g2_i4` through `t3_mad_g5_i20`)**: Every structured `t*_mad_g*` instance has a zero root LP gap by design (`RootLPBound == OptimalObj`). Pure-Go closes those models at node 1 through presolve orbit fixing and root heuristics (`tryPropagatedRounding`, `tryRootSubMIP`, and `tryFractionalDiving` in [`heuristics.go`](../heuristics.go)) without C++ `CbcModel` and `CglPreProcess` setup costs.
+2. **Large Planted-Gap MAD (`t3_mad_g6_i30`, `t3_mad_g10_i100`, `t3_mad_g4_i1000`)**: Pure-Go `Go Solve` closes these models at the root (exact node counts and solve times appear in the generated table above) because [`Presolve`](../presolve.go) verifies the $S_G$ group-permutation automorphism (`applyOrbitSymmetryBreaking`), fixes the $G \times G$ designated-item bijection to $I_G$, and eliminates $G^2$ binary variables and $2G$ assignment equations before the root LP runs, while [`FTRANSparseHint`](../lu.go) and [`BTRANSparseHint`](../lu.go) restrict basis triangular sweeps to active index windows. On the unpresolved `Root LP` column:
+   - **Equality Crash Basis (`t3_mad_g10_i100`)**: [`crashEqualityBasis`](../simplex.go) builds a lower-triangular, dual-feasible equality basis with analytical DSE weights.
+   - **Dense-Row Coupling and Forrest-Tomlin Updates (`t3_mad_g4_i1000`)**: On 1,000-row bases, [`crashEqualityBasis`](../simplex.go) skips columns incident to coupling rows wider than 128 nonzeros so BFRT bound flips retain sparse unit slacks, while [`lu.go`](../lu.go) performs in-place mutated-$U$ Forrest-Tomlin updates (`PushEtaSparse`) inside pre-allocated headroom arenas up to `maxEtaUpdates = 56`.
+3. **Symmetric Random-Weight MAD (`t1_mad_rand_g2_i4`, `t2_mad_rand_g2_i8`, `t2_mad_rand_g3_i9`)**: Assigning dense random weights (`BuildMADRandom`) removes the zero-gap structure and forces Branch-and-Cut to prove optimality. In these models, [`Presolve`](../presolve.go) verifies exact $S_G$ group symmetry and fixes the $G \times G$ designated-item bijection to $I_G$, [`bab.go`](../bab.go) exits after round 1 when root cuts yield zero bound gain and purges slack root cuts via [`PurgeSlackCuts`](../simplex.go), and [`tryRootSubMIP`](../heuristics.go) enforces a 50% RINS integer-fixing gate on zero-cut roots. Comparing `CP7 Full` against `CP5 +Presolve` (`Presolve=on, Cuts=off, Heuristics=off`) in [Section 3](#mad-solver-core-checkpoint-progression) isolates the effect of cutting planes and primal heuristics on random-weight MAD search.
+
+### 9.2 Non-MAD Corpus Comparison, Dispersion, and Checkpoint Trade-Offs
+
+Across the non-MAD families, multi-row MIR cut aggregation (`separateAggregatedMIRCuts`), bound-cutoff strong-branching domain reductions (`selectBranchVarCore`), and globally valid in-tree cuts (`generateInTreeCutRound`) accelerate Branch-and-Cut convergence, while the generated `Go Total Mean +- SD` and `CBC Total Mean +- SD` columns capture seed-to-seed variance (for example outlier seeds in `t2_binpack_44`):
+
+<!-- BEGIN GENERATED:NON_MAD_CBC_GAP_TABLE -->
+| Problem ID | $N \times M$ | Paired `Go / CBC` | Go Total Mean $\pm$ SD (ms) | CBC Total Mean $\pm$ SD (ms) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP5 +Presolve (ms / nodes) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `t3_mkp_200` | $200 \times 8$ | **0.49x** | $21.63 \pm 13.45$ | $40.01 \pm 18.88$ | 18.30 (250 / 2447) | 49.03 (154 / 1145) | 81.17 (1135 / 16) | 163.68 (5000, `NodeLimit`) |
+| `t2_mkp_50` | $50 \times 8$ | **0.35x** | $5.90 \pm 6.19$ | $12.50 \pm 9.17$ | 4.24 (1 / 19) | 8.76 (0 / 8) | 11.65 (2 / 4) | 4.77 (118) |
+| `t2_binpack_44` | $44 \times 14$ | **1.19x** | $22.14 \pm 41.75$ | $6.69 \pm 2.15$ | 11.73 (274 / 1988) | 6.22 (0 / 8) | 13.91 (298 / 12) | 8.27 (772) |
+| `t3_cflp_300` | $300 \times 34$ | **0.15x** | $10.66 \pm 7.39$ | $55.13 \pm 11.82$ | 9.24 (1 / 105) | 50.10 (18 / 483) | 18.82 (54 / 34) | 8.55 (116) |
+| `t3_lotsizing_504` | $504 \times 336$ | **0.55x** | $55.64 \pm 34.85$ | $92.90 \pm 57.41$ | 62.70 (2 / 1061) | 71.64 (10 / 377) | 79.83 (376 / 206) | 250.03 (3651, `TimeLimit`) |
+| `t3_sched_1000` | $1000 \times 100$ | **0.12x** | $8.22 \pm 4.30$ | $61.22 \pm 4.57$ | 6.56 (31 / 474) | 59.55 (0 / 76) | 19.96 (87 / 53) | 250.03 (2570, `TimeLimit`) |
+<!-- END GENERATED:NON_MAD_CBC_GAP_TABLE -->
+
+---
+
+## 10. Reproducing Benchmarks and Syncing Documentation
+
+Run all commands from the `goblin/` repository root on a quiet host so that all eight telemetry files record uniform `git_commit`, `source_fingerprint`, and `uname_release`:
+
+```bash
+# 0. Build the vendored COIN-OR CBC/CLP C++ stack with -DNDEBUG into third_party/Cbc/dist (once per checkout)
+./scripts/build_cbc.sh
+
+# 1. Unit, regression, 293-trial CBC parity, 21-instance public suite, and documentation gates
+go test ./...
+GOEXPERIMENT=simd go test ./...
+go test -tags=cbc ./...
+
+# 2. Regenerate the deduplicated 31-family PuLP JSON and multi-trial JSONL corpus in testdata/corpus/
+go run ./cmd/goblin-bench -generate-corpus
+
+# 3. Commit code changes first so every telemetry file records clean git provenance.
+git status --short   # must be empty for git_dirty=false provenance
+
+# 4. Warm-state Python PuLP + COIN-OR CBC (c1c171ec) baseline, pinned to one performance core
+CBC_BIN=./third_party/Cbc/dist/bin/cbc taskset -c 2 python3 bench/python_baseline.py --corpus-dir testdata/corpus --out-json bench/results/python_baseline.json --workers 1
+
+# 5. Warm-state goblin benchmarks across separate Default, GOEXPERIMENT=simd, and C++ CBC builds, pinned to CPU 2
+go build -o /tmp/goblin-bench-default ./cmd/goblin-bench
+GOEXPERIMENT=simd go build -o /tmp/goblin-bench-simd ./cmd/goblin-bench
+go build -tags=cbc -o /tmp/goblin-bench-cbc ./cmd/goblin-bench
+taskset -c 2 /tmp/goblin-bench-default -backend go -workers 1 -out bench/results/goblin_scalar.json
+taskset -c 2 /tmp/goblin-bench-simd -backend go -workers 1 -out bench/results/goblin_simd.json
+taskset -c 2 /tmp/goblin-bench-cbc -backend cbc -workers 1 -out bench/results/goblin_cbc.json
+
+# 6. Warm-state SciPy and goblin/assign LSAP benchmarks across separate Default & SIMD builds, pinned to CPU 2
+taskset -c 2 python3 bench/scipy_assign_baseline.py --corpus-dir testdata/assign_corpus --out-json bench/results/scipy_assign_baseline.json
+taskset -c 2 /tmp/goblin-bench-default -assign -out bench/results/goblin_assign_scalar.json
+taskset -c 2 /tmp/goblin-bench-simd -assign -out bench/results/goblin_assign_simd.json
+taskset -c 2 /tmp/goblin-bench-default -binary-size -out bench/results/goblin_binary_size.json
+rm -f /tmp/goblin-bench-default /tmp/goblin-bench-simd /tmp/goblin-bench-cbc
+
+# 7. Render README.md, docs/benchmarks.md, and bench/results/final_report.md from the telemetry
+go run ./cmd/goblin-bench -sync-docs
+
+# 8. Verify documentation, parity, symbol identifiers, and provenance (exits non-zero on any failure)
+go run ./cmd/goblin-bench -check-docs
+
+# 9. Differential tests against CBC and SciPy on freshly generated random instances
+python3 bench/difftest_cbc.py --instances 400 --seed 1
+python3 bench/difftest_assign.py --instances 500 --seed 1
+
+# 10. Hot-path compiler, disassembly, and Amdahl's Law profile audit (scalar and SIMD)
+go run ./cmd/goblin-optcheck -benchtime=200ms
+go run ./cmd/goblin-optcheck -simd -benchtime=200ms
+
+# 11. Lean 4 Prove Lane build (75 jobs), arm64 + amd64 ELF verification, CLI/JSONL checks, and 19 formal Fuzz corpora
+./scripts/verify_formal.sh
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_elf_track5.py --verify
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_amd64_track5e.py --verify
+```
+
+Running `go test ./...` also executes `TestDocumentationAndBenchmarkSync`, which validates corpus dimensions, parity, symbol identifiers, provenance, and every generated block across `README.md`, `docs/benchmarks.md`, and `bench/results/final_report.md`.

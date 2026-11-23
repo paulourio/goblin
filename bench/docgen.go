@@ -917,12 +917,16 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 	switch blockName {
 	case "TIER_SUMMARY_TABLE":
 		renderTierSummaryTable(&b, cases, tb)
+	case "README_MILP_SUMMARY_TABLE":
+		renderReadmeMILPSummaryTable(&b, cases, tb)
 	case "SIMD_EFFECT_TABLE":
 		renderSIMDEffectTable(&b, cases, tb)
 	case "SIMD_SUMMARY":
 		renderSIMDSummary(&b, cases, tb)
 	case "MAD_PIPELINE_TABLE":
 		renderMADPipelineTable(&b, cases, tb)
+	case "README_MAD_SUMMARY_TABLE":
+		renderReadmeMADSummaryTable(&b, cases, tb)
 	case "MAD_CBC_GAP_TABLE":
 		renderMADCBCGapTable(&b, cases, tb)
 	case "NON_MAD_CBC_GAP_TABLE":
@@ -941,6 +945,8 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 		}
 	case "ASSIGN_TIER_SUMMARY_TABLE":
 		renderAssignTierSummaryTable(&b, tb)
+	case "README_ASSIGN_SUMMARY_TABLE":
+		renderReadmeAssignSummaryTable(&b, tb)
 	case "ASSIGN_PIPELINE_TABLE":
 		renderAssignPipelineTable(&b, tb)
 	case "ASSIGN_SIMD_SUMMARY":
@@ -956,6 +962,99 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 	}
 
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+type tierSummaryStats struct {
+	nFams      int
+	nInst      int
+	famGM      float64
+	famLo      float64
+	famHi      float64
+	pooledGM   float64
+	goSum      float64
+	goMedSum   float64
+	pySum      float64
+	pyMedSum   float64
+	medSp      float64
+	minSp      float64
+	maxSp      float64
+	cbcRatio   string
+	cbcSumText string
+}
+
+func summarizeTierSubset(cases []CorpusCase, filter func(CorpusCase) bool, tb *TelemetryBundle) tierSummaryStats {
+	var st tierSummaryStats
+	var famPyGo, famGoCBC, pyPaired, goPaired, instSpeedups []float64
+	var cbcSum, cbcMedSum float64
+	hasAllCBC := true
+	for _, c := range cases {
+		if !filter(c) {
+			continue
+		}
+		st.nFams++
+		py := tb.Python[c.ID]
+		sc := tb.Scalar[c.ID]
+		gbRes, hasCBC := tb.Goblin[c.ID]
+		if !hasCBC || len(gbRes.TTotalTrialsMS) == 0 {
+			hasAllCBC = false
+		}
+		st.pyMedSum += py.TTotalMedianMS
+		st.goMedSum += sc.TTotalMS
+		if hasCBC {
+			cbcMedSum += gbRes.TTotalMS
+		}
+		nInst := min(len(py.TTotalTrialsMS), len(sc.TTotalTrialsMS))
+		if nInst == 0 {
+			pyPaired = append(pyPaired, py.TTotalMedianMS)
+			goPaired = append(goPaired, sc.TTotalMS)
+			st.pySum += py.TTotalMedianMS
+			st.goSum += sc.TTotalMS
+			if sc.TTotalMS > 0 {
+				r := py.TTotalMedianMS / sc.TTotalMS
+				instSpeedups = append(instSpeedups, r)
+				famPyGo = append(famPyGo, r)
+			}
+			if hasCBC {
+				cbcSum += gbRes.TTotalMS
+				if gbRes.TTotalMS > 0 {
+					famGoCBC = append(famGoCBC, sc.TTotalMS/gbRes.TTotalMS)
+				}
+			}
+			continue
+		}
+		if fgm, _, _, _ := pairedRatio(py.TTotalTrialsMS[:nInst], sc.TTotalTrialsMS[:nInst]); !math.IsNaN(fgm) {
+			famPyGo = append(famPyGo, fgm)
+		}
+		if hasCBC && len(gbRes.TTotalTrialsMS) >= nInst {
+			if cgm, _, _, _ := pairedRatio(sc.TTotalTrialsMS[:nInst], gbRes.TTotalTrialsMS[:nInst]); !math.IsNaN(cgm) {
+				famGoCBC = append(famGoCBC, cgm)
+			}
+		}
+		for k := range nInst {
+			pt := py.TTotalTrialsMS[k]
+			gt := sc.TTotalTrialsMS[k]
+			pyPaired = append(pyPaired, pt)
+			goPaired = append(goPaired, gt)
+			st.pySum += pt
+			st.goSum += gt
+			if gt > 0 {
+				instSpeedups = append(instSpeedups, pt/gt)
+			}
+			if hasCBC && k < len(gbRes.TTotalTrialsMS) {
+				cbcSum += gbRes.TTotalTrialsMS[k]
+			}
+		}
+	}
+	st.famGM, st.famLo, st.famHi = familyClusteredRatio(famPyGo)
+	st.pooledGM, _, _, st.nInst = pairedRatio(pyPaired, goPaired)
+	st.medSp, st.minSp, st.maxSp = medianMinMax(instSpeedups)
+	st.cbcRatio, st.cbcSumText = "N/A", "N/A"
+	if hasAllCBC && len(famGoCBC) == st.nFams && len(famGoCBC) > 0 {
+		cbcGM, _, _ := familyClusteredRatio(famGoCBC)
+		st.cbcRatio = fmt.Sprintf("%.2fx", cbcGM)
+		st.cbcSumText = fmt.Sprintf("%.1f (%.1f)", cbcSum, cbcMedSum)
+	}
+	return st
 }
 
 func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
@@ -983,80 +1082,34 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 	b.WriteString("| Workload Subset | Families (Trials) | Equal-Family `Py / Go` GeoMean [Clustered 95% CI] | Pooled Trial `Py / Go` | Equal-Family `Go / CBC` | `Go` Trial (Med) Sum (ms) | `CBC` Trial (Med) Sum (ms) | `Py` Trial (Med) Sum (ms) | Per-Instance `Py / Go` Median [Min-Max] |\n")
 	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range groups {
-		var nFams int
-		var famPyGo, famGoCBC, pyPaired, goPaired, instSpeedups []float64
-		var goSum, cbcSum, pySum, goMedSum, cbcMedSum, pyMedSum float64
-		hasAllCBC := true
-		for _, c := range cases {
-			if !grp.filter(c) {
-				continue
-			}
-			nFams++
-			py := tb.Python[c.ID]
-			sc := tb.Scalar[c.ID]
-			gbRes, hasCBC := tb.Goblin[c.ID]
-			if !hasCBC || len(gbRes.TTotalTrialsMS) == 0 {
-				hasAllCBC = false
-			}
-			pyMedSum += py.TTotalMedianMS
-			goMedSum += sc.TTotalMS
-			if hasCBC {
-				cbcMedSum += gbRes.TTotalMS
-			}
-			nInst := min(len(py.TTotalTrialsMS), len(sc.TTotalTrialsMS))
-			if nInst == 0 {
-				pyPaired = append(pyPaired, py.TTotalMedianMS)
-				goPaired = append(goPaired, sc.TTotalMS)
-				pySum += py.TTotalMedianMS
-				goSum += sc.TTotalMS
-				if sc.TTotalMS > 0 {
-					r := py.TTotalMedianMS / sc.TTotalMS
-					instSpeedups = append(instSpeedups, r)
-					famPyGo = append(famPyGo, r)
-				}
-				if hasCBC {
-					cbcSum += gbRes.TTotalMS
-					if gbRes.TTotalMS > 0 {
-						famGoCBC = append(famGoCBC, sc.TTotalMS/gbRes.TTotalMS)
-					}
-				}
-				continue
-			}
-			if fgm, _, _, _ := pairedRatio(py.TTotalTrialsMS[:nInst], sc.TTotalTrialsMS[:nInst]); !math.IsNaN(fgm) {
-				famPyGo = append(famPyGo, fgm)
-			}
-			if hasCBC && len(gbRes.TTotalTrialsMS) >= nInst {
-				if cgm, _, _, _ := pairedRatio(sc.TTotalTrialsMS[:nInst], gbRes.TTotalTrialsMS[:nInst]); !math.IsNaN(cgm) {
-					famGoCBC = append(famGoCBC, cgm)
-				}
-			}
-			for k := range nInst {
-				pt := py.TTotalTrialsMS[k]
-				gt := sc.TTotalTrialsMS[k]
-				pyPaired = append(pyPaired, pt)
-				goPaired = append(goPaired, gt)
-				pySum += pt
-				goSum += gt
-				if gt > 0 {
-					instSpeedups = append(instSpeedups, pt/gt)
-				}
-				if hasCBC && k < len(gbRes.TTotalTrialsMS) {
-					cbcSum += gbRes.TTotalTrialsMS[k]
-				}
-			}
-		}
-		famGM, famLo, famHi := familyClusteredRatio(famPyGo)
-		pooledGM, _, _, nInst := pairedRatio(pyPaired, goPaired)
-		medSp, minSp, maxSp := medianMinMax(instSpeedups)
-		cbcRatioStr, cbcSumStr := "N/A", "N/A"
-		if hasAllCBC && len(famGoCBC) == nFams && len(famGoCBC) > 0 {
-			cbcGM, _, _ := familyClusteredRatio(famGoCBC)
-			cbcRatioStr = fmt.Sprintf("%.2fx", cbcGM)
-			cbcSumStr = fmt.Sprintf("%.1f (%.1f)", cbcSum, cbcMedSum)
-		}
+		st := summarizeTierSubset(cases, grp.filter, tb)
 		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | %.2fx | %s | %.1f (%.1f) | %s | %.1f (%.1f) | %.2fx [%.2fx-%.2fx] |\n",
-			grp.label, nFams, nInst, famGM, famLo, famHi, pooledGM, cbcRatioStr,
-			goSum, goMedSum, cbcSumStr, pySum, pyMedSum, medSp, minSp, maxSp)
+			grp.label, st.nFams, st.nInst, st.famGM, st.famLo, st.famHi, st.pooledGM, st.cbcRatio,
+			st.goSum, st.goMedSum, st.cbcSumText, st.pySum, st.pyMedSum, st.medSp, st.minSp, st.maxSp)
+	}
+}
+
+func renderReadmeMILPSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	type groupSpec struct {
+		label  string
+		filter func(c CorpusCase) bool
+	}
+	groups := []groupSpec{
+		{"Tier 1: Micro-models (`N <= 26`, spawn-dominated)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
+		{"Tier 2: Medium MILPs (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
+		{"Tier 3: Large MILPs (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
+		{"**Tier 2+3 non-planted MILPs (solver-dominated)**", func(c CorpusCase) bool {
+			return c.Tier != "tier1_canonical" && !isPlantedMAD(c.ID)
+		}},
+		{"All 31 synthetic families", func(_ CorpusCase) bool { return true }},
+	}
+
+	b.WriteString("| Workload | Families (Trials) | Go Sum (ms) | Python Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, grp := range groups {
+		st := summarizeTierSubset(cases, grp.filter, tb)
+		fmt.Fprintf(b, "| %s | %d (%d) | %.1f | %.1f | **%.2fx** [%.2fx-%.2fx] | %.2fx [%.2fx-%.2fx] |\n",
+			grp.label, st.nFams, st.nInst, st.goSum, st.pySum, st.famGM, st.famLo, st.famHi, st.medSp, st.minSp, st.maxSp)
 	}
 }
 
@@ -1144,6 +1197,26 @@ func renderMADPipelineTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 			goPrep, pyPrep,
 			sc.CP7Full.Objective,
 			parityCell(tb, c.ID))
+	}
+}
+
+func renderReadmeMADSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
+	b.WriteString("| Problem | $G \\times I$ | Trials | Go (ms) | Python (ms) | Speedup |\n")
+	b.WriteString("| :--- | :---: | ---: | ---: | ---: | ---: |\n")
+	for _, c := range cases {
+		g, i, _, ok := madDimensions(c.ID)
+		if !ok {
+			continue
+		}
+		py := tb.Python[c.ID]
+		sc := tb.Scalar[c.ID]
+		nTrials := py.Trials
+		if nTrials <= 0 {
+			nTrials = len(sc.TrialObjectives)
+		}
+		gm, _, _ := familyTrialRatioRange(py, sc)
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | %d | %.2f | %.2f | **%.1fx** |\n",
+			c.ID, g, i, nTrials, sc.TTotalMS, py.TTotalMedianMS, gm)
 	}
 }
 
@@ -1316,6 +1389,62 @@ func renderProvenance(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) 
 	return nil
 }
 
+type assignTierSummaryStats struct {
+	nFams         int
+	nInst         int
+	famSolveGM    float64
+	famSolveLo    float64
+	famSolveHi    float64
+	pooledSolveGM float64
+	famTotGM      float64
+	goSolveSum    float64
+	goSolveMedSum float64
+	spSolveSum    float64
+	spSolveMedSum float64
+	medSp         float64
+	minSp         float64
+	maxSp         float64
+}
+
+func summarizeAssignTierSubset(assignCases []AssignCorpusCase, filter func(AssignCorpusCase) bool, tb *TelemetryBundle) assignTierSummaryStats {
+	var st assignTierSummaryStats
+	var famSolveGMs, famTotGMs, spSolvePaired, goSolvePaired, solveSpeedups []float64
+	for _, ac := range assignCases {
+		if !filter(ac) {
+			continue
+		}
+		st.nFams++
+		sp := tb.SciPyAssign[ac.ID]
+		sc := tb.AssignScalar[ac.ID]
+		st.goSolveMedSum += sc.TSolveMS
+		st.spSolveMedSum += sp.TSolveMedianMS
+		nInst := min(len(sp.TSolveTrialsMS), len(sc.TSolveTrialsMS))
+		if fgm, _, _, _ := pairedRatio(sp.TSolveTrialsMS[:nInst], sc.TSolveTrialsMS[:nInst]); !math.IsNaN(fgm) {
+			famSolveGMs = append(famSolveGMs, fgm)
+		}
+		for k := range nInst {
+			ss := sp.TSolveTrialsMS[k]
+			gs := sc.TSolveTrialsMS[k]
+			spSolvePaired = append(spSolvePaired, ss)
+			goSolvePaired = append(goSolvePaired, gs)
+			st.goSolveSum += gs
+			st.spSolveSum += ss
+			if gs > 0 {
+				solveSpeedups = append(solveSpeedups, ss/gs)
+			}
+		}
+		nTot := min(len(sp.TTotalTrialsMS), len(sc.TTotalTrialsMS))
+		if tgm, _, _, _ := pairedRatio(sp.TTotalTrialsMS[:nTot], sc.TTotalTrialsMS[:nTot]); !math.IsNaN(tgm) {
+			famTotGMs = append(famTotGMs, tgm)
+		}
+	}
+	st.famSolveGM, st.famSolveLo, st.famSolveHi = familyClusteredRatio(famSolveGMs)
+	st.pooledSolveGM, _, _, st.nInst = pairedRatio(spSolvePaired, goSolvePaired)
+	st.famTotGM, _, _ = familyClusteredRatio(famTotGMs)
+	st.medSp, st.minSp, st.maxSp = medianMinMax(solveSpeedups)
+	return st
+}
+
 func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	assignCases := BuildAssignCorpus()
 	type assignGroupSpec struct {
@@ -1337,48 +1466,38 @@ func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	b.WriteString("| Workload Subset | Families (Trials) | Equal-Family `SciPy Solve / goblin` GeoMean [Clustered 95% CI] | Pooled Trial `SciPy Solve / goblin` | Equal-Family `SciPy Total / goblin` | `goblin` Solve Trial (Med) Sum (ms) | SciPy Solve Trial (Med) Sum (ms) | Per-Instance `SciPy Solve / goblin` Median [Min-Max] |\n")
 	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range groups {
-		var nFams int
-		var famSolveGMs, famTotGMs, spSolvePaired, goSolvePaired, solveSpeedups []float64
-		var goSolveSum, spSolveSum, goSolveMedSum, spSolveMedSum float64
-		for _, ac := range assignCases {
-			if !grp.filter(ac) {
-				continue
-			}
-			nFams++
-			sp := tb.SciPyAssign[ac.ID]
-			sc := tb.AssignScalar[ac.ID]
-			goSolveMedSum += sc.TSolveMS
-			spSolveMedSum += sp.TSolveMedianMS
-			nInst := min(len(sp.TSolveTrialsMS), len(sc.TSolveTrialsMS))
-			if fgm, _, _, _ := pairedRatio(sp.TSolveTrialsMS[:nInst], sc.TSolveTrialsMS[:nInst]); !math.IsNaN(fgm) {
-				famSolveGMs = append(famSolveGMs, fgm)
-			}
-			for k := range nInst {
-				ss := sp.TSolveTrialsMS[k]
-				gs := sc.TSolveTrialsMS[k]
-				spSolvePaired = append(spSolvePaired, ss)
-				goSolvePaired = append(goSolvePaired, gs)
-				goSolveSum += gs
-				spSolveSum += ss
-				if gs > 0 {
-					solveSpeedups = append(solveSpeedups, ss/gs)
-				}
-			}
-			nTot := min(len(sp.TTotalTrialsMS), len(sc.TTotalTrialsMS))
-			if tgm, _, _, _ := pairedRatio(sp.TTotalTrialsMS[:nTot], sc.TTotalTrialsMS[:nTot]); !math.IsNaN(tgm) {
-				famTotGMs = append(famTotGMs, tgm)
-			}
-		}
-		famSolveGM, famSolveLo, famSolveHi := familyClusteredRatio(famSolveGMs)
-		pooledSolveGM, _, _, nInst := pairedRatio(spSolvePaired, goSolvePaired)
-		famTotGM, _, _ := familyClusteredRatio(famTotGMs)
-		medSp, minSp, maxSp := medianMinMax(solveSpeedups)
+		st := summarizeAssignTierSubset(assignCases, grp.filter, tb)
 		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | %.2fx | %.2fx | %s (%s) | %s (%s) | %.2fx [%.2fx-%.2fx] |\n",
-			grp.label, nFams, nInst,
-			famSolveGM, famSolveLo, famSolveHi, pooledSolveGM, famTotGM,
-			formatAssignMS(goSolveSum), formatAssignMS(goSolveMedSum),
-			formatAssignMS(spSolveSum), formatAssignMS(spSolveMedSum),
-			medSp, minSp, maxSp)
+			grp.label, st.nFams, st.nInst,
+			st.famSolveGM, st.famSolveLo, st.famSolveHi, st.pooledSolveGM, st.famTotGM,
+			formatAssignMS(st.goSolveSum), formatAssignMS(st.goSolveMedSum),
+			formatAssignMS(st.spSolveSum), formatAssignMS(st.spSolveMedSum),
+			st.medSp, st.minSp, st.maxSp)
+	}
+}
+
+func renderReadmeAssignSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
+	assignCases := BuildAssignCorpus()
+	type assignGroupSpec struct {
+		label  string
+		filter func(c AssignCorpusCase) bool
+	}
+	groups := []assignGroupSpec{
+		{"Tier 1: Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
+		{"Tier 2: Medium (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
+		{"Tier 3: Large (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
+		{"**All 22 synthetic LSAP families**", func(_ AssignCorpusCase) bool { return true }},
+	}
+
+	b.WriteString("| Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, grp := range groups {
+		st := summarizeAssignTierSubset(assignCases, grp.filter, tb)
+		fmt.Fprintf(b, "| %s | %d (%d) | %s | %s | **%.2fx** [%.2fx-%.2fx] | %.2fx [%.2fx-%.2fx] |\n",
+			grp.label, st.nFams, st.nInst,
+			formatAssignMS(st.goSolveSum), formatAssignMS(st.spSolveSum),
+			st.famSolveGM, st.famSolveLo, st.famSolveHi,
+			st.medSp, st.minSp, st.maxSp)
 	}
 }
 
