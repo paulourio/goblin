@@ -4,7 +4,7 @@ The `goblin` module is a pure-Go solver for Linear Programming (LP), Mixed-Integ
 
 - **Pure Go by default**: Compiles cleanly with `CGO_ENABLED=0` and reuses pooled memory workspaces across solves. No subprocess launches or temporary files sit between your application and the solver.
 - **Two focused packages**: General LP and MILP modeling lives in the root package (`gb`), while dense and sparse bipartite assignment matrices run directly through [`goblin/assign`](assign/assign.go).
-- **Opt-in exact verification**: Passing `gb.WithCertified(true)` or `assign.WithCertified(true)` validates results in exact rational arithmetic before returning. Unused certification code disappears completely at link time.
+- **Opt-in exact verification**: Passing `gb.WithCertified(true)` or `assign.WithCertified(true)` validates results in-process using pure-Go exact `*big.Rat` and `dyadic2304` checkers before returning (Lean is never invoked at runtime). Unused certification code disappears completely at link time.
 - **Optional COIN-OR CBC backend**: Need to compare against or delegate to C++ COIN-OR CBC/CLP? Build with `-tags cbc` and pass `gb.WithCBC()` to invoke CBC in process.
 
 ---
@@ -111,7 +111,7 @@ Every table below renders automatically from canonical JSON telemetry in `bench/
 
 ### LP and MILP Overview
 
-Keep two corpus properties in mind when reading LP and MILP speedups. First, Tier 1 micro-models are dominated by Python's CBC subprocess startup cost. Second, planted-gap MAD models have a zero root LP gap by construction and close without branching. The bold `Tier 2+3 non-planted MILPs` row excludes both groups to isolate solver-dominated branching workloads. Columns report cumulative end-to-end wall time (`JSON -> solution`) summed across all randomized trials in each subset alongside equal-family geometric-mean speedup (`Python / Go`):
+Keep two corpus properties in mind when reading LP and MILP speedups against the Python `PuLP + cbc` subprocess baseline. First, 10 Tier 1 micro-models are dominated by Python's CBC subprocess startup cost. Second, 8 of the 31 synthetic families are planted-gap MAD models with a zero root LP gap by construction that close without branching. The bold `Tier 2+3 non-planted MILPs` row excludes both groups to isolate solver-dominated branching workloads, while Section 9 of [Benchmark Methodology and Corpus Results](docs/benchmarks.md#9-pure-go-vs-in-process-cpp-cbc-performance-analysis) compares pure-Go directly against in-process `BackendCBC`. Columns report cumulative end-to-end wall time (`JSON -> solution`) summed across all randomized trials in each subset alongside equal-family geometric-mean speedup (`Python / Go`):
 
 <!-- BEGIN GENERATED:README_MILP_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | Python Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
@@ -170,23 +170,24 @@ Optimization solvers balance numerical speed against mathematical certainty. The
 
 ### Default Solver Guarantees
 
-- **Verified parity**: Automated tests check status, objective, and feasibility parity across 293 synthetic LP/MILP trials, 20 held-out public Netlib LP and MIPLIB 3.0 MILP instances, and 200 LSAP trials, complemented by differential fuzzing against CBC and SciPy.
-- **Fail-safe resource limits**: Stopping early on `WithTimeLimit`, `WithMaxNodes`, or `WithMaxIter` returns a valid global `BestBound` once the root LP solves, alongside the best feasible solution (incumbent) found. Unresolved nodes never vanish silently.
+- **Verified parity**: Automated tests check status, objective, and feasibility parity across 31 synthetic LP/MILP families (293 trials, including 8 planted-gap MAD families and 10 spawn-dominated micro-models) against Python `PuLP + cbc` subprocess execution and in-process `BackendCBC`, 14 held-out Netlib LPs and 6 MIPLIB 3.0 MIPs solved to optimality plus a 25-node cuts/heuristics-off dual-bound check on `coinor_capplan1` (`21` fixtures in [`testdata/public/manifest.json`](testdata/public/manifest.json)), and 22 synthetic LSAP families (200 trials) against SciPy, complemented by differential fuzzing against CBC and SciPy.
+- **Fail-safe resource limits**: Stopping early on `WithTimeLimit`, `WithMaxNodes`, or `WithMaxIter` returns a valid global `BestBound` once the root LP solves, alongside the best feasible solution (incumbent) found; pre-root or unestablished limit exits return `-Inf` (`Minimize`) or `+Inf` (`Maximize`) in `BestBound`. Unresolved nodes never vanish silently.
 
 ### Opt-In Exact Certification
 
-- **Fail-closed rational checking**: Passing `gb.WithCertified(true)` or `assign.WithCertified(true)` validates optimality (zero rational gap by default), infeasibility, unboundedness, or dual bounds in exact rational arithmetic directly against your original problem. If an exact witness cannot be built or verified, the solver clears unsafe outputs and returns `ErrCertificationFailed`.
+- **Fail-closed rational checking**: Passing `gb.WithCertified(true)` or `assign.WithCertified(true)` runs pure-Go `*big.Rat` or `dyadic2304` checkers in-process at runtime (Lean is never invoked or linked at runtime), validating optimality (zero rational gap by default), outward-rounded `BestBound` values, infeasibility, unboundedness, or dual bounds directly against your unmerged original `Model` terms and constants (tightening pure-integer rows with sub-unit fractional right-hand-side residuals at compile time, while mismatched `Dot` slice lengths return a deferred validation error). If an exact witness cannot be built or verified, the solver clears unsafe outputs and returns `ErrCertificationFailed`. Equivalence with the standalone Lean 4 CLI verifiers is validated offline and under `GOBLIN_FORMAL=1`.
 - **Zero binary tax when unused**: Functional option hooks keep verification, proof tracing, and JSON formatting decoupled from the default solve path. Go's linker strips all certification and proof-tracing symbols out of binaries that do not call those options (see [Production Binary Footprint](docs/benchmarks.md#8-production-binary-footprint-and-linker-dead-code-elimination)).
 
 ### Lean 4 Proofs and Honest Scope Boundaries
 
-An isolated Lean 4 workspace ([`formal/`](formal/lakefile.toml)) with zero external dependencies and zero `sorry` or custom axioms provides machine-checked proofs for the certificate checkers, abstract algebraic presolve and cutting-plane rules, and compiled `arm64`/`amd64` zero-allocation kernels.
+An isolated offline Lean 4 workspace ([`formal/`](formal/lakefile.toml)) with zero external dependencies and zero `sorry` or custom axioms proves soundness for the standalone CLI certificate checkers, abstract algebraic presolve and cutting-plane rules, and compiled `arm64`/`amd64` zero-allocation kernels, validated against Go offline via `scripts/verify_formal.sh` and `GOBLIN_FORMAL=1` differential fuzzing (while `scripts/pre-commit.sh` runs `lake build`, Track 5 ELF verification, and `-short` `TestFormal*` tests when `lake` is present, and plain `go test ./...` skips Lean subprocess checks).
 
 Several parts of the system stay outside formal proof scope by design:
 
-- **Default uncertified solves** execute floating-point Go code without source-to-Lean lifting.
+- **Default uncertified solves** execute floating-point Go code without source-to-Lean lifting, and runtime `WithCertified(true)` runs pure-Go rational checkers rather than Lean executables.
 - **Out-of-scope internals**: Sparse Markowitz `LU` factorization, Forrest-Tomlin updates, simplex termination, parallel search (`WithWorkers > 1`), the Go runtime and garbage collector, and the optional C++ CBC backend are not formally proven.
-- **Soundness over completeness**: Certified mode guarantees that accepted results are mathematically valid over exact rationals. Severely ill-conditioned instances can still fail closed instead of producing a witness.
+- **Track 5 binary proof boundaries**: Machine-code proofs check against hand-authored Lean ARM64 and x86-64 ISA decoders/operational models (part of the trusted computing base). All `14` ARM64 routines target `arm64` ELFs (not `amd64`), with `4` Track 5A helpers and `3` Track 5D leaf helpers proved standalone under `-gcflags=-l` whereas production builds inline them; `Zero-GC` checks direct calls against a minimal allow-list (`allowedZeroGCSyms`) including stack-split prologues (`runtime.morestack*`) and non-blocking cancel polls (`runtime.selectnbrecv`); panic-bounds proofs give unconditional unreachability only on zero-`panicBounds` ARM64 routines while routines retaining slice-entry guards prove structural CFG guard mediation (`checkPanicBoundsReachability_run_safe`); and Track 5E AVX2/AVX-512 cross-ISA proofs for `allAbsLE64` and `initReducedRow64` cover the `n % 8 == 0` vector body (outer Go wrappers handle scalar tails and `-0.0 -> +0.0` normalization, while `minNoNaN64` covers its scalar tail inline).
+- **Soundness over completeness**: Certified mode guarantees that accepted results are mathematically valid over exact rationals against the caller's original model, including continuous-variable vertex polishing and 1-ULP presolve-bound repair on mixed-integer traces. Severely ill-conditioned instances can still fail closed instead of producing a witness.
 
 Read [Formal Verification Architecture](docs/formal-verification.md#verification-strength-and-scope-boundaries) for the full five-track proof inventory, trusted computing base, soundness bug ledger, and Lean verification commands.
 
@@ -216,7 +217,7 @@ Full configuration flags and backend semantics are documented in [Solver Setting
 
 ## Development and Testing
 
-Run core test suites from the `goblin/` directory:
+Run core pure-Go test suites from the `goblin/` directory (`go test ./...` skips Lean subprocess checks unless `GOBLIN_FORMAL=1` is set):
 
 ```bash
 go test ./...
@@ -225,7 +226,7 @@ go test -tags=cbc ./...
 go run ./cmd/goblin-bench -check-docs
 ```
 
-Complete benchmark regeneration, telemetry sync, differential testing, and Lean 4 verification commands live in [Reproducing Benchmarks](docs/benchmarks.md#10-reproducing-benchmarks-and-syncing-documentation) and [Formal Verification Protocol](docs/formal-verification.md#5-verification-protocol).
+Running `./scripts/pre-commit.sh` adds `lake build --wfail`, Track 5 ELF binary verification, and `GOBLIN_FORMAL=1 go test -short -run '^TestFormal' . ./assign` whenever `lake` is installed (emitting a warning if `lake` is absent unless `GOBLIN_STRICT_GATES=1`). Complete benchmark regeneration, telemetry sync, differential testing, and full Lean 4 verification commands (`./scripts/verify_formal.sh`) live in [Reproducing Benchmarks](docs/benchmarks.md#10-reproducing-benchmarks-and-syncing-documentation) and [Formal Verification Protocol](docs/formal-verification.md#5-verification-protocol).
 
 ---
 
