@@ -421,7 +421,7 @@ The 11 MAD corpus families ($N = G(I + T + 3)$ variables, $M = G(2T + 3) + I$ co
 
 ### 9.2 Non-MAD Corpus Comparison, Dispersion, and Checkpoint Trade-Offs
 
-Across the non-MAD families, multi-row MIR cut aggregation (`separateAggregatedMIRCuts`), bound-cutoff strong-branching domain reductions (`selectBranchVarCore`), and globally valid in-tree cuts (`generateInTreeCutRound`) accelerate Branch-and-Cut convergence, while the generated `Go Total Mean +- SD` and `CBC Total Mean +- SD` columns capture seed-to-seed variance (for example outlier seeds in `t2_binpack_44`):
+Across the non-MAD families, multi-row MIR cut aggregation (`separateAggregatedMIRCuts`), bound-cutoff strong-branching domain reductions (`selectBranchVar`), and globally valid in-tree cuts (`generateInTreeCutRound`) accelerate Branch-and-Cut convergence, while the generated `Go Total Mean +- SD` and `CBC Total Mean +- SD` columns capture seed-to-seed variance (for example outlier seeds in `t2_binpack_44`):
 
 <!-- BEGIN GENERATED:NON_MAD_CBC_GAP_TABLE -->
 | Problem ID | $N \times M$ | Paired `Go / CBC` | Go Total Mean $\pm$ SD (ms) | CBC Total Mean $\pm$ SD (ms) | Go CP7 Solve (ms / nodes / iters) | CBC Solve (ms / nodes / iters) | Go CP6 +Cuts (ms / nodes / cuts) | Go CP5 +Presolve (ms / nodes) |
@@ -487,7 +487,7 @@ python3 bench/difftest_assign.py --instances 500 --seed 1
 go run ./cmd/goblin-optcheck -benchtime=200ms
 go run ./cmd/goblin-optcheck -simd -benchtime=200ms
 
-# 11. Lean 4 Prove Lane build (75 jobs), arm64 + amd64 ELF verification, CLI/JSONL checks, and 19 formal Fuzz corpora
+# 11. Lean 4 Prove Lane build (78 jobs), arm64 + amd64 ELF verification, CLI/JSONL checks, and 19 formal Fuzz corpora
 ./scripts/verify_formal.sh
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_elf_track5.py --verify
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_amd64_track5e.py --verify
