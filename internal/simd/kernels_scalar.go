@@ -1,9 +1,10 @@
-//go:build !goexperiment.simd || !amd64
-
+// Package simd provides runtime-dispatched AVX-512 (512-bit) and AVX2/FMA (256-bit)
+// vector kernels via Go 1.27's simd/archsimd package, paired with pure-Go 4-way
+// unrolled scalar fallbacks when built without GOEXPERIMENT=simd, on CPUs lacking
+// AVX2+FMA, or when SIMD is disabled or capped at runtime.
 package simd
 
 import (
-	"fmt"
 	"math"
 	"sync/atomic"
 )
@@ -16,80 +17,42 @@ const (
 	TierAVX512 = "avx512"
 )
 
+const (
+	tierScalar uint32 = 0
+	tierAVX2   uint32 = 1
+	tierAVX512 uint32 = 2
+)
+
 var (
 	simdDisabled atomic.Bool
 	maxTierCap   atomic.Uint32
 )
 
-func init() {
-	maxTierCap.Store(2)
-}
-
-// HardwareSIMDAvailable returns false when compiled without GOEXPERIMENT=simd on amd64.
-func HardwareSIMDAvailable() bool { return false }
-
-// HardwareSIMDTier returns "scalar" when compiled without GOEXPERIMENT=simd on amd64.
-func HardwareSIMDTier() string { return TierScalar }
-
-// ActiveSIMDTier returns "scalar" when compiled without GOEXPERIMENT=simd on amd64.
-func ActiveSIMDTier() string { return TierScalar }
-
-// ActiveSIMDTierWith returns "scalar" when compiled without GOEXPERIMENT=simd on amd64.
-func ActiveSIMDTierWith(_ bool) string { return TierScalar }
-
-// SetMaxTier records the runtime SIMD tier ceiling (no-op on scalar-only builds).
-func SetMaxTier(tier string) error {
-	switch tier {
-	case "", "auto", TierAVX512:
-		maxTierCap.Store(2)
-	case TierAVX2:
-		maxTierCap.Store(1)
-	case TierScalar:
-		maxTierCap.Store(0)
-	default:
-		return fmt.Errorf("simd: unknown tier %q (expected auto, avx512, avx2, or scalar)", tier)
-	}
-	return nil
-}
-
-// MaxTier returns the configured runtime SIMD tier ceiling.
-func MaxTier() string {
-	switch maxTierCap.Load() {
-	case 2:
+func tierName(t uint32) string {
+	switch t {
+	case tierAVX512:
 		return TierAVX512
-	case 1:
+	case tierAVX2:
 		return TierAVX2
 	default:
 		return TierScalar
 	}
 }
 
-// SetDisabled toggles the process-wide SIMD disable flag.
-func SetDisabled(disabled bool) { simdDisabled.Store(disabled) }
+// MaxTier returns the configured runtime SIMD tier ceiling ("avx512", "avx2", or "scalar").
+func MaxTier() string { return tierName(maxTierCap.Load()) }
 
 // IsDisabled reports whether SIMD has been disabled via SetDisabled.
 func IsDisabled() bool { return simdDisabled.Load() }
 
-// UsingHardwareSIMD returns false when compiled without GOEXPERIMENT=simd on amd64.
-func UsingHardwareSIMD() bool { return false }
-
-// UsingHardwareSIMDWith reports whether hardware SIMD is active given a per-solve disable flag.
-func UsingHardwareSIMDWith(_ bool) bool { return false }
-
-// Dot64Scalar computes the dot product sum_i (a[i] * b[i]) using 4-way loop unrolling.
+// Dot64Scalar computes the dot product sum_i (a[i] * b[i]) using 4-way scalar loop unrolling.
 func Dot64Scalar(a, b []float64) float64 {
-	return Dot64(a, b)
-}
-
-// Dot64 computes the dot product sum_i (a[i] * b[i]) using 4-way loop unrolling.
-func Dot64(a, b []float64) float64 {
 	n := min(len(a), len(b))
 	if n == 0 {
 		return 0
 	}
 	a = a[:n]
 	b = b[:len(a)]
-
 	var s0, s1, s2, s3 float64
 	i := 0
 	for ; i <= len(a)-4; i += 4 {
@@ -107,11 +70,6 @@ func Dot64(a, b []float64) float64 {
 
 // Axpy64Scalar computes dst[i] += alpha * src[i] using 4-way scalar loop unrolling.
 func Axpy64Scalar(dst, src []float64, alpha float64) {
-	Axpy64(dst, src, alpha)
-}
-
-// Axpy64 computes dst[i] += alpha * src[i] using 4-way loop unrolling.
-func Axpy64(dst, src []float64, alpha float64) {
 	if alpha == 0 {
 		return
 	}
@@ -121,7 +79,6 @@ func Axpy64(dst, src []float64, alpha float64) {
 	}
 	dst = dst[:n]
 	src = src[:len(dst)]
-
 	i := 0
 	for ; i <= len(dst)-4; i += 4 {
 		p0 := float64(alpha * src[i])
@@ -144,11 +101,6 @@ func Axpy64(dst, src []float64, alpha float64) {
 
 // Scale64Scalar computes dst[i] *= alpha using 4-way scalar loop unrolling.
 func Scale64Scalar(dst []float64, alpha float64) {
-	Scale64(dst, alpha)
-}
-
-// Scale64 computes dst[i] *= alpha using 4-way loop unrolling.
-func Scale64(dst []float64, alpha float64) {
 	if len(dst) == 0 || alpha == 1 {
 		return
 	}
@@ -166,11 +118,6 @@ func Scale64(dst []float64, alpha float64) {
 
 // AbsMax64Scalar returns max_i |x[i]| using 4-way scalar loop unrolling.
 func AbsMax64Scalar(x []float64) float64 {
-	return AbsMax64(x)
-}
-
-// AbsMax64 returns max_i |x[i]|.
-func AbsMax64(x []float64) float64 {
 	var m0, m1, m2, m3 float64
 	i := 0
 	for ; i <= len(x)-4; i += 4 {
@@ -206,19 +153,8 @@ func AllAbsLE64Scalar(x []float64, limit float64) bool {
 	return true
 }
 
-// AllAbsLE64With reports whether every element x[i] satisfies |x[i]| <= limit.
-func AllAbsLE64With(x []float64, limit float64, _ bool) bool {
-	return AllAbsLE64Scalar(x, limit)
-}
-
 // RowActivityBoundsFiniteScalar computes minimum and maximum row activity using a scalar loop.
 func RowActivityBoundsFiniteScalar(row, lb, ub []float64) (minAct, maxAct float64) {
-	return RowActivityBoundsFinite(row, lb, ub)
-}
-
-// RowActivityBoundsFinite computes the minimum and maximum row activity
-// assuming all lb[j] and ub[j] are finite.
-func RowActivityBoundsFinite(row, lb, ub []float64) (minAct, maxAct float64) {
 	n := min(len(row), min(len(lb), len(ub)))
 	if n == 0 {
 		return 0, 0
@@ -262,77 +198,10 @@ func MinReducedSlice64Scalar(rowCost, v []float64) float64 {
 	return minRed
 }
 
-// MinReducedSlice64With returns min_j (rowCost[j] - v[j]) over 0 <= j < min(len(rowCost), len(v)).
-func MinReducedSlice64With(rowCost, v []float64, _ bool) float64 {
-	return MinReducedSlice64Scalar(rowCost, v)
-}
-
-// InitReducedRow64Scalar computes dst[j] = (costRow[j] - v[j]) - ui and returns min_j dst[j].
-func InitReducedRow64Scalar(dst, costRow, v []float64, ui float64) float64 {
-	return InitReducedRow64(dst, costRow, v, ui)
-}
-
-// InitReducedRow64With computes dst[j] = (costRow[j] - v[j]) - ui and returns min_j dst[j].
-func InitReducedRow64With(dst, costRow, v []float64, ui float64, _ bool) float64 {
-	return InitReducedRow64(dst, costRow, v, ui)
-}
-
-// InitReducedRow64 computes dst[j] = (costRow[j] - v[j]) - ui and returns min_j dst[j]
-// using 4-way scalar loop unrolling.
-func InitReducedRow64(dst, costRow, v []float64, ui float64) float64 {
-	n := min(len(dst), min(len(costRow), len(v)))
-	if n == 0 {
-		return math.Inf(1)
-	}
-	dSlice := dst[:n]
-	cSlice := costRow[:len(dSlice)]
-	vSlice := v[:len(dSlice)]
-
-	inf := math.Inf(1)
-	m0, m1, m2, m3 := inf, inf, inf, inf
-	i := 0
-	for ; i <= len(dSlice)-4; i += 4 {
-		d0 := (cSlice[i] - vSlice[i]) - ui
-		d1 := (cSlice[i+1] - vSlice[i+1]) - ui
-		d2 := (cSlice[i+2] - vSlice[i+2]) - ui
-		d3 := (cSlice[i+3] - vSlice[i+3]) - ui
-		dSlice[i] = d0
-		dSlice[i+1] = d1
-		dSlice[i+2] = d2
-		dSlice[i+3] = d3
-		m0 = min(m0, d0)
-		m1 = min(m1, d1)
-		m2 = min(m2, d2)
-		m3 = min(m3, d3)
-	}
-	minVal := min(min(m0, m1), min(m2, m3))
-	for ; i < len(dSlice); i++ {
-		d := (cSlice[i] - vSlice[i]) - ui
-		dSlice[i] = d
-		minVal = min(minVal, d)
-	}
-	if minVal == 0 {
-		minVal = 0
-	}
-	return minVal
-}
-
 // Min2ReducedRow64Scalar computes the smallest (u1, j1) and second-smallest (u2, j2)
-// values of costRow[j] - v[j] over 0 <= j < min(len(costRow), len(v)).
-func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
-	return Min2ReducedRow64(costRow, v)
-}
-
-// Min2ReducedRow64With computes the smallest (u1, j1) and second-smallest (u2, j2)
-// values of costRow[j] - v[j].
-func Min2ReducedRow64With(costRow, v []float64, _ bool) (u1, u2 float64, j1, j2 int) {
-	return Min2ReducedRow64(costRow, v)
-}
-
-// Min2ReducedRow64 computes the smallest (u1, j1) and second-smallest (u2, j2)
-// values of costRow[j] - v[j] using 4-way unrolled fast-filtering.
+// values of costRow[j] - v[j] using 4-way unrolled scalar fast-filtering.
 // Keep vSlice tied to len(cSlice) and the j <= len(cSlice)-4 bound so Go SSA prove eliminates loop BCE.
-func Min2ReducedRow64(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
+func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 	n := min(len(costRow), len(v))
 	u1, u2 = math.Inf(1), math.Inf(1)
 	j1, j2 = 0, -1
@@ -455,11 +324,6 @@ func SelectDualLeaveRow64Scalar(xb, basicLB, basicUB, basicTol, dse []float64) (
 	return leaveRow, leaveDir, primalInfeas
 }
 
-// SelectDualLeaveRow64With selects the dual steepest-edge leaving row.
-func SelectDualLeaveRow64With(xb, basicLB, basicUB, basicTol, dse []float64, _ bool) (leaveRow int, leaveDir, primalInfeas float64) {
-	return SelectDualLeaveRow64Scalar(xb, basicLB, basicUB, basicTol, dse)
-}
-
 // ScanDualRatioCand64Scalar scans 64-column structural chunks starting at (chunkPos, elemPos),
 // appending qualifying column indices (blocking ratio candidates, superbasic columns,
 // sub-tolerance pivots, or NaN entries) into dst until len(dst) is filled or chunks end.
@@ -548,17 +412,4 @@ func ScanDualRatioCand64Scalar[S ~uint8](
 		}
 	}
 	return cnt, len(chunks), 0
-}
-
-// ScanDualRatioCand64With scans 64-column structural chunks starting at (chunkPos, elemPos).
-func ScanDualRatioCand64With[S ~uint8](
-	tab, dj []float64,
-	status []S,
-	chunks []int,
-	chunkPos, elemPos int,
-	negLeaveDir, pivotTol, thetaGuard float64,
-	bland, _ bool,
-	dst []int,
-) (hitCount, nextChunk, nextElem int) {
-	return ScanDualRatioCand64Scalar(tab, dj, status, chunks, chunkPos, elemPos, negLeaveDir, pivotTol, thetaGuard, bland, dst)
 }

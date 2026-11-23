@@ -777,21 +777,6 @@ func parseDurationUnit(valStr, unit string) float64 {
 	return v
 }
 
-func parseSampleMS(tok string) float64 {
-	if tok == "." || tok == "" {
-		return 0
-	}
-	if v, ok := strings.CutSuffix(tok, "ms"); ok {
-		f, _ := strconv.ParseFloat(v, 64)
-		return f
-	}
-	if v, ok := strings.CutSuffix(tok, "s"); ok {
-		f, _ := strconv.ParseFloat(v, 64)
-		return f * 1000.0
-	}
-	return 0
-}
-
 func shortSymbolName(full string) string {
 	if _, after, ok := strings.CutLast(full, "/"); ok {
 		full = after
@@ -879,8 +864,8 @@ func collectHotLines(
 		if lm == nil {
 			continue
 		}
-		flatMS := parseSampleMS(lm[1])
-		cumMS := parseSampleMS(lm[2])
+		flatMS := parseSampleTokenMS(lm[1])
+		cumMS := parseSampleTokenMS(lm[2])
 		if flatMS == 0 && cumMS == 0 {
 			continue
 		}
@@ -1206,7 +1191,6 @@ type objdumpInsn struct {
 	addr string
 	op   string
 	args string
-	raw  string
 }
 
 func normalizeHexAddr(addr string) string {
@@ -1642,7 +1626,6 @@ func auditObjdumpVectorCFG(raw string) vectorAuditReport {
 				addr: normalizeHexAddr(im[1]),
 				op:   strings.ToLower(im[2]),
 				args: strings.TrimSpace(im[3]),
-				raw:  line,
 			})
 		}
 	}

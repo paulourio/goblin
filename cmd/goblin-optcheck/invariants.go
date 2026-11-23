@@ -85,18 +85,12 @@ func requiredNoinlineHelpers() []inlineExpectation {
 	}
 }
 
-func requiredBCEFreeLoops(useSIMD bool) []bceLoopTarget {
+func requiredBCEFreeLoops() []bceLoopTarget {
 	assignFile := filepath.Join("internal", "simd", "assign_scalar.go")
 	kernelsFile := filepath.Join("internal", "simd", "kernels_scalar.go")
-	min2Name := "Min2ReducedRow64"
-	if useSIMD && runtime.GOARCH == "amd64" {
-		assignFile = filepath.Join("internal", "simd", "assign_amd64.go")
-		kernelsFile = filepath.Join("internal", "simd", "kernels_amd64.go")
-		min2Name = "Min2ReducedRow64Scalar"
-	}
 	return []bceLoopTarget{
 		{file: kernelsFile, funcName: "AllAbsLE64Scalar"},
-		{file: kernelsFile, funcName: min2Name},
+		{file: kernelsFile, funcName: "Min2ReducedRow64Scalar"},
 		{file: assignFile, funcName: "RelaxRow64Scalar"},
 		{file: assignFile, funcName: "MinNoNaN64Scalar"},
 		{file: assignFile, funcName: "ValidateAndNegate64Scalar"},
@@ -267,7 +261,7 @@ func verifyStaticInvariants(repoRoot string, useSIMD bool, diags parsedCompilerD
 		}
 	}
 
-	for _, target := range requiredBCEFreeLoops(useSIMD) {
+	for _, target := range requiredBCEFreeLoops() {
 		spans, err := findUnrolledLoop4Spans(repoRoot, target.file, target.funcName)
 		if err != nil {
 			return err

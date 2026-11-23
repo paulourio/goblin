@@ -15,19 +15,7 @@ import (
 	"unsafe"
 )
 
-// SIMD tier identifiers reported by HardwareSIMDTier, ActiveSIMDTier, and MaxTier,
-// and accepted by SetMaxTier.
 const (
-	TierScalar = "scalar"
-	TierAVX2   = "avx2"
-	TierAVX512 = "avx512"
-)
-
-const (
-	tierScalar uint32 = 0
-	tierAVX2   uint32 = 1
-	tierAVX512 uint32 = 2
-
 	minAVX2Len               = 32
 	minAVX512Len             = 64
 	minAVX512LPLen           = 2048
@@ -39,12 +27,10 @@ const (
 )
 
 var (
-	hasAVX2FMA   = archsimd.X86.AVX2() && archsimd.X86.FMA()
-	hasAVX512    = hasAVX2FMA && archsimd.X86.AVX512()
-	hwTier       = detectHWTier()
-	simdDisabled atomic.Bool
-	maxTierCap   atomic.Uint32
-	activeTier   atomic.Uint32
+	hasAVX2FMA = archsimd.X86.AVX2() && archsimd.X86.FMA()
+	hasAVX512  = hasAVX2FMA && archsimd.X86.AVX512()
+	hwTier     = detectHWTier()
+	activeTier atomic.Uint32
 )
 
 func detectHWTier() uint32 {
@@ -69,17 +55,6 @@ func refreshActiveTier() {
 	}
 	t := min(hwTier, maxTierCap.Load())
 	activeTier.Store(t)
-}
-
-func tierName(t uint32) string {
-	switch t {
-	case tierAVX512:
-		return TierAVX512
-	case tierAVX2:
-		return TierAVX2
-	default:
-		return TierScalar
-	}
 }
 
 func currentTier(disable bool) uint32 {
@@ -121,17 +96,11 @@ func SetMaxTier(tier string) error {
 	return nil
 }
 
-// MaxTier returns the configured runtime SIMD tier ceiling ("avx512", "avx2", or "scalar").
-func MaxTier() string { return tierName(maxTierCap.Load()) }
-
 // SetDisabled toggles the process-wide SIMD disable flag.
 func SetDisabled(disabled bool) {
 	simdDisabled.Store(disabled)
 	refreshActiveTier()
 }
-
-// IsDisabled reports whether SIMD has been disabled via SetDisabled.
-func IsDisabled() bool { return simdDisabled.Load() }
 
 // UsingHardwareSIMD reports whether hardware SIMD kernels (AVX-512 or AVX2) are active.
 func UsingHardwareSIMD() bool { return activeTier.Load() > tierScalar }
@@ -143,29 +112,6 @@ func UsingHardwareSIMDWith(disable bool) bool { return currentTier(disable) > ti
 func orderedMask64x4(v archsimd.Float64x4) archsimd.Mask64x4 {
 	//nolint:gocritic // IEEE-754 self-equality emits a single VCMPEQPD to detect NaN lanes.
 	return v.Equal(v)
-}
-
-// Dot64Scalar computes the dot product sum_i (a[i] * b[i]) using 4-way scalar loop unrolling.
-func Dot64Scalar(a, b []float64) float64 {
-	n := min(len(a), len(b))
-	if n == 0 {
-		return 0
-	}
-	a = a[:n]
-	b = b[:len(a)]
-	var s0, s1, s2, s3 float64
-	i := 0
-	for ; i <= len(a)-4; i += 4 {
-		s0 += a[i] * b[i]
-		s1 += a[i+1] * b[i+1]
-		s2 += a[i+2] * b[i+2]
-		s3 += a[i+3] * b[i+3]
-	}
-	sum := (s0 + s1) + (s2 + s3)
-	for ; i < len(a); i++ {
-		sum += a[i] * b[i]
-	}
-	return sum
 }
 
 // Dot64 computes the dot product sum_i (a[i] * b[i]).
@@ -228,37 +174,6 @@ func dot64AVX2(a, b []float64) float64 {
 	return sum
 }
 
-// Axpy64Scalar computes dst[i] += alpha * src[i] using 4-way scalar loop unrolling.
-func Axpy64Scalar(dst, src []float64, alpha float64) {
-	if alpha == 0 {
-		return
-	}
-	n := min(len(dst), len(src))
-	if n == 0 {
-		return
-	}
-	dst = dst[:n]
-	src = src[:len(dst)]
-	i := 0
-	for ; i <= len(dst)-4; i += 4 {
-		p0 := float64(alpha * src[i])
-		p1 := float64(alpha * src[i+1])
-		p2 := float64(alpha * src[i+2])
-		p3 := float64(alpha * src[i+3])
-		d0 := dst[i] + p0
-		d1 := dst[i+1] + p1
-		d2 := dst[i+2] + p2
-		d3 := dst[i+3] + p3
-		dst[i] = d0
-		dst[i+1] = d1
-		dst[i+2] = d2
-		dst[i+3] = d3
-	}
-	for ; i < len(dst); i++ {
-		dst[i] += float64(alpha * src[i])
-	}
-}
-
 // Axpy64 computes dst[i] += alpha * src[i] using sign-symmetric separate Mul+Add.
 func Axpy64(dst, src []float64, alpha float64) {
 	tier := activeTier.Load()
@@ -319,23 +234,6 @@ func axpy64AVX2(dst, src []float64, alpha float64) {
 	archsimd.ClearAVXUpperBits()
 }
 
-// Scale64Scalar computes dst[i] *= alpha using 4-way scalar loop unrolling.
-func Scale64Scalar(dst []float64, alpha float64) {
-	if len(dst) == 0 || alpha == 1 {
-		return
-	}
-	i := 0
-	for ; i <= len(dst)-4; i += 4 {
-		dst[i] *= alpha
-		dst[i+1] *= alpha
-		dst[i+2] *= alpha
-		dst[i+3] *= alpha
-	}
-	for ; i < len(dst); i++ {
-		dst[i] *= alpha
-	}
-}
-
 // Scale64 computes dst[i] *= alpha using AVX-512 or AVX2 vector multiplication.
 func Scale64(dst []float64, alpha float64) {
 	tier := activeTier.Load()
@@ -380,23 +278,6 @@ func scale64AVX2(dst []float64, alpha float64) {
 		archsimd.LoadFloat64x4Array(d0).Mul(valpha).StoreArray(d0)
 	}
 	archsimd.ClearAVXUpperBits()
-}
-
-// AbsMax64Scalar returns max_i |x[i]| using 4-way scalar loop unrolling.
-func AbsMax64Scalar(x []float64) float64 {
-	var m0, m1, m2, m3 float64
-	i := 0
-	for ; i <= len(x)-4; i += 4 {
-		m0 = max(m0, math.Abs(x[i]))
-		m1 = max(m1, math.Abs(x[i+1]))
-		m2 = max(m2, math.Abs(x[i+2]))
-		m3 = max(m3, math.Abs(x[i+3]))
-	}
-	res := max(max(m0, m1), max(m2, m3))
-	for ; i < len(x); i++ {
-		res = max(res, math.Abs(x[i]))
-	}
-	return res
 }
 
 // AbsMax64 returns max_i |x[i]| using AVX-512 or AVX2 sign-bit masking and dual Max accumulators.
@@ -449,26 +330,6 @@ func absMax64AVX2(x []float64) float64 {
 		res = max(res, math.Abs(*(*float64)(unsafe.Add(xp, i*8))))
 	}
 	return res
-}
-
-// AllAbsLE64Scalar reports whether every element x[i] satisfies |x[i]| <= limit.
-// Keep the i <= len(x)-4 bound form so Go SSA prove eliminates loop bounds checks.
-func AllAbsLE64Scalar(x []float64, limit float64) bool {
-	i := 0
-	for ; i <= len(x)-4; i += 4 {
-		if !(math.Abs(x[i]) <= limit &&
-			math.Abs(x[i+1]) <= limit &&
-			math.Abs(x[i+2]) <= limit &&
-			math.Abs(x[i+3]) <= limit) {
-			return false
-		}
-	}
-	for ; i < len(x); i++ {
-		if !(math.Abs(x[i]) <= limit) {
-			return false
-		}
-	}
-	return true
 }
 
 // AllAbsLE64With reports whether every element x[i] satisfies |x[i]| <= limit.
@@ -527,24 +388,6 @@ func allAbsLE64AVX2(x []float64, limit float64) bool {
 	}
 	archsimd.ClearAVXUpperBits()
 	return true
-}
-
-// RowActivityBoundsFiniteScalar computes minimum and maximum row activity using a scalar loop.
-func RowActivityBoundsFiniteScalar(row, lb, ub []float64) (minAct, maxAct float64) {
-	n := min(len(row), min(len(lb), len(ub)))
-	if n == 0 {
-		return 0, 0
-	}
-	row = row[:n]
-	lb = lb[:n]
-	ub = ub[:n]
-	for i, r := range row {
-		p1 := r * lb[i]
-		p2 := r * ub[i]
-		minAct += min(p1, p2)
-		maxAct += max(p1, p2)
-	}
-	return minAct, maxAct
 }
 
 // RowActivityBoundsFinite computes the minimum and maximum row activity
@@ -627,33 +470,6 @@ func rowActivityBoundsFiniteAVX2(row, lb, ub []float64) (minAct, maxAct float64)
 		maxAct += max(p1, p2)
 	}
 	return minAct, maxAct
-}
-
-// MinReducedSlice64Scalar returns min_j (rowCost[j] - v[j]) over 0 <= j < min(len(rowCost), len(v)).
-func MinReducedSlice64Scalar(rowCost, v []float64) float64 {
-	n := min(len(rowCost), len(v))
-	inf := math.Inf(1)
-	if n == 0 {
-		return inf
-	}
-	cSlice := rowCost[:n]
-	vSlice := v[:len(cSlice)]
-	m0, m1, m2, m3 := inf, inf, inf, inf
-	j := 0
-	for ; j <= len(cSlice)-4; j += 4 {
-		m0 = min(m0, float64(cSlice[j]-vSlice[j]))
-		m1 = min(m1, float64(cSlice[j+1]-vSlice[j+1]))
-		m2 = min(m2, float64(cSlice[j+2]-vSlice[j+2]))
-		m3 = min(m3, float64(cSlice[j+3]-vSlice[j+3]))
-	}
-	minRed := min(min(m0, m1), min(m2, m3))
-	for ; j < len(cSlice); j++ {
-		minRed = min(minRed, float64(cSlice[j]-vSlice[j]))
-	}
-	if minRed == 0 {
-		minRed = 0
-	}
-	return minRed
 }
 
 // MinReducedSlice64With returns min_j (rowCost[j] - v[j]) over 0 <= j < min(len(rowCost), len(v)),
@@ -843,89 +659,6 @@ func initReducedRow64AVX2(dst, costRow, v []float64, ui float64) float64 {
 	return min(min(lanes[0], lanes[1]), min(lanes[2], lanes[3]))
 }
 
-// Min2ReducedRow64Scalar computes the smallest (u1, j1) and second-smallest (u2, j2)
-// values of costRow[j] - v[j] using 4-way unrolled scalar fast-filtering.
-// Keep vSlice tied to len(cSlice) and the j <= len(cSlice)-4 bound so Go SSA prove eliminates loop BCE.
-func Min2ReducedRow64Scalar(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
-	n := min(len(costRow), len(v))
-	u1, u2 = math.Inf(1), math.Inf(1)
-	j1, j2 = 0, -1
-	if n == 0 {
-		return u1, u2, j1, j2
-	}
-	cSlice := costRow[:n]
-	vSlice := v[:len(cSlice)]
-
-	j := 0
-	for ; j <= len(cSlice)-4; j += 4 {
-		r0 := cSlice[j] - vSlice[j]
-		r1 := cSlice[j+1] - vSlice[j+1]
-		r2 := cSlice[j+2] - vSlice[j+2]
-		r3 := cSlice[j+3] - vSlice[j+3]
-		if !(r0 >= u2 && r1 >= u2 && r2 >= u2 && r3 >= u2) {
-			if !(r0 >= u2) {
-				if math.IsNaN(r0) {
-					return r0, r0, j, -1
-				}
-				if r0 < u1 {
-					u2, j2 = u1, j1
-					u1, j1 = r0, j
-				} else {
-					u2, j2 = r0, j
-				}
-			}
-			if !(r1 >= u2) {
-				if math.IsNaN(r1) {
-					return r1, r1, j + 1, -1
-				}
-				if r1 < u1 {
-					u2, j2 = u1, j1
-					u1, j1 = r1, j+1
-				} else {
-					u2, j2 = r1, j+1
-				}
-			}
-			if !(r2 >= u2) {
-				if math.IsNaN(r2) {
-					return r2, r2, j + 2, -1
-				}
-				if r2 < u1 {
-					u2, j2 = u1, j1
-					u1, j1 = r2, j+2
-				} else {
-					u2, j2 = r2, j+2
-				}
-			}
-			if !(r3 >= u2) {
-				if math.IsNaN(r3) {
-					return r3, r3, j + 3, -1
-				}
-				if r3 < u1 {
-					u2, j2 = u1, j1
-					u1, j1 = r3, j+3
-				} else {
-					u2, j2 = r3, j+3
-				}
-			}
-		}
-	}
-	for ; j < len(cSlice); j++ {
-		r := cSlice[j] - vSlice[j]
-		if !(r >= u2) {
-			if math.IsNaN(r) {
-				return r, r, j, -1
-			}
-			if r < u1 {
-				u2, j2 = u1, j1
-				u1, j1 = r, j
-			} else {
-				u2, j2 = r, j
-			}
-		}
-	}
-	return u1, u2, j1, j2
-}
-
 // Min2ReducedRow64With computes the smallest (u1, j1) and second-smallest (u2, j2)
 // values of costRow[j] - v[j], honoring a per-call disableSIMD flag.
 func Min2ReducedRow64With(costRow, v []float64, disableSIMD bool) (u1, u2 float64, j1, j2 int) {
@@ -1036,49 +769,6 @@ func min2ReducedRow64AVX2(costRow, v []float64) (u1, u2 float64, j1, j2 int) {
 		}
 	}
 	return u1, u2, j1, j2
-}
-
-// SelectDualLeaveRow64Scalar scans basic rows [0, m) for the steepest-edge leaving row
-// maximizing viol^2 / dse[r] where viol exceeds basicTol[r].
-func SelectDualLeaveRow64Scalar(xb, basicLB, basicUB, basicTol, dse []float64) (leaveRow int, leaveDir, primalInfeas float64) {
-	leaveRow = -1
-	m := len(xb)
-	if m == 0 {
-		return -1, 0, 0
-	}
-	_ = basicLB[m-1]
-	_ = basicUB[m-1]
-	_ = basicTol[m-1]
-	_ = dse[m-1]
-
-	bestScore := -1.0
-	for r, val := range xb {
-		lbr := basicLB[r]
-		ubr := basicUB[r]
-		tol := basicTol[r]
-		var viol, dir float64
-		if val < lbr-tol {
-			viol = lbr - val
-			dir = 1.0
-		} else if val > ubr+tol {
-			viol = val - ubr
-			dir = -1.0
-		}
-		if viol > 0 {
-			w := dse[r]
-			v2 := viol * viol
-			if v2 > bestScore*w {
-				score := v2 / w
-				if leaveRow == -1 || score > bestScore {
-					bestScore = score
-					leaveRow = r
-					leaveDir = dir
-					primalInfeas = viol
-				}
-			}
-		}
-	}
-	return leaveRow, leaveDir, primalInfeas
 }
 
 // SelectDualLeaveRow64With selects the dual steepest-edge leaving row using
@@ -1260,96 +950,6 @@ func scanBetterInfeasAVX2(xp, lp, up, tp, dp unsafe.Pointer, r, m int, bestScore
 	}
 	archsimd.ClearAVXUpperBits()
 	return r, 0
-}
-
-// ScanDualRatioCand64Scalar scans 64-column structural chunks starting at (chunkPos, elemPos),
-// appending qualifying column indices (blocking ratio candidates, superbasic columns,
-// sub-tolerance pivots, or NaN entries) into dst until len(dst) is filled or chunks end.
-// Status bytes encode 0=AtLower, 1=AtUpper, 2=Basic, 3=Fixed, 4=SuperBasic.
-func ScanDualRatioCand64Scalar[S ~uint8](
-	tab, dj []float64,
-	status []S,
-	chunks []int,
-	chunkPos, elemPos int,
-	negLeaveDir, pivotTol, thetaGuard float64,
-	bland bool,
-	dst []int,
-) (hitCount, nextChunk, nextElem int) {
-	n := min(len(tab), min(len(dj), len(status)))
-	capDst := len(dst)
-	if capDst == 0 {
-		return 0, chunkPos, elemPos
-	}
-	if chunkPos < 0 {
-		chunkPos = 0
-	}
-	if elemPos < 0 {
-		elemPos = 0
-	}
-	if n == 0 {
-		return 0, len(chunks), 0
-	}
-	tab = tab[:n]
-	dj = dj[:n]
-	status = status[:n]
-	dst = dst[:capDst]
-	filterByTheta := !bland && !math.IsInf(thetaGuard, 1)
-	cnt := 0
-	for ci := chunkPos; ci < len(chunks); ci++ {
-		ch := chunks[ci]
-		start := ch << 6
-		if start < 0 || start >= n {
-			elemPos = 0
-			continue
-		}
-		end := min(start+64, n)
-		i := elemPos
-		elemPos = 0
-		tChunk := tab[start:end]
-		dChunk := dj[start:end]
-		sChunk := status[start:end]
-		size := len(tChunk)
-		dChunk = dChunk[:size]
-		sChunk = sChunk[:size]
-		for ; i < size; i++ {
-			tv := tChunk[i]
-			if tv == 0 {
-				continue
-			}
-			hit := false
-			if !(tv > pivotTol || tv < -pivotTol) {
-				hit = true
-			} else {
-				alphaBar := negLeaveDir * tv
-				switch uint8(sChunk[i]) {
-				case 0: // statusAtLower
-					if alphaBar > 0 && (!filterByTheta || !(dChunk[i] > thetaGuard*alphaBar)) {
-						hit = true
-					}
-				case 1: // statusAtUpper
-					if alphaBar < 0 && (!filterByTheta || !(dChunk[i] < thetaGuard*alphaBar)) {
-						hit = true
-					}
-				case 4: // statusSuperBasic
-					hit = true
-				}
-			}
-			if hit {
-				if cnt >= capDst {
-					return cnt, ci, i
-				}
-				dst[cnt] = start + i
-				cnt++
-				if cnt >= capDst {
-					if i+1 >= size {
-						return cnt, ci + 1, 0
-					}
-					return cnt, ci, i + 1
-				}
-			}
-		}
-	}
-	return cnt, len(chunks), 0
 }
 
 // ScanDualRatioCand64With scans 64-column structural chunks starting at (chunkPos, elemPos)

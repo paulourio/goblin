@@ -54,9 +54,9 @@ func TestVerifyStaticInvariantsNegativeControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}
-	spans, err := findUnrolledLoop4Spans(repoRoot, filepath.Join("internal", "simd", "kernels_scalar.go"), "Min2ReducedRow64")
+	spans, err := findUnrolledLoop4Spans(repoRoot, filepath.Join("internal", "simd", "kernels_scalar.go"), "Min2ReducedRow64Scalar")
 	if err != nil || len(spans) == 0 {
-		t.Fatalf("findUnrolledLoop4Spans(Min2ReducedRow64) = (%v, %v), want non-empty", spans, err)
+		t.Fatalf("findUnrolledLoop4Spans(Min2ReducedRow64Scalar) = (%v, %v), want non-empty", spans, err)
 	}
 	loopLine := spans[0].start + 1
 
@@ -93,7 +93,7 @@ func TestVerifyStaticInvariantsNegativeControls(t *testing.T) {
 	for _, want := range []string{
 		"inline lock failed for nextUp",
 		"noinline lock failed for evalColDualDotWide",
-		"BCE regression inside 4-way loop of Min2ReducedRow64",
+		"BCE regression inside 4-way loop of Min2ReducedRow64Scalar",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing expected violation %q in:\n%s", want, joined)
