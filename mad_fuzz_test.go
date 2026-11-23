@@ -815,7 +815,7 @@ func FuzzMADMediumDecomposed(f *testing.F) {
 	f.Fuzz(func(t *testing.T, seed uint64, gByte uint8, sizeRaw uint16, regimeByte, sparsityByte uint8) {
 		spec := decodeDecomposedMADSpec(seed, gByte, sizeRaw, regimeByte, sparsityByte)
 		if raceEnabled && testing.Short() && spec.nI > 250 {
-			t.Skipf("skipping large %d-item decomposed MAD seed under -race -short", spec.nI)
+			spec.nI = decomposedMADMinItems + (spec.nI % (250 - decomposedMADMinItems + 1))
 		}
 
 		tag := fmt.Sprintf("mad_med_g%d_i%d_t%d_r%d_s%d_%d",
@@ -878,8 +878,18 @@ func FuzzMADMediumDecomposed(f *testing.F) {
 			}
 			verifyFormalSeparatedCuts(t, tag+"/cuts", p, sols)
 			if p.NumVars() <= 300 {
-				resTr, _ := verifyFormalVIPRTrace(t, tag+"/vipr", p, 40, 250*time.Millisecond)
+				resTr, tr := verifyFormalVIPRTrace(
+					t,
+					tag+"/vipr",
+					p,
+					40,
+					250*time.Millisecond,
+					gb.WithPresolve(false),
+					gb.WithCuts(true),
+					gb.WithHeuristics(true),
+				)
 				_ = assertDecomposedMADSoundness(t, tag, "vipr", p, resTr, inst.plantedObj)
+				assertFullFeatureVsVIPR(t, tag+"/full_vs_vipr", p, resGo, resTr, tr, 1e-6, 1e-6)
 			}
 		}
 

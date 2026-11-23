@@ -141,6 +141,7 @@ func TestRandomFuzzAssignment(t *testing.T) {
 			if !errors.Is(errSIMD, assign.ErrInfeasible) {
 				t.Fatalf("[%s] unexpected error: %v", label, errSIMD)
 			}
+			verifyFormalAssignInfeasible(t, label, rows, cols, cost, sense)
 			// Confirm via exact bipartite matching that no complete finite matching exists.
 			if hasCompleteFiniteMatching(rows, cols, cost) {
 				t.Fatalf("[%s] solver reported ErrInfeasible, but a complete finite matching exists", label)
@@ -161,6 +162,10 @@ func TestRandomFuzzAssignment(t *testing.T) {
 		// Verify primal-dual certificates for both SIMD and Scalar solutions.
 		verifyOptimalityCertificate(t, label+"/SIMD", rows, cols, cost, sense, resSIMD)
 		verifyOptimalityCertificate(t, label+"/Scalar", rows, cols, cost, sense, resScalar)
+		fam := idx % 7
+		exactFam := fam == 1 || fam == 2 || fam == 4 || fam == 6
+		verifyFormalAssignResult(t, label+"/SIMD", rows, cols, cost, sense, resSIMD, exactFam)
+		verifyFormalAssignResult(t, label+"/Scalar", rows, cols, cost, sense, resScalar, exactFam)
 
 		maxAbs := 0.0
 		for _, v := range cost {
@@ -241,57 +246,11 @@ func verifyFormalAssignResult(
 	exactMode bool,
 ) {
 	tb.Helper()
-	if !formalAssignOracleEnabled() || rows == 0 || cols == 0 || rows*cols > 1024 {
+	if !formalAssignOracleEnabled() {
 		return
 	}
-	maxAbs := 0.0
-	for _, v := range cost[:rows*cols] {
-		if math.IsInf(v, 0) || math.IsNaN(v) {
-			return
-		}
-		if a := math.Abs(v); a > maxAbs {
-			maxAbs = a
-		}
-	}
-	if exactMode {
-		raw, ok := buildFormalLSAPJSON(rows, cols, cost, sense, res, "exact", 0)
-		if !ok {
-			tb.Fatalf("[%s] buildFormalLSAPJSON failed on finite matrix", label)
-		}
-		okCall, _, detail := formalAssignOracleCall(tb, raw)
-		if !okCall {
-			tb.Fatalf("[%s] lsap-check --jsonl exact rejected: %s", label, detail)
-		}
-		return
-	}
-	tol := max(1e-300, 1e-9*max(1.0, maxAbs)*float64(max(rows, cols)))
-	if maxAbs > 1e280 {
-		tol = max(tol, maxAbs*0x1p-46*float64(max(rows, cols)))
-	}
-	if math.IsInf(tol, 0) {
-		tol = math.MaxFloat64
-	}
-	raw, ok := buildFormalLSAPJSON(rows, cols, cost, sense, res, "safe", tol)
-	if !ok {
-		return
-	}
-	okCall, bndPair, detail := formalAssignOracleCall(tb, raw)
-	if !okCall {
-		tb.Fatalf("[%s] lsap-check --jsonl safe rejected: %s", label, detail)
-	}
-	if bndPair[0] != "" && bndPair[1] != "" {
-		bndRat, err := (formalAssignRat{Num: bndPair[0], Den: bndPair[1]}).bigRat()
-		if err != nil {
-			tb.Fatalf("[%s] invalid safe bound %v: %v", label, bndPair, err)
-		}
-		if gotRat, okGot := exactMatchedObjRat(rows, cols, cost, res.RowInd, res.ColInd); okGot {
-			if sense == assign.Minimize && bndRat.Cmp(gotRat) > 0 {
-				tb.Fatalf("[%s] safe lower bound %s exceeds exact primal %s", label, bndRat.RatString(), gotRat.RatString())
-			}
-			if sense == assign.Maximize && bndRat.Cmp(gotRat) < 0 {
-				tb.Fatalf("[%s] safe upper bound %s below exact primal %s", label, bndRat.RatString(), gotRat.RatString())
-			}
-		}
+	if err := checkFormalAssignResult(tb, label, rows, cols, cost, sense, res, exactMode); err != nil {
+		tb.Fatal(err)
 	}
 }
 
@@ -336,9 +295,7 @@ func FuzzLinearSum(f *testing.F) {
 			if !errors.Is(errSIMD, assign.ErrInfeasible) {
 				t.Fatalf("unexpected error: %v", errSIMD)
 			}
-			if hasCompleteFiniteMatching(rows, cols, cost) {
-				t.Fatalf("fuzz_target reported ErrInfeasible, but a complete finite matching exists (%dx%d)", rows, cols)
-			}
+			verifyFormalAssignInfeasible(t, "fuzz_target", rows, cols, cost, sense)
 			return
 		}
 		verifyOptimalityCertificate(t, "fuzz_target/simd", rows, cols, cost, sense, resSIMD)
@@ -569,12 +526,14 @@ func TestExactIntegerHungarianParity(t *testing.T) {
 			if !errors.Is(err, assign.ErrInfeasible) {
 				t.Fatalf("trial %d: expected ErrInfeasible, got err=%v", trial, err)
 			}
+			verifyFormalAssignInfeasible(t, fmt.Sprintf("int64_trial_%d", trial), n, n, fcost, assign.Minimize)
 			continue
 		}
 		if err != nil {
 			t.Fatalf("trial %d: unexpected err=%v when exact Hungarian found %d", trial, err, wantInt)
 		}
 		verifyOptimalityCertificate(t, fmt.Sprintf("int64_trial_%d", trial), n, n, fcost, assign.Minimize, res)
+		verifyFormalAssignResult(t, fmt.Sprintf("int64_trial_%d", trial), n, n, fcost, assign.Minimize, res, trial%5 != 4)
 
 		if trial%5 != 4 {
 			var gotInt int64

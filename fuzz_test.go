@@ -33,19 +33,6 @@ func ratCeilBigInt(r *big.Rat) *big.Int {
 	return q
 }
 
-func allVarsBounded(p *gb.CompiledProblem) bool {
-	if p == nil || p.NumVars() == 0 {
-		return false
-	}
-	for j := range p.NumVars() {
-		lb, ub := p.VarBounds(j)
-		if math.IsInf(lb, 0) || math.IsInf(ub, 0) || math.IsNaN(lb) || math.IsNaN(ub) {
-			return false
-		}
-	}
-	return true
-}
-
 func exactEvalMinObjRat(p *gb.CompiledProblem, x []float64) (totalMin *big.Rat, linScale float64, ok bool) {
 	if p == nil || len(x) < p.NumVars() {
 		return nil, 0, false
@@ -195,47 +182,11 @@ func isExactRatMIPFeasible(p *gb.CompiledProblem, x []float64) bool {
 
 func verifyFormalLPResult(tb testing.TB, label string, p *gb.CompiledProblem, lp *gb.LPSolver, res gb.LPResult) {
 	tb.Helper()
-	if !formalFuzzEnabled() || p == nil {
+	if !formalFuzzEnabled() {
 		return
 	}
-	if res.Status != gb.StatusOptimal && res.Status != gb.StatusInfeasible && res.Status != gb.StatusUnbounded {
-		return
-	}
-	mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
-	if !ok {
-		if p.NumVars() > 0 && p.NumVars() <= 128 && p.NumConstraints() <= 128 {
-			if res.Status == gb.StatusOptimal && (allVarsBounded(p) || lp != nil) && p.NumConstraints() > 0 {
-				tb.Fatalf("[%s] ExportLPCheckPayload failed on optimal LP", label)
-			}
-			if res.Status == gb.StatusUnbounded {
-				tb.Fatalf("[%s] ExportLPCheckPayload failed on unbounded LP", label)
-			}
-		}
-		return
-	}
-	bnd := mustFormalLPCheck(tb, payload)
-	switch res.Status {
-	case gb.StatusOptimal:
-		if mode != "safe-bound" || bnd == nil {
-			tb.Fatalf("[%s] expected safe-bound LP certificate, got mode=%q bnd=%v", label, mode, bnd)
-		}
-		if evalMinRat, linScale, okRat := exactEvalMinObjRat(p, res.Primal); okRat {
-			tolRat := new(big.Rat).SetFloat64(1e-4 * max(1.0, linScale))
-			if tolRat != nil {
-				limit := new(big.Rat).Add(evalMinRat, tolRat)
-				if bnd.Cmp(limit) > 0 {
-					tb.Fatalf("[%s] safe-bound %s exceeds primal objective %s + tol", label, bnd.RatString(), evalMinRat.RatString())
-				}
-			}
-		}
-	case gb.StatusInfeasible:
-		if mode != "farkas" {
-			tb.Fatalf("[%s] expected farkas LP certificate, got mode=%q", label, mode)
-		}
-	case gb.StatusUnbounded:
-		if mode != "unbounded" && mode != "milp-unbounded" {
-			tb.Fatalf("[%s] expected unbounded LP certificate, got mode=%q", label, mode)
-		}
+	if err := checkFormalLPResult(tb, label, p, lp, res); err != nil {
+		tb.Fatal(err)
 	}
 }
 
@@ -245,122 +196,8 @@ func verifyFormalPresolvedLP(tb testing.TB, label string, p *gb.CompiledProblem,
 	if err != nil {
 		tb.Fatalf("[%s] SolveCompiled presolve LP failed: %v", label, err)
 	}
-	if resPre.Status == gb.StatusUnbounded {
-		if formalFuzzEnabled() && p != nil && p.NumVars() > 0 && p.NumVars() <= 128 && p.NumConstraints() <= 128 {
-			uMode, uPayload, okU := gb.ExportUnboundedCheckPayload(p, nil, resPre.Values)
-			if !okU || (uMode != "unbounded" && uMode != "milp-unbounded") {
-				tb.Fatalf("[%s] ExportUnboundedCheckPayload failed on presolved unbounded LP: ok=%v mode=%q", label, okU, uMode)
-			}
-			_ = mustFormalLPCheck(tb, uPayload)
-		}
-		return resPre
-	}
-	if resPre.Status != gb.StatusOptimal {
-		return resPre
-	}
-	bV, rV, _ := p.MaxViolation(resPre.Values, false)
-	if bV > 1e-5 || rV > 1e-5 {
-		tb.Fatalf("[%s] presolved LP primal violation: bound=%.2e row=%.2e", label, bV, rV)
-	}
-	evalObj := p.EvaluateObjective(resPre.Values)
-	if !formalFuzzEnabled() || p.NumConstraints() == 0 {
-		return resPre
-	}
-	if len(resPre.Duals) != p.NumConstraints() {
-		if allVarsBounded(p) {
-			tb.Fatalf("[%s] presolved LP len(Duals)=%d, want %d", label, len(resPre.Duals), p.NumConstraints())
-		}
-		return resPre
-	}
-	lpRes := gb.LPResult{
-		Status:    gb.StatusOptimal,
-		Objective: evalObj,
-		Primal:    resPre.Values,
-		Dual:      resPre.Duals,
-	}
-	mode, payload, ok := gb.ExportLPCheckPayload(p, nil, lpRes)
-	if !ok {
-		if allVarsBounded(p) {
-			tb.Fatalf("[%s] failed to export SolveCompiled Duals for lp-check (ok=%v mode=%q)", label, ok, mode)
-		}
-		return resPre
-	}
-	if mode != "safe-bound" {
-		tb.Fatalf("[%s] expected mode safe-bound for SolveCompiled Duals, got %q", label, mode)
-	}
-	evalMinRat, linScale, okRat := exactEvalMinObjRat(p, resPre.Values)
-	bnd := mustFormalLPCheck(tb, payload)
-	if bnd == nil {
-		tb.Fatalf("[%s] lp-check returned nil safe bound", label)
-	}
-	if okRat {
-		tolRat := new(big.Rat).SetFloat64(1e-4 * max(1.0, linScale))
-		if tolRat != nil && bnd.Cmp(new(big.Rat).Add(evalMinRat, tolRat)) > 0 {
-			tb.Fatalf("[%s] presolved LP bound %s > evalObj %s + tol", label, bnd.RatString(), evalMinRat.RatString())
-		}
-		if checkDualGap {
-			boundSpan := 0.0
-			for j := range p.NumVars() {
-				lb, ub := p.VarBounds(j)
-				span := max(math.Abs(lb), math.Abs(ub)) * max(1.0, math.Abs(p.ObjMinCoeff(j)))
-				if !math.IsInf(span, 0) && !math.IsNaN(span) {
-					boundSpan += span
-				}
-			}
-			gapTolVal := 1e-4 * max(1.0, max(linScale, boundSpan))
-			if gapTolRat := new(big.Rat).SetFloat64(gapTolVal); gapTolRat != nil {
-				gap := new(big.Rat).Sub(evalMinRat, bnd)
-				if gap.Cmp(gapTolRat) > 0 {
-					tb.Fatalf("[%s] presolved LP duality gap %s > gapTol %s", label, gap.RatString(), gapTolRat.RatString())
-				}
-			}
-		}
-	}
-	if checkDualGap {
-		senseSign := 1.0
-		if p.Sense() == gb.Maximize {
-			senseSign = -1.0
-		}
-		for i := range p.NumConstraints() {
-			if p.RowLen(i) != 1 {
-				continue
-			}
-			yi := senseSign * resPre.Duals[i]
-			if yi == 0 {
-				continue
-			}
-			var col int
-			var coeff float64
-			p.ForEachRowTerm(i, func(c int, v float64) {
-				col = c
-				coeff = v
-			})
-			if coeff == 0 {
-				continue
-			}
-			xVal := resPre.Values[col]
-			impBound := p.RowRHS(i) / coeff
-			act := coeff * xVal
-			rowSlack := p.RowRHS(i) - act
-			switch p.RowSense(i) {
-			case gb.LessEqual:
-				if (coeff > 0 && impBound-xVal > 1e-2*max(1.0, math.Abs(xVal)) && rowSlack > 0) ||
-					(coeff < 0 && xVal-impBound > 1e-2*max(1.0, math.Abs(xVal)) && rowSlack > 0) {
-					if math.Abs(yi) > 1e-6 {
-						tb.Fatalf("[%s] slack singleton row %d has non-zero dual y=%g (x=%g impBound=%g)",
-							label, i, yi, xVal, impBound)
-					}
-				}
-			case gb.GreaterEqual:
-				if (coeff > 0 && xVal-impBound > 1e-2*max(1.0, math.Abs(xVal)) && rowSlack < 0) ||
-					(coeff < 0 && impBound-xVal > 1e-2*max(1.0, math.Abs(xVal)) && rowSlack < 0) {
-					if math.Abs(yi) > 1e-6 {
-						tb.Fatalf("[%s] slack singleton row %d has non-zero dual y=%g (x=%g impBound=%g)",
-							label, i, yi, xVal, impBound)
-					}
-				}
-			}
-		}
+	if err := checkFormalPresolvedLPResult(tb, label, p, resPre, checkDualGap); err != nil {
+		tb.Fatal(err)
 	}
 	return resPre
 }
@@ -379,7 +216,13 @@ func verifyFormalPresolveRules(tb testing.TB, p *gb.CompiledProblem) ([][]byte, 
 
 func verifyFormalRootLP(tb testing.TB, label string, p *gb.CompiledProblem) {
 	tb.Helper()
-	if !formalFuzzEnabled() || p == nil || p.NumVars() == 0 || p.NumConstraints() == 0 {
+	if !formalFuzzEnabled() {
+		return
+	}
+	if p == nil {
+		tb.Fatalf("[%s] nil CompiledProblem", label)
+	}
+	if p.NumVars() == 0 {
 		return
 	}
 	ws := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
@@ -391,8 +234,11 @@ func verifyFormalRootLP(tb testing.TB, label string, p *gb.CompiledProblem) {
 
 func verifyFormalSeparatedCuts(tb testing.TB, label string, p *gb.CompiledProblem, sols [][]float64) {
 	tb.Helper()
-	if !formalFuzzEnabled() || p == nil {
+	if !formalFuzzEnabled() {
 		return
+	}
+	if p == nil {
+		tb.Fatalf("[%s] nil CompiledProblem", label)
 	}
 	items, err := gb.ExportSeparatedCutsItems(p, sols)
 	if err != nil {
@@ -412,8 +258,11 @@ func verifyFormalVIPRTrace(
 	extraOpts ...gb.Option,
 ) (gb.Result, *gb.VIPRTrace) {
 	tb.Helper()
-	if !formalFuzzEnabled() || p == nil {
+	if !formalFuzzEnabled() {
 		return gb.Result{}, nil
+	}
+	if p == nil {
+		tb.Fatalf("[%s] nil CompiledProblem", label)
 	}
 	tr := gb.NewVIPRTrace()
 	opts := make([]gb.Option, 0, 4+len(extraOpts))
@@ -424,65 +273,13 @@ func verifyFormalVIPRTrace(
 		gb.WithVIPRTrace(tr),
 	)
 	opts = append(opts, extraOpts...)
+	cfg := gb.ApplyOptions(opts...)
 	res, err := gb.SolveCompiled(tb.Context(), p, opts...)
 	if err != nil {
 		tb.Fatalf("[%s] SolveCompiled with VIPRTrace failed: %v", label, err)
 	}
-	if !formalFuzzEnabled() || !tr.HasCertificate() {
-		return res, tr
-	}
-	raw, err := tr.MarshalVIPRJSON()
-	if err != nil {
-		tb.Fatalf("[%s] MarshalVIPRJSON failed: %v", label, err)
-	}
-	bnd := mustFormalVIPRCheck(tb, raw)
-
-	switch res.Status {
-	case gb.StatusInfeasible:
-		if tr.Mode() != "infeasible" {
-			tb.Fatalf("[%s] StatusInfeasible emitted VIPR mode %q, want infeasible", label, tr.Mode())
-		}
-	case gb.StatusOptimal, gb.StatusNodeLimit, gb.StatusTimeLimit, gb.StatusIterationLimit:
-		targetLB := tr.TargetLB()
-		if targetLB == nil {
-			tb.Fatalf("[%s] status=%v missing TargetLB in VIPRTrace (mode=%q)", label, res.Status, tr.Mode())
-		}
-		if bnd != nil && bnd.Cmp(targetLB) != 0 {
-			tb.Fatalf("[%s] vipr-check bound %s != TargetLB %s", label, bnd.RatString(), targetLB.RatString())
-		}
-		if len(res.Values) == p.NumVars() && isExactRatMIPFeasible(p, res.Values) {
-			if evalMinRat, linScale, okRat := exactEvalMinObjRat(p, res.Values); okRat {
-				tolRat := new(big.Rat).SetFloat64(1e-4 * max(1.0, linScale))
-				if tolRat != nil && targetLB.Cmp(new(big.Rat).Add(evalMinRat, tolRat)) > 0 {
-					tb.Fatalf("[%s] VIPR TargetLB %s exceeds incumbent %s + tol",
-						label, targetLB.RatString(), evalMinRat.RatString())
-				}
-			}
-		}
-		if tr.Mode() == "optimal" && !math.IsNaN(res.BestBound) && !math.IsInf(res.BestBound, 0) {
-			userOpt := userBoundFromMinRat(p, targetLB)
-			tol := 1e-4 * max(1.0, max(math.Abs(res.BestBound), math.Abs(userOpt)))
-			if p.Sense() == gb.Minimize && res.BestBound > userOpt+tol {
-				tb.Fatalf("[%s] Minimize BestBound %.8g > VIPR optimal %.8g", label, res.BestBound, userOpt)
-			}
-			if p.Sense() == gb.Maximize && res.BestBound < userOpt-tol {
-				tb.Fatalf("[%s] Maximize BestBound %.8g < VIPR optimal %.8g", label, res.BestBound, userOpt)
-			}
-			if res.Status == gb.StatusOptimal && tr.TracedProblem() == p {
-				objTol := 1e-4 * max(1.0, max(math.Abs(res.Objective), math.Abs(userOpt)))
-				if math.Abs(res.Objective-userOpt) > objTol {
-					tb.Fatalf("[%s] solver Optimal %.8g != VIPR certified optimal %.8g", label, res.Objective, userOpt)
-				}
-			}
-		}
-	case gb.StatusUnbounded:
-		if formalFuzzEnabled() && p.NumVars() <= 64 && p.NumConstraints() <= 64 {
-			uMode, uPay, okU := gb.ExportUnboundedCheckPayload(p, nil, res.Values)
-			if !okU || (uMode != "unbounded" && uMode != "milp-unbounded") {
-				tb.Fatalf("[%s] VIPR solve returned StatusUnbounded without valid Meyer/LP ray certificate (ok=%v mode=%q)", label, okU, uMode)
-			}
-			_ = mustFormalLPCheck(tb, uPay)
-		}
+	if err := checkFormalVIPRResult(tb, label, p, res, tr, cfg.RelGapTol, cfg.AbsGapTol); err != nil {
+		tb.Fatal(err)
 	}
 	return res, tr
 }
@@ -497,86 +294,8 @@ func assertFullFeatureVsVIPR(
 	relTol, absTol float64,
 ) {
 	tb.Helper()
-	if p == nil {
-		return
-	}
-	verifyMILPInvariants(tb, label+"/full", p, resFull)
-	verifyMILPInvariants(tb, label+"/vipr", p, resVIPR)
-
-	if resFull.Status == gb.StatusUnbounded {
-		if resVIPR.Status == gb.StatusOptimal || resVIPR.Status == gb.StatusInfeasible {
-			tb.Fatalf("[%s] full-feature returned StatusUnbounded while VIPR returned %v", label, resVIPR.Status)
-		}
-		if tr != nil && tr.HasCertificate() && (tr.Mode() == "optimal" || tr.Mode() == "infeasible") {
-			tb.Fatalf("[%s] full-feature returned StatusUnbounded contradicting VIPR certificate mode %q", label, tr.Mode())
-		}
-		if formalFuzzEnabled() && p.NumVars() <= 64 && p.NumConstraints() <= 64 {
-			uMode, uPay, okU := gb.ExportUnboundedCheckPayload(p, nil, resFull.Values)
-			if !okU || (uMode != "unbounded" && uMode != "milp-unbounded") {
-				tb.Fatalf("[%s] full-feature StatusUnbounded failed ExportUnboundedCheckPayload (ok=%v mode=%q)", label, okU, uMode)
-			}
-			_ = mustFormalLPCheck(tb, uPay)
-		}
-	}
-	if resVIPR.Status == gb.StatusUnbounded && (resFull.Status == gb.StatusOptimal || resFull.Status == gb.StatusInfeasible) {
-		tb.Fatalf("[%s] VIPR returned StatusUnbounded while full-feature returned %v", label, resFull.Status)
-	}
-
-	if resFull.Status == gb.StatusInfeasible {
-		if resVIPR.Status == gb.StatusUnbounded {
-			tb.Fatalf("[%s] full-feature returned StatusInfeasible while VIPR returned StatusUnbounded", label)
-		}
-		if tr != nil && tr.HasCertificate() && tr.Mode() == "optimal" {
-			tb.Fatalf("[%s] full-feature returned StatusInfeasible contradicting VIPR optimal certificate", label)
-		}
-		if len(resVIPR.Values) == p.NumVars() && isExactRatMIPFeasible(p, resVIPR.Values) {
-			tb.Fatalf("[%s] full-feature falsely declared exact-feasible MIP infeasible", label)
-		}
-	}
-	if resVIPR.Status == gb.StatusInfeasible {
-		if resFull.Status == gb.StatusOptimal && isExactRatMIPFeasible(p, resFull.Values) {
-			tb.Fatalf("[%s] VIPR falsely declared exact-feasible MIP infeasible", label)
-		}
-	}
-
-	if len(resFull.Values) == p.NumVars() && isExactRatMIPFeasible(p, resFull.Values) &&
-		tr != nil && tr.HasCertificate() && tr.TracedProblem() == p && tr.TargetLB() != nil {
-		if evalMinRat, linScale, okRat := exactEvalMinObjRat(p, resFull.Values); okRat {
-			tolRat := new(big.Rat).SetFloat64(1e-5 * max(1.0, linScale))
-			if tolRat != nil && tr.TargetLB().Cmp(new(big.Rat).Add(evalMinRat, tolRat)) > 0 {
-				tb.Fatalf("[%s] full-feature feasible solution minObj %s violates certified VIPR TargetLB %s",
-					label, evalMinRat.RatString(), tr.TargetLB().RatString())
-			}
-		}
-	}
-
-	if len(resVIPR.Values) == p.NumVars() && isExactRatMIPFeasible(p, resVIPR.Values) &&
-		!math.IsNaN(resFull.BestBound) && !math.IsInf(resFull.BestBound, 0) {
-		viprObj := p.EvaluateObjective(resVIPR.Values)
-		bndTol := max(absTol, relTol*max(1.0, math.Abs(viprObj))) + 1e-4*max(1.0, max(math.Abs(resFull.BestBound), math.Abs(viprObj)))
-		if p.Sense() == gb.Minimize && resFull.BestBound > viprObj+bndTol {
-			tb.Fatalf("[%s] full-feature Minimize BestBound %.8g > VIPR feasible witness %.8g",
-				label, resFull.BestBound, viprObj)
-		}
-		if p.Sense() == gb.Maximize && resFull.BestBound < viprObj-bndTol {
-			tb.Fatalf("[%s] full-feature Maximize BestBound %.8g < VIPR feasible witness %.8g",
-				label, resFull.BestBound, viprObj)
-		}
-	}
-
-	if resFull.Status == gb.StatusOptimal && resVIPR.Status == gb.StatusOptimal {
-		scale := max(1.0, max(math.Abs(resFull.Objective), math.Abs(resVIPR.Objective)))
-		gapAllow := max(absTol, relTol*scale) + 1e-5*scale
-		if math.Abs(resFull.Objective-resVIPR.Objective) > gapAllow {
-			fullBetter := (p.Sense() == gb.Minimize && resFull.Objective < resVIPR.Objective-gapAllow) ||
-				(p.Sense() == gb.Maximize && resFull.Objective > resVIPR.Objective+gapAllow)
-			viprBetter := (p.Sense() == gb.Minimize && resVIPR.Objective < resFull.Objective-gapAllow) ||
-				(p.Sense() == gb.Maximize && resVIPR.Objective > resFull.Objective+gapAllow)
-			if (fullBetter && isExactRatMIPFeasible(p, resFull.Values)) || (viprBetter && isExactRatMIPFeasible(p, resVIPR.Values)) {
-				tb.Fatalf("[%s] full-feature Optimal %.8g != VIPR Optimal %.8g (tol=%.2e)",
-					label, resFull.Objective, resVIPR.Objective, gapAllow)
-			}
-		}
+	if err := checkFullFeatureVsVIPR(tb, label, p, resFull, resVIPR, tr, relTol, absTol); err != nil {
+		tb.Fatal(err)
 	}
 }
 
@@ -894,40 +613,8 @@ func buildFuzzScaledMILP(rng *rand.Rand, tag string) *gb.Model {
 
 func verifyMILPInvariants(tb testing.TB, label string, p *gb.CompiledProblem, res gb.Result) {
 	tb.Helper()
-	if res.Status != gb.StatusOptimal {
-		return
-	}
-	if len(res.Values) != p.NumVars() {
-		tb.Fatalf("[%s] Optimal status with len(Values)=%d, want %d", label, len(res.Values), p.NumVars())
-	}
-	bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
-	rowTol := 1e-5
-	if res.Backend == gb.BackendCBC {
-		// Match cbcPrimalWithinTol (1e-4 abs) on scaled CBC row residuals.
-		rowTol = 1e-4
-	}
-	if bV > 1e-5 || rV > rowTol || iV > 1e-5 {
-		tb.Fatalf("[%s] Optimal solution violates model: bound=%.2e row=%.2e int=%.2e", label, bV, rV, iV)
-	}
-	evalObj := p.EvaluateObjective(res.Values)
-	if math.Abs(evalObj-res.Objective) > 1e-6*max(1.0, math.Abs(res.Objective)) {
-		tb.Fatalf("[%s] EvaluateObjective=%.8f != res.Objective=%.8f", label, evalObj, res.Objective)
-	}
-	boundTol := 1e-5 * max(1.0, math.Abs(res.Objective))
-	if p.Sense() == gb.Minimize {
-		if res.BestBound > res.Objective+boundTol {
-			tb.Fatalf("[%s] Minimize BestBound %.8f > Objective %.8f", label, res.BestBound, res.Objective)
-		}
-		if !math.IsNaN(res.RootLPBound) && res.BestBound < res.RootLPBound-boundTol {
-			tb.Fatalf("[%s] Minimize BestBound %.8f < RootLPBound %.8f", label, res.BestBound, res.RootLPBound)
-		}
-	} else {
-		if res.BestBound < res.Objective-boundTol {
-			tb.Fatalf("[%s] Maximize BestBound %.8f < Objective %.8f", label, res.BestBound, res.Objective)
-		}
-		if !math.IsNaN(res.RootLPBound) && res.BestBound > res.RootLPBound+boundTol {
-			tb.Fatalf("[%s] Maximize BestBound %.8f > RootLPBound %.8f", label, res.BestBound, res.RootLPBound)
-		}
+	if err := checkMILPInvariantsErr(label, p, res); err != nil {
+		tb.Fatal(err)
 	}
 }
 
@@ -1092,6 +779,7 @@ func FuzzMILPSolver(f *testing.F) {
 		var firstOptObj float64
 		var optValues []float64
 		sawInfeasible := ""
+		sawUnbounded := ""
 
 		for name, vOpts := range optionVariants() {
 			opts := append(slices.Clone(baseLimits), vOpts...)
@@ -1126,12 +814,26 @@ func FuzzMILPSolver(f *testing.F) {
 					t.Fatalf("[%s/%s] returned Infeasible when exact ground truth is %.8f", tag, name, exactWant)
 				}
 				sawInfeasible = name
+			case gb.StatusUnbounded:
+				if hasExactWant || exactInfeasible {
+					t.Fatalf("[%s/%s] returned Unbounded on bounded/enumerated MIP", tag, name)
+				}
+				sawUnbounded = name
+				if formalFuzzEnabled() {
+					if err := checkFormalUnboundedMILP(t, tag+"/"+name, p, res.Values); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 		}
 
 		if firstOptName != "" && sawInfeasible != "" {
 			t.Fatalf("[%s] contradictory verdicts: %s returned Optimal (%.8f) while %s returned Infeasible",
 				tag, firstOptName, firstOptObj, sawInfeasible)
+		}
+		if sawUnbounded != "" && (firstOptName != "" || sawInfeasible != "") {
+			t.Fatalf("[%s] contradictory verdicts: %s returned Unbounded vs opt=%q infeas=%q",
+				tag, sawUnbounded, firstOptName, sawInfeasible)
 		}
 
 		if formalFuzzEnabled() {
@@ -1140,9 +842,9 @@ func FuzzMILPSolver(f *testing.F) {
 			if len(optValues) == p.NumVars() {
 				verifyFormalSeparatedCuts(t, tag+"/cuts", p, [][]float64{optValues})
 			}
-			if p.NumVars() <= 24 && p.NumConstraints() <= 40 {
-				resTr, _ := verifyFormalVIPRTrace(t, tag+"/vipr", p, 1500, 1500*time.Millisecond)
-				verifyMILPInvariants(t, tag+"/vipr", p, resTr)
+			if p.NumVars() <= 128 && p.NumConstraints() <= 128 {
+				workers := [3]int{1, 2, 4}[int(seed)%3]
+				_, _, _ = runFullFeatureVsVIPRCheck(t, tag+"/full_vs_vipr", p, workers, 1500, 1500*time.Millisecond, 1e-6, 1e-6)
 			}
 		}
 	})
@@ -1820,7 +1522,7 @@ func runAdversarialMIPGCDAndBinRegime(t *testing.T, seed uint64, paramA, paramB 
 		t.Fatalf("[%s] CompileChecked: %v", label, err)
 	}
 	_, _ = verifyFormalPresolveRules(t, p)
-	if p.NumVars() <= 16 {
+	if p.NumVars() <= 128 && p.NumConstraints() <= 128 {
 		w := [3]int{1, 2, 4}[int(seed+uint64(paramB))%3]
 		_, _, _ = runFullFeatureVsVIPRCheck(t, label, p, w, 400, 800*time.Millisecond, 1e-6, 1e-6)
 	}
@@ -2179,7 +1881,7 @@ func runAdversarialMIPObjConstRegime(t *testing.T, seed uint64, paramA, paramB u
 		gb.WithPresolve(false), gb.WithRelGapTol(0), gb.WithAbsGapTol(0),
 		gb.WithMaxNodes(500), gb.WithTimeLimit(time.Second))
 	if resRef.Status != gb.StatusOptimal {
-		return
+		t.Fatalf("[%s] zero-constant reference solve returned %v, want StatusOptimal", label, resRef.Status)
 	}
 	optLinMinRat, okRef := exactEvalLinearMinRat(pZero, resRef.Values)
 	if !okRef {
@@ -2297,6 +1999,7 @@ func FuzzMIPSmall(f *testing.F) {
 	for seed := range uint64(16) {
 		f.Add(seed, uint8(seed%6), uint8(seed*3))
 	}
+	f.Add(uint64(375), uint8(0x14), uint8(0xe6))
 
 	f.Fuzz(func(t *testing.T, seed uint64, kindByte, flagByte uint8) {
 		rng := rand.New(rand.NewPCG(seed^0x94d049bb133111eb, uint64(kindByte)*37+uint64(flagByte)))
@@ -2458,6 +2161,7 @@ func FuzzLPSmall(f *testing.F) {
 	for seed := range uint64(20) {
 		f.Add(seed, uint8(seed%6), uint8(seed*5))
 	}
+	f.Add(uint64(238), uint8(0x1d), uint8('D'))
 
 	f.Fuzz(func(t *testing.T, seed uint64, kindByte, flagByte uint8) {
 		rng := rand.New(rand.NewPCG(seed^0xbf58476d1ce4e5b9, uint64(kindByte)*41+uint64(flagByte)))
@@ -2549,7 +2253,7 @@ func FuzzLPSmall(f *testing.F) {
 			verifyFormalLPResult(t, tag+"/simd", p, lpSIMD, resSIMD)
 			verifyFormalLPResult(t, tag+"/scalar", p, lpScalar, resScalar)
 		}
-		resPre := verifyFormalPresolvedLP(t, tag+"/presolve", p, allVarsBounded(p))
+		resPre := verifyFormalPresolvedLP(t, tag+"/presolve", p, true)
 		if resPre.Status != resSIMD.Status {
 			t.Fatalf("[%s] presolved LP status %v != LP status %v", tag, resPre.Status, resSIMD.Status)
 		}
