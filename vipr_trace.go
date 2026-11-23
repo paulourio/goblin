@@ -2,13 +2,13 @@ package goblin
 
 import (
 	"cmp"
-	"encoding/json/jsontext"
-	"encoding/json/v2"
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
 	"slices"
+	"time"
 )
 
 const (
@@ -61,39 +61,95 @@ type viprLinConJSON struct {
 	RHS    viprRatPayload   `json:"rhs"`
 }
 
+type viprOrbitWitnessJSON struct {
+	Companion      int   `json:"companion"`
+	ColPerm        []int `json:"colPerm"`
+	RowPerm        []int `json:"rowPerm"`
+	SupportEntries []int `json:"supportEntries,omitzero"`
+}
+
+type viprPresolveStepJSON struct {
+	Op       string          `json:"op"`
+	Row      *int            `json:"row,omitzero"`
+	Col      *int            `json:"col,omitzero"`
+	U        *int            `json:"u,omitzero"`
+	V        *int            `json:"v,omitzero"`
+	IsUpper  *bool           `json:"isUpper,omitzero"`
+	RoundInt *bool           `json:"roundInt,omitzero"`
+	Divisor  *int64          `json:"divisor,omitzero"`
+	NewBound *viprRatPayload `json:"newBound,omitzero"`
+	Val      *viprRatPayload `json:"val,omitzero"`
+	Delta    *viprRatPayload `json:"delta,omitzero"`
+	ColPerm  []int           `json:"colPerm,omitzero"`
+	RowPerm  []int           `json:"rowPerm,omitzero"`
+}
+
+type viprInstanceJSON struct {
+	N        int               `json:"n"`
+	ObjConst viprRatPayload    `json:"objConst"`
+	Obj      []viprRatPayload  `json:"obj"`
+	IsInt    []bool            `json:"isInt"`
+	LB       []*viprRatPayload `json:"lb"`
+	UB       []*viprRatPayload `json:"ub"`
+	BaseRows []viprLinConJSON  `json:"baseRows"`
+}
+
 type viprStepJSON struct {
-	Rule        string             `json:"rule"`
-	Row         *int               `json:"row,omitzero"`
-	Col         *int               `json:"col,omitzero"`
-	Sense       string             `json:"sense,omitzero"`
-	Bound       jsontext.Value     `json:"bound,omitzero"`
-	Refs        *[]viprLinRefJSON  `json:"refs,omitzero"`
-	Bounds      []viprBoundRefJSON `json:"bounds,omitzero"`
-	BoundAsms   []int              `json:"boundAsms,omitzero"`
-	Ref         *int               `json:"ref,omitzero"`
-	SplitVal    jsontext.Value     `json:"splitVal,omitzero"`
-	LeftAsm     *int               `json:"leftAsm,omitzero"`
-	RightAsm    *int               `json:"rightAsm,omitzero"`
-	Left        *int               `json:"left,omitzero"`
-	Right       *int               `json:"right,omitzero"`
-	LBRef       *int               `json:"lbRef,omitzero"`
-	UBRef       *int               `json:"ubRef,omitzero"`
-	Assumptions []int              `json:"assumptions,omitzero"`
+	Rule        string                 `json:"rule"`
+	Row         *int                   `json:"row,omitzero"`
+	Col         *int                   `json:"col,omitzero"`
+	Sense       string                 `json:"sense,omitzero"`
+	Bound       viprRawJSON            `json:"bound,omitzero"`
+	Refs        *[]viprLinRefJSON      `json:"refs,omitzero"`
+	Bounds      []viprBoundRefJSON     `json:"bounds,omitzero"`
+	BoundAsms   []int                  `json:"boundAsms,omitzero"`
+	Ref         *int                   `json:"ref,omitzero"`
+	SplitVal    viprRawJSON            `json:"splitVal,omitzero"`
+	LeftAsm     *int                   `json:"leftAsm,omitzero"`
+	RightAsm    *int                   `json:"rightAsm,omitzero"`
+	Left        *int                   `json:"left,omitzero"`
+	Right       *int                   `json:"right,omitzero"`
+	OrbitAsms   []int                  `json:"orbitAsms,omitzero"`
+	Witnesses   []viprOrbitWitnessJSON `json:"witnesses,omitzero"`
+	ExtraAsms   []int                  `json:"extraAsms,omitzero"`
+	LBRef       *int                   `json:"lbRef,omitzero"`
+	UBRef       *int                   `json:"ubRef,omitzero"`
+	Assumptions []int                  `json:"assumptions,omitzero"`
 }
 
 type viprCertJSON struct {
-	N         int               `json:"n"`
-	ObjConst  viprRatPayload    `json:"objConst"`
-	Obj       []viprRatPayload  `json:"obj"`
-	IsInt     []bool            `json:"isInt"`
-	LB        []*viprRatPayload `json:"lb"`
-	UB        []*viprRatPayload `json:"ub"`
-	BaseRows  []viprLinConJSON  `json:"baseRows"`
-	Mode      string            `json:"mode"`
-	TargetLB  *viprRatPayload   `json:"targetLB,omitzero"`
-	Incumbent []viprRatPayload  `json:"incumbent,omitzero"`
-	Steps     []viprStepJSON    `json:"steps"`
-	RootStep  int               `json:"rootStep"`
+	Orig      *viprInstanceJSON      `json:"orig,omitzero"`
+	Presolve  []viprPresolveStepJSON `json:"presolve,omitzero"`
+	N         int                    `json:"n"`
+	ObjConst  viprRatPayload         `json:"objConst"`
+	Obj       []viprRatPayload       `json:"obj"`
+	IsInt     []bool                 `json:"isInt"`
+	LB        []*viprRatPayload      `json:"lb"`
+	UB        []*viprRatPayload      `json:"ub"`
+	BaseRows  []viprLinConJSON       `json:"baseRows"`
+	Mode      string                 `json:"mode"`
+	TargetLB  *viprRatPayload        `json:"targetLB,omitzero"`
+	Incumbent []viprRatPayload       `json:"incumbent,omitzero"`
+	Steps     []viprStepJSON         `json:"steps"`
+	RootStep  int                    `json:"rootStep"`
+}
+
+func viprBoolPtr(v bool) *bool {
+	b := v
+	return &b
+}
+
+func viprInt64Ptr(v int64) *int64 {
+	x := v
+	return &x
+}
+
+func viprRatPtr(r *big.Rat) *viprRatPayload {
+	if r == nil {
+		return nil
+	}
+	p := viprBigRatToPayload(r)
+	return &p
 }
 
 func viprIntPtr(v int) *int {
@@ -101,11 +157,11 @@ func viprIntPtr(v int) *int {
 	return &p
 }
 
-func viprBigIntJSON(v *big.Int) jsontext.Value {
+func viprBigIntJSON(v *big.Int) viprRawJSON {
 	if v == nil {
 		return nil
 	}
-	return jsontext.Value(v.String())
+	return viprRawJSON(v.String())
 }
 
 func viprFloorBigInt(v float64) (*big.Int, bool) {
@@ -157,21 +213,24 @@ func viprOptRefs(r []viprLinRefJSON) *[]viprLinRefJSON {
 // VIPRTrace records an exact rational Mini-VIPR proof tree during a single-threaded
 // BackendGo Branch-and-Bound solve configured with WithVIPRTrace.
 //
-// When presolve reduces the input problem before Branch-and-Bound, VIPRTrace certifies
-// the post-presolve problem returned by TracedProblem. When presolve proves no feasible
-// point exists before Branch-and-Bound, PresolveInfeasible reports true and VIPRTrace
-// emits a root proof against the original problem whenever root bounds, integer GCD,
-// rational bound tightening, or an LP Farkas ray certify an empty feasible set.
+// When MIP presolve reduces the input problem before Branch-and-Bound, VIPRTrace attaches
+// an exact rational presolve proof envelope (Orig -> Reduced) so TracedProblem reports the
+// original CompiledProblem. When presolve proves no feasible point exists before
+// Branch-and-Bound, PresolveInfeasible reports true and VIPRTrace emits a presolve-enveloped
+// or root proof against the original problem.
 type VIPRTrace struct {
-	tracedProb          *CompiledProblem
-	cert                viprCertJSON
-	targetLB            *big.Rat
-	presolveInfeasible  bool
-	hasCert             bool
-	rootCutsCertified   int
-	inTreeCutsCertified int
-	rcfFixingsCertified int
-	unbTightCertified   int
+	tracedProb             *CompiledProblem
+	presolveEnv            *VIPRPresolveEnvelope
+	cert                   viprCertJSON
+	targetLB               *big.Rat
+	presolveInfeasible     bool
+	hasCert                bool
+	disableOrbit           bool
+	rootCutsCertified      int
+	inTreeCutsCertified    int
+	rcfFixingsCertified    int
+	unbTightCertified      int
+	orbitBranchesCertified int
 }
 
 // NewVIPRTrace allocates an empty VIPRTrace for use with WithVIPRTrace.
@@ -179,8 +238,23 @@ func NewVIPRTrace() *VIPRTrace {
 	return &VIPRTrace{}
 }
 
+// WithVIPRTrace enables single-threaded rational Mini-VIPR proof tracing into tr on BackendGo.
+func WithVIPRTrace(tr *VIPRTrace) Option {
+	return func(cfg *Options) {
+		if tr == nil {
+			cfg.viprTrace = nil
+			return
+		}
+		cfg.viprTrace = tr
+		cfg.Workers = 1
+	}
+}
+
 func (tr *VIPRTrace) reset(p *CompiledProblem) {
 	tr.tracedProb = p
+	if tr.presolveEnv != nil && tr.presolveEnv.Reduced != p {
+		tr.presolveEnv = nil
+	}
 	tr.cert = viprCertJSON{}
 	tr.targetLB = nil
 	tr.presolveInfeasible = false
@@ -189,12 +263,55 @@ func (tr *VIPRTrace) reset(p *CompiledProblem) {
 	tr.inTreeCutsCertified = 0
 	tr.rcfFixingsCertified = 0
 	tr.unbTightCertified = 0
+	tr.orbitBranchesCertified = 0
+}
+
+// SetPresolveEnvelope attaches a verified presolve envelope (Orig -> Reduced) to
+// the trace. It may be called either before solving Reduced or after a trace on
+// Reduced has been finalized.
+func (tr *VIPRTrace) SetPresolveEnvelope(env *VIPRPresolveEnvelope) {
+	if tr == nil {
+		return
+	}
+	tr.presolveEnv = env
+	if tr.hasCert && env != nil && env.Reduced == tr.tracedProb {
+		tr.attachPresolveEnvelopeIfMatching(tr.tracedProb)
+	}
+}
+
+// PresolveEnvelope returns the attached VIPRPresolveEnvelope, or nil if none.
+func (tr *VIPRTrace) PresolveEnvelope() *VIPRPresolveEnvelope {
+	if tr == nil {
+		return nil
+	}
+	return tr.presolveEnv
+}
+
+// PresolveStepCount returns the number of certified presolve steps in the envelope.
+func (tr *VIPRTrace) PresolveStepCount() int {
+	if tr == nil || tr.presolveEnv == nil {
+		return 0
+	}
+	return len(tr.presolveEnv.Steps)
+}
+
+// OrbitBranchesCertified returns the count of exact-verified orbital branches recorded.
+func (tr *VIPRTrace) OrbitBranchesCertified() int {
+	if tr == nil {
+		return 0
+	}
+	return tr.orbitBranchesCertified
 }
 
 // TracedProblem returns the CompiledProblem certified by this trace.
 func (tr *VIPRTrace) TracedProblem() *CompiledProblem {
 	if tr == nil {
 		return nil
+	}
+	if tr.presolveEnv != nil && tr.presolveEnv.Orig != nil && tr.presolveEnv.Reduced == tr.tracedProb {
+		if !tr.hasCert || tr.cert.Orig != nil {
+			return tr.presolveEnv.Orig
+		}
 	}
 	return tr.tracedProb
 }
@@ -207,6 +324,52 @@ func (tr *VIPRTrace) PresolveInfeasible() bool {
 // HasCertificate reports whether a complete Mini-VIPR certificate is available.
 func (tr *VIPRTrace) HasCertificate() bool {
 	return tr != nil && tr.hasCert
+}
+
+func (tr *VIPRTrace) hasCertificate() bool {
+	return tr.HasCertificate()
+}
+
+func (tr *VIPRTrace) newBabRecorder(p *CompiledProblem, disableSIMD bool) babVIPRHook {
+	return newBabVIPRRecorder(tr, p, disableSIMD)
+}
+
+func (tr *VIPRTrace) presolveMIP(
+	ctx context.Context,
+	p *CompiledProblem,
+	backend Backend,
+	disableSIMD bool,
+	start, deadline time.Time,
+	done <-chan struct{},
+) (*CompiledProblem, Result, bool) {
+	vPre := presolveForVIPRWithDeadline(p, defaultPresolveMaxPass, deadline, done)
+	if ctx != nil && ctx.Err() != nil {
+		return p, Result{}, true
+	}
+	if vPre.TimedOut {
+		return p, Result{
+			modelID:   p.modelID,
+			Backend:   backend,
+			Status:    StatusTimeLimit,
+			SolveTime: time.Since(start),
+		}, true
+	}
+	if vPre.Infeasible {
+		if !tr.RecordPresolveInfeasibleEnvelope(vPre) {
+			tr.recordPresolveInfeasible(p, disableSIMD)
+		}
+		return p, Result{
+			modelID:   p.modelID,
+			Backend:   backend,
+			Status:    StatusInfeasible,
+			SolveTime: time.Since(start),
+		}, true
+	}
+	if vPre.Reduced != nil && vPre.Reduced.invalidErr == nil && vPre.Envelope != nil && len(vPre.Envelope.Steps) > 0 {
+		tr.SetPresolveEnvelope(vPre.Envelope)
+		return vPre.Reduced, Result{}, false
+	}
+	return p, Result{}, false
 }
 
 // Mode returns the Mini-VIPR certificate mode ("infeasible", "optimal", "bound", or "").
@@ -242,7 +405,7 @@ func (tr *VIPRTrace) MarshalVIPRJSON() ([]byte, error) {
 	if !tr.hasCert {
 		return nil, errVIPRNoCertificate
 	}
-	return json.Marshal(tr.cert)
+	return marshalVIPRCertJSON(tr.cert), nil
 }
 
 type viprRatProblem struct {
@@ -400,6 +563,198 @@ func (rp *viprRatProblem) buildBaseCert(mode string) viprCertJSON {
 		BaseRows: rows,
 		Mode:     mode,
 	}
+}
+
+func (rp *viprRatProblem) buildInstanceJSON() viprInstanceJSON {
+	c := rp.buildBaseCert("")
+	return viprInstanceJSON{
+		N:        c.N,
+		ObjConst: c.ObjConst,
+		Obj:      c.Obj,
+		IsInt:    c.IsInt,
+		LB:       c.LB,
+		UB:       c.UB,
+		BaseRows: c.BaseRows,
+	}
+}
+
+func marshalVIPRPresolveStep(s VIPRPresolveStep) viprPresolveStepJSON {
+	out := viprPresolveStepJSON{Op: s.Op}
+	switch s.Op {
+	case "roundBound":
+		out.Col = viprIntPtr(s.Col)
+		out.IsUpper = viprBoolPtr(s.IsUpper)
+		out.NewBound = viprRatPtr(s.NewBound)
+	case "activityBound":
+		out.Row = viprIntPtr(s.Row)
+		out.Col = viprIntPtr(s.Col)
+		out.IsUpper = viprBoolPtr(s.IsUpper)
+		out.RoundInt = viprBoolPtr(s.RoundInt)
+		out.NewBound = viprRatPtr(s.NewBound)
+	case "gcdRowDiv":
+		out.Row = viprIntPtr(s.Row)
+		out.Divisor = viprInt64Ptr(s.Divisor)
+	case "substFixedRow":
+		out.Row = viprIntPtr(s.Row)
+		out.Col = viprIntPtr(s.Col)
+		out.Val = viprRatPtr(s.Val)
+	case "substFixedObj":
+		out.Col = viprIntPtr(s.Col)
+		out.Val = viprRatPtr(s.Val)
+	case "singletonRowElim":
+		out.Row = viprIntPtr(s.Row)
+		out.Col = viprIntPtr(s.Col)
+		out.RoundInt = viprBoolPtr(s.RoundInt)
+	case "redundantRow":
+		out.Row = viprIntPtr(s.Row)
+	case "binStrengthen":
+		out.Row = viprIntPtr(s.Row)
+		out.Col = viprIntPtr(s.Col)
+		out.Delta = viprRatPtr(s.Delta)
+	case "symBreakLe":
+		out.U = viprIntPtr(s.U)
+		out.V = viprIntPtr(s.V)
+		out.ColPerm = slices.Clone(s.ColPerm)
+		out.RowPerm = slices.Clone(s.RowPerm)
+	}
+	return out
+}
+
+func (tr *VIPRTrace) attachPresolveEnvelopeIfMatching(p *CompiledProblem) {
+	if tr == nil || tr.presolveEnv == nil || tr.presolveEnv.Orig == nil || tr.presolveEnv.Reduced != p {
+		return
+	}
+	origRP, ok := buildVIPRRatProblem(tr.presolveEnv.Orig)
+	if !ok {
+		return
+	}
+	inst := origRP.buildInstanceJSON()
+	tr.cert.Orig = &inst
+	if len(tr.presolveEnv.Steps) > 0 {
+		steps := make([]viprPresolveStepJSON, len(tr.presolveEnv.Steps))
+		for i, st := range tr.presolveEnv.Steps {
+			steps[i] = marshalVIPRPresolveStep(st)
+		}
+		tr.cert.Presolve = steps
+	} else {
+		tr.cert.Presolve = nil
+	}
+}
+
+// RecordPresolveInfeasibleEnvelope records a complete presolve-enveloped
+// infeasibility certificate from an infeasible VIPRPresolveResult.
+func (tr *VIPRTrace) RecordPresolveInfeasibleEnvelope(res VIPRPresolveResult) bool {
+	if tr == nil || !res.Infeasible || res.Envelope == nil || res.Reduced == nil {
+		return false
+	}
+	tr.presolveEnv = res.Envelope
+	tr.reset(res.Reduced)
+	tr.presolveInfeasible = true
+	rp, ok := buildVIPRRatProblem(res.Reduced)
+	if !ok {
+		return false
+	}
+
+	var steps []viprStepJSON
+	rootStep := 0
+	if res.InfeasConflictCol >= 0 && res.InfeasConflictCol < rp.n {
+		col := res.InfeasConflictCol
+		if rp.lb[col] != nil && rp.ub[col] != nil && rp.ub[col].Cmp(rp.lb[col]) < 0 {
+			steps = []viprStepJSON{{Rule: "boundConflict", Col: viprIntPtr(col)}}
+		}
+	}
+	if len(steps) == 0 && res.InfeasRow >= 0 && res.InfeasRow < rp.m {
+		row := res.InfeasRow
+		cols := rp.rowCols[row]
+		vals := rp.rowVals[row]
+		if len(cols) == 0 {
+			steps = []viprStepJSON{{Rule: "conIndex", Row: viprIntPtr(row)}}
+		} else if res.InfeasGCDDivisor > 0 {
+			if gcdSteps, gcdRoot, okGCD := buildGCDInfeasSteps(rp); okGCD {
+				steps = gcdSteps
+				rootStep = gcdRoot
+			}
+		} else {
+			// Activity-infeasible row: derive 0 <= rhs - minAct < 0 (or maxAct - rhs < 0) via farkas.
+			minAct := new(big.Rat)
+			maxAct := new(big.Rat)
+			minFin, maxFin := true, true
+			var prod big.Rat
+			for k, col := range cols {
+				a := vals[k]
+				if a.Sign() > 0 {
+					if rp.lb[col] == nil {
+						minFin = false
+					} else {
+						minAct.Add(minAct, prod.Mul(a, rp.lb[col]))
+					}
+					if rp.ub[col] == nil {
+						maxFin = false
+					} else {
+						maxAct.Add(maxAct, prod.Mul(a, rp.ub[col]))
+					}
+				} else if a.Sign() < 0 {
+					if rp.ub[col] == nil {
+						minFin = false
+					} else {
+						minAct.Add(minAct, prod.Mul(a, rp.ub[col]))
+					}
+					if rp.lb[col] == nil {
+						maxFin = false
+					} else {
+						maxAct.Add(maxAct, prod.Mul(a, rp.lb[col]))
+					}
+				}
+			}
+			var rowMult int64
+			if (rp.rowSense[row] == LessEqual || rp.rowSense[row] == Equal) && minFin && minAct.Cmp(rp.rowRHS[row]) > 0 {
+				rowMult = 1
+			} else if (rp.rowSense[row] == GreaterEqual || rp.rowSense[row] == Equal) && maxFin && maxAct.Cmp(rp.rowRHS[row]) < 0 {
+				rowMult = -1
+			}
+			if rowMult != 0 {
+				mRat := big.NewRat(rowMult, 1)
+				bounds := make([]viprBoundRefJSON, 0, len(cols))
+				for k, col := range cols {
+					effA := new(big.Rat).Mul(vals[k], mRat)
+					if effA.Sign() == 0 {
+						continue
+					}
+					negA := new(big.Rat).Neg(effA)
+					kind := "lb"
+					if effA.Sign() < 0 {
+						kind = "ub"
+					}
+					bounds = append(bounds, viprBoundRefJSON{
+						Col:  col,
+						Kind: kind,
+						Mult: viprBigRatToPayload(negA),
+					})
+				}
+				steps = []viprStepJSON{{
+					Rule:   "farkas",
+					Refs:   viprOptRefs([]viprLinRefJSON{{ID: row, Mult: viprInt64Payload(rowMult)}}),
+					Bounds: bounds,
+				}}
+			}
+		}
+	}
+	if len(steps) == 0 {
+		if gcdSteps, gcdRoot, okGCD := buildGCDInfeasSteps(rp); okGCD {
+			steps = gcdSteps
+			rootStep = gcdRoot
+		}
+	}
+	if len(steps) == 0 {
+		return false
+	}
+	cert := rp.buildBaseCert("infeasible")
+	cert.Steps = steps
+	cert.RootStep = rootStep
+	tr.cert = cert
+	tr.attachPresolveEnvelopeIfMatching(res.Reduced)
+	tr.hasCert = true
+	return true
 }
 
 func viprRatFloor(r *big.Rat) *big.Rat {
@@ -1380,10 +1735,17 @@ type viprNodeKind uint8
 const (
 	viprNodeOpen viprNodeKind = iota
 	viprNodeBranch
+	viprNodeOrbitBranch
 	viprNodeLeafBoundConflict
 	viprNodeLeafFarkas
 	viprNodeLeafDual
 )
+
+type viprOrbitWitness struct {
+	companion int
+	colPerm   []int
+	rowPerm   []int
+}
 
 type viprPropStep struct {
 	rowIdx   int // -1 denotes integer bound rounding from an existing bound.
@@ -1438,43 +1800,47 @@ type viprCertifiedCut struct {
 }
 
 type viprTreeNode struct {
-	parent      *viprTreeNode
-	left        *viprTreeNode
-	right       *viprTreeNode
-	propSteps   []viprPropStep
-	bestDual    []viprRowMult
-	bestDualRHS *big.Rat
-	farkas      []viprRowMult
-	asmBound    *big.Int
-	splitVal    *big.Int
-	asmCol      int
-	branchCol   int
-	conflictCol int
-	kind        viprNodeKind
-	hasAsm      bool
-	asmIsUpper  bool
+	parent         *viprTreeNode
+	left           *viprTreeNode
+	right          *viprTreeNode
+	propSteps      []viprPropStep
+	bestDual       []viprRowMult
+	bestDualRHS    *big.Rat
+	farkas         []viprRowMult
+	asmBound       *big.Int
+	splitVal       *big.Int
+	orbitAsmCols   []int
+	orbitWitnesses []viprOrbitWitness
+	asmCol         int
+	branchCol      int
+	conflictCol    int
+	kind           viprNodeKind
+	hasAsm         bool
+	asmIsUpper     bool
 }
 
 type babVIPRRecorder struct {
-	trace               *VIPRTrace
-	rp                  *viprRatProblem
-	root                *viprTreeNode
-	baseScratchLP       *LPSolver
-	cutScratchLP        *LPSolver
-	scratchCutIDs       []int
-	allCuts             []viprGlobalCut
-	activeCutIDs        []int
-	cachedIncPtr        *float64
-	cachedIncObjMin     float64
-	cachedIncRat        []*big.Rat
-	cachedIncObj        *big.Rat
-	cachedIncOK         bool
-	disableSIMD         bool
-	invalid             bool
-	rootCutsCertified   int
-	inTreeCutsCertified int
-	rcfFixingsCertified int
-	unbTightCertified   int
+	trace                  *VIPRTrace
+	rp                     *viprRatProblem
+	root                   *viprTreeNode
+	baseScratchLP          *LPSolver
+	cutScratchLP           *LPSolver
+	scratchCutIDs          []int
+	allCuts                []viprGlobalCut
+	stagedCuts             []viprCertifiedCut
+	activeCutIDs           []int
+	cachedIncPtr           *float64
+	cachedIncObjMin        float64
+	cachedIncRat           []*big.Rat
+	cachedIncObj           *big.Rat
+	cachedIncOK            bool
+	disableSIMD            bool
+	invalid                bool
+	rootCutsCertified      int
+	inTreeCutsCertified    int
+	rcfFixingsCertified    int
+	unbTightCertified      int
+	orbitBranchesCertified int
 }
 
 func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *babVIPRRecorder {
@@ -1504,6 +1870,99 @@ func (r *babVIPRRecorder) close() {
 		r.cutScratchLP = nil
 		r.scratchCutIDs = nil
 	}
+}
+
+func (r *babVIPRRecorder) rootNode() *viprTreeNode {
+	if r == nil {
+		return nil
+	}
+	return r.root
+}
+
+func (r *babVIPRRecorder) recordRootInfeasibleEqRow(p *CompiledProblem) {
+	if r == nil || r.trace == nil {
+		return
+	}
+	r.trace.recordRootInfeasibleEqRow(p)
+}
+
+func (r *babVIPRRecorder) newDisabledOrbitSubTrace() viprTraceHook {
+	tr := NewVIPRTrace()
+	tr.disableOrbit = true
+	return tr
+}
+
+func (r *babVIPRRecorder) adoptSubTraceInfeas(p *CompiledProblem, sub viprTraceHook) {
+	if r == nil || r.trace == nil {
+		return
+	}
+	if subTr, ok := sub.(*VIPRTrace); ok && subTr != nil {
+		r.trace.adoptInfeasSteps(p, subTr)
+	}
+}
+
+func (r *babVIPRRecorder) stageCertifiedCutRound(
+	s *LPSolver,
+	lpPrimal []float64,
+	maxCuts int,
+	minEff float64,
+	ws *cutGenWorkspace,
+) bool {
+	if r == nil {
+		return false
+	}
+	r.stagedCuts = r.generateCertifiedCutRound(s, lpPrimal, maxCuts, minEff, ws)
+	return len(r.stagedCuts) > 0
+}
+
+func (r *babVIPRRecorder) commitStagedCutPlanes(lpSolver *LPSolver, isRoot bool) int {
+	if r == nil {
+		return 0
+	}
+	cuts := r.stagedCuts
+	r.stagedCuts = nil
+	return r.addCertifiedCutPlanes(lpSolver, cuts, isRoot)
+}
+
+func (r *babVIPRRecorder) createChildNodes(
+	p *CompiledProblem,
+	sym *nodeSymmetry,
+	deadline time.Time,
+	done <-chan struct{},
+	parentLB float64,
+	parentDepth int,
+	parent *searchNode,
+	parentVN *viprTreeNode,
+	brVar int,
+	brVal float64,
+	curLB, curUB []float64,
+	pc pseudoCost,
+	counter *int,
+) (downNode, upNode *searchNode) {
+	downNode, upNode = createChildNodes(parentLB, parentDepth+1, parent, brVar, brVal, curLB[brVar], curUB[brVar], pc, counter)
+	fl := math.Floor(downNode.delta.ub)
+	downNode.delta.ub = fl
+	upNode.delta.lb = fl + 1.0
+	if r != nil && (r.trace == nil || !r.trace.disableOrbit) && p.varCat[brVar] == Binary && curLB[brVar] == 0 && curUB[brVar] == 1 && fl == 0 {
+		cands := sym.activeOrbitWithWitnesses(p, curLB, curUB, brVar, parentDepth, deadline, done)
+		if verified := r.filterVerifiedOrbitCompanions(parentVN, brVar, cands); len(verified) > 0 {
+			downNode.base = slices.Clip(downNode.base)
+			for _, w := range verified {
+				downNode.base = append(downNode.base, boundDelta{col: w.companion, lb: 0, ub: 0})
+			}
+			downNode.orbitalDown = true
+			downNode.viprNode, upNode.viprNode = r.recordOrbitBranch(parentVN, brVar, verified)
+			return downNode, upNode
+		}
+	}
+	if r != nil {
+		if splitInt, ok := viprFloorBigInt(downNode.delta.ub); !ok {
+			r.invalid = true
+		} else {
+			downNode.viprNode, upNode.viprNode = r.recordBranch(parentVN, brVar, splitInt)
+		}
+	}
+	return downNode, upNode
 }
 
 func (r *babVIPRRecorder) ensureBaseScratchLP() *LPSolver {
@@ -2081,6 +2540,12 @@ func (r *babVIPRRecorder) nodeBoundsRat(vn *viprTreeNode) ([]*big.Rat, []*big.Ra
 				lb[cur.asmCol] = bRat
 			}
 		}
+		for _, c := range cur.orbitAsmCols {
+			zeroRat := new(big.Rat)
+			if ub[c] == nil || zeroRat.Cmp(ub[c]) < 0 {
+				ub[c] = zeroRat
+			}
+		}
 		for _, ps := range cur.propSteps {
 			if ps.isUpper {
 				if ub[ps.col] == nil || ps.bound.Cmp(ub[ps.col]) < 0 {
@@ -2229,6 +2694,255 @@ func (r *babVIPRRecorder) recordBranch(vn *viprTreeNode, col int, splitVal *big.
 	vn.splitVal = sv
 	vn.left = left
 	vn.right = right
+	return left, right
+}
+
+func viprIsBijection(n int, perm []int) bool {
+	if len(perm) != n {
+		return false
+	}
+	seen := make([]bool, n)
+	for _, p := range perm {
+		if p < 0 || p >= n || seen[p] {
+			return false
+		}
+		seen[p] = true
+	}
+	return true
+}
+
+func viprSparseRatPermMatch(srcCols []int, srcVals []*big.Rat, dstCols []int, dstVals []*big.Rat, colPerm []int, negate bool) bool {
+	srcNNZ := 0
+	for _, v := range srcVals {
+		if v != nil && v.Sign() != 0 {
+			srcNNZ++
+		}
+	}
+	dstNNZ := 0
+	for _, v := range dstVals {
+		if v != nil && v.Sign() != 0 {
+			dstNNZ++
+		}
+	}
+	if srcNNZ != dstNNZ {
+		return false
+	}
+	srcMap := make(map[int]*big.Rat, srcNNZ)
+	for k, c := range srcCols {
+		if srcVals[k] != nil && srcVals[k].Sign() != 0 {
+			srcMap[c] = srcVals[k]
+		}
+	}
+	var neg big.Rat
+	for k, c := range dstCols {
+		if dstVals[k] == nil || dstVals[k].Sign() == 0 {
+			continue
+		}
+		sv, ok := srcMap[colPerm[c]]
+		if !ok {
+			return false
+		}
+		if negate {
+			neg.Neg(sv)
+			if dstVals[k].Cmp(&neg) != 0 {
+				return false
+			}
+		} else if dstVals[k].Cmp(sv) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func viprRatBaseRowPermImplies(rp *viprRatProblem, srcIdx, dstIdx int, colPerm []int) bool {
+	srcSense := rp.rowSense[srcIdx]
+	dstSense := rp.rowSense[dstIdx]
+	srcRHS := rp.rowRHS[srcIdx]
+	dstRHS := rp.rowRHS[dstIdx]
+	if viprSparseRatPermMatch(rp.rowCols[srcIdx], rp.rowVals[srcIdx], rp.rowCols[dstIdx], rp.rowVals[dstIdx], colPerm, false) {
+		switch {
+		case srcSense == LessEqual && dstSense == LessEqual:
+			if srcRHS.Cmp(dstRHS) <= 0 {
+				return true
+			}
+		case srcSense == GreaterEqual && dstSense == GreaterEqual:
+			if dstRHS.Cmp(srcRHS) <= 0 {
+				return true
+			}
+		case srcSense == Equal && dstSense == Equal:
+			if srcRHS.Cmp(dstRHS) == 0 {
+				return true
+			}
+		case srcSense == Equal && dstSense == LessEqual:
+			if srcRHS.Cmp(dstRHS) <= 0 {
+				return true
+			}
+		case srcSense == Equal && dstSense == GreaterEqual:
+			if dstRHS.Cmp(srcRHS) <= 0 {
+				return true
+			}
+		}
+	}
+	if viprSparseRatPermMatch(rp.rowCols[srcIdx], rp.rowVals[srcIdx], rp.rowCols[dstIdx], rp.rowVals[dstIdx], colPerm, true) {
+		negSrcRHS := new(big.Rat).Neg(srcRHS)
+		switch {
+		case srcSense == LessEqual && dstSense == GreaterEqual:
+			return dstRHS.Cmp(negSrcRHS) <= 0
+		case srcSense == GreaterEqual && dstSense == LessEqual:
+			return negSrcRHS.Cmp(dstRHS) <= 0
+		case srcSense == Equal && dstSense == Equal:
+			return negSrcRHS.Cmp(dstRHS) == 0
+		case srcSense == Equal && dstSense == LessEqual:
+			return negSrcRHS.Cmp(dstRHS) <= 0
+		case srcSense == Equal && dstSense == GreaterEqual:
+			return dstRHS.Cmp(negSrcRHS) <= 0
+		}
+	}
+	return false
+}
+
+func viprCutPermImplies(src, dst *viprGlobalCut, colPerm []int) bool {
+	if src.rhs == nil || dst.rhs == nil || src.rhs.Cmp(dst.rhs) > 0 {
+		return false
+	}
+	return viprSparseRatPermMatch(src.cols, src.vals, dst.cols, dst.vals, colPerm, false)
+}
+
+// filterVerifiedOrbitCompanions checks every candidate companion against baseRows,
+// objective, base bounds, exact node bounds, and active global cuts using exact
+// *big.Rat arithmetic, returning only companions with verified witnesses.
+func (r *babVIPRRecorder) filterVerifiedOrbitCompanions(
+	vn *viprTreeNode,
+	brVar int,
+	cands []orbitCandidateWitness,
+) []viprOrbitWitness {
+	if r == nil || r.invalid || vn == nil || len(cands) == 0 {
+		return nil
+	}
+	rp := r.rp
+	if brVar < 0 || brVar >= rp.n || !rp.isInt[brVar] {
+		return nil
+	}
+	nodeLB, nodeUB := r.nodeBoundsRat(vn)
+	one := big.NewRat(1, 1)
+	if nodeLB[brVar] == nil || nodeUB[brVar] == nil || nodeLB[brVar].Sign() != 0 || nodeUB[brVar].Cmp(one) != 0 {
+		return nil
+	}
+
+	seenComp := make(map[int]bool, len(cands))
+	var out []viprOrbitWitness
+	for _, cand := range cands {
+		c := cand.companion
+		if c < 0 || c >= rp.n || c == brVar || seenComp[c] || !rp.isInt[c] {
+			continue
+		}
+		if nodeLB[c] == nil || nodeUB[c] == nil || nodeLB[c].Sign() != 0 || nodeUB[c].Cmp(one) != 0 {
+			continue
+		}
+		if !viprIsBijection(rp.n, cand.colPerm) || cand.colPerm[brVar] != c || len(cand.rowPerm) != rp.m {
+			continue
+		}
+		colsOK := true
+		for j := range rp.n {
+			p := cand.colPerm[j]
+			if (rp.isInt[j] && !rp.isInt[p]) || rp.objMin[j].Cmp(rp.objMin[p]) != 0 {
+				colsOK = false
+				break
+			}
+			if !viprOptRatLbLe(rp.lb[j], rp.lb[p]) || !viprOptRatUbLe(rp.ub[p], rp.ub[j]) {
+				colsOK = false
+				break
+			}
+			if !viprOptRatLbLe(nodeLB[j], nodeLB[p]) || !viprOptRatUbLe(nodeUB[p], nodeUB[j]) {
+				colsOK = false
+				break
+			}
+		}
+		if !colsOK {
+			continue
+		}
+		rowsOK := true
+		for i := range rp.m {
+			ri := cand.rowPerm[i]
+			if ri < 0 || ri >= rp.m || !viprRatBaseRowPermImplies(rp, ri, i, cand.colPerm) {
+				rowsOK = false
+				break
+			}
+		}
+		if !rowsOK {
+			continue
+		}
+		cutsOK := true
+		for _, cutID := range r.activeCutIDs {
+			cDst := &r.allCuts[cutID]
+			matched := false
+			for _, otherID := range r.activeCutIDs {
+				if viprCutPermImplies(&r.allCuts[otherID], cDst, cand.colPerm) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				cutsOK = false
+				break
+			}
+		}
+		if !cutsOK {
+			continue
+		}
+		seenComp[c] = true
+		out = append(out, viprOrbitWitness{
+			companion: c,
+			colPerm:   slices.Clone(cand.colPerm),
+			rowPerm:   slices.Clone(cand.rowPerm),
+		})
+	}
+	return out
+}
+
+func (r *babVIPRRecorder) recordOrbitBranch(
+	vn *viprTreeNode,
+	brVar int,
+	witnesses []viprOrbitWitness,
+) (left, right *viprTreeNode) {
+	if r == nil || r.invalid || vn == nil {
+		return nil, nil
+	}
+	if len(witnesses) == 0 {
+		return r.recordBranch(vn, brVar, big.NewInt(0))
+	}
+	if brVar < 0 || brVar >= r.rp.n || !r.rp.isInt[brVar] {
+		r.invalid = true
+		return nil, nil
+	}
+	orbCols := make([]int, len(witnesses))
+	for i, w := range witnesses {
+		orbCols[i] = w.companion
+	}
+	left = &viprTreeNode{
+		parent:       vn,
+		asmCol:       brVar,
+		asmIsUpper:   true,
+		asmBound:     big.NewInt(0),
+		hasAsm:       true,
+		orbitAsmCols: orbCols,
+		kind:         viprNodeOpen,
+	}
+	right = &viprTreeNode{
+		parent:     vn,
+		asmCol:     brVar,
+		asmIsUpper: false,
+		asmBound:   big.NewInt(1),
+		hasAsm:     true,
+		kind:       viprNodeOpen,
+	}
+	vn.kind = viprNodeOrbitBranch
+	vn.branchCol = brVar
+	vn.splitVal = big.NewInt(0)
+	vn.orbitWitnesses = witnesses
+	vn.left = left
+	vn.right = right
+	r.orbitBranchesCertified++
 	return left, right
 }
 
@@ -2465,12 +3179,6 @@ func (r *babVIPRRecorder) certifyAndApplyRCF(
 		}
 	}
 	return curVN, applied, false
-}
-
-type viprBoundCand struct {
-	col     int
-	isUpper bool
-	bound   float64
 }
 
 func (r *babVIPRRecorder) certifyPrunedChildForCutoff(
@@ -3944,16 +4652,138 @@ func (r *babVIPRRecorder) propagateNode(vn *viprTreeNode, curLB, curUB []float64
 	return true, false
 }
 
+type viprAsmMeta struct {
+	col     int
+	isUpper bool
+	bound   *big.Rat
+}
+
 type viprEmitter struct {
 	rec       *babVIPRRecorder
 	rp        *viprRatProblem
 	cutStepID []int
 	steps     []viprStepJSON
+	entryAsms [][]int
+	asmMeta   map[int]viprAsmMeta
+}
+
+func viprMergeAsms(lists ...[]int) []int {
+	total := 0
+	for _, ls := range lists {
+		total += len(ls)
+	}
+	if total == 0 {
+		return nil
+	}
+	out := make([]int, 0, total)
+	for _, ls := range lists {
+		for _, a := range ls {
+			if !slices.Contains(out, a) {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+func viprFilterOutAsms(src []int, drop ...int) []int {
+	if len(src) == 0 {
+		return nil
+	}
+	var out []int
+	for _, a := range src {
+		if !slices.Contains(drop, a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func (em *viprEmitter) getAsms(id int) []int {
+	idx := id - em.rp.m
+	if idx < 0 || idx >= len(em.entryAsms) {
+		return nil
+	}
+	return em.entryAsms[idx]
+}
+
+func (em *viprEmitter) computeStepAsms(id int, st viprStepJSON) []int {
+	switch st.Rule {
+	case "assume":
+		return []int{id}
+	case "conIndex":
+		return nil
+	case "lincomb", "farkas", "dualBound":
+		if st.Refs == nil {
+			return nil
+		}
+		var lists [][]int
+		for _, ref := range *st.Refs {
+			if a := em.getAsms(ref.ID); len(a) > 0 {
+				lists = append(lists, a)
+			}
+		}
+		return viprMergeAsms(lists...)
+	case "roundDown", "roundUp":
+		if st.Ref == nil {
+			return nil
+		}
+		return slices.Clone(em.getAsms(*st.Ref))
+	case "boundConflict":
+		var lbA, ubA []int
+		if st.LBRef != nil {
+			lbA = em.getAsms(*st.LBRef)
+		}
+		if st.UBRef != nil {
+			ubA = em.getAsms(*st.UBRef)
+		}
+		return viprMergeAsms(lbA, ubA)
+	case "safeDual":
+		var lists [][]int
+		if st.Refs != nil {
+			for _, ref := range *st.Refs {
+				if a := em.getAsms(ref.ID); len(a) > 0 {
+					lists = append(lists, a)
+				}
+			}
+		}
+		for _, bid := range st.BoundAsms {
+			if a := em.getAsms(bid); len(a) > 0 {
+				lists = append(lists, a)
+			}
+		}
+		return viprMergeAsms(lists...)
+	case "branch":
+		var leftRem, rightRem []int
+		if st.Left != nil && st.LeftAsm != nil {
+			leftRem = viprFilterOutAsms(em.getAsms(*st.Left), *st.LeftAsm)
+		}
+		if st.Right != nil && st.RightAsm != nil {
+			rightRem = viprFilterOutAsms(em.getAsms(*st.Right), *st.RightAsm)
+		}
+		return viprMergeAsms(leftRem, rightRem)
+	case "orbitBranch":
+		var leftRem, rightRem []int
+		if st.Left != nil && st.LeftAsm != nil {
+			drop := make([]int, 0, 1+len(st.OrbitAsms))
+			drop = append(drop, *st.LeftAsm)
+			drop = append(drop, st.OrbitAsms...)
+			leftRem = viprFilterOutAsms(em.getAsms(*st.Left), drop...)
+		}
+		if st.Right != nil && st.RightAsm != nil {
+			rightRem = viprFilterOutAsms(em.getAsms(*st.Right), *st.RightAsm)
+		}
+		return viprMergeAsms(leftRem, rightRem, st.ExtraAsms)
+	default:
+		return nil
+	}
 }
 
 func (em *viprEmitter) addStep(st viprStepJSON) int {
 	id := em.rp.m + len(em.steps)
+	asms := em.computeStepAsms(id, st)
 	em.steps = append(em.steps, st)
+	em.entryAsms = append(em.entryAsms, asms)
 	return id
 }
 
@@ -3974,14 +4804,21 @@ func (em *viprEmitter) emitAssume(col int, isUpper bool, bound *big.Int) int {
 		sense = "<="
 	}
 	id := em.rp.m + len(em.steps)
-	em.steps = append(em.steps, viprStepJSON{
+	if em.asmMeta == nil {
+		em.asmMeta = make(map[int]viprAsmMeta)
+	}
+	em.asmMeta[id] = viprAsmMeta{
+		col:     col,
+		isUpper: isUpper,
+		bound:   new(big.Rat).SetInt(bound),
+	}
+	return em.addStep(viprStepJSON{
 		Rule:        "assume",
 		Col:         viprIntPtr(col),
 		Sense:       sense,
 		Bound:       viprBigIntJSON(bound),
 		Assumptions: []int{id},
 	})
-	return id
 }
 
 func (em *viprEmitter) emitGlobalCut(cut viprGlobalCut) (int, bool) {
@@ -4383,6 +5220,145 @@ func (em *viprEmitter) emitNode(
 			}
 			return brID, false, rightRHS, true
 		}
+
+	case viprNodeOrbitBranch:
+		if vn.left != nil && vn.right != nil &&
+			vn.left.kind == viprNodeOpen && len(vn.left.propSteps) == 0 &&
+			vn.right.kind == viprNodeOpen && len(vn.right.propSteps) == 0 {
+			if mults, hasD := nearestDual(vn); hasD {
+				id, rhs, dOK := em.emitSafeDual(mults, curLB, curUB, curAsms)
+				return id, false, rhs, dOK
+			}
+		}
+
+		zeroInt := big.NewInt(0)
+		oneInt := big.NewInt(1)
+		leftAsmID := em.emitAssume(vn.branchCol, true, zeroInt)
+		orbitAsmIDs := make([]int, len(vn.orbitWitnesses))
+		leftLB := slices.Clone(curLB)
+		leftUB := slices.Clone(curUB)
+		leftLBID := slices.Clone(curLBID)
+		leftUBID := slices.Clone(curUBID)
+		zeroRat := new(big.Rat)
+		if leftUB[vn.branchCol] == nil || zeroRat.Cmp(leftUB[vn.branchCol]) < 0 {
+			leftUB[vn.branchCol] = zeroRat
+			leftUBID[vn.branchCol] = leftAsmID
+		}
+		leftAsms := append(slices.Clone(curAsms), leftAsmID)
+		for idx, w := range vn.orbitWitnesses {
+			oid := em.emitAssume(w.companion, true, zeroInt)
+			orbitAsmIDs[idx] = oid
+			if leftUB[w.companion] == nil || zeroRat.Cmp(leftUB[w.companion]) < 0 {
+				leftUB[w.companion] = new(big.Rat)
+				leftUBID[w.companion] = oid
+			}
+			leftAsms = append(leftAsms, oid)
+		}
+		leftID, leftUnsat, leftRHS, leftOK := em.emitNode(vn.left, leftLB, leftUB, leftLBID, leftUBID, leftAsms)
+		if !leftOK {
+			return -1, false, nil, false
+		}
+
+		rightAsmID := em.emitAssume(vn.branchCol, false, oneInt)
+		rightLB := slices.Clone(curLB)
+		rightUB := slices.Clone(curUB)
+		rightLBID := slices.Clone(curLBID)
+		rightUBID := slices.Clone(curUBID)
+		oneRat := big.NewRat(1, 1)
+		if rightLB[vn.branchCol] == nil || oneRat.Cmp(rightLB[vn.branchCol]) > 0 {
+			rightLB[vn.branchCol] = oneRat
+			rightLBID[vn.branchCol] = rightAsmID
+		}
+		rightAsms := append(slices.Clone(curAsms), rightAsmID)
+		rightID, rightUnsat, rightRHS, rightOK := em.emitNode(vn.right, rightLB, rightUB, rightLBID, rightUBID, rightAsms)
+		if !rightOK {
+			return -1, false, nil, false
+		}
+
+		rightRem := viprFilterOutAsms(em.getAsms(rightID), rightAsmID)
+		var extraAsms []int
+
+		wJSON := make([]viprOrbitWitnessJSON, len(vn.orbitWitnesses))
+		for idx, w := range vn.orbitWitnesses {
+			var supports []int
+			for _, a := range rightRem {
+				meta, okM := em.asmMeta[a]
+				if !okM {
+					return -1, false, nil, false
+				}
+				kp := w.colPerm[meta.col]
+				if meta.isUpper {
+					if em.rp.ub[kp] != nil && em.rp.ub[kp].Cmp(meta.bound) <= 0 {
+						continue
+					}
+					if kp == meta.col {
+						continue
+					}
+					sid := curUBID[kp]
+					if sid < 0 {
+						return -1, false, nil, false
+					}
+					if !slices.Contains(supports, sid) {
+						supports = append(supports, sid)
+					}
+					for _, dep := range em.getAsms(sid) {
+						if !slices.Contains(extraAsms, dep) {
+							extraAsms = append(extraAsms, dep)
+						}
+					}
+				} else {
+					if em.rp.lb[kp] != nil && meta.bound.Cmp(em.rp.lb[kp]) <= 0 {
+						continue
+					}
+					if kp == meta.col {
+						continue
+					}
+					sid := curLBID[kp]
+					if sid < 0 {
+						return -1, false, nil, false
+					}
+					if !slices.Contains(supports, sid) {
+						supports = append(supports, sid)
+					}
+					for _, dep := range em.getAsms(sid) {
+						if !slices.Contains(extraAsms, dep) {
+							extraAsms = append(extraAsms, dep)
+						}
+					}
+				}
+			}
+			wJSON[idx] = viprOrbitWitnessJSON{
+				Companion:      w.companion,
+				ColPerm:        slices.Clone(w.colPerm),
+				RowPerm:        slices.Clone(w.rowPerm),
+				SupportEntries: supports,
+			}
+		}
+
+		obID := em.addStep(viprStepJSON{
+			Rule:      "orbitBranch",
+			Col:       viprIntPtr(vn.branchCol),
+			LeftAsm:   viprIntPtr(leftAsmID),
+			RightAsm:  viprIntPtr(rightAsmID),
+			Left:      viprIntPtr(leftID),
+			Right:     viprIntPtr(rightID),
+			OrbitAsms: orbitAsmIDs,
+			Witnesses: wJSON,
+			ExtraAsms: extraAsms,
+		})
+		switch {
+		case leftUnsat && rightUnsat:
+			return obID, true, nil, true
+		case leftUnsat:
+			return obID, false, rightRHS, true
+		case rightUnsat:
+			return obID, false, leftRHS, true
+		default:
+			if leftRHS.Cmp(rightRHS) <= 0 {
+				return obID, false, leftRHS, true
+			}
+			return obID, false, rightRHS, true
+		}
 	default:
 		return -1, false, nil, false
 	}
@@ -4442,6 +5418,7 @@ func (r *babVIPRRecorder) finalize(res Result) {
 	r.trace.inTreeCutsCertified = r.inTreeCutsCertified
 	r.trace.rcfFixingsCertified = r.rcfFixingsCertified
 	r.trace.unbTightCertified = r.unbTightCertified
+	r.trace.orbitBranchesCertified = r.orbitBranchesCertified
 
 	lbStepID := make([]int, rp.n)
 	ubStepID := make([]int, rp.n)
@@ -4481,6 +5458,7 @@ func (r *babVIPRRecorder) finalize(res Result) {
 		cert.Steps = em.steps
 		cert.RootStep = rootID - rp.m
 		r.trace.cert = cert
+		r.trace.attachPresolveEnvelopeIfMatching(rp.p)
 		r.trace.targetLB = nil
 		r.trace.hasCert = true
 		return
@@ -4524,6 +5502,7 @@ func (r *babVIPRRecorder) finalize(res Result) {
 		cert.TargetLB = &lbPay
 	}
 	r.trace.cert = cert
+	r.trace.attachPresolveEnvelopeIfMatching(rp.p)
 	r.trace.targetLB = targetLB
 	r.trace.hasCert = true
 }
@@ -4553,19 +5532,8 @@ func (tr *VIPRTrace) recordRootInfeasibleEqRow(p *CompiledProblem) {
 	cert.Steps = steps
 	cert.RootStep = rootStep
 	tr.cert = cert
+	tr.attachPresolveEnvelopeIfMatching(p)
 	tr.hasCert = true
-}
-
-func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
-	if p == nil || !p.isMIP {
-		return false
-	}
-	rp, ok := buildVIPRRatProblem(p)
-	if !ok {
-		return false
-	}
-	_, _, okGCD := buildGCDInfeasSteps(rp)
-	return okGCD
 }
 
 func buildGCDInfeasSteps(rp *viprRatProblem) ([]viprStepJSON, int, bool) {
@@ -4724,6 +5692,7 @@ func (tr *VIPRTrace) adoptInfeasSteps(p *CompiledProblem, sub *VIPRTrace) {
 	cert.Steps = slices.Clone(sub.cert.Steps)
 	cert.RootStep = sub.cert.RootStep
 	tr.cert = cert
+	tr.attachPresolveEnvelopeIfMatching(p)
 	tr.hasCert = true
 }
 

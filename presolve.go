@@ -1981,12 +1981,19 @@ type nodeSymmetry struct {
 	colTwinClass []int
 	twinClasses  [][]int
 
-	symG        int
-	symOrbits   []int
-	symColOrbit []int
-	symColGroup []int
+	symG         int
+	symOrbits    []int
+	symRowTuples []int
+	symColOrbit  []int
+	symColGroup  []int
 
 	dynScratch *orbitTrialScratch
+}
+
+type orbitCandidateWitness struct {
+	companion int
+	colPerm   []int
+	rowPerm   []int
 }
 
 func initNodeSymmetry(p *CompiledProblem) nodeSymmetry {
@@ -2129,6 +2136,7 @@ func (s *nodeSymmetry) initStaticSymGroup(p *CompiledProblem) {
 		}
 		s.symG = gCount
 		s.symOrbits = slices.Clone(sc.orbits)
+		s.symRowTuples = slices.Clone(sc.rowTuples)
 		s.symColOrbit = slices.Clone(sc.colOrbit)
 		s.symColGroup = slices.Clone(sc.colGroup)
 		return
@@ -2224,6 +2232,280 @@ func (s *nodeSymmetry) activeOrbit(
 		return detectDynamicNodeOrbit(p, curLB, curUB, bVar, deadline, done, &s.dynScratch, out)
 	}
 	return out
+}
+
+func identityPerm(n int) []int {
+	perm := make([]int, n)
+	for i := range n {
+		perm[i] = i
+	}
+	return perm
+}
+
+// activeOrbitWithWitnesses returns candidate orbit companions of bVar together with
+// explicit column and row permutation witnesses for exact rational verification.
+func (s *nodeSymmetry) activeOrbitWithWitnesses(
+	p *CompiledProblem,
+	curLB, curUB []float64,
+	bVar, depth int,
+	deadline time.Time,
+	done <-chan struct{},
+) []orbitCandidateWitness {
+	n := p.numVars
+	m := p.numConstraints
+	if bVar < 0 || bVar >= n || p.varCat[bVar] != Binary || curLB[bVar] != 0 || curUB[bVar] != 1 {
+		return nil
+	}
+
+	if bVar < len(s.colTwinClass) {
+		if tc := s.colTwinClass[bVar]; tc >= 0 {
+			var cands []orbitCandidateWitness
+			for _, c := range s.twinClasses[tc] {
+				if c == bVar || curLB[c] != 0 || curUB[c] != 1 {
+					continue
+				}
+				cp := identityPerm(n)
+				cp[bVar], cp[c] = c, bVar
+				cands = append(cands, orbitCandidateWitness{
+					companion: c,
+					colPerm:   cp,
+					rowPerm:   identityPerm(m),
+				})
+			}
+			if len(cands) > 0 {
+				return cands
+			}
+		}
+	}
+
+	if s.symG >= 2 && bVar < len(s.symColOrbit) {
+		if orbID := s.symColOrbit[bVar]; orbID >= 0 {
+			g0 := s.symColGroup[bVar]
+			numOrbs := len(s.symOrbits) / s.symG
+			numTuples := len(s.symRowTuples) / s.symG
+			var cands []orbitCandidateWitness
+			for g := range s.symG {
+				if g == g0 {
+					continue
+				}
+				cg := s.symOrbits[orbID*s.symG+g]
+				if cg == bVar || curLB[cg] != 0 || curUB[cg] != 1 {
+					continue
+				}
+				okSym := true
+				for o := range numOrbs {
+					a := s.symOrbits[o*s.symG+g0]
+					bCol := s.symOrbits[o*s.symG+g]
+					if p.objMin[a] != p.objMin[bCol] || curLB[a] != curLB[bCol] || curUB[a] != curUB[bCol] {
+						okSym = false
+						break
+					}
+				}
+				if !okSym {
+					continue
+				}
+				cp := identityPerm(n)
+				for o := range numOrbs {
+					a := s.symOrbits[o*s.symG+g0]
+					bCol := s.symOrbits[o*s.symG+g]
+					cp[a], cp[bCol] = bCol, a
+				}
+				rp := identityPerm(m)
+				for t := range numTuples {
+					ra := s.symRowTuples[t*s.symG+g0]
+					rb := s.symRowTuples[t*s.symG+g]
+					if ra >= 0 && ra < m && rb >= 0 && rb < m {
+						rp[ra], rp[rb] = rb, ra
+					}
+				}
+				cands = append(cands, orbitCandidateWitness{
+					companion: cg,
+					colPerm:   cp,
+					rowPerm:   rp,
+				})
+			}
+			if len(cands) > 0 {
+				return cands
+			}
+		}
+	}
+
+	if depth >= 1 && depth <= 6 && n <= 512 && m <= 512 {
+		return detectDynamicNodeOrbitWithWitnesses(p, curLB, curUB, bVar, deadline, done, &s.dynScratch)
+	}
+	return nil
+}
+
+func detectDynamicNodeOrbitWithWitnesses(
+	p *CompiledProblem,
+	curLB, curUB []float64,
+	bVar int,
+	deadline time.Time,
+	done <-chan struct{},
+	scratchPtr **orbitTrialScratch,
+) []orbitCandidateWitness {
+	if stopRequested(deadline, done) {
+		return nil
+	}
+	n := p.numVars
+	m := p.numConstraints
+
+	isFree := make([]bool, n)
+	for j := range n {
+		if curLB[j] < curUB[j] {
+			isFree[j] = true
+		}
+	}
+
+	resRows := make([]presolveWorkRow, 0, m)
+	resToOrigRow := make([]int, 0, m)
+	var seedRows []int
+	for i := range m {
+		rs, re := p.rowPtr[i], p.rowPtr[i+1]
+		freeCnt := 0
+		for k := rs; k < re; k++ {
+			if isFree[p.colIdx[k]] {
+				freeCnt++
+			}
+		}
+		if freeCnt == 0 {
+			continue
+		}
+		remRHS, exact, ok := evalFixedRowResidualExact(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
+		var rhsRat *big.Rat
+		if !exact {
+			rat, ratOK := evalFixedRowResidualRat(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
+			if !ratOK {
+				return nil
+			}
+			if f, fExact := rat.Float64(); fExact && !math.IsInf(f, 0) && !math.IsNaN(f) {
+				remRHS = f
+			} else {
+				remRHS, _ = rat.Float64()
+				rhsRat = rat
+			}
+		} else if !ok {
+			return nil
+		}
+		cols := make([]int, 0, freeCnt)
+		vals := make([]float64, 0, freeCnt)
+		touchesBVar := false
+		for k := rs; k < re; k++ {
+			col := p.colIdx[k]
+			if isFree[col] {
+				cols = append(cols, col)
+				vals = append(vals, p.rowVal[k])
+				if col == bVar {
+					touchesBVar = true
+				}
+			}
+		}
+		rowIdxOut := len(resRows)
+		resRows = append(resRows, presolveWorkRow{
+			cols:   cols,
+			vals:   vals,
+			rhs:    remRHS,
+			rhsRat: rhsRat,
+			sense:  p.rowSense[i],
+			active: true,
+		})
+		resToOrigRow = append(resToOrigRow, i)
+		if touchesBVar && freeCnt >= 2 && freeCnt <= maxOrbitGroupSize && (p.rowSense[i] == Equal || p.rowSense[i] == LessEqual) && rhsRat == nil && remRHS == 1.0 {
+			unitBin := true
+			for k, col := range cols {
+				if vals[k] != 1.0 || p.varCat[col] != Binary || curLB[col] != 0 || curUB[col] != 1 {
+					unitBin = false
+					break
+				}
+			}
+			if unitBin {
+				seedRows = append(seedRows, rowIdxOut)
+			}
+		}
+	}
+	if len(seedRows) == 0 || len(resRows) < 2 {
+		return nil
+	}
+
+	colPtr, colRow, colVal := buildPresolveCSC(n, resRows)
+	seedRows = filterAndSortOrbitSeeds(resRows, colPtr, seedRows)
+	if len(seedRows) == 0 {
+		return nil
+	}
+	rowHash := computeOrbitRowHashes(p, resRows, curLB, curUB, colPtr)
+
+	sc := *scratchPtr
+	if sc == nil || len(sc.colOrbit) < n || len(sc.rowState) < len(resRows) {
+		tmp := newOrbitTrialScratch(n, len(resRows))
+		sc = &tmp
+		*scratchPtr = sc
+	} else {
+		sc.reset()
+	}
+
+	maxTrials := min(len(seedRows), 4)
+	for sIdx := range maxTrials {
+		if stopRequested(deadline, done) {
+			return nil
+		}
+		if sIdx > 0 {
+			sc.reset()
+		}
+		gCount, ok, to := proposeAndVerifyOrbits(
+			p, resRows, curLB, curUB, colPtr, colRow, colVal, rowHash, seedRows[sIdx], sc, deadline, done,
+		)
+		if to {
+			return nil
+		}
+		if !ok || len(sc.orbits) == 0 || sc.colOrbit[bVar] < 0 {
+			continue
+		}
+		orbID := sc.colOrbit[bVar]
+		g0 := sc.colGroup[bVar]
+		numOrbs := len(sc.orbits) / gCount
+		numTuples := len(sc.rowTuples) / gCount
+		var cands []orbitCandidateWitness
+		for g := range gCount {
+			if g == g0 {
+				continue
+			}
+			cg := sc.orbits[orbID*gCount+g]
+			if cg == bVar || curLB[cg] != 0 || curUB[cg] != 1 {
+				continue
+			}
+			sameObj := true
+			for o := range numOrbs {
+				if p.objMin[sc.orbits[o*gCount+g0]] != p.objMin[sc.orbits[o*gCount+g]] {
+					sameObj = false
+					break
+				}
+			}
+			if !sameObj {
+				continue
+			}
+			cp := identityPerm(n)
+			for o := range numOrbs {
+				a := sc.orbits[o*gCount+g0]
+				bCol := sc.orbits[o*gCount+g]
+				cp[a], cp[bCol] = bCol, a
+			}
+			rp := identityPerm(m)
+			for t := range numTuples {
+				ra := resToOrigRow[sc.rowTuples[t*gCount+g0]]
+				rb := resToOrigRow[sc.rowTuples[t*gCount+g]]
+				rp[ra], rp[rb] = rb, ra
+			}
+			cands = append(cands, orbitCandidateWitness{
+				companion: cg,
+				colPerm:   cp,
+				rowPerm:   rp,
+			})
+		}
+		if len(cands) > 0 {
+			return cands
+		}
+	}
+	return nil
 }
 
 func detectDynamicNodeOrbit(
@@ -3830,4 +4112,1423 @@ func postsolveLP(orig *CompiledProblem, pre *LPPresolveResult, res *Result) bool
 	res.Duals = dualsOut
 	res.ReducedCosts = rcOut
 	return true
+}
+
+// VIPRPresolveStep records one exact-rational presolve reduction step matching
+// GoblinFormal.Track4.PresolveStep.
+type VIPRPresolveStep struct {
+	Op       string
+	Row      int
+	Col      int
+	U        int
+	V        int
+	IsUpper  bool
+	RoundInt bool
+	Divisor  int64
+	NewBound *big.Rat
+	Val      *big.Rat
+	Delta    *big.Rat
+	ColPerm  []int
+	RowPerm  []int
+}
+
+// VIPRPresolveEnvelope pairs an original CompiledProblem with the verified
+// presolve reduction sequence transforming Orig into Reduced.
+type VIPRPresolveEnvelope struct {
+	Orig    *CompiledProblem
+	Reduced *CompiledProblem
+	Steps   []VIPRPresolveStep
+}
+
+// VIPRPresolveResult holds the reduced problem, infeasibility witness metadata,
+// and verified presolve envelope returned by PresolveForVIPR.
+type VIPRPresolveResult struct {
+	Reduced           *CompiledProblem
+	Envelope          *VIPRPresolveEnvelope
+	Infeasible        bool
+	TimedOut          bool
+	TightenedBounds   int
+	RemovedRows       int
+	StrengthenedRows  int
+	SymBreakRows      int
+	SubstFixed        int
+	InfeasConflictCol int
+	InfeasRow         int
+	InfeasGCDDivisor  int64
+}
+
+// PresolveForVIPR runs exact-rational MIP presolve reductions and records a
+// machine-checkable VIPRPresolveEnvelope certifying Orig -> Reduced.
+func PresolveForVIPR(orig *CompiledProblem, maxPasses int) VIPRPresolveResult {
+	return presolveForVIPRWithDeadline(orig, maxPasses, time.Time{}, nil)
+}
+
+func viprRatFloorRat(r *big.Rat) *big.Rat {
+	q, rem := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
+	if rem.Sign() < 0 {
+		q.Sub(q, big.NewInt(1))
+	}
+	return new(big.Rat).SetInt(q)
+}
+
+func viprRatCeilRat(r *big.Rat) *big.Rat {
+	q, rem := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
+	if rem.Sign() > 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	return new(big.Rat).SetInt(q)
+}
+
+func viprRatExactFloat(r *big.Rat) (float64, bool) {
+	if r == nil {
+		return 0, false
+	}
+	f, exact := r.Float64()
+	if !exact || math.IsInf(f, 0) || math.IsNaN(f) {
+		return 0, false
+	}
+	return f, true
+}
+
+func viprOptRatLbLe(a, b *big.Rat) bool {
+	if a == nil {
+		return true
+	}
+	if b == nil {
+		return false
+	}
+	return a.Cmp(b) <= 0
+}
+
+func viprOptRatUbLe(a, b *big.Rat) bool {
+	if b == nil {
+		return true
+	}
+	if a == nil {
+		return false
+	}
+	return a.Cmp(b) <= 0
+}
+
+type viprPresolveRow struct {
+	name   string
+	cols   []int
+	vals   []*big.Rat
+	rhs    *big.Rat
+	sense  ConstraintSense
+	active bool
+}
+
+type viprPresolveState struct {
+	orig        *CompiledProblem
+	n           int
+	objConstRat *big.Rat
+	objConstF   float64
+	objRat      []*big.Rat
+	objF        []float64
+	isInt       []bool
+	lbRat       []*big.Rat
+	ubRat       []*big.Rat
+	lbF         []float64
+	ubF         []float64
+	rows        []viprPresolveRow
+	steps       []VIPRPresolveStep
+
+	tightened    int
+	removed      int
+	strengthened int
+	symBreak     int
+	substFixed   int
+}
+
+func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
+	if orig == nil {
+		return nil, false
+	}
+	n := orig.numVars
+	m := orig.numConstraints
+	constMin := orig.objConstMin()
+	objConstRat, ok := viprRatFromFloat(constMin)
+	if !ok {
+		return nil, false
+	}
+	st := &viprPresolveState{
+		orig:        orig,
+		n:           n,
+		objConstRat: objConstRat,
+		objConstF:   constMin,
+		objRat:      make([]*big.Rat, n),
+		objF:        slices.Clone(orig.objMin),
+		isInt:       make([]bool, n),
+		lbRat:       make([]*big.Rat, n),
+		ubRat:       make([]*big.Rat, n),
+		lbF:         slices.Clone(orig.varLB),
+		ubF:         slices.Clone(orig.varUB),
+		rows:        make([]viprPresolveRow, m),
+	}
+	for j := range n {
+		c, okC := viprRatFromFloat(orig.objMin[j])
+		if !okC {
+			return nil, false
+		}
+		st.objRat[j] = c
+		st.isInt[j] = orig.varCat[j] != Continuous
+		if !math.IsInf(st.lbF[j], -1) {
+			lr, okL := viprRatFromFloat(st.lbF[j])
+			if !okL {
+				return nil, false
+			}
+			st.lbRat[j] = lr
+		}
+		if !math.IsInf(st.ubF[j], 1) {
+			ur, okU := viprRatFromFloat(st.ubF[j])
+			if !okU {
+				return nil, false
+			}
+			st.ubRat[j] = ur
+		}
+	}
+	for i := range m {
+		rhs, okR := viprRatFromFloat(orig.rowRHS[i])
+		if !okR {
+			return nil, false
+		}
+		rs, re := orig.rowPtr[i], orig.rowPtr[i+1]
+		cols := make([]int, 0, re-rs)
+		vals := make([]*big.Rat, 0, re-rs)
+		for k := rs; k < re; k++ {
+			v := orig.rowVal[k]
+			if v == 0 {
+				continue
+			}
+			vr, okV := viprRatFromFloat(v)
+			if !okV {
+				return nil, false
+			}
+			cols = append(cols, orig.colIdx[k])
+			vals = append(vals, vr)
+		}
+		st.rows[i] = viprPresolveRow{
+			name:   orig.rowNames[i],
+			cols:   cols,
+			vals:   vals,
+			rhs:    rhs,
+			sense:  orig.rowSense[i],
+			active: true,
+		}
+	}
+	return st, true
+}
+
+func (st *viprPresolveState) buildCompiled() (*CompiledProblem, []int) {
+	orig := st.orig
+	n := st.n
+	mc := 0
+	totalNNZ := 0
+	rowMap := make([]int, len(st.rows))
+	for i := range st.rows {
+		rowMap[i] = -1
+		if !st.rows[i].active {
+			continue
+		}
+		rowMap[i] = mc
+		mc++
+		for _, v := range st.rows[i].vals {
+			if v.Sign() != 0 {
+				totalNNZ++
+			}
+		}
+	}
+
+	sense := orig.Sense()
+	red := newCompiledProblem()
+	red.name = orig.Name()
+	red.sense = sense
+	red.modelID = orig.modelID
+	red.numVars = n
+	red.numConstraints = mc
+	red.objName = orig.objName
+	red.objConstMinVal = st.objConstF
+	if sense == Maximize {
+		if st.objConstF == 0 {
+			red.objConstant = 0
+		} else {
+			red.objConstant = -st.objConstF
+		}
+	} else {
+		red.objConstant = st.objConstF
+	}
+
+	if len(orig.varNames) == n {
+		red.varNames = orig.varNames
+	} else {
+		red.varNames = make([]string, n)
+	}
+	red.objMin = slices.Clone(st.objF)
+	if sense == Maximize {
+		red.objCoeffs = make([]float64, n)
+		for j := range n {
+			if st.objF[j] != 0 {
+				red.objCoeffs[j] = -st.objF[j]
+			}
+		}
+	} else {
+		red.objCoeffs = red.objMin
+	}
+
+	red.rowNames = make([]string, mc)
+	red.rowSense = make([]ConstraintSense, mc)
+	red.rowRHS = make([]float64, mc)
+	red.rowLB = make([]float64, mc)
+	red.rowUB = make([]float64, mc)
+	red.rowPtr = make([]int, mc+1)
+	red.colIdx = make([]int, 0, totalNNZ)
+	red.rowVal = make([]float64, 0, totalNNZ)
+
+	rowOut := 0
+	for i := range st.rows {
+		r := &st.rows[i]
+		if !r.active {
+			continue
+		}
+		rhsF, _ := r.rhs.Float64()
+		red.rowNames[rowOut] = r.name
+		red.rowSense[rowOut] = r.sense
+		red.rowRHS[rowOut] = rhsF
+		switch r.sense {
+		case LessEqual:
+			red.rowLB[rowOut] = math.Inf(-1)
+			red.rowUB[rowOut] = rhsF
+		case GreaterEqual:
+			red.rowLB[rowOut] = rhsF
+			red.rowUB[rowOut] = math.Inf(1)
+		case Equal:
+			red.rowLB[rowOut] = rhsF
+			red.rowUB[rowOut] = rhsF
+		}
+		rowStart := len(red.colIdx)
+		red.rowPtr[rowOut] = rowStart
+		prevCol := -1
+		strictAsc := true
+		for k, col := range r.cols {
+			if r.vals[k].Sign() == 0 {
+				continue
+			}
+			vf, _ := r.vals[k].Float64()
+			if vf == 0 {
+				continue
+			}
+			if col <= prevCol {
+				strictAsc = false
+			}
+			prevCol = col
+			red.colIdx = append(red.colIdx, col)
+			red.rowVal = append(red.rowVal, vf)
+		}
+		if !strictAsc {
+			canonicalizeCSRRow(&red.colIdx, &red.rowVal, rowStart)
+		}
+		rowOut++
+	}
+	red.rowPtr[mc] = len(red.colIdx)
+
+	stride := denseRowStride(n, mc, len(red.colIdx))
+	if stride > 0 {
+		red.rowStride = stride
+		red.denseRows = make([]float64, mc*stride)
+		for i := range mc {
+			denseRow := red.denseRows[i*stride : (i+1)*stride]
+			for k := red.rowPtr[i]; k < red.rowPtr[i+1]; k++ {
+				denseRow[red.colIdx[k]] = red.rowVal[k]
+			}
+		}
+	} else if n > 0 && mc > 0 {
+		red.rowStride = sparseNoDenseStride
+	}
+
+	buildCSCFromCSR(red)
+
+	numInt := 0
+	for j := range n {
+		if st.isInt[j] {
+			numInt++
+		}
+	}
+	numWords := (n + wordBitMask) / bitsPerWord
+	red.varLB = slices.Clone(st.lbF)
+	red.varUB = slices.Clone(st.ubF)
+	red.varCat = make([]VarCategory, n)
+	red.binaryMask = make([]uint64, numWords)
+	if numInt > 0 {
+		red.isMIP = true
+		red.intCols = make([]int, 0, numInt)
+	}
+	for j := range n {
+		cat := orig.varCat[j]
+		if cat == Integer && red.varLB[j] >= 0 && red.varUB[j] <= 1 && red.varLB[j] <= red.varUB[j] {
+			cat = Binary
+		}
+		red.varCat[j] = cat
+		if cat != Continuous {
+			red.intCols = append(red.intCols, j)
+			if cat == Binary {
+				red.binaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
+			}
+		}
+	}
+	return red, rowMap
+}
+
+func (st *viprPresolveState) buildResult(infeas, timedOut bool, conflictCol, infeasRow int, gcdDiv int64) VIPRPresolveResult {
+	red, rowMap := st.buildCompiled()
+	mappedRow := -1
+	if infeasRow >= 0 && infeasRow < len(rowMap) {
+		mappedRow = rowMap[infeasRow]
+	}
+	return VIPRPresolveResult{
+		Reduced: red,
+		Envelope: &VIPRPresolveEnvelope{
+			Orig:    st.orig,
+			Reduced: red,
+			Steps:   st.steps,
+		},
+		Infeasible:        infeas,
+		TimedOut:          timedOut,
+		TightenedBounds:   st.tightened,
+		RemovedRows:       st.removed,
+		StrengthenedRows:  st.strengthened,
+		SymBreakRows:      st.symBreak,
+		SubstFixed:        st.substFixed,
+		InfeasConflictCol: conflictCol,
+		InfeasRow:         mappedRow,
+		InfeasGCDDivisor:  gcdDiv,
+	}
+}
+
+func (st *viprPresolveState) roundInitialBounds() int {
+	for j := range st.n {
+		if st.lbRat[j] != nil && st.ubRat[j] != nil && st.lbRat[j].Cmp(st.ubRat[j]) > 0 {
+			return j
+		}
+		if !st.isInt[j] {
+			continue
+		}
+		if st.lbRat[j] != nil && !st.lbRat[j].IsInt() {
+			cl := viprRatCeilRat(st.lbRat[j])
+			if f, ok := viprRatExactFloat(cl); ok {
+				st.lbRat[j] = cl
+				st.lbF[j] = f
+				st.steps = append(st.steps, VIPRPresolveStep{
+					Op:       "roundBound",
+					Col:      j,
+					IsUpper:  false,
+					NewBound: new(big.Rat).Set(cl),
+				})
+				st.tightened++
+			}
+		}
+		if st.ubRat[j] != nil && !st.ubRat[j].IsInt() {
+			fl := viprRatFloorRat(st.ubRat[j])
+			if f, ok := viprRatExactFloat(fl); ok {
+				st.ubRat[j] = fl
+				st.ubF[j] = f
+				st.steps = append(st.steps, VIPRPresolveStep{
+					Op:       "roundBound",
+					Col:      j,
+					IsUpper:  true,
+					NewBound: new(big.Rat).Set(fl),
+				})
+				st.tightened++
+			}
+		}
+		if st.lbRat[j] != nil && st.ubRat[j] != nil && st.lbRat[j].Cmp(st.ubRat[j]) > 0 {
+			return j
+		}
+	}
+	return -1
+}
+
+func (st *viprPresolveState) applyGCDRowDiv() (infeasRow int, gcdDiv int64) {
+	if !st.orig.isMIP {
+		return -1, 0
+	}
+	for i := range st.rows {
+		r := &st.rows[i]
+		if !r.active || len(r.cols) == 0 {
+			continue
+		}
+		allInt := true
+		var g int64
+		for k, col := range r.cols {
+			v := r.vals[k]
+			if v.Sign() == 0 {
+				continue
+			}
+			if !st.isInt[col] || !v.IsInt() || !v.Num().IsInt64() {
+				allInt = false
+				break
+			}
+			iv := v.Num().Int64()
+			if iv == math.MinInt64 {
+				allInt = false
+				break
+			}
+			if iv < 0 {
+				iv = -iv
+			}
+			g = gcdInt64(g, iv)
+		}
+		if !allInt || g <= 0 {
+			continue
+		}
+		if g == 1 && r.rhs.IsInt() {
+			continue
+		}
+		gRat := new(big.Rat).SetInt64(g)
+		qRat := new(big.Rat).Quo(r.rhs, gRat)
+		var newRHS *big.Rat
+		switch r.sense {
+		case Equal:
+			if !qRat.IsInt() {
+				return i, g
+			}
+			newRHS = qRat
+		case LessEqual:
+			newRHS = viprRatFloorRat(qRat)
+		case GreaterEqual:
+			newRHS = viprRatCeilRat(qRat)
+		}
+		if _, ok := viprRatExactFloat(newRHS); !ok {
+			continue
+		}
+		newVals := make([]*big.Rat, len(r.vals))
+		allExact := true
+		for k, v := range r.vals {
+			nv := new(big.Rat).Quo(v, gRat)
+			if _, ok := viprRatExactFloat(nv); !ok {
+				allExact = false
+				break
+			}
+			newVals[k] = nv
+		}
+		if !allExact {
+			continue
+		}
+		r.vals = newVals
+		r.rhs = newRHS
+		st.steps = append(st.steps, VIPRPresolveStep{
+			Op:      "gcdRowDiv",
+			Row:     i,
+			Divisor: g,
+		})
+		st.strengthened++
+	}
+	return -1, 0
+}
+
+func (st *viprPresolveState) substFixedVars() bool {
+	progress := false
+	for j := range st.n {
+		if st.lbRat[j] == nil || st.ubRat[j] == nil || st.lbRat[j].Cmp(st.ubRat[j]) != 0 {
+			continue
+		}
+		val := st.lbRat[j]
+		if st.objRat[j].Sign() != 0 {
+			prod := new(big.Rat).Mul(st.objRat[j], val)
+			newConst := new(big.Rat).Add(st.objConstRat, prod)
+			if cf, ok := viprRatExactFloat(newConst); ok {
+				st.objConstRat = newConst
+				st.objConstF = cf
+				st.objRat[j] = new(big.Rat)
+				st.objF[j] = 0
+				st.steps = append(st.steps, VIPRPresolveStep{
+					Op:  "substFixedObj",
+					Col: j,
+					Val: new(big.Rat).Set(val),
+				})
+				st.substFixed++
+				progress = true
+			}
+		}
+		for i := range st.rows {
+			r := &st.rows[i]
+			if !r.active {
+				continue
+			}
+			pos := -1
+			for k, c := range r.cols {
+				if c == j {
+					pos = k
+					break
+				}
+			}
+			if pos < 0 {
+				continue
+			}
+			a := r.vals[pos]
+			prod := new(big.Rat).Mul(a, val)
+			newRHS := new(big.Rat).Sub(r.rhs, prod)
+			if _, ok := viprRatExactFloat(newRHS); !ok {
+				continue
+			}
+			r.rhs = newRHS
+			r.cols = slices.Delete(r.cols, pos, pos+1)
+			r.vals = slices.Delete(r.vals, pos, pos+1)
+			st.steps = append(st.steps, VIPRPresolveStep{
+				Op:  "substFixedRow",
+				Row: i,
+				Col: j,
+				Val: new(big.Rat).Set(val),
+			})
+			st.substFixed++
+			progress = true
+		}
+	}
+	return progress
+}
+
+func (st *viprPresolveState) elimEmptyAndSingletonRows() (progress bool, conflictCol int, infeasRow int) {
+	for i := range st.rows {
+		r := &st.rows[i]
+		if !r.active {
+			continue
+		}
+		if len(r.cols) == 0 {
+			feasible := false
+			switch r.sense {
+			case LessEqual:
+				feasible = r.rhs.Sign() >= 0
+			case GreaterEqual:
+				feasible = r.rhs.Sign() <= 0
+			case Equal:
+				feasible = r.rhs.Sign() == 0
+			}
+			if !feasible {
+				return progress, -1, i
+			}
+			r.active = false
+			st.steps = append(st.steps, VIPRPresolveStep{
+				Op:  "redundantRow",
+				Row: i,
+			})
+			st.removed++
+			progress = true
+			continue
+		}
+		if len(r.cols) != 1 {
+			continue
+		}
+		col := r.cols[0]
+		a := r.vals[0]
+		if a.Sign() == 0 {
+			continue
+		}
+		b := new(big.Rat).Quo(r.rhs, a)
+		if r.sense == Equal {
+			bf, ok := viprRatExactFloat(b)
+			if !ok {
+				continue
+			}
+			if st.lbRat[col] == nil || b.Cmp(st.lbRat[col]) > 0 {
+				st.lbRat[col] = new(big.Rat).Set(b)
+				st.lbF[col] = bf
+				st.tightened++
+			}
+			if st.ubRat[col] == nil || b.Cmp(st.ubRat[col]) < 0 {
+				st.ubRat[col] = new(big.Rat).Set(b)
+				st.ubF[col] = bf
+				st.tightened++
+			}
+			r.active = false
+			st.steps = append(st.steps, VIPRPresolveStep{
+				Op:       "singletonRowElim",
+				Row:      i,
+				Col:      col,
+				RoundInt: false,
+			})
+			st.removed++
+			progress = true
+			if st.lbRat[col].Cmp(st.ubRat[col]) > 0 {
+				return progress, col, -1
+			}
+			if st.isInt[col] && !st.lbRat[col].IsInt() {
+				cl := viprRatCeilRat(st.lbRat[col])
+				if cf, okC := viprRatExactFloat(cl); okC {
+					st.lbRat[col] = cl
+					st.lbF[col] = cf
+					st.steps = append(st.steps, VIPRPresolveStep{
+						Op:       "roundBound",
+						Col:      col,
+						IsUpper:  false,
+						NewBound: new(big.Rat).Set(cl),
+					})
+					st.tightened++
+					if st.lbRat[col].Cmp(st.ubRat[col]) > 0 {
+						return progress, col, -1
+					}
+				}
+			}
+			continue
+		}
+
+		isUpper := (r.sense == LessEqual && a.Sign() > 0) || (r.sense == GreaterEqual && a.Sign() < 0)
+		roundInt := st.isInt[col]
+		effB := b
+		if roundInt {
+			if isUpper {
+				effB = viprRatFloorRat(b)
+			} else {
+				effB = viprRatCeilRat(b)
+			}
+		}
+		ef, ok := viprRatExactFloat(effB)
+		if !ok {
+			continue
+		}
+		if isUpper {
+			if st.ubRat[col] == nil || effB.Cmp(st.ubRat[col]) < 0 {
+				st.ubRat[col] = new(big.Rat).Set(effB)
+				st.ubF[col] = ef
+				st.tightened++
+			}
+		} else {
+			if st.lbRat[col] == nil || effB.Cmp(st.lbRat[col]) > 0 {
+				st.lbRat[col] = new(big.Rat).Set(effB)
+				st.lbF[col] = ef
+				st.tightened++
+			}
+		}
+		r.active = false
+		st.steps = append(st.steps, VIPRPresolveStep{
+			Op:       "singletonRowElim",
+			Row:      i,
+			Col:      col,
+			RoundInt: roundInt,
+		})
+		st.removed++
+		progress = true
+		if st.lbRat[col] != nil && st.ubRat[col] != nil && st.lbRat[col].Cmp(st.ubRat[col]) > 0 {
+			return progress, col, -1
+		}
+	}
+	return progress, -1, -1
+}
+
+func (st *viprPresolveState) rowActivities(r *viprPresolveRow) (minAct, maxAct *big.Rat, minMiss, maxMiss, minMissIdx, maxMissIdx int) {
+	minAct = new(big.Rat)
+	maxAct = new(big.Rat)
+	minMissIdx = -1
+	maxMissIdx = -1
+	var prod big.Rat
+	for k, col := range r.cols {
+		a := r.vals[k]
+		if a.Sign() == 0 {
+			continue
+		}
+		if a.Sign() > 0 {
+			if st.lbRat[col] == nil {
+				minMiss++
+				minMissIdx = k
+			} else {
+				prod.Mul(a, st.lbRat[col])
+				minAct.Add(minAct, &prod)
+			}
+			if st.ubRat[col] == nil {
+				maxMiss++
+				maxMissIdx = k
+			} else {
+				prod.Mul(a, st.ubRat[col])
+				maxAct.Add(maxAct, &prod)
+			}
+		} else {
+			if st.ubRat[col] == nil {
+				minMiss++
+				minMissIdx = k
+			} else {
+				prod.Mul(a, st.ubRat[col])
+				minAct.Add(minAct, &prod)
+			}
+			if st.lbRat[col] == nil {
+				maxMiss++
+				maxMissIdx = k
+			} else {
+				prod.Mul(a, st.lbRat[col])
+				maxAct.Add(maxAct, &prod)
+			}
+		}
+	}
+	return minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx
+}
+
+func (st *viprPresolveState) tryActivityTighten(rowIdx, col int, isUpper bool, imp *big.Rat) (changed bool, conflict bool) {
+	roundInt := st.isInt[col]
+	var newB *big.Rat
+	var newF float64
+	if roundInt {
+		if isUpper {
+			newB = viprRatFloorRat(imp)
+		} else {
+			newB = viprRatCeilRat(imp)
+		}
+		var ok bool
+		newF, ok = viprRatExactFloat(newB)
+		if !ok {
+			return false, false
+		}
+	} else {
+		newF = viprRatToOutwardFloat(imp, isUpper)
+		if math.IsInf(newF, 0) || math.IsNaN(newF) {
+			return false, false
+		}
+		var ok bool
+		newB, ok = viprRatFromFloat(newF)
+		if !ok {
+			return false, false
+		}
+		if isUpper && imp.Cmp(newB) > 0 {
+			return false, false
+		}
+		if !isUpper && newB.Cmp(imp) > 0 {
+			return false, false
+		}
+	}
+	if isUpper {
+		if st.ubRat[col] != nil {
+			if newB.Cmp(st.ubRat[col]) >= 0 {
+				return false, false
+			}
+			if !roundInt && st.ubF[col]-newF <= presolveBoundChangeTol*max(1.0, math.Abs(st.ubF[col])) {
+				return false, false
+			}
+		}
+		st.ubRat[col] = newB
+		st.ubF[col] = newF
+	} else {
+		if st.lbRat[col] != nil {
+			if newB.Cmp(st.lbRat[col]) <= 0 {
+				return false, false
+			}
+			if !roundInt && newF-st.lbF[col] <= presolveBoundChangeTol*max(1.0, math.Abs(st.lbF[col])) {
+				return false, false
+			}
+		}
+		st.lbRat[col] = newB
+		st.lbF[col] = newF
+	}
+	st.steps = append(st.steps, VIPRPresolveStep{
+		Op:       "activityBound",
+		Row:      rowIdx,
+		Col:      col,
+		IsUpper:  isUpper,
+		RoundInt: roundInt,
+		NewBound: new(big.Rat).Set(newB),
+	})
+	st.tightened++
+	if st.lbRat[col] != nil && st.ubRat[col] != nil && st.lbRat[col].Cmp(st.ubRat[col]) > 0 {
+		return true, true
+	}
+	return true, false
+}
+
+func (st *viprPresolveState) tightenAndDropActivityRows() (progress bool, conflictCol int, infeasRow int) {
+	for i := range st.rows {
+		r := &st.rows[i]
+		if !r.active {
+			continue
+		}
+		minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx := st.rowActivities(r)
+		if (r.sense == LessEqual || r.sense == Equal) && minMiss == 0 && minAct.Cmp(r.rhs) > 0 {
+			return progress, -1, i
+		}
+		if (r.sense == GreaterEqual || r.sense == Equal) && maxMiss == 0 && maxAct.Cmp(r.rhs) < 0 {
+			return progress, -1, i
+		}
+		isRed := (r.sense == LessEqual && maxMiss == 0 && maxAct.Cmp(r.rhs) <= 0) ||
+			(r.sense == GreaterEqual && minMiss == 0 && minAct.Cmp(r.rhs) >= 0) ||
+			(r.sense == Equal && minMiss == 0 && maxMiss == 0 && minAct.Cmp(r.rhs) >= 0 && maxAct.Cmp(r.rhs) <= 0)
+		if isRed {
+			r.active = false
+			st.steps = append(st.steps, VIPRPresolveStep{
+				Op:  "redundantRow",
+				Row: i,
+			})
+			st.removed++
+			progress = true
+			continue
+		}
+
+		for k, col := range r.cols {
+			a := r.vals[k]
+			if a.Sign() == 0 {
+				continue
+			}
+			// Implied upper bound on col.
+			if a.Sign() > 0 && (r.sense == LessEqual || r.sense == Equal) {
+				if minMiss == 0 || (minMiss == 1 && minMissIdx == k) {
+					mExcl := new(big.Rat).Set(minAct)
+					if minMiss == 0 {
+						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.lbRat[col]))
+					}
+					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
+					if ch, conf := st.tryActivityTighten(i, col, true, imp); ch {
+						progress = true
+						if conf {
+							return progress, col, -1
+						}
+						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
+					}
+				}
+			} else if a.Sign() < 0 && (r.sense == GreaterEqual || r.sense == Equal) {
+				if maxMiss == 0 || (maxMiss == 1 && maxMissIdx == k) {
+					mExcl := new(big.Rat).Set(maxAct)
+					if maxMiss == 0 {
+						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.lbRat[col]))
+					}
+					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
+					if ch, conf := st.tryActivityTighten(i, col, true, imp); ch {
+						progress = true
+						if conf {
+							return progress, col, -1
+						}
+						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
+					}
+				}
+			}
+			// Implied lower bound on col.
+			if a.Sign() > 0 && (r.sense == GreaterEqual || r.sense == Equal) {
+				if maxMiss == 0 || (maxMiss == 1 && maxMissIdx == k) {
+					mExcl := new(big.Rat).Set(maxAct)
+					if maxMiss == 0 {
+						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.ubRat[col]))
+					}
+					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
+					if ch, conf := st.tryActivityTighten(i, col, false, imp); ch {
+						progress = true
+						if conf {
+							return progress, col, -1
+						}
+						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
+					}
+				}
+			} else if a.Sign() < 0 && (r.sense == LessEqual || r.sense == Equal) {
+				if minMiss == 0 || (minMiss == 1 && minMissIdx == k) {
+					mExcl := new(big.Rat).Set(minAct)
+					if minMiss == 0 {
+						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.ubRat[col]))
+					}
+					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
+					if ch, conf := st.tryActivityTighten(i, col, false, imp); ch {
+						progress = true
+						if conf {
+							return progress, col, -1
+						}
+						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
+					}
+				}
+			}
+		}
+	}
+	return progress, -1, -1
+}
+
+func (st *viprPresolveState) applyBinStrengthen() bool {
+	if !st.orig.isMIP {
+		return false
+	}
+	progress := false
+	one := big.NewRat(1, 1)
+	for i := range st.rows {
+		r := &st.rows[i]
+		if !r.active || r.sense != LessEqual || len(r.cols) < 2 {
+			continue
+		}
+		_, maxAct, _, maxMiss, _, _ := st.rowActivities(r)
+		if maxMiss != 0 || maxAct.Cmp(r.rhs) <= 0 {
+			continue
+		}
+		for k := 0; k < len(r.cols); k++ {
+			col := r.cols[k]
+			if !st.isInt[col] || st.lbRat[col] == nil || st.ubRat[col] == nil ||
+				st.lbRat[col].Sign() != 0 || st.ubRat[col].Cmp(one) != 0 {
+				continue
+			}
+			a := r.vals[k]
+			if a.Sign() == 0 {
+				continue
+			}
+			if a.Sign() > 0 {
+				maxExcl := new(big.Rat).Sub(maxAct, a)
+				delta := new(big.Rat).Sub(r.rhs, maxExcl)
+				if delta.Sign() <= 0 {
+					continue
+				}
+				if delta.Cmp(a) > 0 {
+					delta.Set(a)
+				}
+				newA := new(big.Rat).Sub(a, delta)
+				newRHS := new(big.Rat).Sub(r.rhs, delta)
+				if _, okA := viprRatExactFloat(newA); !okA {
+					continue
+				}
+				if _, okR := viprRatExactFloat(newRHS); !okR {
+					continue
+				}
+				r.rhs = newRHS
+				if newA.Sign() == 0 {
+					r.cols = slices.Delete(r.cols, k, k+1)
+					r.vals = slices.Delete(r.vals, k, k+1)
+					k--
+				} else {
+					r.vals[k] = newA
+				}
+				maxAct = new(big.Rat).Sub(maxAct, delta)
+				st.steps = append(st.steps, VIPRPresolveStep{
+					Op:    "binStrengthen",
+					Row:   i,
+					Col:   col,
+					Delta: delta,
+				})
+				st.strengthened++
+				progress = true
+			} else {
+				// For a < 0 on [0, 1], termMaxAct = 0 so maxExcl == maxAct.
+				delta := new(big.Rat).Sub(r.rhs, new(big.Rat).Add(maxAct, a))
+				if delta.Sign() <= 0 {
+					continue
+				}
+				negA := new(big.Rat).Neg(a)
+				if delta.Cmp(negA) > 0 {
+					delta.Set(negA)
+				}
+				newA := new(big.Rat).Add(a, delta)
+				if _, okA := viprRatExactFloat(newA); !okA {
+					continue
+				}
+				if newA.Sign() == 0 {
+					r.cols = slices.Delete(r.cols, k, k+1)
+					r.vals = slices.Delete(r.vals, k, k+1)
+					k--
+				} else {
+					r.vals[k] = newA
+				}
+				st.steps = append(st.steps, VIPRPresolveStep{
+					Op:    "binStrengthen",
+					Row:   i,
+					Col:   col,
+					Delta: delta,
+				})
+				st.strengthened++
+				progress = true
+			}
+		}
+	}
+	return progress
+}
+
+func viprSparseRowPermMatch(src, dst *viprPresolveRow, colPerm []int, negate bool) bool {
+	if len(src.cols) != len(dst.cols) {
+		return false
+	}
+	srcMap := make(map[int]*big.Rat, len(src.cols))
+	for k, c := range src.cols {
+		srcMap[c] = src.vals[k]
+	}
+	var neg big.Rat
+	for k, c := range dst.cols {
+		sv, ok := srcMap[colPerm[c]]
+		if !ok {
+			return false
+		}
+		if negate {
+			neg.Neg(sv)
+			if dst.vals[k].Cmp(&neg) != 0 {
+				return false
+			}
+		} else if dst.vals[k].Cmp(sv) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func viprRowPermImplies(src, dst *viprPresolveRow, colPerm []int) bool {
+	if viprSparseRowPermMatch(src, dst, colPerm, false) {
+		switch {
+		case src.sense == LessEqual && dst.sense == LessEqual:
+			if src.rhs.Cmp(dst.rhs) <= 0 {
+				return true
+			}
+		case src.sense == GreaterEqual && dst.sense == GreaterEqual:
+			if dst.rhs.Cmp(src.rhs) <= 0 {
+				return true
+			}
+		case src.sense == Equal && dst.sense == Equal:
+			if src.rhs.Cmp(dst.rhs) == 0 {
+				return true
+			}
+		case src.sense == Equal && dst.sense == LessEqual:
+			if src.rhs.Cmp(dst.rhs) <= 0 {
+				return true
+			}
+		case src.sense == Equal && dst.sense == GreaterEqual:
+			if dst.rhs.Cmp(src.rhs) <= 0 {
+				return true
+			}
+		}
+	}
+	if viprSparseRowPermMatch(src, dst, colPerm, true) {
+		negSrcRHS := new(big.Rat).Neg(src.rhs)
+		switch {
+		case src.sense == LessEqual && dst.sense == GreaterEqual:
+			return dst.rhs.Cmp(negSrcRHS) <= 0
+		case src.sense == GreaterEqual && dst.sense == LessEqual:
+			return negSrcRHS.Cmp(dst.rhs) <= 0
+		case src.sense == Equal && dst.sense == Equal:
+			return negSrcRHS.Cmp(dst.rhs) == 0
+		case src.sense == Equal && dst.sense == LessEqual:
+			return negSrcRHS.Cmp(dst.rhs) <= 0
+		case src.sense == Equal && dst.sense == GreaterEqual:
+			return dst.rhs.Cmp(negSrcRHS) <= 0
+		}
+	}
+	return false
+}
+
+func viprRowIsSymChain(r *viprPresolveRow, v int, colPerm []int) bool {
+	if r.rhs.Sign() != 0 || len(r.cols) != 2 {
+		return false
+	}
+	one := big.NewRat(1, 1)
+	negOne := big.NewRat(-1, 1)
+	var w int
+	var hasW, hasV bool
+	switch r.sense {
+	case LessEqual:
+		for k, c := range r.cols {
+			if c == v && r.vals[k].Cmp(negOne) == 0 {
+				hasV = true
+			} else if r.vals[k].Cmp(one) == 0 {
+				w = c
+				hasW = true
+			}
+		}
+	case GreaterEqual:
+		for k, c := range r.cols {
+			if c == v && r.vals[k].Cmp(one) == 0 {
+				hasV = true
+			} else if r.vals[k].Cmp(negOne) == 0 {
+				w = c
+				hasW = true
+			}
+		}
+	}
+	return hasW && hasV && w != v && w >= 0 && w < len(colPerm) && colPerm[w] == w
+}
+
+func (st *viprPresolveState) verifySymBreakLe(u, v int, colPerm, rowPerm []int) bool {
+	n := st.n
+	m := len(st.rows)
+	if u < 0 || u >= n || v < 0 || v >= n || u == v {
+		return false
+	}
+	if len(colPerm) != n || len(rowPerm) != m || colPerm[u] != v {
+		return false
+	}
+	for j := range n {
+		p := colPerm[j]
+		if p < 0 || p >= n || colPerm[p] != j {
+			return false
+		}
+		if st.isInt[j] && !st.isInt[p] {
+			return false
+		}
+		if !viprOptRatLbLe(st.lbRat[j], st.lbRat[p]) || !viprOptRatUbLe(st.ubRat[p], st.ubRat[j]) {
+			return false
+		}
+		if j != u && j != v && st.objRat[j].Cmp(st.objRat[p]) != 0 {
+			return false
+		}
+	}
+	if st.objRat[v].Cmp(st.objRat[u]) > 0 {
+		return false
+	}
+	for i := range m {
+		if !st.rows[i].active {
+			continue
+		}
+		ri := rowPerm[i]
+		okDir := ri >= 0 && ri < m && st.rows[ri].active && viprRowPermImplies(&st.rows[ri], &st.rows[i], colPerm)
+		if !okDir && !viprRowIsSymChain(&st.rows[i], v, colPerm) {
+			return false
+		}
+	}
+	return true
+}
+
+func (st *viprPresolveState) emitSymBreakLe(u, v int, colPerm, rowPerm []int) bool {
+	if !st.verifySymBreakLe(u, v, colPerm, rowPerm) {
+		return false
+	}
+	st.steps = append(st.steps, VIPRPresolveStep{
+		Op:      "symBreakLe",
+		U:       u,
+		V:       v,
+		ColPerm: slices.Clone(colPerm),
+		RowPerm: slices.Clone(rowPerm),
+	})
+	st.rows = append(st.rows, viprPresolveRow{
+		name:   "__vipr_sym_" + strconv.Itoa(u) + "_" + strconv.Itoa(v),
+		cols:   []int{u, v},
+		vals:   []*big.Rat{big.NewRat(1, 1), big.NewRat(-1, 1)},
+		rhs:    new(big.Rat),
+		sense:  LessEqual,
+		active: true,
+	})
+	st.symBreak++
+	return true
+}
+
+func (st *viprPresolveState) applyStaticSymBreak(deadline time.Time, done <-chan struct{}) bool {
+	if !st.orig.isMIP || st.n < 2 {
+		return false
+	}
+	m := len(st.rows)
+	workRows := make([]presolveWorkRow, m)
+	var seedRows []int
+	for i := range m {
+		r := &st.rows[i]
+		if !r.active {
+			continue
+		}
+		valsF := make([]float64, len(r.vals))
+		for k, vr := range r.vals {
+			valsF[k], _ = vr.Float64()
+		}
+		rhsF, _ := r.rhs.Float64()
+		workRows[i] = presolveWorkRow{
+			name:   r.name,
+			cols:   r.cols,
+			vals:   valsF,
+			rhs:    rhsF,
+			sense:  r.sense,
+			active: true,
+		}
+		g := len(r.cols)
+		if g >= 2 && g <= maxOrbitGroupSize && g*2 <= st.n && (r.sense == Equal || r.sense == LessEqual) && rhsF == 1.0 {
+			unitBin := true
+			for k, col := range r.cols {
+				if valsF[k] != 1.0 || !st.isInt[col] || st.lbF[col] != 0 || st.ubF[col] != 1 {
+					unitBin = false
+					break
+				}
+			}
+			if unitBin {
+				seedRows = append(seedRows, i)
+			}
+		}
+	}
+
+	// 1. Static orbit group symmetry breaking: x_{orb,g} <= x_{orb,0} for g = 1..G-1.
+	if len(seedRows) > 0 && st.n >= 4 && m >= 2 {
+		colPtr, colRow, colVal := buildPresolveCSC(st.n, workRows)
+		seedRows = filterAndSortOrbitSeeds(workRows, colPtr, seedRows)
+		if len(seedRows) > 0 {
+			rowHash := computeOrbitRowHashes(st.orig, workRows, st.lbF, st.ubF, colPtr)
+			sc := newOrbitTrialScratch(st.n, m)
+			maxTrials := min(len(seedRows), 16)
+			for sIdx := range maxTrials {
+				if stopRequested(deadline, done) {
+					return false
+				}
+				if sIdx > 0 {
+					sc.reset()
+				}
+				gCount, ok, to := proposeAndVerifyOrbits(
+					st.orig, workRows, st.lbF, st.ubF, colPtr, colRow, colVal, rowHash, seedRows[sIdx], &sc, deadline, done,
+				)
+				if to {
+					return false
+				}
+				if !ok || len(sc.orbits) == 0 || gCount < 2 {
+					continue
+				}
+				numOrbs := len(sc.orbits) / gCount
+				numTuples := len(sc.rowTuples) / gCount
+				added := false
+				vCol := sc.orbits[0]
+				for g := 1; g < gCount; g++ {
+					uCol := sc.orbits[g]
+					cp := identityPerm(st.n)
+					for o := range numOrbs {
+						a := sc.orbits[o*gCount]
+						b := sc.orbits[o*gCount+g]
+						cp[a], cp[b] = b, a
+					}
+					rp := identityPerm(len(st.rows))
+					for t := range numTuples {
+						ra := sc.rowTuples[t*gCount]
+						rb := sc.rowTuples[t*gCount+g]
+						if ra >= 0 && ra < m && rb >= 0 && rb < m {
+							rp[ra], rp[rb] = rb, ra
+						}
+					}
+					if st.emitSymBreakLe(uCol, vCol, cp, rp) {
+						added = true
+					}
+				}
+				if added {
+					return true
+				}
+			}
+		}
+	}
+
+	// 2. Fallback: exact binary column twins (x_u <= x_v for identical columns).
+	colTerms := make([][]int, st.n)
+	colVals := make([][]*big.Rat, st.n)
+	for i := range st.rows {
+		r := &st.rows[i]
+		if !r.active {
+			continue
+		}
+		for k, c := range r.cols {
+			colTerms[c] = append(colTerms[c], i)
+			colVals[c] = append(colVals[c], r.vals[k])
+		}
+	}
+	sameExactCol := func(a, b int) bool {
+		if !st.isInt[a] || !st.isInt[b] {
+			return false
+		}
+		if st.lbRat[a] == nil || st.ubRat[a] == nil || st.lbRat[b] == nil || st.ubRat[b] == nil {
+			return false
+		}
+		if st.lbRat[a].Cmp(st.lbRat[b]) != 0 || st.ubRat[a].Cmp(st.ubRat[b]) != 0 {
+			return false
+		}
+		if st.lbRat[a].Cmp(st.ubRat[a]) >= 0 {
+			return false
+		}
+		if len(colTerms[a]) != len(colTerms[b]) || len(colTerms[a]) == 0 {
+			return false
+		}
+		for k := range colTerms[a] {
+			if colTerms[a][k] != colTerms[b][k] || colVals[a][k].Cmp(colVals[b][k]) != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	used := make([]bool, st.n)
+	addedAny := false
+	for a := range st.n {
+		if used[a] || !st.isInt[a] || len(colTerms[a]) == 0 {
+			continue
+		}
+		group := []int{a}
+		for b := a + 1; b < st.n; b++ {
+			if !used[b] && sameExactCol(a, b) {
+				group = append(group, b)
+				used[b] = true
+			}
+		}
+		if len(group) < 2 {
+			continue
+		}
+		used[a] = true
+		slices.SortFunc(group, func(x, y int) int {
+			if c := st.objRat[x].Cmp(st.objRat[y]); c != 0 {
+				return c
+			}
+			return cmp.Compare(x, y)
+		})
+		vCol := group[0]
+		for _, uCol := range group[1:] {
+			cp := identityPerm(st.n)
+			cp[uCol], cp[vCol] = vCol, uCol
+			rp := identityPerm(len(st.rows))
+			if st.emitSymBreakLe(uCol, vCol, cp, rp) {
+				addedAny = true
+			}
+		}
+	}
+	return addedAny
+}
+
+func presolveForVIPRWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}) VIPRPresolveResult {
+	if maxPasses <= 0 {
+		maxPasses = defaultPresolveMaxPass
+	}
+	if orig == nil {
+		return VIPRPresolveResult{InfeasConflictCol: -1, InfeasRow: -1}
+	}
+	if stopRequested(deadline, done) {
+		return VIPRPresolveResult{
+			Reduced: orig,
+			Envelope: &VIPRPresolveEnvelope{
+				Orig:    orig,
+				Reduced: orig,
+			},
+			TimedOut:          true,
+			InfeasConflictCol: -1,
+			InfeasRow:         -1,
+		}
+	}
+	st, ok := newVIPRPresolveState(orig)
+	if !ok {
+		return VIPRPresolveResult{
+			Reduced: orig,
+			Envelope: &VIPRPresolveEnvelope{
+				Orig:    orig,
+				Reduced: orig,
+			},
+			InfeasConflictCol: -1,
+			InfeasRow:         -1,
+		}
+	}
+
+	if confCol := st.roundInitialBounds(); confCol >= 0 {
+		return st.buildResult(true, false, confCol, -1, 0)
+	}
+	if infRow, gDiv := st.applyGCDRowDiv(); infRow >= 0 {
+		return st.buildResult(true, false, -1, infRow, gDiv)
+	}
+
+	symDone := false
+	for range maxPasses {
+		if stopRequested(deadline, done) {
+			return st.buildResult(false, true, -1, -1, 0)
+		}
+		prog := false
+		if st.substFixedVars() {
+			prog = true
+		}
+		pSing, confCol, infRow := st.elimEmptyAndSingletonRows()
+		if pSing {
+			prog = true
+		}
+		if confCol >= 0 || infRow >= 0 {
+			return st.buildResult(true, false, confCol, infRow, 0)
+		}
+		pAct, confCol, infRow := st.tightenAndDropActivityRows()
+		if pAct {
+			prog = true
+		}
+		if confCol >= 0 || infRow >= 0 {
+			return st.buildResult(true, false, confCol, infRow, 0)
+		}
+		if st.applyBinStrengthen() {
+			prog = true
+		}
+		if !symDone {
+			symDone = true
+			if st.applyStaticSymBreak(deadline, done) {
+				prog = true
+			}
+		}
+		if !prog {
+			break
+		}
+	}
+	return st.buildResult(false, false, -1, -1, 0)
 }

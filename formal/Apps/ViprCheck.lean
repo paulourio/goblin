@@ -71,12 +71,38 @@ private def diagnoseFailure (cert : MiniVIPRCert) : String := Id.run do
   else
     return "Mini-VIPR trace failed verification"
 
+/-- Pinpoints the failing presolve step, reduced-instance mismatch, or Mini-VIPR step. -/
+private def diagnosePresolveFailure (cert : VIPRWithPresolveCert) : String := Id.run do
+  let mut st := PresolveState.ofInstance cert.orig
+  for i in [:cert.presolve.size] do
+    if hi : i < cert.presolve.size then
+      match applyPresolveStep st cert.presolve[i] with
+      | some st' => st := st'
+      | none => return s!"presolve step {i} failed verification"
+  if !checkVIPRInstanceEq st.toInstance cert.reduced.inst then
+    return "presolve final instance does not match reduced Mini-VIPR instance"
+  return diagnoseFailure cert.reduced
+
+private def hasNonNullField (jv : JsonVal) (key : String) : Bool :=
+  match jv.getField? key with
+  | none | some .null => false
+  | some _ => true
+
 private def verifyCertVal (jv : JsonVal) : Except String MiniVIPRCert := do
-  let cert ← decodeMiniVIPRCert jv
-  if checkMiniVIPR cert then
-    .ok cert
+  if hasNonNullField jv "orig" then
+    let envCert ← decodeVIPRWithPresolveCert jv
+    if checkVIPRWithPresolve envCert then
+      .ok envCert.reduced
+    else
+      .error (diagnosePresolveFailure envCert)
+  else if hasNonNullField jv "presolve" then
+    .error "presolve field requires orig instance"
   else
-    .error (diagnoseFailure cert)
+    let cert ← decodeMiniVIPRCert jv
+    if checkMiniVIPR cert then
+      .ok cert
+    else
+      .error (diagnoseFailure cert)
 
 private def formatJsonlOk (cert : MiniVIPRCert) : String :=
   match cert.mode with

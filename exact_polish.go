@@ -2253,3 +2253,117 @@ func exactMIPFeasibleRat(p *CompiledProblem, x []float64) bool {
 	}
 	return true
 }
+
+func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
+	const maxRatDenomBits = 2048
+	if p == nil || !p.isMIP {
+		return false
+	}
+	if _, ok := exactRatFromFloat(p.objConstMin()); !ok {
+		return false
+	}
+	for j := range p.numVars {
+		if _, ok := exactRatFromFloat(p.objMin[j]); !ok {
+			return false
+		}
+		if !math.IsInf(p.varLB[j], -1) {
+			if _, ok := exactRatFromFloat(p.varLB[j]); !ok {
+				return false
+			}
+		}
+		if !math.IsInf(p.varUB[j], 1) {
+			if _, ok := exactRatFromFloat(p.varUB[j]); !ok {
+				return false
+			}
+		}
+	}
+	for i := range p.numConstraints {
+		if _, ok := exactRatFromFloat(p.rowRHS[i]); !ok {
+			return false
+		}
+		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
+			if p.rowVal[k] != 0 {
+				if _, ok := exactRatFromFloat(p.rowVal[k]); !ok {
+					return false
+				}
+			}
+		}
+	}
+	bigOne := big.NewInt(1)
+	g := new(big.Int)
+	lcmDen := new(big.Int)
+	tmpGCD := new(big.Int)
+	scaledNum := new(big.Int)
+	for i := range p.numConstraints {
+		if p.rowSense[i] != Equal {
+			continue
+		}
+		rhsRat, ok := exactRatFromFloat(p.rowRHS[i])
+		if !ok {
+			return false
+		}
+		st, en := p.rowPtr[i], p.rowPtr[i+1]
+		nnz := 0
+		allInt := true
+		lcmDen.SetInt64(1)
+		var rowVals []*big.Rat
+		for k := st; k < en; k++ {
+			v := p.rowVal[k]
+			if v == 0 {
+				continue
+			}
+			nnz++
+			col := p.colIdx[k]
+			if p.varCat[col] == Continuous {
+				allInt = false
+				break
+			}
+			vr, okV := exactRatFromFloat(v)
+			if !okV {
+				return false
+			}
+			rowVals = append(rowVals, vr)
+			den := vr.Denom()
+			if den.Cmp(bigOne) > 0 {
+				tmpGCD.GCD(nil, nil, lcmDen, den)
+				lcmDen.Quo(lcmDen, tmpGCD)
+				lcmDen.Mul(lcmDen, den)
+				if lcmDen.BitLen() > maxRatDenomBits {
+					allInt = false
+					break
+				}
+			}
+		}
+		if nnz == 0 {
+			if rhsRat.Sign() != 0 {
+				return true
+			}
+			continue
+		}
+		if !allInt {
+			continue
+		}
+		g.SetInt64(0)
+		for _, vr := range rowVals {
+			scaledNum.Quo(lcmDen, vr.Denom())
+			scaledNum.Mul(scaledNum, vr.Num())
+			scaledNum.Abs(scaledNum)
+			if scaledNum.Sign() > 0 {
+				if g.Sign() == 0 {
+					g.Set(scaledNum)
+				} else {
+					g.GCD(nil, nil, g, scaledNum)
+				}
+			}
+		}
+		if g.Sign() <= 0 {
+			continue
+		}
+		scaleMult := new(big.Rat).SetFrac(new(big.Int).Set(lcmDen), new(big.Int).Set(g))
+		rhsScaled := new(big.Rat).Mul(rhsRat, scaleMult)
+		if !rhsScaled.IsInt() {
+			return true
+		}
+	}
+	return false
+}

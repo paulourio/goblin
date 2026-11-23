@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func runVIPRCheckBytes(tb testing.TB, exe, name string, raw []byte) (string, error) {
@@ -1412,5 +1413,953 @@ func TestVIPRTraceRaisedCapsAndLargeSplitBounds(t *testing.T) {
 		if formalOn {
 			requireVIPRBytesVerified(t, viprExe, "huge_split_2p70", raw)
 		}
+	})
+}
+
+func requireVIPRBytesRejected(tb testing.TB, exe, name string, raw []byte) {
+	tb.Helper()
+	out, err := runVIPRCheckBytes(tb, exe, name, raw)
+	if err == nil || strings.TrimSpace(out) == "VERIFIED" {
+		tb.Fatalf("%s unexpectedly passed vipr-check: err=%v out=%q", name, err, out)
+	}
+}
+
+func solveWithPresolveEnvelopeForTest(tb testing.TB, p *CompiledProblem) (Result, *VIPRTrace, VIPRPresolveResult) {
+	tb.Helper()
+	pRes := PresolveForVIPR(p, 0)
+	tr := NewVIPRTrace()
+	if pRes.Infeasible {
+		if !tr.RecordPresolveInfeasibleEnvelope(pRes) {
+			tb.Fatalf("RecordPresolveInfeasibleEnvelope failed for %s", p.Name())
+		}
+		return Result{Status: StatusInfeasible}, tr, pRes
+	}
+	tr.SetPresolveEnvelope(pRes.Envelope)
+	res, err := SolveCompiled(
+		tb.Context(),
+		pRes.Reduced,
+		WithPureGo(),
+		WithWorkers(1),
+		WithPresolve(false),
+		WithRelGapTol(0),
+		WithAbsGapTol(0),
+		WithVIPRTrace(tr),
+	)
+	if err != nil {
+		tb.Fatalf("SolveCompiled(%s): %v", p.Name(), err)
+	}
+	return res, tr, pRes
+}
+
+func buildSymmetricColoringMIP(numColors int) *Model {
+	// K4 graph coloring with numColors identical colors: exact S_{numColors} group symmetry.
+	// Minimizing total used colors yields fractional LP optimum and triggers orbital branching.
+	m := NewModel("sym_coloring", Minimize)
+	const numVerts = 4
+	y := make([]Var, numColors)
+	for c := range numColors {
+		y[c] = m.AddBinaryVar("y" + strconv.Itoa(c))
+	}
+	x := make([][]Var, numVerts)
+	for v := range numVerts {
+		x[v] = make([]Var, numColors)
+		for c := range numColors {
+			x[v][c] = m.AddBinaryVar("x" + strconv.Itoa(v) + "_" + strconv.Itoa(c))
+		}
+	}
+	objTerms := make([]Term, numColors)
+	for c := range numColors {
+		objTerms[c] = y[c].T(1)
+	}
+	m.SetObjective(NewExpr(objTerms...))
+	for v := range numVerts {
+		terms := make([]Term, numColors)
+		for c := range numColors {
+			terms[c] = x[v][c].T(1)
+		}
+		m.AddConstraint("assign_"+strconv.Itoa(v), Eq(NewExpr(terms...), 1))
+	}
+	for u := range numVerts {
+		for v := u + 1; v < numVerts; v++ {
+			for c := range numColors {
+				name := "edge_" + strconv.Itoa(u) + "_" + strconv.Itoa(v) + "_c" + strconv.Itoa(c)
+				m.AddConstraint(name, Le(NewExpr(x[u][c].T(1), x[v][c].T(1), y[c].T(-1)), 0))
+			}
+		}
+	}
+	return m
+}
+
+func TestVIPRTraceOrbitalSymmetryBranching(t *testing.T) {
+	t.Parallel()
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	t.Run("column_twins_live_orbit", func(t *testing.T) {
+		t.Parallel()
+		// 4 identical binary column twins: 2*sum(x_i) <= 3 forces fractional LP (0.375 each) and B&B.
+		m := NewModel("twin_orbit", Maximize)
+		xs := make([]Var, 4)
+		terms := make([]Term, 4)
+		for i := range 4 {
+			xs[i] = m.AddBinaryVar("x" + strconv.Itoa(i))
+			terms[i] = xs[i].T(2)
+		}
+		m.SetObjective(NewExpr(xs[0].T(1), xs[1].T(1), xs[2].T(1), xs[3].T(1)))
+		m.AddConstraint("cap", Le(NewExpr(terms...), 3))
+		p := m.Compile()
+
+		tr := NewVIPRTrace()
+		res, err := SolveCompiled(
+			t.Context(),
+			p,
+			WithPureGo(),
+			WithWorkers(1),
+			WithPresolve(false),
+			WithCuts(false),
+			WithHeuristics(false),
+			WithRelGapTol(0),
+			WithAbsGapTol(0),
+			WithVIPRTrace(tr),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != StatusOptimal || math.Abs(res.Objective-1.0) > 1e-6 {
+			t.Fatalf("got status=%v obj=%v, want Optimal 1", res.Status, res.Objective)
+		}
+		if !tr.HasCertificate() || tr.Mode() != "optimal" {
+			t.Fatalf("expected optimal VIPR cert, got hasCert=%v mode=%q", tr.HasCertificate(), tr.Mode())
+		}
+		if tr.OrbitBranchesCertified() == 0 {
+			t.Fatalf("expected live orbital branches > 0 on symmetric twin model")
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert := decodeVIPRJSONForTest(t, raw)
+		foundOrbit := false
+		for _, st := range cert.Steps {
+			if st.Rule == "orbitBranch" && len(st.OrbitAsms) > 0 && len(st.Witnesses) == len(st.OrbitAsms) {
+				foundOrbit = true
+				break
+			}
+		}
+		if !foundOrbit {
+			t.Fatalf("expected orbitBranch step in VIPR JSON")
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "column_twins_live_orbit", raw)
+		}
+	})
+
+	t.Run("static_group_coloring_live_orbit", func(t *testing.T) {
+		t.Parallel()
+		m := buildSymmetricColoringMIP(5)
+		p := m.Compile()
+
+		tr := NewVIPRTrace()
+		res, err := SolveCompiled(
+			t.Context(),
+			p,
+			WithPureGo(),
+			WithWorkers(1),
+			WithPresolve(false),
+			WithCuts(false),
+			WithHeuristics(false),
+			WithRelGapTol(0),
+			WithAbsGapTol(0),
+			WithVIPRTrace(tr),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != StatusOptimal || math.Abs(res.Objective-4.0) > 1e-6 {
+			t.Fatalf("got status=%v obj=%v, want Optimal 4", res.Status, res.Objective)
+		}
+		if !tr.HasCertificate() || tr.Mode() != "optimal" {
+			t.Fatalf("expected optimal VIPR cert, got hasCert=%v mode=%q", tr.HasCertificate(), tr.Mode())
+		}
+		if tr.OrbitBranchesCertified() == 0 {
+			t.Fatalf("expected live orbital branches > 0 on S_5 coloring model")
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert := decodeVIPRJSONForTest(t, raw)
+		foundNonTrivRowPerm := false
+		for _, st := range cert.Steps {
+			if st.Rule != "orbitBranch" {
+				continue
+			}
+			for _, w := range st.Witnesses {
+				for i, ri := range w.RowPerm {
+					if i != ri {
+						foundNonTrivRowPerm = true
+						break
+					}
+				}
+			}
+		}
+		if !foundNonTrivRowPerm {
+			t.Fatalf("expected orbitBranch witness with non-identity rowPerm on S_5 coloring model")
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "static_group_coloring_live_orbit", raw)
+		}
+	})
+
+	t.Run("nested_orbit_with_ancestor_assumptions", func(t *testing.T) {
+		t.Parallel()
+		// Two disjoint symmetric twin blocks: branching on block A creates an active
+		// ancestor assumption when B&B subsequently performs an orbitBranch on block B.
+		m := NewModel("nested_orbit_asms", Maximize)
+		a0 := m.AddBinaryVar("a0")
+		a1 := m.AddBinaryVar("a1")
+		b0 := m.AddBinaryVar("b0")
+		b1 := m.AddBinaryVar("b1")
+		b2 := m.AddBinaryVar("b2")
+		m.SetObjective(NewExpr(a0.T(3), a1.T(3), b0.T(1), b1.T(1), b2.T(1)))
+		m.AddConstraint("capA", Le(NewExpr(a0.T(2), a1.T(2)), 3))
+		m.AddConstraint("capB", Le(NewExpr(b0.T(2), b1.T(2), b2.T(2)), 3))
+		p := m.Compile()
+
+		tr := NewVIPRTrace()
+		res, err := SolveCompiled(
+			t.Context(),
+			p,
+			WithPureGo(),
+			WithWorkers(1),
+			WithPresolve(false),
+			WithCuts(false),
+			WithHeuristics(false),
+			WithRelGapTol(0),
+			WithAbsGapTol(0),
+			WithVIPRTrace(tr),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != StatusOptimal || math.Abs(res.Objective-4.0) > 1e-6 {
+			t.Fatalf("got status=%v obj=%v, want Optimal 4", res.Status, res.Objective)
+		}
+		if !tr.HasCertificate() || tr.Mode() != "optimal" {
+			t.Fatalf("expected optimal VIPR cert, got hasCert=%v mode=%q", tr.HasCertificate(), tr.Mode())
+		}
+		if tr.OrbitBranchesCertified() < 2 {
+			t.Fatalf("expected >= 2 nested orbital branches, got %d", tr.OrbitBranchesCertified())
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "nested_orbit_with_ancestor_assumptions", raw)
+		}
+	})
+
+	t.Run("weighted_coloring_nested_orbit_extra_asms", func(t *testing.T) {
+		t.Parallel()
+		buildWeightedGraphColoring := func(name string, numVerts int, edges [][2]int, weights []float64) *Model {
+			numColors := len(weights)
+			m := NewModel(name, Minimize)
+			y := make([]Var, numColors)
+			objTerms := make([]Term, numColors)
+			for c := range numColors {
+				y[c] = m.AddBinaryVar("y" + strconv.Itoa(c))
+				objTerms[c] = y[c].T(weights[c])
+			}
+			m.SetObjective(NewExpr(objTerms...))
+			x := make([][]Var, numVerts)
+			for v := range numVerts {
+				x[v] = make([]Var, numColors)
+				terms := make([]Term, numColors)
+				for c := range numColors {
+					x[v][c] = m.AddBinaryVar("x" + strconv.Itoa(v) + "_" + strconv.Itoa(c))
+					terms[c] = x[v][c].T(1)
+				}
+				m.AddConstraint("assign_"+strconv.Itoa(v), Eq(NewExpr(terms...), 1))
+			}
+			for _, e := range edges {
+				u, v := e[0], e[1]
+				for c := range numColors {
+					cname := "e_" + strconv.Itoa(u) + "_" + strconv.Itoa(v) + "_c" + strconv.Itoa(c)
+					m.AddConstraint(cname, Le(NewExpr(x[u][c].T(1), x[v][c].T(1), y[c].T(-1)), 0))
+				}
+			}
+			return m
+		}
+
+		// W5 (6-vertex wheel, hub 0 + 5-cycle 1..5) and K5 (5-vertex clique).
+		w5Edges := [][2]int{
+			{0, 1}, {0, 2}, {0, 3}, {0, 4}, {0, 5},
+			{1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 1},
+		}
+		k5Edges := [][2]int{
+			{0, 1}, {0, 2}, {0, 3}, {0, 4},
+			{1, 2}, {1, 3}, {1, 4},
+			{2, 3}, {2, 4}, {3, 4},
+		}
+		weights := []float64{1, 1, 2, 2, 3, 3}
+
+		cases := []struct {
+			name     string
+			verts    int
+			edges    [][2]int
+			cuts     bool
+			maxNodes int
+		}{
+			{name: "w5_max15_nocuts", verts: 6, edges: w5Edges, cuts: false, maxNodes: 15},
+			{name: "w5_full_nocuts", verts: 6, edges: w5Edges, cuts: false, maxNodes: 0},
+			{name: "k5_max15_nocuts", verts: 5, edges: k5Edges, cuts: false, maxNodes: 15},
+			{name: "k5_max15_cuts", verts: 5, edges: k5Edges, cuts: true, maxNodes: 15},
+			{name: "k5_full_nocuts", verts: 5, edges: k5Edges, cuts: false, maxNodes: 0},
+		}
+
+		sawExtraAsms := false
+		var batch [][]byte
+		for _, tc := range cases {
+			p := buildWeightedGraphColoring(tc.name, tc.verts, tc.edges, weights).Compile()
+			tr := NewVIPRTrace()
+			opts := []Option{
+				WithPureGo(),
+				WithWorkers(1),
+				WithPresolve(false),
+				WithCuts(tc.cuts),
+				WithHeuristics(false),
+				WithRelGapTol(0),
+				WithAbsGapTol(0),
+				WithVIPRTrace(tr),
+			}
+			if tc.maxNodes > 0 {
+				opts = append(opts, WithMaxNodes(tc.maxNodes))
+			}
+			if _, err := SolveCompiled(t.Context(), p, opts...); err != nil {
+				t.Fatalf("%s solve error: %v", tc.name, err)
+			}
+			if !tr.HasCertificate() {
+				t.Fatalf("%s missing VIPR certificate", tc.name)
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("%s marshal error: %v", tc.name, err)
+			}
+			cert := decodeVIPRJSONForTest(t, raw)
+			for _, st := range cert.Steps {
+				if st.Rule == "orbitBranch" && len(st.ExtraAsms) > 0 {
+					sawExtraAsms = true
+				}
+			}
+			batch = append(batch, raw)
+		}
+		if !sawExtraAsms {
+			t.Fatalf("expected at least one nested orbitBranch with non-empty extraAsms across weighted coloring cases")
+		}
+		if formalOn {
+			runJSONLItems(t, viprExe, batch)
+		}
+	})
+
+	t.Run("asymmetric_cut_filters_companion", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("cut_filter", Maximize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddBinaryVar("x1")
+		x2 := m.AddBinaryVar("x2")
+		m.SetObjective(NewExpr(x0.T(1), x1.T(1), x2.T(1)))
+		m.AddConstraint("cap", Le(NewExpr(x0.T(2), x1.T(2), x2.T(2)), 3))
+		p := m.Compile()
+
+		tr := NewVIPRTrace()
+		rec := newBabVIPRRecorder(tr, p, false)
+		defer rec.close()
+
+		sym := initNodeSymmetry(p)
+		lb := slices.Clone(p.varLB)
+		ub := slices.Clone(p.varUB)
+
+		cands0 := sym.activeOrbitWithWitnesses(p, lb, ub, 0, 0, time.Time{}, nil)
+		ver0 := rec.filterVerifiedOrbitCompanions(rec.root, 0, cands0)
+		if len(ver0) != 2 {
+			t.Fatalf("expected 2 verified companions before asymmetric cut, got %d", len(ver0))
+		}
+
+		// Add an asymmetric global cut x0 <= 0 (breaks 0 <-> 1 and 0 <-> 2, keeps 1 <-> 2).
+		rec.allCuts = append(rec.allCuts, viprGlobalCut{
+			cols: []int{0},
+			vals: []*big.Rat{big.NewRat(1, 1)},
+			rhs:  big.NewRat(0, 1),
+		})
+		rec.activeCutIDs = append(rec.activeCutIDs, 0)
+
+		ver0After := rec.filterVerifiedOrbitCompanions(rec.root, 0, cands0)
+		if len(ver0After) != 0 {
+			t.Fatalf("expected asymmetric cut to drop all companions of x0, got %d", len(ver0After))
+		}
+		cands1 := sym.activeOrbitWithWitnesses(p, lb, ub, 1, 0, time.Time{}, nil)
+		ver1After := rec.filterVerifiedOrbitCompanions(rec.root, 1, cands1)
+		if len(ver1After) != 1 || ver1After[0].companion != 2 {
+			t.Fatalf("expected x1 to retain only unbroken companion x2, got %+v", ver1After)
+		}
+
+		// Adding partner cut x1 <= 0 restores 0 <-> 1 symmetry while keeping 0 <-> 2 broken.
+		rec.allCuts = append(rec.allCuts, viprGlobalCut{
+			cols: []int{1},
+			vals: []*big.Rat{big.NewRat(1, 1)},
+			rhs:  big.NewRat(0, 1),
+		})
+		rec.activeCutIDs = append(rec.activeCutIDs, 1)
+		ver0Partner := rec.filterVerifiedOrbitCompanions(rec.root, 0, cands0)
+		if len(ver0Partner) != 1 || ver0Partner[0].companion != 1 {
+			t.Fatalf("expected partner cut to restore only companion x1, got %+v", ver0Partner)
+		}
+	})
+}
+
+func TestVIPRTracePresolveEnvelopeEndToEnd(t *testing.T) {
+	t.Parallel()
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	t.Run("all_presolve_rules_and_bnb", func(t *testing.T) {
+		t.Parallel()
+		// Exercises roundBound, gcdRowDiv, singletonRowElim, substFixedRow, substFixedObj,
+		// redundantRow, activityBound, binStrengthen, and symBreakLe in one MIP.
+		m := NewModel("all_presolve_rules", Minimize)
+		x0 := m.AddIntVar("x0", 0.25, 4.75) // roundBound -> [1, 4]
+		x1 := m.AddIntVar("x1", 0, 5)       // gcdRowDiv + activityBound
+		x2 := m.AddIntVar("x2", 0, 10)      // singletonRowElim (<=)
+		x3 := m.AddIntVar("x3", 0, 10)      // singletonRowElim (= 2) -> substFixedRow + substFixedObj
+		c0 := m.AddContVar("c0", 0, 100)
+		b0 := m.AddBinaryVar("b0") // binStrengthen target
+		b1 := m.AddBinaryVar("b1")
+		s0 := m.AddBinaryVar("s0") // symmetric binary twins -> symBreakLe
+		s1 := m.AddBinaryVar("s1")
+		s2 := m.AddBinaryVar("s2")
+
+		m.SetObjective(NewExpr(
+			x0.T(2), x1.T(3), x2.T(-1), x3.T(5), c0.T(1),
+			b0.T(-4), b1.T(-3), s0.T(-2), s1.T(-2), s2.T(-2),
+		))
+		m.AddConstraint("gcd_row", Le(NewExpr(x0.T(2), x1.T(2)), 7))
+		m.AddConstraint("sing_le", Le(NewExpr(x2.T(2)), 5))
+		m.AddConstraint("sing_eq", Eq(NewExpr(x3.T(1)), 2))
+		m.AddConstraint("use_fixed", Le(NewExpr(c0.T(1), x3.T(1)), 9))
+		m.AddConstraint("act_cont", Le(NewExpr(c0.T(3), x0.T(1)), 10))
+		m.AddConstraint("red_row", Le(NewExpr(x0.T(1), x1.T(1)), 20))
+		m.AddConstraint("bin_str", Le(NewExpr(b0.T(5), b1.T(2)), 6))
+		m.AddConstraint("sym_cap", Le(NewExpr(s0.T(2), s1.T(2), s2.T(2)), 3))
+
+		p := m.Compile()
+		// Inject raw fractional bounds on integer x0 to exercise presolve roundBound directly.
+		p.varLB[0] = 0.25
+		p.varUB[0] = 4.75
+		refRes, err := SolveCompiled(t.Context(), p, WithPureGo(), WithWorkers(1), WithPresolve(false), WithRelGapTol(0), WithAbsGapTol(0))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		res, tr, pRes := solveWithPresolveEnvelopeForTest(t, p)
+		if res.Status != StatusOptimal || math.Abs(res.Objective-refRes.Objective) > 1e-6 {
+			t.Fatalf("presolved obj=%v (%v) != ref obj=%v (%v)", res.Objective, res.Status, refRes.Objective, refRes.Status)
+		}
+		if !tr.HasCertificate() || tr.Mode() != "optimal" {
+			t.Fatalf("expected optimal cert, got hasCert=%v mode=%q", tr.HasCertificate(), tr.Mode())
+		}
+		if tr.PresolveStepCount() == 0 || pRes.Envelope == nil {
+			t.Fatalf("expected non-empty presolve steps")
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert := decodeVIPRJSONForTest(t, raw)
+		if cert.Orig == nil {
+			t.Fatalf("expected orig instance in VIPR JSON")
+		}
+		seenOps := make(map[string]int)
+		for _, ps := range cert.Presolve {
+			seenOps[ps.Op]++
+		}
+		wantOps := []string{
+			"roundBound", "gcdRowDiv", "singletonRowElim",
+			"substFixedRow", "substFixedObj", "redundantRow",
+			"activityBound", "binStrengthen", "symBreakLe",
+		}
+		for _, op := range wantOps {
+			if seenOps[op] == 0 {
+				t.Errorf("expected presolve op %q in trace, got ops=%v", op, seenOps)
+			}
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "all_presolve_rules_and_bnb", raw)
+		}
+	})
+
+	t.Run("presolve_symbreak_plus_live_orbit_combined", func(t *testing.T) {
+		t.Parallel()
+		// Combines an S_4 coloring block (reduced by PresolveForVIPR symBreakLe) with a
+		// GCD-1 binary twin block 2*(t0+t1+t2) + u <= 3 (reduced by live orbitBranch in B&B).
+		m := buildSymmetricColoringMIP(4)
+		t0 := m.AddBinaryVar("t0")
+		t1 := m.AddBinaryVar("t1")
+		t2 := m.AddBinaryVar("t2")
+		u := m.AddBinaryVar("u")
+		origObj := m.objTerms
+		origObj = append(origObj, t0.T(-5), t1.T(-5), t2.T(-5), u.T(-1))
+		m.SetObjective(NewExpr(origObj...))
+		m.AddConstraint("twin_cap", Le(NewExpr(t0.T(2), t1.T(2), t2.T(2), u.T(1)), 3))
+		p := m.Compile()
+
+		pRes := PresolveForVIPR(p, 0)
+		if pRes.Infeasible || pRes.SymBreakRows == 0 {
+			t.Fatalf("expected symBreakLe rows from PresolveForVIPR, got infeas=%v symBreak=%d", pRes.Infeasible, pRes.SymBreakRows)
+		}
+		tr := NewVIPRTrace()
+		tr.SetPresolveEnvelope(pRes.Envelope)
+		res, err := SolveCompiled(
+			t.Context(),
+			pRes.Reduced,
+			WithPureGo(),
+			WithWorkers(1),
+			WithPresolve(false),
+			WithCuts(false),
+			WithHeuristics(false),
+			WithRelGapTol(0),
+			WithAbsGapTol(0),
+			WithVIPRTrace(tr),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != StatusOptimal || math.Abs(res.Objective-(-2.0)) > 1e-6 {
+			t.Fatalf("got status=%v obj=%v, want Optimal -2", res.Status, res.Objective)
+		}
+		if !tr.HasCertificate() || tr.Mode() != "optimal" {
+			t.Fatalf("expected optimal cert, got hasCert=%v mode=%q", tr.HasCertificate(), tr.Mode())
+		}
+		if tr.OrbitBranchesCertified() == 0 {
+			t.Fatalf("expected live orbital branching in B&B alongside presolve symBreakLe")
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "presolve_symbreak_plus_live_orbit", raw)
+		}
+	})
+
+	t.Run("presolve_maximize_with_constant", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("max_const_presolve", Maximize)
+		x0 := m.AddIntVar("x0", 0.5, 3.5)
+		x1 := m.AddIntVar("x1", 0, 5)
+		x2 := m.AddIntVar("x2", 2, 2)
+		m.SetObjective(NewExpr(x0.T(3), x1.T(2), x2.T(7)).AddConstant(11))
+		m.AddConstraint("c1", Le(NewExpr(x0.T(2), x1.T(2), x2.T(1)), 11))
+		p := m.Compile()
+
+		refRes, err := SolveCompiled(t.Context(), p, WithPureGo(), WithWorkers(1), WithPresolve(false), WithRelGapTol(0), WithAbsGapTol(0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, tr, _ := solveWithPresolveEnvelopeForTest(t, p)
+		if res.Status != StatusOptimal || math.Abs(res.Objective-refRes.Objective) > 1e-6 {
+			t.Fatalf("got %v (%v), want %v (%v)", res.Objective, res.Status, refRes.Objective, refRes.Status)
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "presolve_maximize_with_constant", raw)
+		}
+	})
+
+	t.Run("presolve_infeasible_envelopes", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name  string
+			build func() *Model
+		}{
+			{
+				name: "bound_conflict_roundBound",
+				build: func() *Model {
+					m := NewModel("inf_round", Minimize)
+					x := m.AddIntVar("x", 0.25, 0.75)
+					m.SetObjective(NewExpr(x.T(1)))
+					return m
+				},
+			},
+			{
+				name: "empty_row_after_substFixedRow",
+				build: func() *Model {
+					m := NewModel("inf_empty_row", Minimize)
+					x := m.AddIntVar("x", 2, 2)
+					m.SetObjective(NewExpr(x.T(1)))
+					m.AddConstraint("bad", Le(NewExpr(x.T(1)), 1))
+					return m
+				},
+			},
+			{
+				name: "activity_infeasible_row",
+				build: func() *Model {
+					m := NewModel("inf_act_row", Minimize)
+					x := m.AddIntVar("x", 2, 5)
+					y := m.AddIntVar("y", 2, 5)
+					m.SetObjective(NewExpr(x.T(1)))
+					m.AddConstraint("bad", Le(NewExpr(x.T(1), y.T(1)), 3))
+					return m
+				},
+			},
+			{
+				name: "gcd_eq_infeasible",
+				build: func() *Model {
+					m := NewModel("inf_gcd_eq", Minimize)
+					x := m.AddBinaryVar("x")
+					y := m.AddBinaryVar("y")
+					m.SetObjective(NewExpr(x.T(1)))
+					m.AddConstraint("parity", Eq(NewExpr(x.T(2), y.T(2)), 3))
+					return m
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				p := tc.build().Compile()
+				if tc.name == "bound_conflict_roundBound" {
+					p.varLB[0] = 0.25
+					p.varUB[0] = 0.75
+				}
+				res, tr, pRes := solveWithPresolveEnvelopeForTest(t, p)
+				if !pRes.Infeasible || res.Status != StatusInfeasible {
+					t.Fatalf("expected presolve infeasible, got pRes.Infeas=%v status=%v", pRes.Infeasible, res.Status)
+				}
+				if !tr.HasCertificate() || !tr.PresolveInfeasible() || tr.Mode() != "infeasible" {
+					t.Fatalf("expected infeasible presolve cert, got hasCert=%v presolveInf=%v mode=%q",
+						tr.HasCertificate(), tr.PresolveInfeasible(), tr.Mode())
+				}
+				raw, err := tr.MarshalVIPRJSON()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if formalOn {
+					requireVIPRBytesVerified(t, viprExe, "presolve_inf_"+tc.name, raw)
+				}
+			})
+		}
+	})
+
+	t.Run("corpus_mips_presolve_envelope", func(t *testing.T) {
+		t.Parallel()
+		files := []string{
+			filepath.Join("testdata", "corpus", "t1_furniture.json"),
+			filepath.Join("testdata", "corpus", "t1_std_mip.json"),
+			filepath.Join("testdata", "corpus", "t1_knapsack_12.json"),
+			filepath.Join("testdata", "corpus", "t1_infeasible_mip.json"),
+		}
+		var batch [][]byte
+		for _, path := range files {
+			p := loadJSONModelForTest(t, path).Compile()
+			_, tr, _ := solveWithPresolveEnvelopeForTest(t, p)
+			if !tr.HasCertificate() {
+				t.Fatalf("missing cert for %s", path)
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("MarshalVIPRJSON(%s): %v", path, err)
+			}
+			cert := decodeVIPRJSONForTest(t, raw)
+			if cert.Orig == nil {
+				t.Fatalf("expected orig envelope for %s", path)
+			}
+			batch = append(batch, raw)
+		}
+		if formalOn {
+			runJSONLItems(t, viprExe, batch)
+		}
+	})
+}
+
+func TestVIPRTraceOrbitAndPresolveNegativeControls(t *testing.T) {
+	t.Parallel()
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+	if !formalOn {
+		t.Skip("set GOBLIN_FORMAL=1 to run Lean vipr-check negative controls")
+	}
+
+	buildOrbitCert := func() viprCertJSON {
+		m := NewModel("neg_orbit", Maximize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddBinaryVar("x1")
+		x2 := m.AddBinaryVar("x2")
+		m.SetObjective(NewExpr(x0.T(1), x1.T(1), x2.T(1)))
+		m.AddConstraint("cap", Le(NewExpr(x0.T(2), x1.T(2), x2.T(2)), 3))
+		p := m.Compile()
+		tr := NewVIPRTrace()
+		if _, err := SolveCompiled(t.Context(), p, WithPureGo(), WithWorkers(1),
+			WithPresolve(false), WithCuts(false), WithHeuristics(false),
+			WithRelGapTol(0), WithAbsGapTol(0), WithVIPRTrace(tr)); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireVIPRBytesVerified(t, viprExe, "neg_orbit_baseline", raw)
+		return decodeVIPRJSONForTest(t, raw)
+	}
+
+	cloneCert := func(c viprCertJSON) viprCertJSON {
+		b, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out viprCertJSON
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	orbitBase := buildOrbitCert()
+	orbitIdx := -1
+	for i, st := range orbitBase.Steps {
+		if st.Rule == "orbitBranch" && len(st.Witnesses) > 0 {
+			orbitIdx = i
+			break
+		}
+	}
+	if orbitIdx < 0 {
+		t.Fatal("baseline orbit cert missing orbitBranch step")
+	}
+
+	t.Run("reject_bad_orbit_colPerm", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(orbitBase)
+		for j := range bad.Steps[orbitIdx].Witnesses[0].ColPerm {
+			bad.Steps[orbitIdx].Witnesses[0].ColPerm[j] = j
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_orbit_colPerm", raw)
+	})
+
+	t.Run("reject_bad_orbit_non_bijection", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(orbitBase)
+		comp := bad.Steps[orbitIdx].Witnesses[0].Companion
+		for j := range bad.Steps[orbitIdx].Witnesses[0].ColPerm {
+			bad.Steps[orbitIdx].Witnesses[0].ColPerm[j] = comp
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_orbit_non_bij", raw)
+	})
+
+	t.Run("reject_bad_orbit_rowPerm", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(orbitBase)
+		bad.Steps[orbitIdx].Witnesses[0].RowPerm = []int{99}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_orbit_rowPerm", raw)
+	})
+
+	t.Run("reject_asymmetric_orbit_objective", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(orbitBase)
+		comp := bad.Steps[orbitIdx].Witnesses[0].Companion
+		bad.Obj[comp] = viprInt64Payload(-2)
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_orbit_asym_obj", raw)
+	})
+
+	t.Run("reject_asymmetric_orbit_bounds", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(orbitBase)
+		comp := bad.Steps[orbitIdx].Witnesses[0].Companion
+		ub2 := viprInt64Payload(2)
+		bad.UB[comp] = &ub2
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_orbit_asym_ub", raw)
+	})
+
+	buildPresolveCert := func() viprCertJSON {
+		m := NewModel("neg_presolve", Minimize)
+		x0 := m.AddIntVar("x0", 0.25, 4.75)
+		x1 := m.AddIntVar("x1", 0, 5)
+		x2 := m.AddIntVar("x2", 2, 2)
+		s0 := m.AddBinaryVar("s0")
+		s1 := m.AddBinaryVar("s1")
+		m.SetObjective(NewExpr(x0.T(1), x1.T(1), x2.T(3), s0.T(-1), s1.T(-1)))
+		m.AddConstraint("gcd", Le(NewExpr(x0.T(2), x1.T(2)), 7))
+		m.AddConstraint("use_fix", Le(NewExpr(x1.T(1), x2.T(1)), 5))
+		m.AddConstraint("sym", Le(NewExpr(s0.T(1), s1.T(1)), 1))
+		p := m.Compile()
+		p.varLB[0] = 0.25
+		p.varUB[0] = 4.75
+		_, tr, _ := solveWithPresolveEnvelopeForTest(t, p)
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireVIPRBytesVerified(t, viprExe, "neg_presolve_baseline", raw)
+		return decodeVIPRJSONForTest(t, raw)
+	}
+
+	preBase := buildPresolveCert()
+
+	t.Run("reject_unsound_roundBound", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		found := false
+		for i := range bad.Presolve {
+			if bad.Presolve[i].Op == "roundBound" && !*bad.Presolve[i].IsUpper {
+				p2 := viprInt64Payload(2)
+				bad.Presolve[i].NewBound = &p2
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("missing roundBound step")
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_roundBound", raw)
+	})
+
+	t.Run("reject_unsound_gcdRowDiv", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		found := false
+		for i := range bad.Presolve {
+			if bad.Presolve[i].Op == "gcdRowDiv" {
+				bad.Presolve[i].Divisor = viprInt64Ptr(3)
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("missing gcdRowDiv step")
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_gcdRowDiv", raw)
+	})
+
+	t.Run("reject_unsound_substFixedRow", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		found := false
+		for i := range bad.Presolve {
+			if bad.Presolve[i].Op == "substFixedRow" {
+				bad.Presolve[i].Col = viprIntPtr(0)
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("missing substFixedRow step")
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_substFixedRow", raw)
+	})
+
+	t.Run("reject_unsound_symBreakLe_perm", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		found := false
+		for i := range bad.Presolve {
+			if bad.Presolve[i].Op == "symBreakLe" {
+				for j := range bad.Presolve[i].ColPerm {
+					bad.Presolve[i].ColPerm[j] = j
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("missing symBreakLe step")
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_symBreakLe", raw)
+	})
+
+	t.Run("reject_unsound_symBreakLe_asym_obj", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		found := false
+		for _, ps := range bad.Presolve {
+			if ps.Op == "symBreakLe" {
+				bad.Orig.Obj[*ps.V] = viprInt64Payload(10)
+				bad.Obj[*ps.V] = viprInt64Payload(10)
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("missing symBreakLe step")
+		}
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_symBreakLe_obj", raw)
+	})
+
+	t.Run("reject_mismatched_reduced_instance", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		bad.ObjConst = viprInt64Payload(999)
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_reduced_mismatch", raw)
+	})
+
+	t.Run("reject_presolve_without_orig", func(t *testing.T) {
+		t.Parallel()
+		bad := cloneCert(preBase)
+		bad.Orig = nil
+		raw, _ := json.Marshal(bad)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_no_orig", raw)
+	})
+
+	t.Run("reject_unsound_redundantRow_and_binStrengthen_and_activityBound", func(t *testing.T) {
+		t.Parallel()
+		badRed := cloneCert(preBase)
+		badRed.Presolve = append([]viprPresolveStepJSON{{Op: "redundantRow", Row: viprIntPtr(0)}}, badRed.Presolve...)
+		rawRed, _ := json.Marshal(badRed)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_redundantRow", rawRed)
+
+		badAct := cloneCert(preBase)
+		z := viprInt64Payload(0)
+		badAct.Presolve = append([]viprPresolveStepJSON{{
+			Op:       "activityBound",
+			Row:      viprIntPtr(0),
+			Col:      viprIntPtr(1),
+			IsUpper:  viprBoolPtr(true),
+			RoundInt: viprBoolPtr(true),
+			NewBound: &z,
+		}}, badAct.Presolve...)
+		rawAct, _ := json.Marshal(badAct)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_activityBound", rawAct)
+
+		badBin := cloneCert(preBase)
+		d5 := viprInt64Payload(5)
+		badBin.Presolve = append([]viprPresolveStepJSON{{
+			Op:    "binStrengthen",
+			Row:   viprIntPtr(2),
+			Col:   viprIntPtr(3),
+			Delta: &d5,
+		}}, badBin.Presolve...)
+		rawBin, _ := json.Marshal(badBin)
+		requireVIPRBytesRejected(t, viprExe, "bad_presolve_binStrengthen", rawBin)
 	})
 }

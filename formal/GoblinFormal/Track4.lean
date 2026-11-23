@@ -1491,6 +1491,14 @@ structure VarBoundRef where
   mult : Rat
   deriving Repr, DecidableEq
 
+/-- Explicit node-automorphism witness for an orbital branching companion `c ≠ br`. -/
+structure OrbitWitness where
+  companion : Nat
+  colPerm : Array Nat
+  rowPerm : Array Nat
+  supportEntries : Array Nat := #[]
+  deriving Repr
+
 /-- Supported derivation rules in a Mini-VIPR certificate. -/
 inductive StepRule (n : Nat) where
   | conIndex (row : Nat)
@@ -1499,6 +1507,9 @@ inductive StepRule (n : Nat) where
   | roundDown (ref : Nat)
   | roundUp (ref : Nat)
   | branch (col : Nat) (splitVal : Int) (leftAsm rightAsm left right : Nat)
+  | orbitBranch (col : Nat) (leftAsm rightAsm left right : Nat)
+      (orbitAsms : Array Nat) (witnesses : Array OrbitWitness)
+      (extraAsms : Array Nat := #[])
   | farkas (refs : Array LinRef) (bounds : Array VarBoundRef)
   | boundConflict (col : Nat) (lbRef ubRef : Option Nat)
   | dualBound (refs : Array LinRef) (bounds : Array VarBoundRef)
@@ -2599,6 +2610,993 @@ private def getBoundUB (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
       else none
     else none
 
+/-! ### Permutation & Orbital Automorphism Verification -/
+
+/-- Builds a candidate inverse array `inv` for a permutation `perm` of `[0 .. n-1]`. -/
+def buildPermInv (n : Nat) (perm : Array Nat) : Array Nat :=
+  go 0 (Array.replicate n n)
+where
+  go (i : Nat) (inv : Array Nat) : Array Nat :=
+    if hi : i < perm.size then
+      let p := perm[i]
+      if hp : p < inv.size then
+        go (i + 1) (inv.set p i hp)
+      else
+        go (i + 1) inv
+    else inv
+  termination_by perm.size - i
+
+private theorem buildPermInv_go_size (n : Nat) (perm : Array Nat) :
+    ∀ k (inv : Array Nat), inv.size = n → (buildPermInv.go perm k inv).size = n := by
+  intro k inv hsz
+  unfold buildPermInv.go
+  split
+  · next hi =>
+    by_cases hp : perm[k] < inv.size
+    · simp only [hp, ↓reduceDIte]
+      exact buildPermInv_go_size n perm (k + 1) (inv.set perm[k] k hp) (by rw [Array.size_set]; exact hsz)
+    · simp only [hp, ↓reduceDIte]
+      exact buildPermInv_go_size n perm (k + 1) inv hsz
+  · exact hsz
+termination_by k _ _ => perm.size - k
+
+theorem buildPermInv_size (n : Nat) (perm : Array Nat) :
+    (buildPermInv n perm).size = n := by
+  unfold buildPermInv
+  exact buildPermInv_go_size n perm 0 (Array.replicate n n) (by simp)
+
+/-- Helper indexing into a sized permutation array. -/
+@[inline]
+private def permAt {n : Nat} (perm : Array Nat) (hsz : perm.size = n) (j : Fin n) : Nat :=
+  perm[j.1]'(by rw [hsz]; exact j.2)
+
+/-- Helper lifting a validated permutation array to `Fin n → Fin n`. -/
+@[inline]
+private def permFn {n : Nat} (perm : Array Nat) (hsz : perm.size = n)
+    (hlt : ∀ j : Fin n, permAt perm hsz j < n) (j : Fin n) : Fin n :=
+  ⟨permAt perm hsz j, hlt j⟩
+
+/-- Checks whether `perm` is a bijection on `Fin n` via `inv[perm[i]] = i`. -/
+def checkPermBijection (n : Nat) (perm : Array Nat) : Bool :=
+  if perm.size == n then
+    let inv := buildPermInv n perm
+    loop inv 0
+  else false
+where
+  loop (inv : Array Nat) (i : Nat) : Bool :=
+    if hi : i < n then
+      if hp : i < perm.size then
+        let p := perm[i]
+        if hpn : p < inv.size then
+          if inv[p] == i then loop inv (i + 1) else false
+        else false
+      else false
+    else true
+  termination_by n - i
+
+private theorem checkPermBijection_loop_sound (n : Nat) (perm inv : Array Nat)
+    (hsz : perm.size = n) (hinvSz : inv.size = n) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k),
+        ∃ hp : permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hk⟩ < n,
+          inv[permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hk⟩]'(by rw [hinvSz]; exact hp) = i) →
+      checkPermBijection.loop n perm inv k = true →
+      ∀ j : Fin n,
+        ∃ hp : permAt perm hsz j < n,
+          inv[permAt perm hsz j]'(by rw [hinvSz]; exact hp) = j.1 := by
+  intro k hk hprev hloop j
+  unfold checkPermBijection.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hlt =>
+    have hpk : k < perm.size := by rw [hsz]; exact hlt
+    simp only [hpk, ↓reduceDIte] at hloop
+    split at hloop
+    · next hpn =>
+      split at hloop
+      · next heq =>
+        have hpn' : permAt perm hsz ⟨k, hlt⟩ < n := by
+          change perm[k]'hpk < n
+          omega
+        have hcur : inv[permAt perm hsz ⟨k, hlt⟩]'(by rw [hinvSz]; exact hpn') = k := beq_iff_eq.mp heq
+        have hnext : ∀ i (hi : i < k + 1),
+            ∃ hp : permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hlt⟩ < n,
+              inv[permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hlt⟩]'(by rw [hinvSz]; exact hp) = i := by
+          intro i hi
+          by_cases hik : i = k
+          · subst hik; exact ⟨hpn', hcur⟩
+          · exact hprev i (by omega)
+        exact checkPermBijection_loop_sound n perm inv hsz hinvSz (k + 1) hlt hnext hloop j
+      · contradiction
+    · contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2
+termination_by k _ _ _ => n - k
+
+theorem checkPermBijection_spec {n : Nat} {perm : Array Nat}
+    (h : checkPermBijection n perm = true) :
+    ∃ hsz : perm.size = n,
+      ∃ hlt : ∀ j : Fin n, permAt perm hsz j < n,
+        ∀ i₁ i₂ : Fin n, permFn perm hsz hlt i₁ = permFn perm hsz hlt i₂ → i₁ = i₂ := by
+  unfold checkPermBijection at h
+  dsimp only at h
+  split at h
+  · next hszb =>
+    have hsz : perm.size = n := beq_iff_eq.mp hszb
+    have hinvSz : (buildPermInv n perm).size = n := buildPermInv_size n perm
+    have hall := checkPermBijection_loop_sound n perm (buildPermInv n perm) hsz hinvSz
+      0 (Nat.zero_le n) (fun _ hi => by omega) h
+    have hlt : ∀ j : Fin n, permAt perm hsz j < n := fun j => (hall j).1
+    refine ⟨hsz, hlt, ?_⟩
+    intro i₁ i₂ heq
+    have hv : permAt perm hsz i₁ = permAt perm hsz i₂ := congrArg Fin.val heq
+    have h1 := (hall i₁).2
+    have h2 := (hall i₂).2
+    have h3 : (buildPermInv n perm)[permAt perm hsz i₁]'(by rw [hinvSz]; exact hlt i₁) =
+        (buildPermInv n perm)[permAt perm hsz i₂]'(by rw [hinvSz]; exact hlt i₂) := by
+      congr 1
+    rw [h1, h2] at h3
+    exact Fin.ext h3
+  · contradiction
+
+/-- Checks whether `perm` is an involution (`perm[perm[i]] = i`) on `Fin n`. -/
+def checkPermInvolution (n : Nat) (perm : Array Nat) : Bool :=
+  if perm.size == n then
+    loop 0
+  else false
+where
+  loop (i : Nat) : Bool :=
+    if hi : i < n then
+      if hp : i < perm.size then
+        let p := perm[i]
+        if hpn : p < perm.size then
+          if perm[p] == i then loop (i + 1) else false
+        else false
+      else false
+    else true
+  termination_by n - i
+
+private theorem checkPermInvolution_loop_sound (n : Nat) (perm : Array Nat)
+    (hsz : perm.size = n) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k),
+        ∃ hp : permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hk⟩ < n,
+          permAt perm hsz ⟨permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hk⟩, hp⟩ = i) →
+      checkPermInvolution.loop n perm k = true →
+      ∀ j : Fin n,
+        ∃ hp : permAt perm hsz j < n,
+          permAt perm hsz ⟨permAt perm hsz j, hp⟩ = j.1 := by
+  intro k hk hprev hloop j
+  unfold checkPermInvolution.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hlt =>
+    have hpk : k < perm.size := by rw [hsz]; exact hlt
+    simp only [hpk, ↓reduceDIte] at hloop
+    split at hloop
+    · next hpn =>
+      split at hloop
+      · next heq =>
+        have hpn' : permAt perm hsz ⟨k, hlt⟩ < n := by
+          change perm[k]'hpk < n
+          omega
+        have hcur : permAt perm hsz ⟨permAt perm hsz ⟨k, hlt⟩, hpn'⟩ = k := beq_iff_eq.mp heq
+        have hnext : ∀ i (hi : i < k + 1),
+            ∃ hp : permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hlt⟩ < n,
+              permAt perm hsz ⟨permAt perm hsz ⟨i, Nat.lt_of_lt_of_le hi hlt⟩, hp⟩ = i := by
+          intro i hi
+          by_cases hik : i = k
+          · subst hik; exact ⟨hpn', hcur⟩
+          · exact hprev i (by omega)
+        exact checkPermInvolution_loop_sound n perm hsz (k + 1) hlt hnext hloop j
+      · contradiction
+    · contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2
+termination_by k _ _ _ => n - k
+
+theorem checkPermInvolution_spec {n : Nat} {perm : Array Nat}
+    (h : checkPermInvolution n perm = true) :
+    ∃ hsz : perm.size = n,
+      ∃ hlt : ∀ j : Fin n, permAt perm hsz j < n,
+        (∀ j : Fin n, permFn perm hsz hlt (permFn perm hsz hlt j) = j) ∧
+        (∀ i₁ i₂ : Fin n, permFn perm hsz hlt i₁ = permFn perm hsz hlt i₂ → i₁ = i₂) := by
+  unfold checkPermInvolution at h
+  split at h
+  · next hszb =>
+    have hsz : perm.size = n := beq_iff_eq.mp hszb
+    have hall := checkPermInvolution_loop_sound n perm hsz 0 (Nat.zero_le n)
+      (fun _ hi => by omega) h
+    have hlt : ∀ j : Fin n, permAt perm hsz j < n := fun j => (hall j).1
+    have hinv : ∀ j : Fin n, permFn perm hsz hlt (permFn perm hsz hlt j) = j := by
+      intro j
+      exact Fin.ext (hall j).2
+    refine ⟨hsz, hlt, hinv, ?_⟩
+    intro i₁ i₂ heq
+    have h1 := hinv i₁
+    have h2 := hinv i₂
+    rw [← h1, ← h2, heq]
+  · contradiction
+
+/-- Checks whether `dst.get j = (±) src.get (perm[j])` for all `j : Fin n`. -/
+def checkCoeffsPermMatch {n : Nat} (dst src : RatVec n) (perm : Array Nat) (negate : Bool) : Bool :=
+  loop 0
+where
+  loop (i : Nat) : Bool :=
+    if hi : i < n then
+      if hp : i < perm.size then
+        let p := perm[i]
+        if hpn : p < n then
+          let dj := dst.get ⟨i, hi⟩
+          let sp := src.get ⟨p, hpn⟩
+          let ok := if negate then dj == -sp else dj == sp
+          if ok then loop (i + 1) else false
+        else false
+      else false
+    else true
+  termination_by n - i
+
+private theorem checkCoeffsPermMatch_loop_sound {n : Nat} (dst src : RatVec n)
+    (perm : Array Nat) (negate : Bool) (hsz : perm.size = n)
+    (hlt : ∀ j : Fin n, permAt perm hsz j < n) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k),
+        let j : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hk⟩
+        if negate then dst.get j = -(src.get (permFn perm hsz hlt j))
+        else dst.get j = src.get (permFn perm hsz hlt j)) →
+      checkCoeffsPermMatch.loop dst src perm negate k = true →
+      ∀ j : Fin n,
+        if negate then dst.get j = -(src.get (permFn perm hsz hlt j))
+        else dst.get j = src.get (permFn perm hsz hlt j) := by
+  intro k hk hprev hloop j
+  unfold checkCoeffsPermMatch.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    have hpk : k < perm.size := by rw [hsz]; exact hltK
+    have hpn : perm[k]'hpk < n := hlt ⟨k, hltK⟩
+    simp only [hpk, hpn, ↓reduceDIte] at hloop
+    by_cases hok : (if negate then dst.get ⟨k, hltK⟩ == -(src.get ⟨perm[k]'hpk, hpn⟩)
+        else dst.get ⟨k, hltK⟩ == src.get ⟨perm[k]'hpk, hpn⟩) = true
+    · simp only [hok, ↓reduceIte] at hloop
+      have hcur : if negate then dst.get ⟨k, hltK⟩ = -(src.get (permFn perm hsz hlt ⟨k, hltK⟩))
+          else dst.get ⟨k, hltK⟩ = src.get (permFn perm hsz hlt ⟨k, hltK⟩) := by
+        cases negate <;> simp only [Bool.false_eq_true, ↓reduceIte] at hok ⊢ <;>
+          exact beq_iff_eq.mp hok
+      have hnext : ∀ i (hi : i < k + 1),
+          let ji : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hltK⟩
+          if negate then dst.get ji = -(src.get (permFn perm hsz hlt ji))
+          else dst.get ji = src.get (permFn perm hsz hlt ji) := by
+        intro i hi
+        by_cases hik : i = k
+        · subst hik; exact hcur
+        · exact hprev i (by omega)
+      exact checkCoeffsPermMatch_loop_sound dst src perm negate hsz hlt (k + 1) hltK hnext hloop j
+    · simp only [hok] at hloop; contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2
+termination_by k _ _ _ => n - k
+
+private theorem dot_perm_pos {n : Nat} {dst src : RatVec n} {f : Fin n → Fin n}
+    (hf : ∀ i₁ i₂, f i₁ = f i₂ → i₁ = i₂)
+    (hm : ∀ j : Fin n, dst.get j = src.get (f j)) (x : Fin n → Rat) :
+    dst.dot (fun j => x (f j)) = src.dot x := by
+  unfold RatVec.dot
+  have h1 : finSum n (fun j => dst.get j * x (f j)) =
+      finSum n (fun j => src.get (f j) * x (f j)) :=
+    finSum_congr (fun j => by rw [hm j])
+  rw [h1]
+  exact finSum_inj_eq (g := fun k => src.get k * x k) hf
+
+private theorem dot_perm_neg {n : Nat} {dst src : RatVec n} {f : Fin n → Fin n}
+    (hf : ∀ i₁ i₂, f i₁ = f i₂ → i₁ = i₂)
+    (hm : ∀ j : Fin n, dst.get j = -(src.get (f j))) (x : Fin n → Rat) :
+    dst.dot (fun j => x (f j)) = -(src.dot x) := by
+  unfold RatVec.dot
+  have h1 : finSum n (fun j => dst.get j * x (f j)) =
+      finSum n (fun j => -(src.get (f j) * x (f j))) :=
+    finSum_congr (fun j => by rw [hm j, Rat.neg_mul])
+  rw [h1, finSum_neg]
+  exact congrArg Neg.neg (finSum_inj_eq (g := fun k => src.get k * x k) hf)
+
+/-- Checks whether `src.sat x` implies `dst.sat (fun j => x (perm j))` (supporting sign-flipped rows). -/
+def checkConPermImplies {n : Nat} (src dst : LinCon n) (perm : Array Nat) : Bool :=
+  (checkCoeffsPermMatch dst.coeffs src.coeffs perm false &&
+   match dst.sense with
+   | .le => (src.sense == .le || src.sense == .eq) && decide (src.rhs ≤ dst.rhs)
+   | .ge => (src.sense == .ge || src.sense == .eq) && decide (dst.rhs ≤ src.rhs)
+   | .eq => src.sense == .eq && src.rhs == dst.rhs) ||
+  (checkCoeffsPermMatch dst.coeffs src.coeffs perm true &&
+   match dst.sense with
+   | .le => (src.sense == .ge || src.sense == .eq) && decide (-src.rhs ≤ dst.rhs)
+   | .ge => (src.sense == .le || src.sense == .eq) && decide (dst.rhs ≤ -src.rhs)
+   | .eq => src.sense == .eq && dst.rhs == -src.rhs)
+
+theorem checkConPermImplies_sound {n : Nat} {src dst : LinCon n} {perm : Array Nat}
+    (hsz : perm.size = n) (hlt : ∀ j : Fin n, permAt perm hsz j < n)
+    (hf : ∀ i₁ i₂ : Fin n, permFn perm hsz hlt i₁ = permFn perm hsz hlt i₂ → i₁ = i₂)
+    (hchk : checkConPermImplies src dst perm = true)
+    {x : Fin n → Rat} (hsat : src.sat x) :
+    dst.sat (fun j => x (permFn perm hsz hlt j)) := by
+  unfold checkConPermImplies at hchk
+  rcases Bool.or_eq_true _ _ |>.mp hchk with hpos | hneg
+  · simp only [Bool.and_eq_true] at hpos
+    have hm := checkCoeffsPermMatch_loop_sound dst.coeffs src.coeffs perm false hsz hlt
+      0 (Nat.zero_le n) (fun _ hi => by omega) hpos.1
+    have hm' : ∀ j : Fin n, dst.coeffs.get j = src.coeffs.get (permFn perm hsz hlt j) := by
+      intro j; simpa using hm j
+    have hdot : dst.coeffs.dot (fun j => x (permFn perm hsz hlt j)) = src.coeffs.dot x :=
+      dot_perm_pos hf hm' x
+    unfold LinCon.sat at hsat ⊢
+    rw [hdot]
+    have hs := hpos.2
+    cases hd : dst.sense with
+    | le =>
+      rw [hd] at hs
+      simp only [Bool.and_eq_true] at hs
+      have hr : src.rhs ≤ dst.rhs := decide_eq_true_eq.mp hs.2
+      rcases Bool.or_eq_true _ _ |>.mp hs.1 with hss | hss
+      · rw [beq_iff_eq.mp hss] at hsat; exact Rat.le_trans hsat hr
+      · rw [beq_iff_eq.mp hss] at hsat; exact hsat ▸ hr
+    | ge =>
+      rw [hd] at hs
+      simp only [Bool.and_eq_true] at hs
+      have hr : dst.rhs ≤ src.rhs := decide_eq_true_eq.mp hs.2
+      rcases Bool.or_eq_true _ _ |>.mp hs.1 with hss | hss
+      · rw [beq_iff_eq.mp hss] at hsat; exact Rat.le_trans hr hsat
+      · rw [beq_iff_eq.mp hss] at hsat; exact hsat ▸ hr
+    | eq =>
+      rw [hd] at hs
+      simp only [Bool.and_eq_true, beq_iff_eq] at hs
+      rw [hs.1] at hsat
+      rw [hsat, hs.2]
+  · simp only [Bool.and_eq_true] at hneg
+    have hm := checkCoeffsPermMatch_loop_sound dst.coeffs src.coeffs perm true hsz hlt
+      0 (Nat.zero_le n) (fun _ hi => by omega) hneg.1
+    have hm' : ∀ j : Fin n, dst.coeffs.get j = -(src.coeffs.get (permFn perm hsz hlt j)) := by
+      intro j; simpa using hm j
+    have hdot : dst.coeffs.dot (fun j => x (permFn perm hsz hlt j)) = -(src.coeffs.dot x) :=
+      dot_perm_neg hf hm' x
+    unfold LinCon.sat at hsat ⊢
+    rw [hdot]
+    have hs := hneg.2
+    cases hd : dst.sense with
+    | le =>
+      rw [hd] at hs
+      simp only [Bool.and_eq_true] at hs
+      have hr : -src.rhs ≤ dst.rhs := decide_eq_true_eq.mp hs.2
+      rcases Bool.or_eq_true _ _ |>.mp hs.1 with hss | hss
+      · rw [beq_iff_eq.mp hss] at hsat
+        exact Rat.le_trans (Rat.neg_le_neg hsat) hr
+      · rw [beq_iff_eq.mp hss] at hsat
+        rw [hsat]; exact hr
+    | ge =>
+      rw [hd] at hs
+      simp only [Bool.and_eq_true] at hs
+      have hr : dst.rhs ≤ -src.rhs := decide_eq_true_eq.mp hs.2
+      rcases Bool.or_eq_true _ _ |>.mp hs.1 with hss | hss
+      · rw [beq_iff_eq.mp hss] at hsat
+        exact Rat.le_trans hr (Rat.neg_le_neg hsat)
+      · rw [beq_iff_eq.mp hss] at hsat
+        rw [hsat]; exact hr
+    | eq =>
+      rw [hd] at hs
+      simp only [Bool.and_eq_true, beq_iff_eq] at hs
+      rw [hs.1] at hsat
+      rw [hsat, hs.2]
+
+/-- Checks whether `P`'s base bounds at `perm[k]` directly imply `dst.sat (x ∘ perm)`. -/
+def checkBaseBoundImpliesPerm (P : VIPRInstance) (dst : LinCon P.n) (perm : Array Nat) : Bool :=
+  loop 0
+where
+  loop (k : Nat) : Bool :=
+    if hk : k < P.n then
+      if hp : k < perm.size then
+        let p := perm[k]
+        if hpn : p < P.n then
+          let jk : Fin P.n := ⟨k, hk⟩
+          let jp : Fin P.n := ⟨p, hpn⟩
+          if dst.coeffs.beq (RatVec.unit P.n jk) then
+            match dst.sense with
+            | .le =>
+              match P.ub jp with
+              | some u => decide (u ≤ dst.rhs)
+              | none => false
+            | .ge =>
+              match P.lb jp with
+              | some l => decide (dst.rhs ≤ l)
+              | none => false
+            | .eq =>
+              match P.lb jp, P.ub jp with
+              | some l, some u => decide (dst.rhs ≤ l) && decide (u ≤ dst.rhs)
+              | _, _ => false
+          else loop (k + 1)
+        else false
+      else false
+    else false
+  termination_by P.n - k
+
+private theorem checkBaseBoundImpliesPerm_loop_sound (P : VIPRInstance) (dst : LinCon P.n)
+    (perm : Array Nat) (hsz : perm.size = P.n)
+    (hlt : ∀ j : Fin P.n, permAt perm hsz j < P.n) :
+    ∀ k,
+      checkBaseBoundImpliesPerm.loop P dst perm k = true →
+      ∀ x : Fin P.n → Rat, MILPFeasible P x →
+        dst.sat (fun j => x (permFn perm hsz hlt j)) := by
+  intro k hloop x hx
+  unfold checkBaseBoundImpliesPerm.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hk =>
+    have hpk : k < perm.size := by rw [hsz]; exact hk
+    have hpn : perm[k]'hpk < P.n := hlt ⟨k, hk⟩
+    simp only [hpk, hpn, ↓reduceDIte] at hloop
+    split at hloop
+    · next hunit =>
+      have hcEq : dst.coeffs = RatVec.unit P.n ⟨k, hk⟩ := RatVec.eq_of_beq hunit
+      unfold LinCon.sat
+      rw [hcEq, RatVec.dot_unit]
+      cases hs : dst.sense with
+      | le =>
+        rw [hs] at hloop
+        cases hub : P.ub ⟨perm[k]'hpk, hpn⟩ with
+        | none => simp [hub] at hloop
+        | some u =>
+          rw [hub] at hloop
+          exact Rat.le_trans ((hx.1 ⟨perm[k]'hpk, hpn⟩).2 u hub) (decide_eq_true_eq.mp hloop)
+      | ge =>
+        rw [hs] at hloop
+        cases hlb : P.lb ⟨perm[k]'hpk, hpn⟩ with
+        | none => simp [hlb] at hloop
+        | some l =>
+          rw [hlb] at hloop
+          exact Rat.le_trans (decide_eq_true_eq.mp hloop) ((hx.1 ⟨perm[k]'hpk, hpn⟩).1 l hlb)
+      | eq =>
+        rw [hs] at hloop
+        cases hlb : P.lb ⟨perm[k]'hpk, hpn⟩ with
+        | none => simp [hlb] at hloop
+        | some l =>
+          cases hub : P.ub ⟨perm[k]'hpk, hpn⟩ with
+          | none => simp [hlb, hub] at hloop
+          | some u =>
+            rw [hlb, hub] at hloop
+            simp only [Bool.and_eq_true] at hloop
+            exact Rat.le_antisymm
+              (Rat.le_trans ((hx.1 ⟨perm[k]'hpk, hpn⟩).2 u hub) (decide_eq_true_eq.mp hloop.2))
+              (Rat.le_trans (decide_eq_true_eq.mp hloop.1) ((hx.1 ⟨perm[k]'hpk, hpn⟩).1 l hlb))
+    · exact checkBaseBoundImpliesPerm_loop_sound P dst perm hsz hlt (k + 1) hloop x hx
+  · contradiction
+termination_by k _ _ _ => P.n - k
+
+private def optLbLe (a b : Option Rat) : Bool :=
+  match a, b with
+  | none, _ => true
+  | some l1, some l2 => decide (l1 ≤ l2)
+  | some _, none => false
+
+private def optUbLe (a b : Option Rat) : Bool :=
+  match a, b with
+  | _, none => true
+  | some u1, some u2 => decide (u1 ≤ u2)
+  | none, some _ => false
+
+/-- Checks that `w` is an exact node-level automorphism mapping `br ↦ c`, preserving `P`'s bounds,
+integrality, objective, base rows, conclusion `rightCon`, and all active `rightRem` assumptions. -/
+def checkOrbitAutomorphism (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
+    (outAsms rightRem : List Nat) (br c : Fin P.n)
+    (rightCon : LinCon P.n) (w : OrbitWitness) : Bool :=
+  checkPermBijection P.n w.colPerm &&
+  (if hbr : br.1 < w.colPerm.size then w.colPerm[br.1] == c.1 else false) &&
+  (w.rowPerm.size == P.baseRows.size) &&
+  checkCols 0 &&
+  checkRows 0 &&
+  (isUnsatCon rightCon || checkCoeffsPermMatch rightCon.coeffs rightCon.coeffs w.colPerm false) &&
+  checkSupports 0 &&
+  checkRightRem rightRem
+where
+  checkCols (i : Nat) : Bool :=
+    if hi : i < P.n then
+      if hp : i < w.colPerm.size then
+        let p := w.colPerm[i]
+        if hpn : p < P.n then
+          let j : Fin P.n := ⟨i, hi⟩
+          let jp : Fin P.n := ⟨p, hpn⟩
+          let okInt := !P.isInt j || P.isInt jp
+          let okObj := P.obj j == P.obj jp
+          let okLb := optLbLe (P.lb j) (P.lb jp)
+          let okUb := optUbLe (P.ub jp) (P.ub j)
+          if okInt && okObj && okLb && okUb then checkCols (i + 1) else false
+        else false
+      else false
+    else true
+  termination_by P.n - i
+  checkRows (i : Nat) : Bool :=
+    if hi : i < P.baseRows.size then
+      if hrp : i < w.rowPerm.size then
+        let rIdx := w.rowPerm[i]
+        if hr : rIdx < P.baseRows.size then
+          if checkConPermImplies P.baseRows[rIdx] P.baseRows[i] w.colPerm then
+            checkRows (i + 1)
+          else false
+        else false
+      else false
+    else true
+  termination_by P.baseRows.size - i
+  checkSupports (i : Nat) : Bool :=
+    if hi : i < w.supportEntries.size then
+      let b := w.supportEntries[i]
+      if hb : b < entries.size then
+        if entries[b].assumptions.all (fun d => outAsms.contains d) then
+          checkSupports (i + 1)
+        else false
+      else false
+    else true
+  termination_by w.supportEntries.size - i
+  anyOutMatch (conA : LinCon P.n) : List Nat → Bool
+    | [] => false
+    | b :: bs =>
+      let ok := if hb : b < entries.size then checkConPermImplies entries[b].con conA w.colPerm else false
+      ok || anyOutMatch conA bs
+  anySupportMatch (conA : LinCon P.n) (i : Nat) : Bool :=
+    if hi : i < w.supportEntries.size then
+      let b := w.supportEntries[i]
+      let ok := if hb : b < entries.size then checkConPermImplies entries[b].con conA w.colPerm else false
+      ok || anySupportMatch conA (i + 1)
+    else false
+  termination_by w.supportEntries.size - i
+  checkRightRem : List Nat → Bool
+    | [] => true
+    | a :: rest =>
+      if ha : a < entries.size then
+        let conA := entries[a].con
+        let ok :=
+          checkBaseBoundImpliesPerm P conA w.colPerm ||
+          checkConPermImplies conA conA w.colPerm ||
+          anyOutMatch conA outAsms ||
+          anySupportMatch conA 0
+        ok && checkRightRem rest
+      else false
+
+private theorem checkOrbitAutomorphism_cols_sound (P : VIPRInstance) (w : OrbitWitness)
+    (hsz : w.colPerm.size = P.n) (hlt : ∀ j : Fin P.n, permAt w.colPerm hsz j < P.n) :
+    ∀ k (hk : k ≤ P.n),
+      (∀ i (hi : i < k),
+        let j : Fin P.n := ⟨i, Nat.lt_of_lt_of_le hi hk⟩
+        let jp : Fin P.n := permFn w.colPerm hsz hlt j
+        (P.isInt j = true → P.isInt jp = true) ∧
+        P.obj j = P.obj jp ∧
+        (∀ l, P.lb j = some l → ∃ l', P.lb jp = some l' ∧ l ≤ l') ∧
+        (∀ u, P.ub j = some u → ∃ u', P.ub jp = some u' ∧ u' ≤ u)) →
+      checkOrbitAutomorphism.checkCols P w k = true →
+      ∀ j : Fin P.n,
+        let jp : Fin P.n := permFn w.colPerm hsz hlt j
+        (P.isInt j = true → P.isInt jp = true) ∧
+        P.obj j = P.obj jp ∧
+        (∀ l, P.lb j = some l → ∃ l', P.lb jp = some l' ∧ l ≤ l') ∧
+        (∀ u, P.ub j = some u → ∃ u', P.ub jp = some u' ∧ u' ≤ u) := by
+  intro k hk hprev hloop j
+  unfold checkOrbitAutomorphism.checkCols at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    have hpk : k < w.colPerm.size := by rw [hsz]; exact hltK
+    have hpn : w.colPerm[k]'hpk < P.n := hlt ⟨k, hltK⟩
+    simp only [hpk, hpn, ↓reduceDIte] at hloop
+    split at hloop
+    · next hok =>
+      let jk : Fin P.n := ⟨k, hltK⟩
+      let jpk : Fin P.n := ⟨w.colPerm[k]'hpk, hpn⟩
+      simp only [Bool.and_eq_true] at hok
+      have hcurInt : P.isInt jk = true → P.isInt jpk = true := by
+        intro hi
+        rcases Bool.or_eq_true _ _ |>.mp hok.1.1.1 with hno | hyes
+        · rw [hi] at hno; contradiction
+        · exact hyes
+      have hcurObj : P.obj jk = P.obj jpk := beq_iff_eq.mp hok.1.1.2
+      have hcurLb : ∀ l, P.lb jk = some l → ∃ l', P.lb jpk = some l' ∧ l ≤ l' := by
+        intro l hl
+        have hlb := hok.1.2
+        unfold optLbLe at hlb
+        rw [hl] at hlb
+        cases h2 : P.lb jpk with
+        | none => rw [h2] at hlb; contradiction
+        | some l' =>
+          rw [h2] at hlb
+          exact ⟨l', rfl, decide_eq_true_eq.mp hlb⟩
+      have hcurUb : ∀ u, P.ub jk = some u → ∃ u', P.ub jpk = some u' ∧ u' ≤ u := by
+        intro u hu
+        have hub := hok.2
+        unfold optUbLe at hub
+        rw [hu] at hub
+        cases h2 : P.ub jpk with
+        | none => rw [h2] at hub; contradiction
+        | some u' =>
+          rw [h2] at hub
+          exact ⟨u', rfl, decide_eq_true_eq.mp hub⟩
+      have hnext : ∀ i (hi : i < k + 1),
+          let ji : Fin P.n := ⟨i, Nat.lt_of_lt_of_le hi hltK⟩
+          let jpi : Fin P.n := permFn w.colPerm hsz hlt ji
+          (P.isInt ji = true → P.isInt jpi = true) ∧
+          P.obj ji = P.obj jpi ∧
+          (∀ l, P.lb ji = some l → ∃ l', P.lb jpi = some l' ∧ l ≤ l') ∧
+          (∀ u, P.ub ji = some u → ∃ u', P.ub jpi = some u' ∧ u' ≤ u) := by
+        intro i hi
+        by_cases hik : i = k
+        · subst hik; exact ⟨hcurInt, hcurObj, hcurLb, hcurUb⟩
+        · exact hprev i (by omega)
+      exact checkOrbitAutomorphism_cols_sound P w hsz hlt (k + 1) hltK hnext hloop j
+    · contradiction
+  · next hge =>
+    have hkn : k = P.n := by omega
+    subst hkn
+    exact hprev j.1 j.2
+termination_by k _ _ _ => P.n - k
+
+private theorem checkOrbitAutomorphism_rows_sound (P : VIPRInstance) (w : OrbitWitness)
+    (hsz : w.colPerm.size = P.n) (hlt : ∀ j : Fin P.n, permAt w.colPerm hsz j < P.n)
+    (hf : ∀ i₁ i₂ : Fin P.n, permFn w.colPerm hsz hlt i₁ = permFn w.colPerm hsz hlt i₂ → i₁ = i₂)
+    (hrsz : w.rowPerm.size = P.baseRows.size) :
+    ∀ k (hk : k ≤ P.baseRows.size),
+      (∀ i (hi : i < k),
+        ∀ x : Fin P.n → Rat, MILPFeasible P x →
+          P.baseRows[i].sat (fun j => x (permFn w.colPerm hsz hlt j))) →
+      checkOrbitAutomorphism.checkRows P w k = true →
+      ∀ i : Fin P.baseRows.size,
+        ∀ x : Fin P.n → Rat, MILPFeasible P x →
+          P.baseRows[i].sat (fun j => x (permFn w.colPerm hsz hlt j)) := by
+  intro k hk hprev hloop i x hx
+  unfold checkOrbitAutomorphism.checkRows at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    have hrp : k < w.rowPerm.size := by rw [hrsz]; exact hltK
+    simp only [hrp, ↓reduceDIte] at hloop
+    split at hloop
+    · next hr =>
+      split at hloop
+      · next himp =>
+        have hcur : ∀ y : Fin P.n → Rat, MILPFeasible P y →
+            P.baseRows[k].sat (fun j => y (permFn w.colPerm hsz hlt j)) := by
+          intro y hy
+          exact checkConPermImplies_sound hsz hlt hf himp (hy.2.1 ⟨w.rowPerm[k], hr⟩)
+        have hnext : ∀ m (hm : m < k + 1),
+            ∀ y : Fin P.n → Rat, MILPFeasible P y →
+              P.baseRows[m].sat (fun j => y (permFn w.colPerm hsz hlt j)) := by
+          intro m hm
+          by_cases hmk : m = k
+          · subst hmk; exact hcur
+          · exact hprev m (by omega)
+        exact checkOrbitAutomorphism_rows_sound P w hsz hlt hf hrsz (k + 1) hltK hnext hloop i x hx
+      · contradiction
+    · contradiction
+  · next hge =>
+    have hkn : k = P.baseRows.size := by omega
+    subst hkn
+    exact hprev i.1 i.2 x hx
+termination_by k _ _ _ _ _ => P.baseRows.size - k
+
+private theorem checkOrbitAutomorphism_supports_sound (P : VIPRInstance)
+    (entries : Array (DerivedEntry P.n)) (outAsms : List Nat) (w : OrbitWitness) :
+    ∀ k (hk : k ≤ w.supportEntries.size),
+      (∀ i (hi : i < k),
+        ∃ hb : w.supportEntries[i]'(Nat.lt_of_lt_of_le hi hk) < entries.size,
+          ∀ d ∈ entries[w.supportEntries[i]'(Nat.lt_of_lt_of_le hi hk)].assumptions, d ∈ outAsms) →
+      checkOrbitAutomorphism.checkSupports P entries outAsms w k = true →
+      ∀ i : Fin w.supportEntries.size,
+        ∃ hb : w.supportEntries[i] < entries.size,
+          ∀ d ∈ entries[w.supportEntries[i]].assumptions, d ∈ outAsms := by
+  intro k hk hprev hloop i
+  unfold checkOrbitAutomorphism.checkSupports at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    split at hloop
+    · next hb =>
+      split at hloop
+      · next hall =>
+        have hcur : ∀ d ∈ entries[w.supportEntries[k]].assumptions, d ∈ outAsms := by
+          intro d hd
+          exact List.contains_iff_mem.mp (List.all_eq_true.mp hall d hd)
+        have hnext : ∀ m (hm : m < k + 1),
+            ∃ hb' : w.supportEntries[m]'(Nat.lt_of_lt_of_le hm hltK) < entries.size,
+              ∀ d ∈ entries[w.supportEntries[m]'(Nat.lt_of_lt_of_le hm hltK)].assumptions, d ∈ outAsms := by
+          intro m hm
+          by_cases hmk : m = k
+          · subst hmk; exact ⟨hb, hcur⟩
+          · exact hprev m (by omega)
+        exact checkOrbitAutomorphism_supports_sound P entries outAsms w (k + 1) hltK hnext hloop i
+      · contradiction
+    · contradiction
+  · next hge =>
+    have hkn : k = w.supportEntries.size := by omega
+    subst hkn
+    exact hprev i.1 i.2
+termination_by k _ _ _ => w.supportEntries.size - k
+
+private theorem anyOutMatch_sound (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
+    (w : OrbitWitness) (hsz : w.colPerm.size = P.n)
+    (hlt : ∀ j : Fin P.n, permAt w.colPerm hsz j < P.n)
+    (hf : ∀ i₁ i₂ : Fin P.n, permFn w.colPerm hsz hlt i₁ = permFn w.colPerm hsz hlt i₂ → i₁ = i₂)
+    (conA : LinCon P.n) (x : Fin P.n → Rat) :
+    ∀ bs : List Nat,
+      (∀ b ∈ bs, ∃ hb : b < entries.size, entries[b].con.sat x) →
+      checkOrbitAutomorphism.anyOutMatch P entries w conA bs = true →
+      conA.sat (fun j => x (permFn w.colPerm hsz hlt j)) := by
+  intro bs hsat hchk
+  induction bs with
+  | nil => simp [checkOrbitAutomorphism.anyOutMatch] at hchk
+  | cons b rest ih =>
+    unfold checkOrbitAutomorphism.anyOutMatch at hchk
+    rcases Bool.or_eq_true _ _ |>.mp hchk with hhead | htail
+    · split at hhead
+      · next hb =>
+        obtain ⟨_, hsb⟩ := hsat b (by simp)
+        exact checkConPermImplies_sound hsz hlt hf hhead hsb
+      · contradiction
+    · exact ih (fun b' hb' => hsat b' (List.mem_cons_of_mem b hb')) htail
+
+private theorem anySupportMatch_sound (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
+    (ht : ValidTable P entries) (outAsms : List Nat) (w : OrbitWitness)
+    (hsz : w.colPerm.size = P.n) (hlt : ∀ j : Fin P.n, permAt w.colPerm hsz j < P.n)
+    (hf : ∀ i₁ i₂ : Fin P.n, permFn w.colPerm hsz hlt i₁ = permFn w.colPerm hsz hlt i₂ → i₁ = i₂)
+    (hsupp : ∀ i : Fin w.supportEntries.size,
+      ∃ hb : w.supportEntries[i] < entries.size,
+        ∀ d ∈ entries[w.supportEntries[i]].assumptions, d ∈ outAsms)
+    (conA : LinCon P.n) (x : Fin P.n → Rat) (hx : MILPFeasible P x)
+    (hasm : asmsSat entries outAsms x) :
+    ∀ k,
+      checkOrbitAutomorphism.anySupportMatch P entries w conA k = true →
+      conA.sat (fun j => x (permFn w.colPerm hsz hlt j)) := by
+  intro k hchk
+  unfold checkOrbitAutomorphism.anySupportMatch at hchk
+  dsimp only at hchk
+  split at hchk
+  · next hk =>
+    rcases Bool.or_eq_true _ _ |>.mp hchk with hhead | htail
+    · split at hhead
+      · next hb =>
+        obtain ⟨_, hsub⟩ := hsupp ⟨k, hk⟩
+        have hsb : entries[w.supportEntries[k]].con.sat x :=
+          (ht w.supportEntries[k] hb).2 x hx (asmsSat_mono hsub hasm)
+        exact checkConPermImplies_sound hsz hlt hf hhead hsb
+      · contradiction
+    · exact anySupportMatch_sound P entries ht outAsms w hsz hlt hf hsupp conA x hx hasm (k + 1) htail
+  · contradiction
+termination_by k _ => w.supportEntries.size - k
+
+private theorem checkRightRem_sound (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
+    (ht : ValidTable P entries) (outAsms : List Nat) (w : OrbitWitness)
+    (hsz : w.colPerm.size = P.n) (hlt : ∀ j : Fin P.n, permAt w.colPerm hsz j < P.n)
+    (hf : ∀ i₁ i₂ : Fin P.n, permFn w.colPerm hsz hlt i₁ = permFn w.colPerm hsz hlt i₂ → i₁ = i₂)
+    (hsupp : ∀ i : Fin w.supportEntries.size,
+      ∃ hb : w.supportEntries[i] < entries.size,
+        ∀ d ∈ entries[w.supportEntries[i]].assumptions, d ∈ outAsms)
+    (x : Fin P.n → Rat) (hx : MILPFeasible P x) (hasm : asmsSat entries outAsms x) :
+    ∀ rs : List Nat,
+      (∀ a ∈ rs, a ∈ outAsms) →
+      checkOrbitAutomorphism.checkRightRem P entries outAsms w rs = true →
+      asmsSat entries rs (fun j => x (permFn w.colPerm hsz hlt j)) := by
+  intro rs hsub hchk
+  induction rs with
+  | nil =>
+    intro a ha; simp at ha
+  | cons a rest ih =>
+    unfold checkOrbitAutomorphism.checkRightRem at hchk
+    dsimp only at hchk
+    split at hchk
+    · next ha =>
+      simp only [Bool.and_eq_true] at hchk
+      intro q hq
+      rcases List.mem_cons.mp hq with hqa | hrest
+      · subst hqa
+        refine ⟨ha, ?_⟩
+        rcases Bool.or_eq_true _ _ |>.mp hchk.1 with h123 | h4
+        · rcases Bool.or_eq_true _ _ |>.mp h123 with h12 | h3
+          · rcases Bool.or_eq_true _ _ |>.mp h12 with h1 | h2
+            · exact checkBaseBoundImpliesPerm_loop_sound P entries[q].con w.colPerm hsz hlt 0 h1 x hx
+            · obtain ⟨_, hsa⟩ := hasm q (hsub q (by simp))
+              exact checkConPermImplies_sound hsz hlt hf h2 hsa
+          · exact anyOutMatch_sound P entries w hsz hlt hf entries[q].con x outAsms hasm h3
+        · exact anySupportMatch_sound P entries ht outAsms w hsz hlt hf hsupp entries[q].con x hx hasm 0 h4
+      · exact ih (fun y hy => hsub y (List.mem_cons_of_mem a hy)) hchk.2 q hrest
+    · contradiction
+
+/-- Soundness of the executable node-automorphism checker for orbital branching. -/
+theorem checkOrbitAutomorphism_sound
+    {P : VIPRInstance} {entries : Array (DerivedEntry P.n)}
+    (ht : ValidTable P entries)
+    {outAsms rightRem : List Nat} {br c : Fin P.n}
+    {rightCon : LinCon P.n} {w : OrbitWitness}
+    (hcheck : checkOrbitAutomorphism P entries outAsms rightRem br c rightCon w = true)
+    (hsubR : ∀ a ∈ rightRem, a ∈ outAsms)
+    {x : Fin P.n → Rat} (hx : MILPFeasible P x)
+    (hasm : asmsSat entries outAsms x) (hxc : (1 : Rat) ≤ x c) :
+    ∃ x' : Fin P.n → Rat,
+      MILPFeasible P x' ∧
+      LPObjective P x' = LPObjective P x ∧
+      (1 : Rat) ≤ x' br ∧
+      asmsSat entries rightRem x' ∧
+      (rightCon.sat x' → rightCon.sat x) := by
+  unfold checkOrbitAutomorphism at hcheck
+  simp only [Bool.and_eq_true] at hcheck
+  rcases hcheck with ⟨⟨⟨⟨⟨⟨⟨hbij, hbrMap⟩, hrszB⟩, hcols⟩, hrows⟩, hconInv⟩, hsupp⟩, hrem⟩
+  obtain ⟨hsz, hlt, hf⟩ := checkPermBijection_spec hbij
+  have hrsz : w.rowPerm.size = P.baseRows.size := beq_iff_eq.mp hrszB
+  let f : Fin P.n → Fin P.n := permFn w.colPerm hsz hlt
+  let x' : Fin P.n → Rat := fun j => x (f j)
+  have hcolSpec := checkOrbitAutomorphism_cols_sound P w hsz hlt 0 (Nat.zero_le P.n)
+    (fun _ hi => by omega) hcols
+  have hrowSpec := checkOrbitAutomorphism_rows_sound P w hsz hlt hf hrsz 0 (Nat.zero_le P.baseRows.size)
+    (fun _ hi => by omega) hrows
+  have hsuppSpec := checkOrbitAutomorphism_supports_sound P entries outAsms w 0
+    (Nat.zero_le w.supportEntries.size) (fun _ hi => by omega) hsupp
+  have hx'Feas : MILPFeasible P x' := by
+    refine ⟨fun j => ⟨?_, ?_⟩, fun i => hrowSpec i x hx, fun j hj => ?_⟩
+    · intro l hl
+      obtain ⟨l', hl', hle⟩ := (hcolSpec j).2.2.1 l hl
+      exact Rat.le_trans hle ((hx.1 (f j)).1 l' hl')
+    · intro u hu
+      obtain ⟨u', hu', hle⟩ := (hcolSpec j).2.2.2 u hu
+      exact Rat.le_trans ((hx.1 (f j)).2 u' hu') hle
+    · exact hx.2.2 (f j) ((hcolSpec j).1 hj)
+  have hobjEq : LPObjective P x' = LPObjective P x := by
+    unfold LPObjective
+    congr 1
+    have h1 : finSum P.n (fun j => P.obj j * x (f j)) =
+        finSum P.n (fun j => P.obj (f j) * x (f j)) :=
+      finSum_congr (fun j => by rw [(hcolSpec j).2.1])
+    rw [h1]
+    exact finSum_inj_eq (g := fun k => P.obj k * x k) hf
+  have hx'Br : (1 : Rat) ≤ x' br := by
+    have hbrLt : br.1 < w.colPerm.size := by rw [hsz]; exact br.2
+    simp only [hbrLt, ↓reduceDIte, beq_iff_eq] at hbrMap
+    have hfeq : f br = c := Fin.ext hbrMap
+    dsimp only [x']
+    rw [hfeq]
+    exact hxc
+  have hremSat : asmsSat entries rightRem x' :=
+    checkRightRem_sound P entries ht outAsms w hsz hlt hf hsuppSpec x hx hasm rightRem hsubR hrem
+  have hconSat : rightCon.sat x' → rightCon.sat x := by
+    intro hsat'
+    rcases Bool.or_eq_true _ _ |>.mp hconInv with hunsat | hmatch
+    · exact absurd hsat' (isUnsatCon_sound hunsat x')
+    · have hm := checkCoeffsPermMatch_loop_sound rightCon.coeffs rightCon.coeffs w.colPerm false
+        hsz hlt 0 (Nat.zero_le P.n) (fun _ hi => by omega) hmatch
+      have hm' : ∀ j : Fin P.n, rightCon.coeffs.get j = rightCon.coeffs.get (f j) := by
+        intro j; simpa [f] using hm j
+      have hdot : rightCon.coeffs.dot x' = rightCon.coeffs.dot x := dot_perm_pos hf hm' x
+      unfold LinCon.sat at hsat' ⊢
+      rwa [hdot] at hsat'
+  exact ⟨x', hx'Feas, hobjEq, hx'Br, hremSat, hconSat⟩
+
+private def checkOrbitWitnesses (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
+    (outAsms rightRem : List Nat) (br : Fin P.n) (rightCon : LinCon P.n)
+    (orbitAsms : Array Nat) (witnesses : Array OrbitWitness) (i : Nat) : Bool :=
+  if hi : i < orbitAsms.size then
+    if hw : i < witnesses.size then
+      let oa := orbitAsms[i]
+      let w := witnesses[i]
+      if hoa : oa < entries.size then
+        if hc : w.companion < P.n then
+          if P.isInt ⟨w.companion, hc⟩ then
+            let wantOA : LinCon P.n :=
+              { coeffs := RatVec.unit P.n ⟨w.companion, hc⟩, sense := .le, rhs := 0 }
+            if entries[oa].con.beq wantOA && (entries[oa].assumptions == [oa]) &&
+                checkOrbitAutomorphism P entries outAsms rightRem br ⟨w.companion, hc⟩ rightCon w then
+              checkOrbitWitnesses P entries outAsms rightRem br rightCon orbitAsms witnesses (i + 1)
+            else false
+          else false
+        else false
+      else false
+    else false
+  else true
+termination_by orbitAsms.size - i
+
+private theorem checkOrbitWitnesses_sound (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
+    (outAsms rightRem : List Nat) (br : Fin P.n) (rightCon : LinCon P.n)
+    (orbitAsms : Array Nat) (witnesses : Array OrbitWitness)
+    (hsz : orbitAsms.size = witnesses.size) :
+    ∀ k (hk : k ≤ orbitAsms.size),
+      (∀ i (hi : i < k),
+        let oa := orbitAsms[i]'(Nat.lt_of_lt_of_le hi hk)
+        let w := witnesses[i]'(by rw [← hsz]; exact Nat.lt_of_lt_of_le hi hk)
+        ∃ hoa : oa < entries.size, ∃ hc : w.companion < P.n,
+          P.isInt ⟨w.companion, hc⟩ = true ∧
+          entries[oa].con = { coeffs := RatVec.unit P.n ⟨w.companion, hc⟩, sense := .le, rhs := 0 } ∧
+          checkOrbitAutomorphism P entries outAsms rightRem br ⟨w.companion, hc⟩ rightCon w = true) →
+      checkOrbitWitnesses P entries outAsms rightRem br rightCon orbitAsms witnesses k = true →
+      ∀ i : Fin orbitAsms.size,
+        let oa := orbitAsms[i.1]
+        let w := witnesses[i.1]'(by rw [← hsz]; exact i.2)
+        ∃ hoa : oa < entries.size, ∃ hc : w.companion < P.n,
+          P.isInt ⟨w.companion, hc⟩ = true ∧
+          entries[oa].con = { coeffs := RatVec.unit P.n ⟨w.companion, hc⟩, sense := .le, rhs := 0 } ∧
+          checkOrbitAutomorphism P entries outAsms rightRem br ⟨w.companion, hc⟩ rightCon w = true := by
+  intro k hk hprev hloop i
+  unfold checkOrbitWitnesses at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    have hwK : k < witnesses.size := by rw [← hsz]; exact hltK
+    simp only [hwK, ↓reduceDIte] at hloop
+    split at hloop
+    · next hoa =>
+      split at hloop
+      · next hc =>
+        split at hloop
+        · next hint =>
+          split at hloop
+          · next hok =>
+            simp only [Bool.and_eq_true] at hok
+            have hcur : ∃ hoa' : orbitAsms[k] < entries.size,
+                ∃ hc' : witnesses[k].companion < P.n,
+                  P.isInt ⟨witnesses[k].companion, hc'⟩ = true ∧
+                  entries[orbitAsms[k]].con =
+                    { coeffs := RatVec.unit P.n ⟨witnesses[k].companion, hc'⟩, sense := .le, rhs := 0 } ∧
+                  checkOrbitAutomorphism P entries outAsms rightRem br
+                    ⟨witnesses[k].companion, hc'⟩ rightCon witnesses[k] = true :=
+              ⟨hoa, hc, hint, LinCon.eq_of_beq hok.1.1, hok.2⟩
+            have hnext : ∀ m (hm : m < k + 1),
+                let oa := orbitAsms[m]'(Nat.lt_of_lt_of_le hm hltK)
+                let w := witnesses[m]'(by rw [← hsz]; exact Nat.lt_of_lt_of_le hm hltK)
+                ∃ hoa' : oa < entries.size, ∃ hc' : w.companion < P.n,
+                  P.isInt ⟨w.companion, hc'⟩ = true ∧
+                  entries[oa].con = { coeffs := RatVec.unit P.n ⟨w.companion, hc'⟩, sense := .le, rhs := 0 } ∧
+                  checkOrbitAutomorphism P entries outAsms rightRem br ⟨w.companion, hc'⟩ rightCon w = true := by
+              intro m hm
+              by_cases hmk : m = k
+              · subst hmk; exact hcur
+              · exact hprev m (by omega)
+            exact checkOrbitWitnesses_sound P entries outAsms rightRem br rightCon orbitAsms witnesses
+              hsz (k + 1) hltK hnext hloop i
+          · contradiction
+        · contradiction
+      · contradiction
+    · contradiction
+  · next hge =>
+    have hkn : k = orbitAsms.size := by omega
+    subst hkn
+    exact hprev i.1 i.2
+termination_by k _ _ _ => orbitAsms.size - k
+
+private def checkAllLt (bound : Nat) (arr : Array Nat) (i : Nat) : Bool :=
+  if hi : i < arr.size then
+    if arr[i] < bound then checkAllLt bound arr (i + 1) else false
+  else true
+termination_by arr.size - i
+
+private theorem checkAllLt_sound (bound : Nat) (arr : Array Nat) :
+    ∀ k (hk : k ≤ arr.size),
+      (∀ i (hi : i < k), arr[i]'(Nat.lt_of_lt_of_le hi hk) < bound) →
+      checkAllLt bound arr k = true →
+      ∀ a ∈ arr.toList, a < bound := by
+  intro k hk hprev hloop a ha
+  unfold checkAllLt at hloop
+  split at hloop
+  · next hlt =>
+    split at hloop
+    · next hok =>
+      have hnext : ∀ i (hi : i < k + 1), arr[i]'(Nat.lt_of_lt_of_le hi hlt) < bound := by
+        intro i hi
+        by_cases hik : i = k
+        · subst hik; exact hok
+        · exact hprev i (by omega)
+      exact checkAllLt_sound bound arr (k + 1) hlt hnext hloop a ha
+    · contradiction
+  · next hge =>
+    have hkn : k = arr.size := by omega
+    subst hkn
+    obtain ⟨idx, hidx, rfl⟩ := List.mem_iff_getElem.mp ha
+    have hlt' : idx < arr.size := by simpa using hidx
+    exact hprev idx hlt'
+termination_by k _ _ _ => arr.size - k
+
 /-- Evaluates a single `StepRule` against the current `entries` table. -/
 def evalRule (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
     (rule : StepRule P.n) : Option (DerivedEntry P.n) :=
@@ -2662,6 +3660,40 @@ def evalRule (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
                       (entries[left].assumptions.filter (· != leftAsm))
                       (entries[right].assumptions.filter (· != rightAsm))
                     some { con := cOut, assumptions := asms }
+                  | none => none
+                else none
+              else none
+            else none
+          else none
+        else none
+      else none
+    else none
+  | .orbitBranch col leftAsm rightAsm left right orbitAsms witnesses extraAsms =>
+    if hcol : col < P.n then
+      if P.isInt ⟨col, hcol⟩ then
+        if hla : leftAsm < entries.size then
+          if hra : rightAsm < entries.size then
+            if hl : left < entries.size then
+              if hr : right < entries.size then
+                let wantLA : LinCon P.n :=
+                  { coeffs := RatVec.unit P.n ⟨col, hcol⟩, sense := .le, rhs := 0 }
+                let wantRA : LinCon P.n :=
+                  { coeffs := RatVec.unit P.n ⟨col, hcol⟩, sense := .ge, rhs := 1 }
+                if entries[leftAsm].con.beq wantLA && entries[rightAsm].con.beq wantRA &&
+                    (entries[leftAsm].assumptions == [leftAsm]) &&
+                    (entries[rightAsm].assumptions == [rightAsm]) &&
+                    (orbitAsms.size == witnesses.size) &&
+                    checkAllLt entries.size extraAsms 0 then
+                  match mergeBranchCon entries[left].con entries[right].con with
+                  | some cOut =>
+                    let leftRem := entries[left].assumptions.filter
+                      (fun a => a != leftAsm && !orbitAsms.toList.contains a)
+                    let rightRem := entries[right].assumptions.filter (· != rightAsm)
+                    let outAsms := mergeAsms (mergeAsms leftRem rightRem) extraAsms.toList
+                    if checkOrbitWitnesses P entries outAsms rightRem ⟨col, hcol⟩
+                        entries[right].con orbitAsms witnesses 0 then
+                      some { con := cOut, assumptions := outAsms }
+                    else none
                   | none => none
                 else none
               else none
@@ -2961,6 +3993,147 @@ private theorem evalRule_valid (P : VIPRInstance) (entries : Array (DerivedEntry
                       · have hmem : a ∈ entries[right].assumptions.filter (· != rightAsm) :=
                           List.mem_filter.mpr ⟨ha, bne_iff_ne.mpr hara⟩
                         exact hasm' a (mem_mergeAsms.mpr (Or.inr hmem))
+                · contradiction
+              · contradiction
+            · contradiction
+          · contradiction
+        · contradiction
+      · contradiction
+    · contradiction
+  | orbitBranch col leftAsm rightAsm left right orbitAsms witnesses extraAsms =>
+    simp only [evalRule] at he
+    split at he
+    · next hcol =>
+      split at he
+      · next hj =>
+        split at he
+        · next hla =>
+          split at he
+          · next hra =>
+            split at he
+            · next hl =>
+              split at he
+              · next hr =>
+                split at he
+                · next hok =>
+                  simp only [Bool.and_eq_true] at hok
+                  cases hm : mergeBranchCon entries[left].con entries[right].con with
+                  | none => simp [hm] at he
+                  | some cOut =>
+                    simp only [hm] at he
+                    split at he
+                    · next hwit =>
+                      injection he with hec; subst hec
+                      have hEntL := ht left hl
+                      have hEntR := ht right hr
+                      have hszW : orbitAsms.size = witnesses.size := beq_iff_eq.mp hok.1.2
+                      have hextraLt : ∀ a ∈ extraAsms.toList, a < entries.size :=
+                        checkAllLt_sound entries.size extraAsms 0 (Nat.zero_le _)
+                          (fun _ hi => by omega) hok.2
+                      let leftRem := entries[left].assumptions.filter
+                        (fun a => a != leftAsm && !orbitAsms.toList.contains a)
+                      let rightRem := entries[right].assumptions.filter (· != rightAsm)
+                      let outAsms := mergeAsms (mergeAsms leftRem rightRem) extraAsms.toList
+                      have houtLt : ∀ a ∈ outAsms, a < entries.size := by
+                        intro a ha
+                        rcases mem_mergeAsms.mp ha with hlr | hex
+                        · rcases mem_mergeAsms.mp hlr with hfl | hfr
+                          · exact hEntL.1 a (List.mem_filter.mp hfl).1
+                          · exact hEntR.1 a (List.mem_filter.mp hfr).1
+                        · exact hextraLt a hex
+                      have hsub : ∀ a ∈ outAsms, a < entries.size + 1 :=
+                        fun a ha => Nat.lt_succ_of_lt (houtLt a ha)
+                      have hsubR : ∀ a ∈ rightRem, a ∈ outAsms :=
+                        fun a ha => mem_mergeAsms.mpr (Or.inl (mem_mergeAsms.mpr (Or.inr ha)))
+                      have hLAeq : entries[leftAsm].con =
+                          { coeffs := RatVec.unit P.n ⟨col, hcol⟩, sense := .le, rhs := 0 } :=
+                        LinCon.eq_of_beq hok.1.1.1.1.1
+                      have hRAeq : entries[rightAsm].con =
+                          { coeffs := RatVec.unit P.n ⟨col, hcol⟩, sense := .ge, rhs := 1 } :=
+                        LinCon.eq_of_beq hok.1.1.1.1.2
+                      have hwSpec := checkOrbitWitnesses_sound P entries outAsms rightRem
+                        ⟨col, hcol⟩ entries[right].con orbitAsms witnesses hszW
+                        0 (Nat.zero_le _) (fun _ hi => by omega) hwit
+                      apply validTable_push ht _ hsub
+                      intro x hx hasm
+                      have hasm' : asmsSat entries outAsms x := by
+                        intro a ha
+                        obtain ⟨_, hs⟩ := hasm a ha
+                        have halt := houtLt a ha
+                        rw [Array.getElem_push_lt halt] at hs
+                        exact ⟨halt, hs⟩
+                      apply mergeBranchCon_sound hm
+                      rcases int_split_exhaustive (x ⟨col, hcol⟩) (hx.2.2 ⟨col, hcol⟩ hj) 0 with hdown | hup
+                      · by_cases hall : ∀ i : Fin orbitAsms.size,
+                            ∃ hc : (witnesses[i.1]'(by rw [← hszW]; exact i.2)).companion < P.n,
+                              x ⟨(witnesses[i.1]'(by rw [← hszW]; exact i.2)).companion, hc⟩ ≤ 0
+                        · left
+                          apply hEntL.2 x hx
+                          intro a ha
+                          by_cases hala : a = leftAsm
+                          · subst hala
+                            refine ⟨hla, ?_⟩
+                            rw [hLAeq]; unfold LinCon.sat; rw [RatVec.dot_unit]; exact hdown
+                          · by_cases horb : a ∈ orbitAsms.toList
+                            · obtain ⟨idx, hidx, hget⟩ := List.mem_iff_getElem.mp horb
+                              have hltIdx : idx < orbitAsms.size := by simpa using hidx
+                              have haEq : orbitAsms[idx]'hltIdx = a := by simpa using hget
+                              obtain ⟨hoa, hc, _, hconOA, _⟩ := hwSpec ⟨idx, hltIdx⟩
+                              obtain ⟨hc', hle0⟩ := hall ⟨idx, hltIdx⟩
+                              have hoa' : a < entries.size := by simpa [haEq] using hoa
+                              have hconOA' : entries[a].con =
+                                  { coeffs := RatVec.unit P.n ⟨(witnesses[idx]'(by rw [← hszW]; exact hltIdx)).companion, hc⟩,
+                                    sense := .le, rhs := 0 } := by
+                                simpa [haEq] using hconOA
+                              refine ⟨hoa', ?_⟩
+                              rw [hconOA']; unfold LinCon.sat; rw [RatVec.dot_unit]
+                              exact hle0
+                            · have hnotC : (!orbitAsms.toList.contains a) = true := by
+                                simp only [Bool.not_eq_true']
+                                exact Bool.eq_false_iff.mpr fun hct => horb (List.contains_iff_mem.mp hct)
+                              have hmem : a ∈ leftRem :=
+                                List.mem_filter.mpr ⟨ha, Bool.and_eq_true _ _ |>.mpr ⟨bne_iff_ne.mpr hala, hnotC⟩⟩
+                              exact hasm' a (mem_mergeAsms.mpr (Or.inl (mem_mergeAsms.mpr (Or.inl hmem))))
+                        · right
+                          have hex : ∃ i : Fin orbitAsms.size,
+                              ¬ ∃ hc : (witnesses[i.1]'(by rw [← hszW]; exact i.2)).companion < P.n,
+                                x ⟨(witnesses[i.1]'(by rw [← hszW]; exact i.2)).companion, hc⟩ ≤ 0 := by
+                            exact Classical.not_forall.mp hall
+                          rcases hex with ⟨idx, hnotle⟩
+                          obtain ⟨_, hc, hintC, _, hchkAuto⟩ := hwSpec idx
+                          have hnot0 : ¬ (x ⟨(witnesses[idx.1]'(by rw [← hszW]; exact idx.2)).companion, hc⟩ ≤ 0) :=
+                            fun hle => hnotle ⟨hc, hle⟩
+                          have hxc1 : (1 : Rat) ≤ x ⟨(witnesses[idx.1]'(by rw [← hszW]; exact idx.2)).companion, hc⟩ := by
+                            rcases int_split_exhaustive
+                                (x ⟨(witnesses[idx.1]'(by rw [← hszW]; exact idx.2)).companion, hc⟩)
+                                (hx.2.2 ⟨(witnesses[idx.1]'(by rw [← hszW]; exact idx.2)).companion, hc⟩ hintC) 0 with h0 | h1
+                            · exact absurd h0 hnot0
+                            · simpa using h1
+                          obtain ⟨x', hx'Feas, _, hx'Br, hremSat', hconImp⟩ :=
+                            checkOrbitAutomorphism_sound ht hchkAuto hsubR hx hasm' hxc1
+                          apply hconImp
+                          apply hEntR.2 x' hx'Feas
+                          intro a ha
+                          by_cases hara : a = rightAsm
+                          · subst hara
+                            refine ⟨hra, ?_⟩
+                            rw [hRAeq]; unfold LinCon.sat; rw [RatVec.dot_unit]
+                            exact hx'Br
+                          · have hmem : a ∈ rightRem :=
+                              List.mem_filter.mpr ⟨ha, bne_iff_ne.mpr hara⟩
+                            exact hremSat' a hmem
+                      · right
+                        apply hEntR.2 x hx
+                        intro a ha
+                        by_cases hara : a = rightAsm
+                        · subst hara
+                          refine ⟨hra, ?_⟩
+                          rw [hRAeq]; unfold LinCon.sat; rw [RatVec.dot_unit]
+                          simpa using hup
+                        · have hmem : a ∈ rightRem :=
+                            List.mem_filter.mpr ⟨ha, bne_iff_ne.mpr hara⟩
+                          exact hasm' a (hsubR a hmem)
+                    · contradiction
                 · contradiction
               · contradiction
             · contradiction
@@ -3307,7 +4480,3108 @@ theorem checkMiniVIPR_bound_sound (cert : MiniVIPRCert) {targetLB : Rat}
   exact hs.2
 
 
-/-! ## Section 4: JSON Decoding & Verification Entry Point -/
+/-! ## Section 4: Verified Presolve Envelope (`orig -> reduced`) -/
+
+private theorem rat_floor_le (r : Rat) : (r.floor : Rat) ≤ r :=
+  Rat.le_floor_iff.mp (Int.le_refl r.floor)
+
+private theorem rat_le_ceil (r : Rat) : r ≤ (r.ceil : Rat) :=
+  Rat.ceil_le_iff.mp (Int.le_refl r.ceil)
+
+private theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
+    c * b ≤ c * a := by
+  have hneg : 0 ≤ -c := Rat.le_neg_iff.mp (by simpa using hc)
+  have hmul := Rat.mul_le_mul_of_nonneg_left hab hneg
+  rw [Rat.neg_mul, Rat.neg_mul, Rat.neg_le_neg_iff] at hmul
+  exact hmul
+
+private theorem rat_div_le_div_of_pos {a b c : Rat} (hab : a ≤ b) (hc : 0 < c) :
+    a / c ≤ b / c := by
+  rw [Rat.div_def, Rat.div_def]
+  exact Rat.mul_le_mul_of_nonneg_right hab (Rat.le_of_lt (Rat.inv_pos.mpr hc))
+
+private theorem rat_div_le_div_of_neg {a b c : Rat} (hab : a ≤ b) (hc : c < 0) :
+    b / c ≤ a / c := by
+  have hpos : 0 < -c := by
+    rw [← Rat.neg_zero] at hc
+    exact Rat.neg_lt_neg_iff.mpr hc
+  have hne : c ≠ 0 := Rat.ne_of_lt hc
+  have hmul : (b / c) * (-c) ≤ (a / c) * (-c) := by
+    rw [Rat.mul_neg, Rat.mul_neg, Rat.div_mul_cancel hne, Rat.div_mul_cancel hne, Rat.neg_le_neg_iff]
+    exact hab
+  exact Rat.le_of_mul_le_mul_right hmul hpos
+
+private theorem rat_mul_div_cancel_left {a b : Rat} (ha : a ≠ 0) : a * (b / a) = b := by
+  rw [Rat.mul_comm]
+  exact Rat.div_mul_cancel ha
+
+private theorem rat_div_mul_eq {a b : Rat} (hb : b ≠ 0) : (a * b) / b = a := by
+  rw [Rat.div_def, Rat.mul_assoc, Rat.mul_inv_cancel b hb, Rat.mul_one]
+
+private theorem rat_binary_zero_or_one {v : Rat} (h0 : 0 ≤ v) (h1 : v ≤ 1) (hint : isRatInt v) :
+    v = 0 ∨ v = 1 := by
+  rcases hint with ⟨z, rfl⟩
+  have hz0 : (0 : Int) ≤ z := Rat.intCast_le_intCast.mp h0
+  have hz1 : z ≤ (1 : Int) := Rat.intCast_le_intCast.mp h1
+  have hcases : z = 0 ∨ z = 1 := by omega
+  rcases hcases with rfl | rfl
+  · left; rfl
+  · right; rfl
+
+/-- Intermediate MILP state during exact rational presolve over `n` variables. -/
+structure PresolveState (n : Nat) where
+  objConst : Rat
+  obj : RatVec n
+  isInt : Array Bool
+  isInt_size : isInt.size = n
+  lb : Array (Option Rat)
+  lb_size : lb.size = n
+  ub : Array (Option Rat)
+  ub_size : ub.size = n
+  rows : Array (Option (LinCon n))
+
+@[inline]
+def PresolveState.isIntAt {n : Nat} (st : PresolveState n) (j : Fin n) : Bool :=
+  st.isInt[j.1]'(by rw [st.isInt_size]; exact j.2)
+
+@[inline]
+def PresolveState.lbAt {n : Nat} (st : PresolveState n) (j : Fin n) : Option Rat :=
+  st.lb[j.1]'(by rw [st.lb_size]; exact j.2)
+
+@[inline]
+def PresolveState.ubAt {n : Nat} (st : PresolveState n) (j : Fin n) : Option Rat :=
+  st.ub[j.1]'(by rw [st.ub_size]; exact j.2)
+
+/-- Compacts active `some` rows in index order. -/
+def compactOptRows {n : Nat} (rows : Array (Option (LinCon n))) : Array (LinCon n) :=
+  go 0 #[]
+where
+  go (i : Nat) (acc : Array (LinCon n)) : Array (LinCon n) :=
+    if hi : i < rows.size then
+      match rows[i] with
+      | none => go (i + 1) acc
+      | some r => go (i + 1) (acc.push r)
+    else acc
+  termination_by rows.size - i
+
+private theorem compactOptRows_go_iff {n : Nat} (rows : Array (Option (LinCon n)))
+    (x : Fin n → Rat) :
+    ∀ k (_hk : k ≤ rows.size) (acc out : Array (LinCon n)),
+      compactOptRows.go rows k acc = out →
+      ((∀ i : Fin out.size, out[i].sat x) ↔
+       ((∀ i : Fin acc.size, acc[i].sat x) ∧
+        (∀ i (hi : i < rows.size), k ≤ i → ∀ r, rows[i] = some r → r.sat x))) := by
+  intro k hk acc out hout
+  unfold compactOptRows.go at hout
+  split at hout
+  · next hlt =>
+    cases hcur : rows[k] with
+    | none =>
+      simp only [hcur] at hout
+      rw [compactOptRows_go_iff rows x (k + 1) hlt acc out hout]
+      constructor
+      · rintro ⟨hacc, htail⟩
+        refine ⟨hacc, fun i hi hki r hr => ?_⟩
+        by_cases hik : i = k
+        · subst hik; rw [hcur] at hr; contradiction
+        · exact htail i hi (by omega) r hr
+      · rintro ⟨hacc, hall⟩
+        exact ⟨hacc, fun i hi hki r hr => hall i hi (by omega) r hr⟩
+    | some rk =>
+      simp only [hcur] at hout
+      rw [compactOptRows_go_iff rows x (k + 1) hlt (acc.push rk) out hout]
+      constructor
+      · rintro ⟨hacc, htail⟩
+        refine ⟨fun i => ?_, fun i hi hki r hr => ?_⟩
+        · have h := hacc ⟨i.1, by rw [Array.size_push]; exact Nat.lt_succ_of_lt i.2⟩
+          simpa [Array.getElem_push_lt i.2] using h
+        · by_cases hik : i = k
+          · subst hik
+            rw [hcur] at hr; injection hr with hrEq; subst r
+            have h := hacc ⟨acc.size, by rw [Array.size_push]; exact Nat.lt_succ_self _⟩
+            simpa [Array.getElem_push_eq] using h
+          · exact htail i hi (by omega) r hr
+      · rintro ⟨hacc, hall⟩
+        refine ⟨fun i => ?_, fun i hi hki r hr => hall i hi (by omega) r hr⟩
+        have hisz : i.1 < acc.size + 1 := by simpa [Array.size_push] using i.2
+        by_cases hilt : i.1 < acc.size
+        · simpa [Array.getElem_push_lt hilt] using hacc ⟨i.1, hilt⟩
+        · have heq : i.1 = acc.size := by omega
+          have hget : (acc.push rk)[i] = rk := by
+            change (acc.push rk)[i.1] = rk
+            simp only [heq, Array.getElem_push_eq]
+          rw [hget]
+          exact hall k hlt (Nat.le_refl k) rk hcur
+  · next hge =>
+    subst hout
+    have hkn : k = rows.size := by omega
+    subst hkn
+    constructor
+    · intro hacc; exact ⟨hacc, fun i hi hle _ _ => by omega⟩
+    · rintro ⟨hacc, _⟩; exact hacc
+termination_by k _ _ _ _ => rows.size - k
+
+theorem compactOptRows_sat_iff {n : Nat} (rows : Array (Option (LinCon n))) (x : Fin n → Rat) :
+    (∀ i : Fin (compactOptRows rows).size, (compactOptRows rows)[i].sat x) ↔
+    (∀ i : Fin rows.size, ∀ r, rows[i] = some r → r.sat x) := by
+  unfold compactOptRows
+  rw [compactOptRows_go_iff rows x 0 (Nat.zero_le rows.size) #[] _ rfl]
+  constructor
+  · rintro ⟨_, hall⟩ i r hr
+    exact hall i.1 i.2 (Nat.zero_le i.1) r hr
+  · intro hall
+    refine ⟨fun i => Fin.elim0 (by simpa using i), fun i hi _ r hr => hall ⟨i, hi⟩ r hr⟩
+
+/-- Constructs an initial `PresolveState` from a `VIPRInstance`. -/
+def PresolveState.ofInstance (P : VIPRInstance) : PresolveState P.n :=
+  { objConst := P.objConst
+    obj := RatVec.ofFn P.obj
+    isInt := Array.ofFn P.isInt
+    isInt_size := Array.size_ofFn
+    lb := Array.ofFn P.lb
+    lb_size := Array.size_ofFn
+    ub := Array.ofFn P.ub
+    ub_size := Array.size_ofFn
+    rows := P.baseRows.map some }
+
+/-- Converts a `PresolveState n` into a compacted `VIPRInstance`. -/
+def PresolveState.toInstance {n : Nat} (st : PresolveState n) : VIPRInstance :=
+  { n := n
+    objConst := st.objConst
+    obj := fun j => st.obj.get j
+    isInt := fun j => st.isIntAt j
+    baseRows := compactOptRows st.rows
+    lb := fun j => st.lbAt j
+    ub := fun j => st.ubAt j }
+
+/-- Mixed-integer feasibility predicate for a `PresolveState n`. -/
+def StateFeasible {n : Nat} (st : PresolveState n) (x : Fin n → Rat) : Prop :=
+  inVarBounds st.lbAt st.ubAt x ∧
+  (∀ i : Fin st.rows.size, ∀ r, st.rows[i] = some r → r.sat x) ∧
+  (∀ j : Fin n, st.isIntAt j = true → isRatInt (x j))
+
+/-- Shifted minimization objective for a `PresolveState n`. -/
+def StateObjective {n : Nat} (st : PresolveState n) (x : Fin n → Rat) : Rat :=
+  st.objConst + finSum n (fun j => st.obj.get j * x j)
+
+theorem stateFeasible_ofInstance (P : VIPRInstance) (x : Fin P.n → Rat) :
+    StateFeasible (PresolveState.ofInstance P) x ↔ MILPFeasible P x := by
+  unfold StateFeasible MILPFeasible PresolveState.ofInstance PresolveState.lbAt
+    PresolveState.ubAt PresolveState.isIntAt inVarBounds
+  simp only [Array.getElem_ofFn]
+  constructor
+  · rintro ⟨hb, hr, hi⟩
+    refine ⟨hb, fun i => hr ⟨i.1, by rw [Array.size_map]; exact i.2⟩ P.baseRows[i] (by simp), hi⟩
+  · rintro ⟨hb, hr, hi⟩
+    refine ⟨hb, fun i r hsome => ?_, hi⟩
+    have hget : (Array.map some P.baseRows)[i] = some (P.baseRows[i.1]'(by simpa [Array.size_map] using i.2)) := by
+      change (Array.map some P.baseRows)[i.1] = _
+      simp
+    rw [hget] at hsome
+    injection hsome with hEq; subst hEq
+    exact hr ⟨i.1, by simpa [Array.size_map] using i.2⟩
+
+theorem stateObjective_ofInstance (P : VIPRInstance) (x : Fin P.n → Rat) :
+    StateObjective (PresolveState.ofInstance P) x = LPObjective P x := by
+  unfold StateObjective LPObjective PresolveState.ofInstance
+  simp only [RatVec.get_ofFn]
+
+theorem stateFeasible_toInstance {n : Nat} (st : PresolveState n) (x : Fin n → Rat) :
+    StateFeasible st x ↔ MILPFeasible st.toInstance x := by
+  unfold StateFeasible MILPFeasible PresolveState.toInstance
+  dsimp only
+  rw [compactOptRows_sat_iff]
+
+theorem stateObjective_toInstance {n : Nat} (st : PresolveState n) (x : Fin n → Rat) :
+    StateObjective st x = LPObjective st.toInstance x := rfl
+
+/-! ### Exact Activity Bounds on `PresolveState` -/
+
+/-- Minimum contribution of `a * x` over `x ∈ [lb, ub]`. -/
+def termMinAct (a : Rat) (lb ub : Option Rat) : Option Rat :=
+  if a == 0 then some 0
+  else if 0 < a then lb.map (a * ·)
+  else ub.map (a * ·)
+
+/-- Maximum contribution of `a * x` over `x ∈ [lb, ub]`. -/
+def termMaxAct (a : Rat) (lb ub : Option Rat) : Option Rat :=
+  if a == 0 then some 0
+  else if 0 < a then ub.map (a * ·)
+  else lb.map (a * ·)
+
+private theorem termMinAct_le {a m x : Rat} {lb ub : Option Rat}
+    (hlb : ∀ l, lb = some l → l ≤ x) (hub : ∀ u, ub = some u → x ≤ u)
+    (hm : termMinAct a lb ub = some m) : m ≤ a * x := by
+  unfold termMinAct at hm
+  split at hm
+  · next h0 =>
+    injection hm with heq; subst heq
+    rw [beq_iff_eq.mp h0, Rat.zero_mul]; exact Rat.le_refl
+  · next hne =>
+    split at hm
+    · next hpos =>
+      cases h1 : lb with
+      | none => simp [h1] at hm
+      | some l =>
+        simp only [h1, Option.map_some] at hm
+        injection hm with heq; subst heq
+        exact Rat.mul_le_mul_of_nonneg_left (hlb l h1) (Rat.le_of_lt hpos)
+    · next hnotpos =>
+      have hle0 : a ≤ 0 := Rat.not_lt.mp hnotpos
+      cases h2 : ub with
+      | none => simp [h2] at hm
+      | some u =>
+        simp only [h2, Option.map_some] at hm
+        injection hm with heq; subst heq
+        exact rat_mul_le_mul_of_nonpos_left (hub u h2) hle0
+
+private theorem termMaxAct_ge {a M x : Rat} {lb ub : Option Rat}
+    (hlb : ∀ l, lb = some l → l ≤ x) (hub : ∀ u, ub = some u → x ≤ u)
+    (hM : termMaxAct a lb ub = some M) : a * x ≤ M := by
+  unfold termMaxAct at hM
+  split at hM
+  · next h0 =>
+    injection hM with heq; subst heq
+    rw [beq_iff_eq.mp h0, Rat.zero_mul]; exact Rat.le_refl
+  · next hne =>
+    split at hM
+    · next hpos =>
+      cases h2 : ub with
+      | none => simp [h2] at hM
+      | some u =>
+        simp only [h2, Option.map_some] at hM
+        injection hM with heq; subst heq
+        exact Rat.mul_le_mul_of_nonneg_left (hub u h2) (Rat.le_of_lt hpos)
+    · next hnotpos =>
+      have hle0 : a ≤ 0 := Rat.not_lt.mp hnotpos
+      cases h1 : lb with
+      | none => simp [h1] at hM
+      | some l =>
+        simp only [h1, Option.map_some] at hM
+        injection hM with heq; subst heq
+        exact rat_mul_le_mul_of_nonpos_left (hlb l h1) hle0
+
+/-- Sums `termMinAct` over all columns except an optional `skip` column. -/
+def sumMinAct {n : Nat} (st : PresolveState n) (coeffs : RatVec n) (skip : Option (Fin n)) :
+    Option Rat :=
+  go 0 0
+where
+  go (i : Nat) (acc : Rat) : Option Rat :=
+    if hi : i < n then
+      let j : Fin n := ⟨i, hi⟩
+      if skip == some j then
+        go (i + 1) acc
+      else
+        match termMinAct (coeffs.get j) (st.lbAt j) (st.ubAt j) with
+        | none => none
+        | some t => go (i + 1) (acc + t)
+    else some acc
+  termination_by n - i
+
+/-- Sums `termMaxAct` over all columns except an optional `skip` column. -/
+def sumMaxAct {n : Nat} (st : PresolveState n) (coeffs : RatVec n) (skip : Option (Fin n)) :
+    Option Rat :=
+  go 0 0
+where
+  go (i : Nat) (acc : Rat) : Option Rat :=
+    if hi : i < n then
+      let j : Fin n := ⟨i, hi⟩
+      if skip == some j then
+        go (i + 1) acc
+      else
+        match termMaxAct (coeffs.get j) (st.lbAt j) (st.ubAt j) with
+        | none => none
+        | some t => go (i + 1) (acc + t)
+    else some acc
+  termination_by n - i
+
+private theorem sumMinAct_go_le {n : Nat} (st : PresolveState n) (coeffs : RatVec n)
+    (skip : Option (Fin n)) (x : Fin n → Rat) (hb : inVarBounds st.lbAt st.ubAt x) :
+    ∀ k (hk : k ≤ n) (acc out : Rat),
+      acc ≤ finSum k (fun i =>
+        let j : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hk⟩
+        if skip = some j then 0 else coeffs.get j * x j) →
+      sumMinAct.go st coeffs skip k acc = some out →
+      out ≤ finSum n (fun j => if skip = some j then 0 else coeffs.get j * x j) := by
+  intro k hk acc out hacc hgo
+  unfold sumMinAct.go at hgo
+  dsimp only at hgo
+  split at hgo
+  · next hlt =>
+    let jk : Fin n := ⟨k, hlt⟩
+    have hsplit :
+        finSum (k + 1) (fun i =>
+          let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hlt⟩
+          if skip = some ji then 0 else coeffs.get ji * x ji) =
+        finSum k (fun i =>
+          let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hk⟩
+          if skip = some ji then 0 else coeffs.get ji * x ji) +
+        (if skip = some jk then 0 else coeffs.get jk * x jk) := by
+      simp [finSum_succ, jk]
+    by_cases hskip : skip = some jk
+    · have hsb : (skip == some ⟨k, hlt⟩) = true := beq_iff_eq.mpr hskip
+      simp only [hsb, ↓reduceIte] at hgo
+      have hacc' : acc ≤ finSum (k + 1) (fun i =>
+          let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hlt⟩
+          if skip = some ji then 0 else coeffs.get ji * x ji) := by
+        rw [hsplit]
+        simpa [hskip, Rat.add_zero] using hacc
+      exact sumMinAct_go_le st coeffs skip x hb (k + 1) hlt acc out hacc' hgo
+    · have hsb : (skip == some ⟨k, hlt⟩) = false := beq_false_of_ne hskip
+      simp only [hsb, Bool.false_eq_true, ↓reduceIte] at hgo
+      cases ht : termMinAct (coeffs.get ⟨k, hlt⟩) (st.lbAt ⟨k, hlt⟩) (st.ubAt ⟨k, hlt⟩) with
+      | none => simp [ht] at hgo
+      | some t =>
+        simp only [ht] at hgo
+        have htle : t ≤ coeffs.get jk * x jk := termMinAct_le (hb jk).1 (hb jk).2 ht
+        have hacc' : acc + t ≤ finSum (k + 1) (fun i =>
+            let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hlt⟩
+            if skip = some ji then 0 else coeffs.get ji * x ji) := by
+          rw [hsplit]
+          simp only [hskip, ↓reduceIte]
+          exact Rat.le_trans (Rat.add_le_add_right.mpr hacc) (Rat.add_le_add_left.mpr htle)
+        exact sumMinAct_go_le st coeffs skip x hb (k + 1) hlt (acc + t) out hacc' hgo
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    injection hgo with heq; subst heq
+    exact hacc
+termination_by k _ _ _ _ => n - k
+
+private theorem sumMaxAct_go_ge {n : Nat} (st : PresolveState n) (coeffs : RatVec n)
+    (skip : Option (Fin n)) (x : Fin n → Rat) (hb : inVarBounds st.lbAt st.ubAt x) :
+    ∀ k (hk : k ≤ n) (acc out : Rat),
+      finSum k (fun i =>
+        let j : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hk⟩
+        if skip = some j then 0 else coeffs.get j * x j) ≤ acc →
+      sumMaxAct.go st coeffs skip k acc = some out →
+      finSum n (fun j => if skip = some j then 0 else coeffs.get j * x j) ≤ out := by
+  intro k hk acc out hacc hgo
+  unfold sumMaxAct.go at hgo
+  dsimp only at hgo
+  split at hgo
+  · next hlt =>
+    let jk : Fin n := ⟨k, hlt⟩
+    have hsplit :
+        finSum (k + 1) (fun i =>
+          let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hlt⟩
+          if skip = some ji then 0 else coeffs.get ji * x ji) =
+        finSum k (fun i =>
+          let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hk⟩
+          if skip = some ji then 0 else coeffs.get ji * x ji) +
+        (if skip = some jk then 0 else coeffs.get jk * x jk) := by
+      simp [finSum_succ, jk]
+    by_cases hskip : skip = some jk
+    · have hsb : (skip == some ⟨k, hlt⟩) = true := beq_iff_eq.mpr hskip
+      simp only [hsb, ↓reduceIte] at hgo
+      have hacc' : finSum (k + 1) (fun i =>
+          let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hlt⟩
+          if skip = some ji then 0 else coeffs.get ji * x ji) ≤ acc := by
+        rw [hsplit]
+        simpa [hskip, Rat.add_zero] using hacc
+      exact sumMaxAct_go_ge st coeffs skip x hb (k + 1) hlt acc out hacc' hgo
+    · have hsb : (skip == some ⟨k, hlt⟩) = false := beq_false_of_ne hskip
+      simp only [hsb, Bool.false_eq_true, ↓reduceIte] at hgo
+      cases ht : termMaxAct (coeffs.get ⟨k, hlt⟩) (st.lbAt ⟨k, hlt⟩) (st.ubAt ⟨k, hlt⟩) with
+      | none => simp [ht] at hgo
+      | some t =>
+        simp only [ht] at hgo
+        have htge : coeffs.get jk * x jk ≤ t := termMaxAct_ge (hb jk).1 (hb jk).2 ht
+        have hacc' : finSum (k + 1) (fun i =>
+            let ji : Fin n := ⟨i.1, Nat.lt_of_lt_of_le i.2 hlt⟩
+            if skip = some ji then 0 else coeffs.get ji * x ji) ≤ acc + t := by
+          rw [hsplit]
+          simp only [hskip, ↓reduceIte]
+          exact Rat.le_trans (Rat.add_le_add_right.mpr hacc) (Rat.add_le_add_left.mpr htge)
+        exact sumMaxAct_go_ge st coeffs skip x hb (k + 1) hlt (acc + t) out hacc' hgo
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    injection hgo with heq; subst heq
+    exact hacc
+termination_by k _ _ _ _ => n - k
+
+private theorem dot_split_col {n : Nat} (coeffs : RatVec n) (c : Fin n) (x : Fin n → Rat) :
+    coeffs.dot x =
+    finSum n (fun j => if some c = some j then 0 else coeffs.get j * x j) + coeffs.get c * x c := by
+  unfold RatVec.dot
+  have h1 : ∀ j : Fin n, coeffs.get j * x j =
+      (if some c = some j then 0 else coeffs.get j * x j) +
+      (if j = c then coeffs.get c * x c else 0) := by
+    intro j
+    by_cases hjc : j = c
+    · subst hjc; simp [Rat.zero_add]
+    · have hne : some c ≠ some j := fun heq => hjc (Option.some.inj heq).symm
+      simp [hjc, hne, Rat.add_zero]
+  rw [finSum_congr h1, finSum_add, finSum_single]
+
+private theorem sumMinAct_none_le {n : Nat} {st : PresolveState n} {coeffs : RatVec n} {m : Rat}
+    {x : Fin n → Rat} (hb : inVarBounds st.lbAt st.ubAt x)
+    (hm : sumMinAct st coeffs none = some m) : m ≤ coeffs.dot x := by
+  have h := sumMinAct_go_le st coeffs none x hb 0 (Nat.zero_le n) 0 m Rat.le_refl hm
+  have heq : finSum n (fun j => if (none : Option (Fin n)) = some j then 0 else coeffs.get j * x j) =
+      coeffs.dot x := by
+    unfold RatVec.dot
+    apply finSum_congr; intro j; simp
+  rwa [heq] at h
+
+private theorem sumMaxAct_none_ge {n : Nat} {st : PresolveState n} {coeffs : RatVec n} {M : Rat}
+    {x : Fin n → Rat} (hb : inVarBounds st.lbAt st.ubAt x)
+    (hM : sumMaxAct st coeffs none = some M) : coeffs.dot x ≤ M := by
+  have h := sumMaxAct_go_ge st coeffs none x hb 0 (Nat.zero_le n) 0 M Rat.le_refl hM
+  have heq : finSum n (fun j => if (none : Option (Fin n)) = some j then 0 else coeffs.get j * x j) =
+      coeffs.dot x := by
+    unfold RatVec.dot
+    apply finSum_congr; intro j; simp
+  rwa [heq] at h
+
+private theorem sumMinAct_some_le {n : Nat} {st : PresolveState n} {coeffs : RatVec n}
+    {c : Fin n} {m : Rat} {x : Fin n → Rat} (hb : inVarBounds st.lbAt st.ubAt x)
+    (hm : sumMinAct st coeffs (some c) = some m) :
+    m + coeffs.get c * x c ≤ coeffs.dot x := by
+  have h := sumMinAct_go_le st coeffs (some c) x hb 0 (Nat.zero_le n) 0 m Rat.le_refl hm
+  rw [dot_split_col coeffs c x]
+  exact Rat.add_le_add_right.mpr h
+
+private theorem sumMaxAct_some_ge {n : Nat} {st : PresolveState n} {coeffs : RatVec n}
+    {c : Fin n} {M : Rat} {x : Fin n → Rat} (hb : inVarBounds st.lbAt st.ubAt x)
+    (hM : sumMaxAct st coeffs (some c) = some M) :
+    coeffs.dot x ≤ M + coeffs.get c * x c := by
+  have h := sumMaxAct_go_ge st coeffs (some c) x hb 0 (Nat.zero_le n) 0 M Rat.le_refl hM
+  rw [dot_split_col coeffs c x]
+  exact Rat.add_le_add_right.mpr h
+
+/-- Exact rational presolve transformation steps mapping `orig -> reduced`. -/
+inductive PresolveStep where
+  | roundBound (col : Nat) (isUpper : Bool) (newBound : Rat)
+  | activityBound (row col : Nat) (isUpper roundInt : Bool) (newBound : Rat)
+  | gcdRowDiv (row : Nat) (divisor : Int)
+  | substFixedRow (row col : Nat) (val : Rat)
+  | substFixedObj (col : Nat) (val : Rat)
+  | singletonRowElim (row col : Nat) (roundInt : Bool)
+  | redundantRow (row : Nat)
+  | binStrengthen (row col : Nat) (delta : Rat)
+  | symBreakLe (u v : Nat) (colPerm rowPerm : Array Nat)
+  deriving Repr
+
+private def checkOnlyColNonzero {n : Nat} (coeffs : RatVec n) (col : Fin n) : Bool :=
+  loop 0
+where
+  loop (i : Nat) : Bool :=
+    if hi : i < n then
+      if i == col.1 || coeffs.get ⟨i, hi⟩ == 0 then loop (i + 1) else false
+    else true
+  termination_by n - i
+
+private theorem checkOnlyColNonzero_loop_sound {n : Nat} (coeffs : RatVec n) (col : Fin n) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k), i ≠ col.1 → coeffs.get ⟨i, Nat.lt_of_lt_of_le hi hk⟩ = 0) →
+      checkOnlyColNonzero.loop coeffs col k = true →
+      ∀ j : Fin n, j ≠ col → coeffs.get j = 0 := by
+  intro k hk hprev hloop j hj
+  unfold checkOnlyColNonzero.loop at hloop
+  split at hloop
+  · next hlt =>
+    split at hloop
+    · next hok =>
+      have hcur : k ≠ col.1 → coeffs.get ⟨k, hlt⟩ = 0 := by
+        intro hne
+        rcases Bool.or_eq_true _ _ |>.mp hok with heq | hz
+        · exact absurd (beq_iff_eq.mp heq) hne
+        · exact beq_iff_eq.mp hz
+      have hnext : ∀ i (hi : i < k + 1), i ≠ col.1 →
+          coeffs.get ⟨i, Nat.lt_of_lt_of_le hi hlt⟩ = 0 := by
+        intro i hi hne
+        by_cases hik : i = k
+        · subst hik; exact hcur hne
+        · exact hprev i (by omega) hne
+      exact checkOnlyColNonzero_loop_sound coeffs col (k + 1) hlt hnext hloop j hj
+    · contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2 (fun hv => hj (Fin.ext hv))
+termination_by k _ _ _ => n - k
+
+private theorem dot_singleton {n : Nat} {coeffs : RatVec n} {col : Fin n}
+    (hzero : ∀ j : Fin n, j ≠ col → coeffs.get j = 0) (x : Fin n → Rat) :
+    coeffs.dot x = coeffs.get col * x col := by
+  unfold RatVec.dot
+  have h1 : finSum n (fun j => coeffs.get j * x j) =
+      finSum n (fun j => if j = col then coeffs.get col * x col else 0) := by
+    apply finSum_congr
+    intro j
+    by_cases h : j = col
+    · subst h; simp
+    · simp [h, hzero j h, Rat.zero_mul]
+  rw [h1, finSum_single]
+
+/-- Checks whether `row` is a fixed-column symmetry-breaking inequality `x_w - x_v ≤ 0` (or `x_v - x_w ≥ 0`)
+where `colPerm[w] = w` and `colPerm[v] = u`, which stays satisfied when `x_v < x_u`. -/
+private def checkSymChainRow {n : Nat} (row : LinCon n) (v : Fin n) (colPerm : Array Nat) : Bool :=
+  loop 0
+where
+  loop (w : Nat) : Bool :=
+    if hw : w < n then
+      if hp : w < colPerm.size then
+        let jw : Fin n := ⟨w, hw⟩
+        if colPerm[w] == w && w != v.1 then
+          let leTarget : LinCon n :=
+            { coeffs := RatVec.ofFn (fun j => if j = jw then 1 else if j = v then -1 else 0),
+              sense := .le, rhs := 0 }
+          let geTarget : LinCon n :=
+            { coeffs := RatVec.ofFn (fun j => if j = v then 1 else if j = jw then -1 else 0),
+              sense := .ge, rhs := 0 }
+          if row.beq leTarget || row.beq geTarget then true
+          else loop (w + 1)
+        else loop (w + 1)
+      else false
+    else false
+  termination_by n - w
+
+private theorem dot_diff_unit {n : Nat} {a b : Fin n} (hne : a ≠ b) (x : Fin n → Rat) :
+    (RatVec.ofFn (fun j : Fin n => if j = a then (1 : Rat) else if j = b then -1 else 0)).dot x =
+    x a - x b := by
+  unfold RatVec.dot
+  have h1 :
+      finSum n (fun j : Fin n =>
+        (RatVec.ofFn (fun k : Fin n => if k = a then (1 : Rat) else if k = b then -1 else 0)).get j * x j) =
+      finSum n (fun j : Fin n => (if j = a then x a else 0) + (if j = b then -x b else 0)) := by
+    apply finSum_congr
+    intro j
+    simp only [RatVec.get_ofFn]
+    by_cases hja : j = a
+    · subst hja
+      simp [hne, Rat.one_mul, Rat.add_zero]
+    · by_cases hjb : j = b
+      · subst hjb
+        simp [hja, Rat.neg_mul, Rat.one_mul, Rat.zero_add]
+      · simp [hja, hjb, Rat.zero_mul, Rat.add_zero]
+  rw [h1, finSum_add, finSum_single, finSum_single, Rat.sub_eq_add_neg]
+
+private theorem checkSymChainRow_loop_sound {n : Nat} (row : LinCon n) (u v : Fin n)
+    (colPerm : Array Nat) (hsz : colPerm.size = n)
+    (hlt : ∀ j : Fin n, permAt colPerm hsz j < n)
+    (hvu : permFn colPerm hsz hlt v = u)
+    {x : Fin n → Rat} (hsat : row.sat x) (hvxu : x v ≤ x u) :
+    ∀ k,
+      checkSymChainRow.loop row v colPerm k = true →
+      row.sat (fun j => x (permFn colPerm hsz hlt j)) := by
+  intro k hloop
+  unfold checkSymChainRow.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hw =>
+    have hpw : k < colPerm.size := by rw [hsz]; exact hw
+    simp only [hpw, ↓reduceDIte] at hloop
+    split at hloop
+    · next hfix =>
+      simp only [Bool.and_eq_true, beq_iff_eq, bne_iff_ne] at hfix
+      let jw : Fin n := ⟨k, hw⟩
+      have hne : jw ≠ v := fun heq => hfix.2 (congrArg Fin.val heq)
+      have hfw : permFn colPerm hsz hlt jw = jw := Fin.ext hfix.1
+      split at hloop
+      · next hmatch =>
+        rcases Bool.or_eq_true _ _ |>.mp hmatch with hle | hge
+        · have hrEq := LinCon.eq_of_beq hle
+          rw [hrEq] at hsat ⊢
+          unfold LinCon.sat at hsat ⊢
+          rw [dot_diff_unit hne] at hsat ⊢
+          rw [hfw, hvu]
+          have hxw : x jw ≤ x v := by
+            have := Rat.add_le_add_right (c := x v) |>.mpr hsat
+            simpa [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add, Rat.add_zero] using this
+          have hxu : x jw ≤ x u := Rat.le_trans hxw hvxu
+          rw [Rat.sub_eq_add_neg]
+          have := Rat.add_le_add_right (c := -x u) |>.mpr hxu
+          simpa [Rat.add_neg_cancel] using this
+        · have hrEq := LinCon.eq_of_beq hge
+          rw [hrEq] at hsat ⊢
+          unfold LinCon.sat at hsat ⊢
+          rw [dot_diff_unit (Ne.symm hne)] at hsat ⊢
+          rw [hfw, hvu]
+          have hxw : x jw ≤ x v := by
+            have := Rat.add_le_add_right (c := x jw) |>.mpr hsat
+            simpa [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add, Rat.add_zero] using this
+          have hxu : x jw ≤ x u := Rat.le_trans hxw hvxu
+          rw [Rat.sub_eq_add_neg]
+          have := Rat.add_le_add_right (c := -x jw) |>.mpr hxu
+          simpa [Rat.add_neg_cancel] using this
+      · exact checkSymChainRow_loop_sound row u v colPerm hsz hlt hvu hsat hvxu (k + 1) hloop
+    · exact checkSymChainRow_loop_sound row u v colPerm hsz hlt hvu hsat hvxu (k + 1) hloop
+  · contradiction
+termination_by k _ => n - k
+
+private def checkSymBreakCols {n : Nat} (st : PresolveState n) (colPerm : Array Nat) : Bool :=
+  loop 0
+where
+  loop (i : Nat) : Bool :=
+    if hi : i < n then
+      if hp : i < colPerm.size then
+        let p := colPerm[i]
+        if hpn : p < n then
+          let j : Fin n := ⟨i, hi⟩
+          let jp : Fin n := ⟨p, hpn⟩
+          let okInt := !st.isIntAt j || st.isIntAt jp
+          let okLb := optLbLe (st.lbAt j) (st.lbAt jp)
+          let okUb := optUbLe (st.ubAt jp) (st.ubAt j)
+          if okInt && okLb && okUb then loop (i + 1) else false
+        else false
+      else false
+    else true
+  termination_by n - i
+
+private def checkSymBreakObj {n : Nat} (st : PresolveState n) (u v : Fin n) (colPerm : Array Nat) : Bool :=
+  decide (st.obj.get v ≤ st.obj.get u) && loop 0
+where
+  loop (i : Nat) : Bool :=
+    if hi : i < n then
+      if hp : i < colPerm.size then
+        let p := colPerm[i]
+        if hpn : p < n then
+          let j : Fin n := ⟨i, hi⟩
+          let jp : Fin n := ⟨p, hpn⟩
+          if i == u.1 || i == v.1 || st.obj.get j == st.obj.get jp then
+            loop (i + 1)
+          else false
+        else false
+      else false
+    else true
+  termination_by n - i
+
+private def checkSymBreakRows {n : Nat} (st : PresolveState n) (v : Fin n)
+    (colPerm rowPerm : Array Nat) : Bool :=
+  (rowPerm.size == st.rows.size) && loop 0
+where
+  loop (i : Nat) : Bool :=
+    if hi : i < st.rows.size then
+      match st.rows[i] with
+      | none => loop (i + 1)
+      | some rowI =>
+        let directOk :=
+          if hrp : i < rowPerm.size then
+            let rIdx := rowPerm[i]
+            if hr : rIdx < st.rows.size then
+              match st.rows[rIdx] with
+              | some rowR => checkConPermImplies rowR rowI colPerm
+              | none => false
+            else false
+          else false
+        if directOk || checkSymChainRow rowI v colPerm then
+          loop (i + 1)
+        else false
+    else true
+  termination_by st.rows.size - i
+
+/-- Executes one exact rational `PresolveStep` on `st`, returning `none` if any verification check fails. -/
+def applyPresolveStep {n : Nat} (st : PresolveState n) (step : PresolveStep) :
+    Option (PresolveState n) :=
+  match step with
+  | .roundBound col isUpper newBound =>
+    if hcol : col < n then
+      let j : Fin n := ⟨col, hcol⟩
+      if st.isIntAt j then
+        if isUpper then
+          match st.ubAt j with
+          | none => none
+          | some oldU =>
+            if decide ((oldU.floor : Rat) ≤ newBound) && decide (newBound ≤ oldU) then
+              let ub' := st.ub.set col (some newBound) (by rw [st.ub_size]; exact hcol)
+              some { st with ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size }
+            else none
+        else
+          match st.lbAt j with
+          | none => none
+          | some oldL =>
+            if decide (newBound ≤ (oldL.ceil : Rat)) && decide (oldL ≤ newBound) then
+              let lb' := st.lb.set col (some newBound) (by rw [st.lb_size]; exact hcol)
+              some { st with lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size }
+            else none
+      else none
+    else none
+  | .activityBound row col isUpper roundInt newBound =>
+    if hrow : row < st.rows.size then
+      match st.rows[row] with
+      | none => none
+      | some con =>
+        if hcol : col < n then
+          let j : Fin n := ⟨col, hcol⟩
+          let a := con.coeffs.get j
+          if a == 0 then none
+          else if isUpper then
+            let imp? : Option Rat :=
+              if 0 < a then
+                if con.sense == .le || con.sense == .eq then
+                  (sumMinAct st con.coeffs (some j)).map (fun m => (con.rhs - m) / a)
+                else none
+              else
+                if con.sense == .ge || con.sense == .eq then
+                  (sumMaxAct st con.coeffs (some j)).map (fun M => (con.rhs - M) / a)
+                else none
+            match imp? with
+            | none => none
+            | some imp =>
+              let effImp? : Option Rat :=
+                if roundInt then
+                  if st.isIntAt j then some (imp.floor : Rat) else none
+                else some imp
+              match effImp? with
+              | none => none
+              | some effImp =>
+                if decide (effImp ≤ newBound) && optUbLe (some newBound) (st.ubAt j) then
+                  let ub' := st.ub.set col (some newBound) (by rw [st.ub_size]; exact hcol)
+                  some { st with ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size }
+                else none
+          else
+            let imp? : Option Rat :=
+              if 0 < a then
+                if con.sense == .ge || con.sense == .eq then
+                  (sumMaxAct st con.coeffs (some j)).map (fun M => (con.rhs - M) / a)
+                else none
+              else
+                if con.sense == .le || con.sense == .eq then
+                  (sumMinAct st con.coeffs (some j)).map (fun m => (con.rhs - m) / a)
+                else none
+            match imp? with
+            | none => none
+            | some imp =>
+              let effImp? : Option Rat :=
+                if roundInt then
+                  if st.isIntAt j then some (imp.ceil : Rat) else none
+                else some imp
+              match effImp? with
+              | none => none
+              | some effImp =>
+                if decide (newBound ≤ effImp) && optLbLe (st.lbAt j) (some newBound) then
+                  let lb' := st.lb.set col (some newBound) (by rw [st.lb_size]; exact hcol)
+                  some { st with lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size }
+                else none
+        else none
+    else none
+  | .gcdRowDiv row divisor =>
+    if hrow : row < st.rows.size then
+      if 0 < divisor then
+        match st.rows[row] with
+        | none => none
+        | some con =>
+          let dRat : Rat := (divisor : Rat)
+          let newCoeffs : RatVec n := RatVec.ofFn (fun j => con.coeffs.get j / dRat)
+          if isIntegralLinVec st.toInstance newCoeffs then
+            let qRhs := con.rhs / dRat
+            match con.sense with
+            | .le =>
+              let newCon : LinCon n := { coeffs := newCoeffs, sense := .le, rhs := (qRhs.floor : Rat) }
+              some { st with rows := st.rows.set row (some newCon) hrow }
+            | .ge =>
+              let newCon : LinCon n := { coeffs := newCoeffs, sense := .ge, rhs := (qRhs.ceil : Rat) }
+              some { st with rows := st.rows.set row (some newCon) hrow }
+            | .eq =>
+              if qRhs.den == 1 then
+                let newCon : LinCon n := { coeffs := newCoeffs, sense := .eq, rhs := qRhs }
+                some { st with rows := st.rows.set row (some newCon) hrow }
+              else none
+          else none
+      else none
+    else none
+  | .substFixedRow row col val =>
+    if hrow : row < st.rows.size then
+      if hcol : col < n then
+        let j : Fin n := ⟨col, hcol⟩
+        if st.lbAt j == some val && st.ubAt j == some val then
+          match st.rows[row] with
+          | none => none
+          | some con =>
+            let a := con.coeffs.get j
+            let newCoeffs : RatVec n := RatVec.ofFn (fun k => if k = j then 0 else con.coeffs.get k)
+            let newCon : LinCon n := { coeffs := newCoeffs, sense := con.sense, rhs := con.rhs - a * val }
+            some { st with rows := st.rows.set row (some newCon) hrow }
+        else none
+      else none
+    else none
+  | .substFixedObj col val =>
+    if hcol : col < n then
+      let j : Fin n := ⟨col, hcol⟩
+      if st.lbAt j == some val && st.ubAt j == some val then
+        let c := st.obj.get j
+        let newObj : RatVec n := RatVec.ofFn (fun k => if k = j then 0 else st.obj.get k)
+        some { st with obj := newObj, objConst := st.objConst + c * val }
+      else none
+    else none
+  | .singletonRowElim row col roundInt =>
+    if hrow : row < st.rows.size then
+      if hcol : col < n then
+        let j : Fin n := ⟨col, hcol⟩
+        match st.rows[row] with
+        | none => none
+        | some con =>
+          let a := con.coeffs.get j
+          if !(a == 0) && checkOnlyColNonzero con.coeffs j then
+            let b := con.rhs / a
+            let rows' := st.rows.set row none hrow
+            match con.sense with
+            | .eq =>
+              if roundInt && !(st.isIntAt j && b.den == 1) then none
+              else
+                let lb' := st.lb.set col (tightenLBOpt (st.lbAt j) b) (by rw [st.lb_size]; exact hcol)
+                let ub' := st.ub.set col (tightenUBOpt (st.ubAt j) b) (by rw [st.ub_size]; exact hcol)
+                some { st with
+                  lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size
+                  ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size
+                  rows := rows' }
+            | .le =>
+              if 0 < a then
+                let uNew? : Option Rat :=
+                  if roundInt then (if st.isIntAt j then some (b.floor : Rat) else none) else some b
+                match uNew? with
+                | none => none
+                | some uNew =>
+                  let ub' := st.ub.set col (tightenUBOpt (st.ubAt j) uNew) (by rw [st.ub_size]; exact hcol)
+                  some { st with ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size, rows := rows' }
+              else
+                let lNew? : Option Rat :=
+                  if roundInt then (if st.isIntAt j then some (b.ceil : Rat) else none) else some b
+                match lNew? with
+                | none => none
+                | some lNew =>
+                  let lb' := st.lb.set col (tightenLBOpt (st.lbAt j) lNew) (by rw [st.lb_size]; exact hcol)
+                  some { st with lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size, rows := rows' }
+            | .ge =>
+              if 0 < a then
+                let lNew? : Option Rat :=
+                  if roundInt then (if st.isIntAt j then some (b.ceil : Rat) else none) else some b
+                match lNew? with
+                | none => none
+                | some lNew =>
+                  let lb' := st.lb.set col (tightenLBOpt (st.lbAt j) lNew) (by rw [st.lb_size]; exact hcol)
+                  some { st with lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size, rows := rows' }
+              else
+                let uNew? : Option Rat :=
+                  if roundInt then (if st.isIntAt j then some (b.floor : Rat) else none) else some b
+                match uNew? with
+                | none => none
+                | some uNew =>
+                  let ub' := st.ub.set col (tightenUBOpt (st.ubAt j) uNew) (by rw [st.ub_size]; exact hcol)
+                  some { st with ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size, rows := rows' }
+          else none
+      else none
+    else none
+  | .redundantRow row =>
+    if hrow : row < st.rows.size then
+      match st.rows[row] with
+      | none => none
+      | some con =>
+        let ok :=
+          match con.sense with
+          | .le =>
+            match sumMaxAct st con.coeffs none with
+            | some M => decide (M ≤ con.rhs)
+            | none => false
+          | .ge =>
+            match sumMinAct st con.coeffs none with
+            | some m => decide (con.rhs ≤ m)
+            | none => false
+          | .eq =>
+            match sumMinAct st con.coeffs none, sumMaxAct st con.coeffs none with
+            | some m, some M => decide (con.rhs ≤ m) && decide (M ≤ con.rhs)
+            | _, _ => false
+        if ok then some { st with rows := st.rows.set row none hrow } else none
+    else none
+  | .binStrengthen row col delta =>
+    if hrow : row < st.rows.size then
+      if hcol : col < n then
+        let j : Fin n := ⟨col, hcol⟩
+        if st.isIntAt j && st.lbAt j == some 0 && st.ubAt j == some 1 && decide (0 ≤ delta) then
+          match st.rows[row] with
+          | none => none
+          | some con =>
+            if con.sense == .le then
+              let a := con.coeffs.get j
+              if a == 0 then none
+              else
+                match sumMaxAct st con.coeffs (some j) with
+                | none => none
+                | some maxExcl =>
+                  if 0 < a then
+                    if decide (maxExcl ≤ con.rhs - delta) then
+                      let newCoeffs : RatVec n :=
+                        RatVec.ofFn (fun k => if k = j then a - delta else con.coeffs.get k)
+                      let newCon : LinCon n := { coeffs := newCoeffs, sense := .le, rhs := con.rhs - delta }
+                      some { st with rows := st.rows.set row (some newCon) hrow }
+                    else none
+                  else
+                    if decide (maxExcl + (a + delta) ≤ con.rhs) then
+                      let newCoeffs : RatVec n :=
+                        RatVec.ofFn (fun k => if k = j then a + delta else con.coeffs.get k)
+                      let newCon : LinCon n := { coeffs := newCoeffs, sense := .le, rhs := con.rhs }
+                      some { st with rows := st.rows.set row (some newCon) hrow }
+                    else none
+            else none
+        else none
+      else none
+    else none
+  | .symBreakLe u v colPerm rowPerm =>
+    if hu : u < n then
+      if hv : v < n then
+        if u != v then
+          let ju : Fin n := ⟨u, hu⟩
+          let jv : Fin n := ⟨v, hv⟩
+          if checkPermInvolution n colPerm &&
+              (if hpu : u < colPerm.size then colPerm[u] == v else false) &&
+              checkSymBreakCols st colPerm &&
+              checkSymBreakObj st ju jv colPerm &&
+              checkSymBreakRows st jv colPerm rowPerm then
+            let newCon : LinCon n := {
+              coeffs := RatVec.ofFn (fun j => if j = ju then 1 else if j = jv then -1 else 0)
+              sense := .le
+              rhs := 0
+            }
+            some { st with rows := st.rows.push (some newCon) }
+          else none
+        else none
+      else none
+    else none
+
+private theorem array_set_getElem_fin {α : Type} (arr : Array α) {row : Nat} (hrow : row < arr.size)
+    (v : α) (i : Fin (arr.set row v hrow).size) :
+    (arr.set row v hrow)[i] =
+      if i.1 = row then v else arr[i.1]'(by simpa [Array.size_set] using i.2) := by
+  change (arr.set row v hrow)[i.1] = _
+  by_cases h : i.1 = row
+  · simp [h]
+  · simp only [h, ↓reduceIte]
+    exact Array.getElem_set_ne hrow (by simpa [Array.size_set] using i.2) (Ne.symm h)
+
+private theorem state_set_ub_inVarBounds {n : Nat} (st : PresolveState n)
+    {col : Nat} (hcol : col < n) (newU : Rat) (x : Fin n → Rat) :
+    let ub' := st.ub.set col (some newU) (by rw [st.ub_size]; exact hcol)
+    let st' : PresolveState n := { st with ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size }
+    inVarBounds st'.lbAt st'.ubAt x ↔
+    (∀ j : Fin n,
+      (∀ l, st.lbAt j = some l → l ≤ x j) ∧
+      (if j = ⟨col, hcol⟩ then x j ≤ newU else ∀ u, st.ubAt j = some u → x j ≤ u)) := by
+  intro ub' st'
+  constructor
+  · intro hb j
+    refine ⟨(hb j).1, ?_⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      simp only [↓reduceIte]
+      apply (hb ⟨col, hcol⟩).2 newU
+      unfold PresolveState.ubAt
+      simp [st', ub']
+    · simp only [h, ↓reduceIte]
+      intro u hu
+      have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      apply (hb j).2 u
+      unfold PresolveState.ubAt at hu ⊢
+      simpa [st', ub', Array.getElem_set_ne (by rw [st.ub_size]; exact hcol) (by rw [st.ub_size]; exact j.2) hne] using hu
+  · intro hb j
+    refine ⟨(hb j).1, fun u hu => ?_⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      unfold PresolveState.ubAt at hu
+      simp only [st', ub', Array.getElem_set_self] at hu
+      injection hu with heq; subst heq
+      have hj := (hb ⟨col, hcol⟩).2
+      simpa using hj
+    · have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      unfold PresolveState.ubAt at hu
+      simp only [st', ub', Array.getElem_set_ne (by rw [st.ub_size]; exact hcol) (by rw [st.ub_size]; exact j.2) hne] at hu
+      have hj := (hb j).2
+      simp only [h, ↓reduceIte] at hj
+      exact hj u hu
+
+private theorem state_set_lb_inVarBounds {n : Nat} (st : PresolveState n)
+    {col : Nat} (hcol : col < n) (newL : Rat) (x : Fin n → Rat) :
+    let lb' := st.lb.set col (some newL) (by rw [st.lb_size]; exact hcol)
+    let st' : PresolveState n := { st with lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size }
+    inVarBounds st'.lbAt st'.ubAt x ↔
+    (∀ j : Fin n,
+      (if j = ⟨col, hcol⟩ then newL ≤ x j else ∀ l, st.lbAt j = some l → l ≤ x j) ∧
+      (∀ u, st.ubAt j = some u → x j ≤ u)) := by
+  intro lb' st'
+  constructor
+  · intro hb j
+    refine ⟨?_, (hb j).2⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      simp only [↓reduceIte]
+      apply (hb ⟨col, hcol⟩).1 newL
+      unfold PresolveState.lbAt
+      simp [st', lb']
+    · simp only [h, ↓reduceIte]
+      intro l hl
+      have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      apply (hb j).1 l
+      unfold PresolveState.lbAt at hl ⊢
+      simpa [st', lb', Array.getElem_set_ne (by rw [st.lb_size]; exact hcol) (by rw [st.lb_size]; exact j.2) hne] using hl
+  · intro hb j
+    refine ⟨fun l hl => ?_, (hb j).2⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      unfold PresolveState.lbAt at hl
+      simp only [st', lb', Array.getElem_set_self] at hl
+      injection hl with heq; subst heq
+      have hj := (hb ⟨col, hcol⟩).1
+      simpa using hj
+    · have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      unfold PresolveState.lbAt at hl
+      simp only [st', lb', Array.getElem_set_ne (by rw [st.lb_size]; exact hcol) (by rw [st.lb_size]; exact j.2) hne] at hl
+      have hj := (hb j).1
+      simp only [h, ↓reduceIte] at hj
+      exact hj l hl
+
+private theorem state_set_ub_opt_inVarBounds {n : Nat} (st : PresolveState n)
+    {col : Nat} (hcol : col < n) (newU : Rat) (x : Fin n → Rat) :
+    let ub' := st.ub.set col (tightenUBOpt (st.ubAt ⟨col, hcol⟩) newU) (by rw [st.ub_size]; exact hcol)
+    let st' : PresolveState n := { st with ub := ub', ub_size := by rw [Array.size_set]; exact st.ub_size }
+    inVarBounds st'.lbAt st'.ubAt x ↔ (inVarBounds st.lbAt st.ubAt x ∧ x ⟨col, hcol⟩ ≤ newU) := by
+  intro ub' st'
+  constructor
+  · intro hb
+    have hxU : x ⟨col, hcol⟩ ≤ newU := by
+      cases h0 : st.ubAt ⟨col, hcol⟩ with
+      | none =>
+        apply (hb ⟨col, hcol⟩).2 newU
+        unfold PresolveState.ubAt
+        simp [st', ub', tightenUBOpt, h0]
+      | some u0 =>
+        have hm := (hb ⟨col, hcol⟩).2 (min u0 newU) (by
+          unfold PresolveState.ubAt
+          simp [st', ub', tightenUBOpt, h0])
+        exact Rat.le_trans hm (rat_min_le_right u0 newU)
+    refine ⟨fun j => ⟨(hb j).1, fun u hu => ?_⟩, hxU⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      have hm := (hb ⟨col, hcol⟩).2 (min u newU) (by
+        unfold PresolveState.ubAt
+        simp [st', ub', tightenUBOpt, hu])
+      exact Rat.le_trans hm (rat_min_le_left u newU)
+    · have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      apply (hb j).2 u
+      unfold PresolveState.ubAt at hu ⊢
+      simpa [st', ub', Array.getElem_set_ne (by rw [st.ub_size]; exact hcol) (by rw [st.ub_size]; exact j.2) hne] using hu
+  · rintro ⟨hb, hxU⟩ j
+    refine ⟨(hb j).1, fun u hu => ?_⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      unfold PresolveState.ubAt at hu
+      simp only [st', ub', Array.getElem_set_self] at hu
+      cases h0 : st.ubAt ⟨col, hcol⟩ with
+      | none =>
+        rw [h0, tightenUBOpt] at hu
+        injection hu with heq; subst heq
+        exact hxU
+      | some u0 =>
+        rw [h0, tightenUBOpt] at hu
+        injection hu with heq; subst heq
+        exact rat_le_min_iff.mpr ⟨(hb ⟨col, hcol⟩).2 u0 h0, hxU⟩
+    · have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      unfold PresolveState.ubAt at hu
+      simp only [st', ub', Array.getElem_set_ne (by rw [st.ub_size]; exact hcol) (by rw [st.ub_size]; exact j.2) hne] at hu
+      exact (hb j).2 u hu
+
+private theorem state_set_lb_opt_inVarBounds {n : Nat} (st : PresolveState n)
+    {col : Nat} (hcol : col < n) (newL : Rat) (x : Fin n → Rat) :
+    let lb' := st.lb.set col (tightenLBOpt (st.lbAt ⟨col, hcol⟩) newL) (by rw [st.lb_size]; exact hcol)
+    let st' : PresolveState n := { st with lb := lb', lb_size := by rw [Array.size_set]; exact st.lb_size }
+    inVarBounds st'.lbAt st'.ubAt x ↔ (inVarBounds st.lbAt st.ubAt x ∧ newL ≤ x ⟨col, hcol⟩) := by
+  intro lb' st'
+  constructor
+  · intro hb
+    have hxL : newL ≤ x ⟨col, hcol⟩ := by
+      cases h0 : st.lbAt ⟨col, hcol⟩ with
+      | none =>
+        apply (hb ⟨col, hcol⟩).1 newL
+        unfold PresolveState.lbAt
+        simp [st', lb', tightenLBOpt, h0]
+      | some l0 =>
+        have hm := (hb ⟨col, hcol⟩).1 (max l0 newL) (by
+          unfold PresolveState.lbAt
+          simp [st', lb', tightenLBOpt, h0])
+        have hle : newL ≤ max l0 newL := by
+          rw [Rat.max_def]; split
+          · exact Rat.le_refl
+          · exact Rat.le_of_lt (Rat.not_le.mp ‹_›)
+        exact Rat.le_trans hle hm
+    refine ⟨fun j => ⟨fun l hl => ?_, (hb j).2⟩, hxL⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      have hm := (hb ⟨col, hcol⟩).1 (max l newL) (by
+        unfold PresolveState.lbAt
+        simp [st', lb', tightenLBOpt, hl])
+      have hle : l ≤ max l newL := by
+        rw [Rat.max_def]; split
+        · assumption
+        · exact Rat.le_refl
+      exact Rat.le_trans hle hm
+    · have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      apply (hb j).1 l
+      unfold PresolveState.lbAt at hl ⊢
+      simpa [st', lb', Array.getElem_set_ne (by rw [st.lb_size]; exact hcol) (by rw [st.lb_size]; exact j.2) hne] using hl
+  · rintro ⟨hb, hxL⟩ j
+    refine ⟨fun l hl => ?_, (hb j).2⟩
+    by_cases h : j = ⟨col, hcol⟩
+    · subst h
+      unfold PresolveState.lbAt at hl
+      simp only [st', lb', Array.getElem_set_self] at hl
+      cases h0 : st.lbAt ⟨col, hcol⟩ with
+      | none =>
+        rw [h0, tightenLBOpt] at hl
+        injection hl with heq; subst heq
+        exact hxL
+      | some l0 =>
+        rw [h0, tightenLBOpt] at hl
+        injection hl with heq; subst heq
+        rw [Rat.max_def]; split
+        · exact hxL
+        · exact (hb ⟨col, hcol⟩).1 l0 h0
+    · have hne : col ≠ j.1 := fun heq => h (Fin.ext heq.symm)
+      unfold PresolveState.lbAt at hl
+      simp only [st', lb', Array.getElem_set_ne (by rw [st.lb_size]; exact hcol) (by rw [st.lb_size]; exact j.2) hne] at hl
+      exact (hb j).1 l hl
+
+private theorem checkSymBreakCols_sound {n : Nat} (st : PresolveState n) (colPerm : Array Nat)
+    (hsz : colPerm.size = n) (hlt : ∀ j : Fin n, permAt colPerm hsz j < n) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k),
+        let j : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hk⟩
+        let jp : Fin n := permFn colPerm hsz hlt j
+        (st.isIntAt j = true → st.isIntAt jp = true) ∧
+        (∀ l, st.lbAt j = some l → ∃ l', st.lbAt jp = some l' ∧ l ≤ l') ∧
+        (∀ u, st.ubAt j = some u → ∃ u', st.ubAt jp = some u' ∧ u' ≤ u)) →
+      checkSymBreakCols.loop st colPerm k = true →
+      ∀ j : Fin n,
+        let jp : Fin n := permFn colPerm hsz hlt j
+        (st.isIntAt j = true → st.isIntAt jp = true) ∧
+        (∀ l, st.lbAt j = some l → ∃ l', st.lbAt jp = some l' ∧ l ≤ l') ∧
+        (∀ u, st.ubAt j = some u → ∃ u', st.ubAt jp = some u' ∧ u' ≤ u) := by
+  intro k hk hprev hloop j
+  unfold checkSymBreakCols.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    have hpk : k < colPerm.size := by rw [hsz]; exact hltK
+    have hpn : colPerm[k]'hpk < n := hlt ⟨k, hltK⟩
+    simp only [hpk, hpn, ↓reduceDIte] at hloop
+    split at hloop
+    · next hok =>
+      let jk : Fin n := ⟨k, hltK⟩
+      let jpk : Fin n := ⟨colPerm[k]'hpk, hpn⟩
+      simp only [Bool.and_eq_true] at hok
+      have hcurInt : st.isIntAt jk = true → st.isIntAt jpk = true := by
+        intro hi
+        rcases Bool.or_eq_true _ _ |>.mp hok.1.1 with hno | hyes
+        · rw [hi] at hno; contradiction
+        · exact hyes
+      have hcurLb : ∀ l, st.lbAt jk = some l → ∃ l', st.lbAt jpk = some l' ∧ l ≤ l' := by
+        intro l hl
+        have hlb := hok.1.2
+        unfold optLbLe at hlb; rw [hl] at hlb
+        cases h2 : st.lbAt jpk with
+        | none => rw [h2] at hlb; contradiction
+        | some l' => rw [h2] at hlb; exact ⟨l', rfl, decide_eq_true_eq.mp hlb⟩
+      have hcurUb : ∀ u, st.ubAt jk = some u → ∃ u', st.ubAt jpk = some u' ∧ u' ≤ u := by
+        intro u hu
+        have hub := hok.2
+        unfold optUbLe at hub; rw [hu] at hub
+        cases h2 : st.ubAt jpk with
+        | none => rw [h2] at hub; contradiction
+        | some u' => rw [h2] at hub; exact ⟨u', rfl, decide_eq_true_eq.mp hub⟩
+      have hnext : ∀ i (hi : i < k + 1),
+          let ji : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hltK⟩
+          let jpi : Fin n := permFn colPerm hsz hlt ji
+          (st.isIntAt ji = true → st.isIntAt jpi = true) ∧
+          (∀ l, st.lbAt ji = some l → ∃ l', st.lbAt jpi = some l' ∧ l ≤ l') ∧
+          (∀ u, st.ubAt ji = some u → ∃ u', st.ubAt jpi = some u' ∧ u' ≤ u) := by
+        intro i hi
+        by_cases hik : i = k
+        · subst hik; exact ⟨hcurInt, hcurLb, hcurUb⟩
+        · exact hprev i (by omega)
+      exact checkSymBreakCols_sound st colPerm hsz hlt (k + 1) hltK hnext hloop j
+    · contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2
+termination_by k _ _ _ => n - k
+
+private theorem checkSymBreakObj_loop_sound {n : Nat} (st : PresolveState n) (u v : Fin n)
+    (colPerm : Array Nat) (hsz : colPerm.size = n) (hlt : ∀ j : Fin n, permAt colPerm hsz j < n) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k),
+        let j : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hk⟩
+        j ≠ u → j ≠ v → st.obj.get j = st.obj.get (permFn colPerm hsz hlt j)) →
+      checkSymBreakObj.loop st u v colPerm k = true →
+      ∀ j : Fin n, j ≠ u → j ≠ v → st.obj.get j = st.obj.get (permFn colPerm hsz hlt j) := by
+  intro k hk hprev hloop j hju hjv
+  unfold checkSymBreakObj.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    have hpk : k < colPerm.size := by rw [hsz]; exact hltK
+    have hpn : colPerm[k]'hpk < n := hlt ⟨k, hltK⟩
+    simp only [hpk, hpn, ↓reduceDIte] at hloop
+    split at hloop
+    · next hok =>
+      have hcur : (⟨k, hltK⟩ : Fin n) ≠ u → (⟨k, hltK⟩ : Fin n) ≠ v →
+          st.obj.get ⟨k, hltK⟩ = st.obj.get (permFn colPerm hsz hlt ⟨k, hltK⟩) := by
+        intro hku hkv
+        rcases Bool.or_eq_true _ _ |>.mp hok with h12 | heq
+        · rcases Bool.or_eq_true _ _ |>.mp h12 with h1 | h2
+          · exact absurd (Fin.ext (beq_iff_eq.mp h1)) hku
+          · exact absurd (Fin.ext (beq_iff_eq.mp h2)) hkv
+        · exact beq_iff_eq.mp heq
+      have hnext : ∀ i (hi : i < k + 1),
+          (⟨i, Nat.lt_of_lt_of_le hi hltK⟩ : Fin n) ≠ u →
+          (⟨i, Nat.lt_of_lt_of_le hi hltK⟩ : Fin n) ≠ v →
+          st.obj.get ⟨i, Nat.lt_of_lt_of_le hi hltK⟩ =
+            st.obj.get (permFn colPerm hsz hlt ⟨i, Nat.lt_of_lt_of_le hi hltK⟩) := by
+        intro i hi hiu hiv
+        by_cases hik : i = k
+        · subst hik; exact hcur hiu hiv
+        · exact hprev i (by omega) hiu hiv
+      exact checkSymBreakObj_loop_sound st u v colPerm hsz hlt (k + 1) hltK hnext hloop j hju hjv
+    · contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2 hju hjv
+termination_by k _ _ _ _ _ => n - k
+
+private theorem stateObj_perm_le_of_mono {n : Nat} {c : RatVec n} {x : Fin n → Rat}
+    {f : Fin n → Fin n} (hinv : ∀ k : Fin n, f (f k) = k)
+    (hf : ∀ i₁ i₂ : Fin n, f i₁ = f i₂ → i₁ = i₂)
+    {u v : Fin n} (huv : f u = v) (hne : u ≠ v)
+    (hc_other : ∀ k : Fin n, k ≠ u → k ≠ v → c.get k = c.get (f k))
+    (hc_mono : c.get v ≤ c.get u) (hx_le : x v ≤ x u) :
+    finSum n (fun k => c.get k * x (f k)) ≤ finSum n (fun k => c.get k * x k) := by
+  have hvu : f v = u := by rw [← huv, hinv]
+  let ceq : Fin n → Rat := fun k => if k = u then c.get v else c.get k
+  let delta : Fin n → Rat := fun k => if k = u then c.get u - c.get v else 0
+  have hceq_perm : ∀ k : Fin n, ceq k = ceq (f k) := by
+    intro k
+    by_cases hku : k = u
+    · subst hku; simp [ceq, huv]
+    · by_cases hkv : k = v
+      · subst hkv; simp [ceq, hvu]
+      · have hfneU : f k ≠ u := fun h => hkv (hf k v (h.trans hvu.symm))
+        simp only [ceq, hku, hfneU, ↓reduceIte]
+        exact hc_other k hku hkv
+  have hceq_sum :
+      finSum n (fun k => ceq k * x (f k)) = finSum n (fun k => ceq k * x k) := by
+    have h1 : finSum n (fun k => ceq k * x (f k)) =
+        finSum n (fun k => ceq (f k) * x (f k)) :=
+      finSum_congr (fun k => by rw [hceq_perm k])
+    rw [h1]
+    exact finSum_inj_eq (g := fun k => ceq k * x k) hf
+  have hdelta_perm : finSum n (fun k => delta k * x (f k)) = (c.get u - c.get v) * x v := by
+    have h1 : finSum n (fun k => delta k * x (f k)) =
+        finSum n (fun k => if k = u then (c.get u - c.get v) * x v else 0) := by
+      apply finSum_congr; intro k
+      by_cases hku : k = u
+      · subst hku; simp [delta, huv]
+      · simp [delta, hku, Rat.zero_mul]
+    rw [h1, finSum_single]
+  have hdelta_orig : finSum n (fun k => delta k * x k) = (c.get u - c.get v) * x u := by
+    have h1 : finSum n (fun k => delta k * x k) =
+        finSum n (fun k => if k = u then (c.get u - c.get v) * x u else 0) := by
+      apply finSum_congr; intro k
+      by_cases hku : k = u
+      · subst hku; simp [delta]
+      · simp [delta, hku, Rat.zero_mul]
+    rw [h1, finSum_single]
+  have hsplit_c : ∀ k : Fin n, c.get k = ceq k + delta k := by
+    intro k
+    by_cases hku : k = u
+    · subst hku
+      simp only [ceq, delta, ↓reduceIte]
+      rw [Rat.add_comm, Rat.sub_add_cancel]
+    · simp [ceq, delta, hku, Rat.add_zero]
+  have hlhs : finSum n (fun k => c.get k * x (f k)) =
+      finSum n (fun k => ceq k * x (f k)) + finSum n (fun k => delta k * x (f k)) := by
+    rw [← finSum_add]
+    apply finSum_congr; intro k
+    rw [hsplit_c k, Rat.add_mul]
+  have hrhs : finSum n (fun k => c.get k * x k) =
+      finSum n (fun k => ceq k * x k) + finSum n (fun k => delta k * x k) := by
+    rw [← finSum_add]
+    apply finSum_congr; intro k
+    rw [hsplit_c k, Rat.add_mul]
+  rw [hlhs, hrhs, hceq_sum, hdelta_perm, hdelta_orig]
+  have hdiff_nonneg : 0 ≤ c.get u - c.get v := by
+    have := Rat.add_le_add_right (c := -c.get v) |>.mpr hc_mono
+    simpa [Rat.sub_eq_add_neg, Rat.add_neg_cancel] using this
+  exact Rat.add_le_add_left.mpr (Rat.mul_le_mul_of_nonneg_left hx_le hdiff_nonneg)
+
+private theorem checkSymBreakRows_sound {n : Nat} (st : PresolveState n) (u v : Fin n)
+    (colPerm rowPerm : Array Nat) (hsz : colPerm.size = n)
+    (hlt : ∀ j : Fin n, permAt colPerm hsz j < n)
+    (hf : ∀ i₁ i₂ : Fin n, permFn colPerm hsz hlt i₁ = permFn colPerm hsz hlt i₂ → i₁ = i₂)
+    (hvu : permFn colPerm hsz hlt v = u)
+    (hrsz : rowPerm.size = st.rows.size) :
+    ∀ k (hk : k ≤ st.rows.size),
+      (∀ i (hi : i < k), ∀ r, st.rows[i]'(Nat.lt_of_lt_of_le hi hk) = some r →
+        ∀ x : Fin n → Rat, StateFeasible st x → x v ≤ x u →
+          r.sat (fun j => x (permFn colPerm hsz hlt j))) →
+      checkSymBreakRows.loop st v colPerm rowPerm k = true →
+      ∀ i : Fin st.rows.size, ∀ r, st.rows[i] = some r →
+        ∀ x : Fin n → Rat, StateFeasible st x → x v ≤ x u →
+          r.sat (fun j => x (permFn colPerm hsz hlt j)) := by
+  intro k hk hprev hloop i r hr x hx hvxu
+  unfold checkSymBreakRows.loop at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hltK =>
+    cases hcur : st.rows[k] with
+    | none =>
+      simp only [hcur] at hloop
+      have hnext : ∀ m (hm : m < k + 1), ∀ rm, st.rows[m]'(Nat.lt_of_lt_of_le hm hltK) = some rm →
+          ∀ y : Fin n → Rat, StateFeasible st y → y v ≤ y u →
+            rm.sat (fun j => y (permFn colPerm hsz hlt j)) := by
+        intro m hm rm hrm y hy hyv
+        by_cases hmk : m = k
+        · subst hmk; rw [hcur] at hrm; contradiction
+        · exact hprev m (by omega) rm hrm y hy hyv
+      exact checkSymBreakRows_sound st u v colPerm rowPerm hsz hlt hf hvu hrsz
+        (k + 1) hltK hnext hloop i r hr x hx hvxu
+    | some rowI =>
+      have hrpk : k < rowPerm.size := by rw [hrsz]; exact hltK
+      simp only [hcur, hrpk, ↓reduceDIte] at hloop
+      generalize hokEq :
+        ((if hr : rowPerm[k]'hrpk < st.rows.size then
+            match st.rows[rowPerm[k]'hrpk]'hr with
+            | some rowR => checkConPermImplies rowR rowI colPerm
+            | none => false
+          else false) || checkSymChainRow rowI v colPerm) = rowOk at hloop
+      cases hokB : rowOk with
+      | false => simp [hokB] at hloop
+      | true =>
+        simp only [hokB, ↓reduceIte] at hloop
+        have hok :
+            ((if hr : rowPerm[k]'hrpk < st.rows.size then
+                match st.rows[rowPerm[k]'hrpk]'hr with
+                | some rowR => checkConPermImplies rowR rowI colPerm
+                | none => false
+              else false) || checkSymChainRow rowI v colPerm) = true := hokEq.trans hokB
+        have hcurSat : ∀ y : Fin n → Rat, StateFeasible st y → y v ≤ y u →
+            rowI.sat (fun j => y (permFn colPerm hsz hlt j)) := by
+          intro y hy hyv
+          rcases Bool.or_eq_true _ _ |>.mp hok with hdir | hchain
+          · split at hdir
+            · next hri =>
+              cases hsrc : st.rows[rowPerm[k]'hrpk]'hri with
+              | none => simp [hsrc] at hdir
+              | some rowR =>
+                simp only [hsrc] at hdir
+                exact checkConPermImplies_sound hsz hlt hf hdir (hy.2.1 ⟨rowPerm[k]'hrpk, hri⟩ rowR hsrc)
+            · contradiction
+          · exact checkSymChainRow_loop_sound rowI u v colPerm hsz hlt hvu
+              (hy.2.1 ⟨k, hltK⟩ rowI hcur) hyv 0 hchain
+        have hnext : ∀ m (hm : m < k + 1), ∀ rm, st.rows[m]'(Nat.lt_of_lt_of_le hm hltK) = some rm →
+            ∀ y : Fin n → Rat, StateFeasible st y → y v ≤ y u →
+              rm.sat (fun j => y (permFn colPerm hsz hlt j)) := by
+          intro m hm rm hrm y hy hyv
+          by_cases hmk : m = k
+          · subst hmk
+            rw [hcur] at hrm; injection hrm with hEq; subst hEq
+            exact hcurSat y hy hyv
+          · exact hprev m (by omega) rm hrm y hy hyv
+        exact checkSymBreakRows_sound st u v colPerm rowPerm hsz hlt hf hvu hrsz
+          (k + 1) hltK hnext hloop i r hr x hx hvxu
+  · next hge =>
+    have hkn : k = st.rows.size := by omega
+    subst hkn
+    exact hprev i.1 i.2 r hr x hx hvxu
+termination_by k _ _ _ _ _ _ _ _ => st.rows.size - k
+
+/-- Soundness of a single `PresolveStep`: proves both forward objective-preserving projection
+and backward solution lifting with exact objective equality. -/
+theorem applyPresolveStep_sound {n : Nat} {st st' : PresolveState n} {step : PresolveStep}
+    (h : applyPresolveStep st step = some st') :
+    (∀ x : Fin n → Rat, StateFeasible st x →
+      ∃ x' : Fin n → Rat, StateFeasible st' x' ∧ StateObjective st' x' ≤ StateObjective st x) ∧
+    (∀ x' : Fin n → Rat, StateFeasible st' x' →
+      StateFeasible st x' ∧ StateObjective st x' = StateObjective st' x') := by
+  cases step with
+  | roundBound col isUpper newBound =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hcol =>
+      split at h
+      · next hint =>
+        cases isUpper
+        · simp only [Bool.false_eq_true, ↓reduceIte] at h
+          cases h0 : st.lbAt ⟨col, hcol⟩ with
+          | none => simp [h0] at h
+          | some oldL =>
+            simp only [h0] at h
+            split at h
+            · next hok =>
+              injection h with hst; subst hst
+              simp only [Bool.and_eq_true] at hok
+              have h1 : newBound ≤ (oldL.ceil : Rat) := decide_eq_true_eq.mp hok.1
+              have h2 : oldL ≤ newBound := decide_eq_true_eq.mp hok.2
+              constructor
+              · intro x hx
+                refine ⟨x, ⟨?_, hx.2.1, hx.2.2⟩, Rat.le_refl⟩
+                refine (state_set_lb_inVarBounds st hcol newBound x).mpr (fun j => ⟨?_, (hx.1 j).2⟩)
+                by_cases hj : j = ⟨col, hcol⟩
+                · subst hj; simp only [↓reduceIte]
+                  obtain ⟨z, hz⟩ := hx.2.2 ⟨col, hcol⟩ hint
+                  have hge : oldL ≤ (z : Rat) := hz ▸ (hx.1 ⟨col, hcol⟩).1 oldL h0
+                  have hceil : (oldL.ceil : Rat) ≤ (z : Rat) :=
+                    Rat.intCast_le_intCast.mpr (Rat.ceil_le_iff.mpr hge)
+                  rw [hz]; exact Rat.le_trans h1 hceil
+                · simp only [hj, ↓reduceIte]; exact (hx.1 j).1
+              · intro x' hx'
+                have hb' := (state_set_lb_inVarBounds st hcol newBound x').mp hx'.1
+                refine ⟨⟨fun j => ⟨?_, (hb' j).2⟩, hx'.2.1, hx'.2.2⟩, rfl⟩
+                intro l hl
+                by_cases hj : j = ⟨col, hcol⟩
+                · subst hj
+                  rw [h0] at hl; injection hl with hlEq; subst hlEq
+                  have hxNew : newBound ≤ x' ⟨col, hcol⟩ := by simpa using (hb' ⟨col, hcol⟩).1
+                  exact Rat.le_trans h2 hxNew
+                · have hne := (hb' j).1; simp only [hj, ↓reduceIte] at hne; exact hne l hl
+            · contradiction
+        · simp only [↓reduceIte] at h
+          cases h0 : st.ubAt ⟨col, hcol⟩ with
+          | none => simp [h0] at h
+          | some oldU =>
+            simp only [h0] at h
+            split at h
+            · next hok =>
+              injection h with hst; subst hst
+              simp only [Bool.and_eq_true] at hok
+              have h1 : (oldU.floor : Rat) ≤ newBound := decide_eq_true_eq.mp hok.1
+              have h2 : newBound ≤ oldU := decide_eq_true_eq.mp hok.2
+              constructor
+              · intro x hx
+                refine ⟨x, ⟨?_, hx.2.1, hx.2.2⟩, Rat.le_refl⟩
+                refine (state_set_ub_inVarBounds st hcol newBound x).mpr (fun j => ⟨(hx.1 j).1, ?_⟩)
+                by_cases hj : j = ⟨col, hcol⟩
+                · subst hj; simp only [↓reduceIte]
+                  obtain ⟨z, hz⟩ := hx.2.2 ⟨col, hcol⟩ hint
+                  have hle : (z : Rat) ≤ oldU := hz ▸ (hx.1 ⟨col, hcol⟩).2 oldU h0
+                  have hfl : (z : Rat) ≤ (oldU.floor : Rat) :=
+                    Rat.intCast_le_intCast.mpr (Rat.le_floor_iff.mpr hle)
+                  rw [hz]; exact Rat.le_trans hfl h1
+                · simp only [hj, ↓reduceIte]; exact (hx.1 j).2
+              · intro x' hx'
+                have hb' := (state_set_ub_inVarBounds st hcol newBound x').mp hx'.1
+                refine ⟨⟨fun j => ⟨(hb' j).1, ?_⟩, hx'.2.1, hx'.2.2⟩, rfl⟩
+                intro u hu
+                by_cases hj : j = ⟨col, hcol⟩
+                · subst hj
+                  rw [h0] at hu; injection hu with huEq; subst huEq
+                  have hxNew : x' ⟨col, hcol⟩ ≤ newBound := by simpa using (hb' ⟨col, hcol⟩).2
+                  exact Rat.le_trans hxNew h2
+                · have hne := (hb' j).2; simp only [hj, ↓reduceIte] at hne; exact hne u hu
+            · contradiction
+      · contradiction
+    · contradiction
+  | activityBound row col isUpper roundInt newBound =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hrow =>
+      cases hcon : st.rows[row] with
+      | none => simp [hcon] at h
+      | some con =>
+        simp only [hcon] at h
+        split at h
+        · next hcol =>
+          let j : Fin n := ⟨col, hcol⟩
+          let a : Rat := con.coeffs.get j
+          by_cases ha0 : a = 0
+          · have ha0b : (a == 0) = true := beq_iff_eq.mpr ha0
+            simp only [a, j, ha0b, ↓reduceIte] at h; contradiction
+          · have ha0b : (a == 0) = false := beq_false_of_ne ha0
+            simp only [a, j, ha0b, Bool.false_eq_true, ↓reduceIte] at h
+            cases isUpper
+            · -- Lower bound tightening
+              simp only [Bool.false_eq_true, ↓reduceIte] at h
+              have himp_step :
+                  ∀ imp,
+                    (if 0 < a then
+                      if con.sense == .ge || con.sense == .eq then
+                        (sumMaxAct st con.coeffs (some j)).map (fun M => (con.rhs - M) / a)
+                      else none
+                    else
+                      if con.sense == .le || con.sense == .eq then
+                        (sumMinAct st con.coeffs (some j)).map (fun m => (con.rhs - m) / a)
+                      else none) = some imp →
+                    ∀ x : Fin n → Rat, StateFeasible st x → imp ≤ x j := by
+                intro imp himp x hx
+                have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                unfold LinCon.sat at hsat
+                by_cases hpos : 0 < a
+                · simp only [hpos, ↓reduceIte] at himp
+                  split at himp
+                  · next hs =>
+                    cases hM : sumMaxAct st con.coeffs (some j) with
+                    | none => simp [hM] at himp
+                    | some M =>
+                      simp only [hM, Option.map_some] at himp
+                      injection himp with hEq; subst hEq
+                      have hge : con.rhs ≤ con.coeffs.dot x := by
+                        rcases Bool.or_eq_true _ _ |>.mp hs with h1 | h1
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat ▸ Rat.le_refl
+                      have hleM := sumMaxAct_some_ge hx.1 hM
+                      have h1 : con.rhs ≤ M + a * x j := Rat.le_trans hge hleM
+                      have h2 : con.rhs - M ≤ a * x j := by
+                        have := Rat.add_le_add_right (c := -M) |>.mpr h1
+                        rw [Rat.add_comm M (a * x j), Rat.add_assoc, Rat.add_neg_cancel, Rat.add_zero, ← Rat.sub_eq_add_neg] at this
+                        exact this
+                      have hdiv := rat_div_le_div_of_pos h2 hpos
+                      rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · contradiction
+                · have hneg : a < 0 := Rat.lt_of_le_of_ne (Rat.not_lt.mp hpos) ha0
+                  simp only [hpos, ↓reduceIte] at himp
+                  split at himp
+                  · next hs =>
+                    cases hm : sumMinAct st con.coeffs (some j) with
+                    | none => simp [hm] at himp
+                    | some m =>
+                      simp only [hm, Option.map_some] at himp
+                      injection himp with hEq; subst hEq
+                      have hle : con.coeffs.dot x ≤ con.rhs := by
+                        rcases Bool.or_eq_true _ _ |>.mp hs with h1 | h1
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat ▸ Rat.le_refl
+                      have hgeM := sumMinAct_some_le hx.1 hm
+                      have h1 : m + a * x j ≤ con.rhs := Rat.le_trans hgeM hle
+                      have h2 : a * x j ≤ con.rhs - m := by
+                        have := Rat.add_le_add_right (c := -m) |>.mpr h1
+                        rw [Rat.add_comm m (a * x j), Rat.add_assoc, Rat.add_neg_cancel, Rat.add_zero, ← Rat.sub_eq_add_neg] at this
+                        exact this
+                      have hdiv := rat_div_le_div_of_neg h2 hneg
+                      rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · contradiction
+              generalize himpEq :
+                (if 0 < a then
+                  if con.sense == .ge || con.sense == .eq then
+                    (sumMaxAct st con.coeffs (some j)).map (fun M => (con.rhs - M) / a)
+                  else none
+                else
+                  if con.sense == .le || con.sense == .eq then
+                    (sumMinAct st con.coeffs (some j)).map (fun m => (con.rhs - m) / a)
+                  else none) = impOpt at h
+              cases impOpt with
+              | none => simp at h
+              | some imp =>
+                simp only at h
+                have hxImp := himp_step imp himpEq
+                cases roundInt
+                · simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  split at h
+                  · next hok =>
+                    injection h with hst; subst hst
+                    simp only [Bool.and_eq_true] at hok
+                    have hle : newBound ≤ imp := decide_eq_true_eq.mp hok.1
+                    have hold : ∀ l, st.lbAt j = some l → l ≤ newBound := by
+                      intro l hl; have hb := hok.2; unfold optLbLe at hb; rw [hl] at hb
+                      exact decide_eq_true_eq.mp hb
+                    constructor
+                    · intro x hx
+                      refine ⟨x, ⟨?_, hx.2.1, hx.2.2⟩, Rat.le_refl⟩
+                      refine (state_set_lb_inVarBounds st hcol newBound x).mpr (fun k => ⟨?_, (hx.1 k).2⟩)
+                      by_cases hkj : k = ⟨col, hcol⟩
+                      · subst hkj; simp only [↓reduceIte]; exact Rat.le_trans hle (hxImp x hx)
+                      · simp only [hkj, ↓reduceIte]; exact (hx.1 k).1
+                    · intro x' hx'
+                      have hb' := (state_set_lb_inVarBounds st hcol newBound x').mp hx'.1
+                      refine ⟨⟨fun k => ⟨?_, (hb' k).2⟩, hx'.2.1, hx'.2.2⟩, rfl⟩
+                      intro l hl
+                      by_cases hkj : k = ⟨col, hcol⟩
+                      · subst hkj
+                        have hxN : newBound ≤ x' ⟨col, hcol⟩ := by simpa using (hb' ⟨col, hcol⟩).1
+                        exact Rat.le_trans (hold l hl) hxN
+                      · have hne := (hb' k).1; simp only [hkj, ↓reduceIte] at hne; exact hne l hl
+                  · contradiction
+                · simp only [↓reduceIte] at h
+                  cases hint : st.isIntAt j with
+                  | false => simp [j, hint] at h
+                  | true =>
+                    simp only [j, hint, ↓reduceIte] at h
+                    split at h
+                    · next hok =>
+                      injection h with hst; subst hst
+                      simp only [Bool.and_eq_true] at hok
+                      have hle : newBound ≤ (imp.ceil : Rat) := decide_eq_true_eq.mp hok.1
+                      have hold : ∀ l, st.lbAt j = some l → l ≤ newBound := by
+                        intro l hl; have hb := hok.2; unfold optLbLe at hb; rw [hl] at hb
+                        exact decide_eq_true_eq.mp hb
+                      constructor
+                      · intro x hx
+                        refine ⟨x, ⟨?_, hx.2.1, hx.2.2⟩, Rat.le_refl⟩
+                        refine (state_set_lb_inVarBounds st hcol newBound x).mpr (fun k => ⟨?_, (hx.1 k).2⟩)
+                        by_cases hkj : k = ⟨col, hcol⟩
+                        · subst hkj; simp only [↓reduceIte]
+                          obtain ⟨z, hz⟩ := hx.2.2 j hint
+                          have hge : imp ≤ (z : Rat) := hz ▸ hxImp x hx
+                          have hcl : (imp.ceil : Rat) ≤ (z : Rat) :=
+                            Rat.intCast_le_intCast.mpr (Rat.ceil_le_iff.mpr hge)
+                          rw [hz]; exact Rat.le_trans hle hcl
+                        · simp only [hkj, ↓reduceIte]; exact (hx.1 k).1
+                      · intro x' hx'
+                        have hb' := (state_set_lb_inVarBounds st hcol newBound x').mp hx'.1
+                        refine ⟨⟨fun k => ⟨?_, (hb' k).2⟩, hx'.2.1, hx'.2.2⟩, rfl⟩
+                        intro l hl
+                        by_cases hkj : k = ⟨col, hcol⟩
+                        · subst hkj
+                          have hxN : newBound ≤ x' ⟨col, hcol⟩ := by simpa using (hb' ⟨col, hcol⟩).1
+                          exact Rat.le_trans (hold l hl) hxN
+                        · have hne := (hb' k).1; simp only [hkj, ↓reduceIte] at hne; exact hne l hl
+                    · contradiction
+            · -- Upper bound tightening
+              simp only [↓reduceIte] at h
+              have himp_step :
+                  ∀ imp,
+                    (if 0 < a then
+                      if con.sense == .le || con.sense == .eq then
+                        (sumMinAct st con.coeffs (some j)).map (fun m => (con.rhs - m) / a)
+                      else none
+                    else
+                      if con.sense == .ge || con.sense == .eq then
+                        (sumMaxAct st con.coeffs (some j)).map (fun M => (con.rhs - M) / a)
+                      else none) = some imp →
+                    ∀ x : Fin n → Rat, StateFeasible st x → x j ≤ imp := by
+                intro imp himp x hx
+                have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                unfold LinCon.sat at hsat
+                by_cases hpos : 0 < a
+                · simp only [hpos, ↓reduceIte] at himp
+                  split at himp
+                  · next hs =>
+                    cases hm : sumMinAct st con.coeffs (some j) with
+                    | none => simp [hm] at himp
+                    | some m =>
+                      simp only [hm, Option.map_some] at himp
+                      injection himp with hEq; subst hEq
+                      have hle : con.coeffs.dot x ≤ con.rhs := by
+                        rcases Bool.or_eq_true _ _ |>.mp hs with h1 | h1
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat ▸ Rat.le_refl
+                      have hgeM := sumMinAct_some_le hx.1 hm
+                      have h1 : m + a * x j ≤ con.rhs := Rat.le_trans hgeM hle
+                      have h2 : a * x j ≤ con.rhs - m := by
+                        have := Rat.add_le_add_right (c := -m) |>.mpr h1
+                        rw [Rat.add_comm m (a * x j), Rat.add_assoc, Rat.add_neg_cancel, Rat.add_zero, ← Rat.sub_eq_add_neg] at this
+                        exact this
+                      have hdiv := rat_div_le_div_of_pos h2 hpos
+                      rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · contradiction
+                · have hneg : a < 0 := Rat.lt_of_le_of_ne (Rat.not_lt.mp hpos) ha0
+                  simp only [hpos, ↓reduceIte] at himp
+                  split at himp
+                  · next hs =>
+                    cases hM : sumMaxAct st con.coeffs (some j) with
+                    | none => simp [hM] at himp
+                    | some M =>
+                      simp only [hM, Option.map_some] at himp
+                      injection himp with hEq; subst hEq
+                      have hge : con.rhs ≤ con.coeffs.dot x := by
+                        rcases Bool.or_eq_true _ _ |>.mp hs with h1 | h1
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat
+                        · rw [beq_iff_eq.mp h1] at hsat; exact hsat ▸ Rat.le_refl
+                      have hleM := sumMaxAct_some_ge hx.1 hM
+                      have h1 : con.rhs ≤ M + a * x j := Rat.le_trans hge hleM
+                      have h2 : con.rhs - M ≤ a * x j := by
+                        have := Rat.add_le_add_right (c := -M) |>.mpr h1
+                        rw [Rat.add_comm M (a * x j), Rat.add_assoc, Rat.add_neg_cancel, Rat.add_zero, ← Rat.sub_eq_add_neg] at this
+                        exact this
+                      have hdiv := rat_div_le_div_of_neg h2 hneg
+                      rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · contradiction
+              generalize himpEq :
+                (if 0 < a then
+                  if con.sense == .le || con.sense == .eq then
+                    (sumMinAct st con.coeffs (some j)).map (fun m => (con.rhs - m) / a)
+                  else none
+                else
+                  if con.sense == .ge || con.sense == .eq then
+                    (sumMaxAct st con.coeffs (some j)).map (fun M => (con.rhs - M) / a)
+                  else none) = impOpt at h
+              cases impOpt with
+              | none => simp at h
+              | some imp =>
+                simp only at h
+                have hxImp := himp_step imp himpEq
+                cases roundInt
+                · simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  split at h
+                  · next hok =>
+                    injection h with hst; subst hst
+                    simp only [Bool.and_eq_true] at hok
+                    have hle : imp ≤ newBound := decide_eq_true_eq.mp hok.1
+                    have hold : ∀ u, st.ubAt j = some u → newBound ≤ u := by
+                      intro u hu; have hb := hok.2; unfold optUbLe at hb; rw [hu] at hb
+                      exact decide_eq_true_eq.mp hb
+                    constructor
+                    · intro x hx
+                      refine ⟨x, ⟨?_, hx.2.1, hx.2.2⟩, Rat.le_refl⟩
+                      refine (state_set_ub_inVarBounds st hcol newBound x).mpr (fun k => ⟨(hx.1 k).1, ?_⟩)
+                      by_cases hkj : k = ⟨col, hcol⟩
+                      · subst hkj; simp only [↓reduceIte]; exact Rat.le_trans (hxImp x hx) hle
+                      · simp only [hkj, ↓reduceIte]; exact (hx.1 k).2
+                    · intro x' hx'
+                      have hb' := (state_set_ub_inVarBounds st hcol newBound x').mp hx'.1
+                      refine ⟨⟨fun k => ⟨(hb' k).1, ?_⟩, hx'.2.1, hx'.2.2⟩, rfl⟩
+                      intro u hu
+                      by_cases hkj : k = ⟨col, hcol⟩
+                      · subst hkj
+                        have hxN : x' ⟨col, hcol⟩ ≤ newBound := by simpa using (hb' ⟨col, hcol⟩).2
+                        exact Rat.le_trans hxN (hold u hu)
+                      · have hne := (hb' k).2; simp only [hkj, ↓reduceIte] at hne; exact hne u hu
+                  · contradiction
+                · simp only [↓reduceIte] at h
+                  cases hint : st.isIntAt j with
+                  | false => simp [j, hint] at h
+                  | true =>
+                    simp only [j, hint, ↓reduceIte] at h
+                    split at h
+                    · next hok =>
+                      injection h with hst; subst hst
+                      simp only [Bool.and_eq_true] at hok
+                      have hle : (imp.floor : Rat) ≤ newBound := decide_eq_true_eq.mp hok.1
+                      have hold : ∀ u, st.ubAt j = some u → newBound ≤ u := by
+                        intro u hu; have hb := hok.2; unfold optUbLe at hb; rw [hu] at hb
+                        exact decide_eq_true_eq.mp hb
+                      constructor
+                      · intro x hx
+                        refine ⟨x, ⟨?_, hx.2.1, hx.2.2⟩, Rat.le_refl⟩
+                        refine (state_set_ub_inVarBounds st hcol newBound x).mpr (fun k => ⟨(hx.1 k).1, ?_⟩)
+                        by_cases hkj : k = ⟨col, hcol⟩
+                        · subst hkj; simp only [↓reduceIte]
+                          obtain ⟨z, hz⟩ := hx.2.2 j hint
+                          have hle' : (z : Rat) ≤ imp := hz ▸ hxImp x hx
+                          have hfl : (z : Rat) ≤ (imp.floor : Rat) :=
+                            Rat.intCast_le_intCast.mpr (Rat.le_floor_iff.mpr hle')
+                          rw [hz]; exact Rat.le_trans hfl hle
+                        · simp only [hkj, ↓reduceIte]; exact (hx.1 k).2
+                      · intro x' hx'
+                        have hb' := (state_set_ub_inVarBounds st hcol newBound x').mp hx'.1
+                        refine ⟨⟨fun k => ⟨(hb' k).1, ?_⟩, hx'.2.1, hx'.2.2⟩, rfl⟩
+                        intro u hu
+                        by_cases hkj : k = ⟨col, hcol⟩
+                        · subst hkj
+                          have hxN : x' ⟨col, hcol⟩ ≤ newBound := by simpa using (hb' ⟨col, hcol⟩).2
+                          exact Rat.le_trans hxN (hold u hu)
+                        · have hne := (hb' k).2; simp only [hkj, ↓reduceIte] at hne; exact hne u hu
+                    · contradiction
+        · contradiction
+    · contradiction
+  | gcdRowDiv row divisor =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hrow =>
+      split at h
+      · next hposInt =>
+        cases hcon : st.rows[row] with
+        | none => simp [hcon] at h
+        | some con =>
+          simp only [hcon] at h
+          let dRat : Rat := (divisor : Rat)
+          have hdPos : 0 < dRat := by
+            change ((0 : Int) : Rat) < (divisor : Rat)
+            exact Rat.intCast_lt_intCast.mpr hposInt
+          have hdNe : dRat ≠ 0 := Rat.ne_of_gt hdPos
+          let newCoeffs : RatVec n := RatVec.ofFn (fun j => con.coeffs.get j / dRat)
+          have hdotDiv : ∀ x : Fin n → Rat, newCoeffs.dot x = con.coeffs.dot x / dRat := by
+            intro x
+            unfold RatVec.dot
+            have h1 : finSum n (fun j => newCoeffs.get j * x j) =
+                finSum n (fun j => (con.coeffs.get j * x j) * dRat⁻¹) := by
+              apply finSum_congr; intro j
+              simp only [newCoeffs, RatVec.get_ofFn, Rat.div_def, Rat.mul_assoc, Rat.mul_comm dRat⁻¹ (x j)]
+            rw [h1, finSum_mul_const, ← Rat.div_def]
+          split at h
+          · next hintVec =>
+            cases hs : con.sense with
+            | le =>
+              rw [hs] at h; dsimp only at h
+              injection h with hst; subst hst
+              have hnewSat : ∀ x : Fin n → Rat, StateFeasible st x →
+                  ({ coeffs := newCoeffs, sense := .le, rhs := ((con.rhs / dRat).floor : Rat) } : LinCon n).sat x := by
+                intro x hx
+                have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                unfold LinCon.sat at hsat ⊢; rw [hs] at hsat
+                rw [hdotDiv]
+                have hle : con.coeffs.dot x / dRat ≤ con.rhs / dRat := rat_div_le_div_of_pos hsat hdPos
+                have hintDot : isRatInt (newCoeffs.dot x) :=
+                  isIntegralLinVec_dot_int hintVec ((stateFeasible_toInstance st x).mp hx)
+                rw [hdotDiv] at hintDot
+                obtain ⟨z, hz⟩ := hintDot
+                rw [hz] at hle ⊢
+                exact Rat.intCast_le_intCast.mpr (Rat.le_floor_iff.mpr hle)
+              constructor
+              · intro x hx
+                refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                rw [array_set_getElem_fin] at hr
+                by_cases hir : i.1 = row
+                · simp only [hir, ↓reduceIte] at hr
+                  injection hr with hrEq; subst r
+                  exact hnewSat x hx
+                · simp only [hir, ↓reduceIte] at hr
+                  exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+              · intro x' hx'
+                refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                by_cases hir : i.1 = row
+                · have hrEq : r = con := by
+                    have hget : st.rows[i] = some con := by
+                      change st.rows[i.1] = some con; simpa [hir] using hcon
+                    rw [hget] at hr; injection hr with h1; exact h1.symm
+                  subst r
+                  have hs' := hx'.2.1 ⟨row, by rw [Array.size_set]; exact hrow⟩
+                    { coeffs := newCoeffs, sense := .le, rhs := ((con.rhs / dRat).floor : Rat) }
+                    (by rw [array_set_getElem_fin]; simp only [↓reduceIte]; rfl)
+                  unfold LinCon.sat at hs' ⊢; rw [hs]
+                  rw [hdotDiv] at hs'
+                  have h1 : con.coeffs.dot x' / dRat ≤ con.rhs / dRat :=
+                    Rat.le_trans hs' (rat_floor_le (con.rhs / dRat))
+                  have hmul := Rat.mul_le_mul_of_nonneg_right h1 (Rat.le_of_lt hdPos)
+                  rwa [Rat.div_mul_cancel hdNe, Rat.div_mul_cancel hdNe] at hmul
+                · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                    (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+            | ge =>
+              rw [hs] at h; dsimp only at h
+              injection h with hst; subst hst
+              have hnewSat : ∀ x : Fin n → Rat, StateFeasible st x →
+                  ({ coeffs := newCoeffs, sense := .ge, rhs := ((con.rhs / dRat).ceil : Rat) } : LinCon n).sat x := by
+                intro x hx
+                have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                unfold LinCon.sat at hsat ⊢; rw [hs] at hsat
+                rw [hdotDiv]
+                have hge : con.rhs / dRat ≤ con.coeffs.dot x / dRat := rat_div_le_div_of_pos hsat hdPos
+                have hintDot : isRatInt (newCoeffs.dot x) :=
+                  isIntegralLinVec_dot_int hintVec ((stateFeasible_toInstance st x).mp hx)
+                rw [hdotDiv] at hintDot
+                obtain ⟨z, hz⟩ := hintDot
+                rw [hz] at hge ⊢
+                exact Rat.intCast_le_intCast.mpr (Rat.ceil_le_iff.mpr hge)
+              constructor
+              · intro x hx
+                refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                rw [array_set_getElem_fin] at hr
+                by_cases hir : i.1 = row
+                · simp only [hir, ↓reduceIte] at hr
+                  injection hr with hrEq; subst r
+                  exact hnewSat x hx
+                · simp only [hir, ↓reduceIte] at hr
+                  exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+              · intro x' hx'
+                refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                by_cases hir : i.1 = row
+                · have hrEq : r = con := by
+                    have hget : st.rows[i] = some con := by
+                      change st.rows[i.1] = some con; simpa [hir] using hcon
+                    rw [hget] at hr; injection hr with h1; exact h1.symm
+                  subst r
+                  have hs' := hx'.2.1 ⟨row, by rw [Array.size_set]; exact hrow⟩
+                    { coeffs := newCoeffs, sense := .ge, rhs := ((con.rhs / dRat).ceil : Rat) }
+                    (by rw [array_set_getElem_fin]; simp only [↓reduceIte]; rfl)
+                  unfold LinCon.sat at hs' ⊢; rw [hs]
+                  rw [hdotDiv] at hs'
+                  have h1 : con.rhs / dRat ≤ con.coeffs.dot x' / dRat :=
+                    Rat.le_trans (rat_le_ceil (con.rhs / dRat)) hs'
+                  have hmul := Rat.mul_le_mul_of_nonneg_right h1 (Rat.le_of_lt hdPos)
+                  rwa [Rat.div_mul_cancel hdNe, Rat.div_mul_cancel hdNe] at hmul
+                · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                    (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+            | eq =>
+              rw [hs] at h; dsimp only at h
+              split at h
+              · injection h with hst; subst hst
+                constructor
+                · intro x hx
+                  refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                  rw [array_set_getElem_fin] at hr
+                  by_cases hir : i.1 = row
+                  · simp only [hir, ↓reduceIte] at hr
+                    injection hr with hrEq; subst r
+                    have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                    unfold LinCon.sat at hsat ⊢; rw [hs] at hsat
+                    rw [hdotDiv, hsat]
+                  · simp only [hir, ↓reduceIte] at hr
+                    exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                · intro x' hx'
+                  refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                  by_cases hir : i.1 = row
+                  · have hrEq : r = con := by
+                      have hget : st.rows[i] = some con := by
+                        change st.rows[i.1] = some con; simpa [hir] using hcon
+                      rw [hget] at hr; injection hr with h1; exact h1.symm
+                    subst r
+                    have hs' := hx'.2.1 ⟨row, by rw [Array.size_set]; exact hrow⟩
+                      { coeffs := newCoeffs, sense := .eq, rhs := con.rhs / dRat }
+                      (by rw [array_set_getElem_fin]; simp only [↓reduceIte]; rfl)
+                    unfold LinCon.sat at hs' ⊢; rw [hs]
+                    rw [hdotDiv] at hs'
+                    have hmul := congrArg (· * dRat) hs'
+                    rwa [Rat.div_mul_cancel hdNe, Rat.div_mul_cancel hdNe] at hmul
+                  · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                      (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+              · contradiction
+          · contradiction
+      · contradiction
+    · contradiction
+  | substFixedRow row col val =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hrow =>
+      split at h
+      · next hcol =>
+        split at h
+        · next hfix =>
+          simp only [Bool.and_eq_true, beq_iff_eq] at hfix
+          cases hcon : st.rows[row] with
+          | none => simp [hcon] at h
+          | some con =>
+            simp only [hcon] at h
+            injection h with hst; subst hst
+            let j : Fin n := ⟨col, hcol⟩
+            let a := con.coeffs.get j
+            let newCoeffs : RatVec n := RatVec.ofFn (fun k => if k = j then 0 else con.coeffs.get k)
+            have hdotEq : ∀ x : Fin n → Rat, x j = val →
+                newCoeffs.dot x = con.coeffs.dot x - a * val := by
+              intro x hxv
+              have hsp := dot_split_col con.coeffs j x
+              have hnc : newCoeffs.dot x =
+                  finSum n (fun k => if some j = some k then 0 else con.coeffs.get k * x k) := by
+                unfold RatVec.dot
+                apply finSum_congr; intro k
+                by_cases hkj : k = j
+                · subst hkj; simp [newCoeffs, Rat.zero_mul]
+                · have hne : some j ≠ some k := fun e => hkj (Option.some.inj e).symm
+                  simp [newCoeffs, hkj, hne]
+              rw [hnc, hsp, hxv]
+              have hcancel :
+                  (finSum n fun k => if some j = some k then 0 else con.coeffs.get k * x k) + a * val - a * val =
+                  finSum n fun k => if some j = some k then 0 else con.coeffs.get k * x k := by
+                rw [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.add_neg_cancel, Rat.add_zero]
+              exact hcancel.symm
+            have hsatIff : ∀ x : Fin n → Rat, inVarBounds st.lbAt st.ubAt x →
+                (({ coeffs := newCoeffs, sense := con.sense, rhs := con.rhs - a * val } : LinCon n).sat x ↔
+                 con.sat x) := by
+              intro x hb
+              have hxv : x j = val :=
+                Rat.le_antisymm ((hb j).2 val hfix.2) ((hb j).1 val hfix.1)
+              unfold LinCon.sat
+              rw [hdotEq x hxv]
+              cases con.sense with
+              | le =>
+                constructor
+                · intro h1
+                  have := Rat.add_le_add_right (c := a * val) |>.mpr h1
+                  simpa [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.neg_add_cancel, Rat.add_zero] using this
+                · intro h1
+                  have := Rat.add_le_add_right (c := -(a * val)) |>.mpr h1
+                  simpa [Rat.sub_eq_add_neg] using this
+              | ge =>
+                constructor
+                · intro h1
+                  have := Rat.add_le_add_right (c := a * val) |>.mpr h1
+                  simpa [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.neg_add_cancel, Rat.add_zero] using this
+                · intro h1
+                  have := Rat.add_le_add_right (c := -(a * val)) |>.mpr h1
+                  simpa [Rat.sub_eq_add_neg] using this
+              | eq =>
+                constructor
+                · intro h1
+                  have := congrArg (· + a * val) h1
+                  simpa [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.neg_add_cancel, Rat.add_zero] using this
+                · intro h1; rw [h1]
+            constructor
+            · intro x hx
+              refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+              rw [array_set_getElem_fin] at hr
+              by_cases hir : i.1 = row
+              · simp only [hir, ↓reduceIte] at hr
+                injection hr with hrEq; subst r
+                exact (hsatIff x hx.1).mpr (hx.2.1 ⟨row, hrow⟩ con hcon)
+              · simp only [hir, ↓reduceIte] at hr
+                exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+            · intro x' hx'
+              refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+              by_cases hir : i.1 = row
+              · have hrEq : r = con := by
+                  have hget : st.rows[i] = some con := by
+                    change st.rows[i.1] = some con; simpa [hir] using hcon
+                  rw [hget] at hr; injection hr with h1; exact h1.symm
+                subst r
+                have hs' := hx'.2.1 ⟨row, by rw [Array.size_set]; exact hrow⟩
+                  { coeffs := newCoeffs, sense := con.sense, rhs := con.rhs - a * val }
+                  (by rw [array_set_getElem_fin]; simp only [↓reduceIte]; rfl)
+                exact (hsatIff x' hx'.1).mp hs'
+              · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                  (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+        · contradiction
+      · contradiction
+    · contradiction
+  | substFixedObj col val =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hcol =>
+      split at h
+      · next hfix =>
+        simp only [Bool.and_eq_true, beq_iff_eq] at hfix
+        injection h with hst; subst hst
+        let j : Fin n := ⟨col, hcol⟩
+        have hobjEq : ∀ x : Fin n → Rat, inVarBounds st.lbAt st.ubAt x →
+            StateObjective { st with
+              obj := RatVec.ofFn (fun k => if k = j then 0 else st.obj.get k),
+              objConst := st.objConst + st.obj.get j * val } x =
+            StateObjective st x := by
+          intro x hb
+          have hxv : x j = val :=
+            Rat.le_antisymm ((hb j).2 val hfix.2) ((hb j).1 val hfix.1)
+          unfold StateObjective
+          have hsp : finSum n (fun k => st.obj.get k * x k) =
+              finSum n (fun k => (if k = j then 0 else st.obj.get k) * x k) + st.obj.get j * val := by
+            have h1 : ∀ k : Fin n, st.obj.get k * x k =
+                (if k = j then 0 else st.obj.get k) * x k + (if k = j then st.obj.get j * val else 0) := by
+              intro k
+              by_cases hkj : k = j
+              · subst hkj; simp [hxv, Rat.zero_mul, Rat.zero_add]
+              · simp [hkj, Rat.add_zero]
+            rw [finSum_congr h1, finSum_add, finSum_single]
+          simp only [RatVec.get_ofFn]
+          rw [hsp, Rat.add_assoc, Rat.add_comm (st.obj.get j * val)]
+        constructor
+        · intro x hx
+          refine ⟨x, hx, ?_⟩
+          rw [hobjEq x hx.1]; exact Rat.le_refl
+        · intro x' hx'
+          exact ⟨hx', (hobjEq x' hx'.1).symm⟩
+      · contradiction
+    · contradiction
+  | singletonRowElim row col roundInt =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hrow =>
+      split at h
+      · next hcol =>
+        let j : Fin n := ⟨col, hcol⟩
+        cases hcon : st.rows[row] with
+        | none => simp [hcon] at h
+        | some con =>
+          simp only [hcon] at h
+          let a : Rat := con.coeffs.get j
+          split at h
+          · next hok =>
+            simp only [Bool.and_eq_true, Bool.not_eq_true'] at hok
+            have ha0 : a ≠ 0 := fun heq => by
+              have hb : (a == 0) = true := beq_iff_eq.mpr heq
+              rw [hb] at hok; exact Bool.noConfusion hok.1
+            have hzero := checkOnlyColNonzero_loop_sound con.coeffs j 0 (Nat.zero_le n)
+              (fun _ hi => by omega) hok.2
+            have hdot : ∀ x : Fin n → Rat, con.coeffs.dot x = a * x j :=
+              fun x => dot_singleton hzero x
+            let b : Rat := con.rhs / a
+            cases hs : con.sense with
+            | eq =>
+              rw [hs] at h; dsimp only at h
+              split at h
+              · contradiction
+              · injection h with hst; subst hst
+                have hsatIff : ∀ x : Fin n → Rat, con.sat x ↔ (b ≤ x j ∧ x j ≤ b) := by
+                  intro x; unfold LinCon.sat; rw [hs, hdot]
+                  constructor
+                  · intro heq
+                    have hxEq : x j = b := by
+                      have := congrArg (· / a) heq
+                      rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at this
+                    rw [hxEq]; exact ⟨Rat.le_refl, Rat.le_refl⟩
+                  · rintro ⟨h1, h2⟩
+                    have hxEq : x j = b := Rat.le_antisymm h2 h1
+                    rw [hxEq]; exact rat_mul_div_cancel_left ha0
+                have hlbub : ∀ x : Fin n → Rat,
+                    inVarBounds
+                      (PresolveState.lbAt { st with
+                        lb := st.lb.set col (tightenLBOpt (st.lbAt j) b) (by rw [st.lb_size]; exact hcol)
+                        lb_size := by rw [Array.size_set]; exact st.lb_size
+                        ub := st.ub.set col (tightenUBOpt (st.ubAt j) b) (by rw [st.ub_size]; exact hcol)
+                        ub_size := by rw [Array.size_set]; exact st.ub_size
+                        rows := st.rows.set row none hrow })
+                      (PresolveState.ubAt { st with
+                        lb := st.lb.set col (tightenLBOpt (st.lbAt j) b) (by rw [st.lb_size]; exact hcol)
+                        lb_size := by rw [Array.size_set]; exact st.lb_size
+                        ub := st.ub.set col (tightenUBOpt (st.ubAt j) b) (by rw [st.ub_size]; exact hcol)
+                        ub_size := by rw [Array.size_set]; exact st.ub_size
+                        rows := st.rows.set row none hrow }) x ↔
+                    (inVarBounds st.lbAt st.ubAt x ∧ b ≤ x j ∧ x j ≤ b) := by
+                  intro x
+                  let stMid : PresolveState n := { st with
+                    lb := st.lb.set col (tightenLBOpt (st.lbAt j) b) (by rw [st.lb_size]; exact hcol)
+                    lb_size := by rw [Array.size_set]; exact st.lb_size }
+                  have h1 := state_set_ub_opt_inVarBounds stMid hcol b x
+                  have h2 := state_set_lb_opt_inVarBounds st hcol b x
+                  dsimp only at h1 h2
+                  have hstEq : inVarBounds
+                      (PresolveState.lbAt { st with
+                        lb := st.lb.set col (tightenLBOpt (st.lbAt j) b) (by rw [st.lb_size]; exact hcol)
+                        lb_size := by rw [Array.size_set]; exact st.lb_size
+                        ub := st.ub.set col (tightenUBOpt (st.ubAt j) b) (by rw [st.ub_size]; exact hcol)
+                        ub_size := by rw [Array.size_set]; exact st.ub_size
+                        rows := st.rows.set row none hrow })
+                      (PresolveState.ubAt { st with
+                        lb := st.lb.set col (tightenLBOpt (st.lbAt j) b) (by rw [st.lb_size]; exact hcol)
+                        lb_size := by rw [Array.size_set]; exact st.lb_size
+                        ub := st.ub.set col (tightenUBOpt (st.ubAt j) b) (by rw [st.ub_size]; exact hcol)
+                        ub_size := by rw [Array.size_set]; exact st.ub_size
+                        rows := st.rows.set row none hrow }) x ↔
+                      inVarBounds
+                        (PresolveState.lbAt { stMid with
+                          ub := stMid.ub.set col (tightenUBOpt (stMid.ubAt ⟨col, hcol⟩) b) (by rw [stMid.ub_size]; exact hcol)
+                          ub_size := by rw [Array.size_set]; exact stMid.ub_size })
+                        (PresolveState.ubAt { stMid with
+                          ub := stMid.ub.set col (tightenUBOpt (stMid.ubAt ⟨col, hcol⟩) b) (by rw [stMid.ub_size]; exact hcol)
+                          ub_size := by rw [Array.size_set]; exact stMid.ub_size }) x := Iff.rfl
+                  rw [hstEq, h1, h2]
+                  exact ⟨fun ⟨⟨hb, hl⟩, hu⟩ => ⟨hb, hl, hu⟩, fun ⟨hb, hl, hu⟩ => ⟨⟨hb, hl⟩, hu⟩⟩
+                constructor
+                · intro x hx
+                  refine ⟨x, ⟨(hlbub x).mpr ⟨hx.1, (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)⟩,
+                    fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                  rw [array_set_getElem_fin] at hr
+                  by_cases hir : i.1 = row
+                  · simp [hir] at hr
+                  · simp only [hir, ↓reduceIte] at hr
+                    exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                · intro x' hx'
+                  obtain ⟨hb, hl, hu⟩ := (hlbub x').mp hx'.1
+                  refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                  by_cases hir : i.1 = row
+                  · have hrEq : r = con := by
+                      have hget : st.rows[i] = some con := by
+                        change st.rows[i.1] = some con; simpa [hir] using hcon
+                      rw [hget] at hr; injection hr with h1; exact h1.symm
+                    subst r; exact (hsatIff x').mpr ⟨hl, hu⟩
+                  · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                      (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+            | le =>
+              rw [hs] at h; dsimp only at h
+              by_cases hpos : 0 < a
+              · simp only [a, j, hpos, ↓reduceIte] at h
+                have hsatIff : ∀ x : Fin n → Rat, con.sat x ↔ x j ≤ b := by
+                  intro x; unfold LinCon.sat; rw [hs, hdot]
+                  constructor
+                  · intro hle
+                    have hdiv := rat_div_le_div_of_pos hle hpos
+                    rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · intro hle
+                    have hmul := Rat.mul_le_mul_of_nonneg_left hle (Rat.le_of_lt hpos)
+                    rwa [rat_mul_div_cancel_left ha0] at hmul
+                cases roundInt
+                · simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  injection h with hst; subst hst
+                  constructor
+                  · intro x hx
+                    refine ⟨x, ⟨(state_set_ub_opt_inVarBounds st hcol b x).mpr
+                      ⟨hx.1, (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)⟩,
+                      fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                    rw [array_set_getElem_fin] at hr
+                    by_cases hir : i.1 = row
+                    · simp [hir] at hr
+                    · simp only [hir, ↓reduceIte] at hr
+                      exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                  · intro x' hx'
+                    obtain ⟨hb, hu⟩ := (state_set_ub_opt_inVarBounds st hcol b x').mp hx'.1
+                    refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                    by_cases hir : i.1 = row
+                    · have hrEq : r = con := by
+                        have hget : st.rows[i] = some con := by
+                          change st.rows[i.1] = some con; simpa [hir] using hcon
+                        rw [hget] at hr; injection hr with h1; exact h1.symm
+                      subst r; exact (hsatIff x').mpr hu
+                    · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                        (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+                · simp only [↓reduceIte] at h
+                  cases hint : st.isIntAt ⟨col, hcol⟩ with
+                  | false => simp [hint] at h
+                  | true =>
+                    simp only [hint, ↓reduceIte] at h; injection h with hst; subst hst
+                    constructor
+                    · intro x hx
+                      obtain ⟨z, hz⟩ := hx.2.2 j hint
+                      have hle : (z : Rat) ≤ b := hz ▸ (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)
+                      have hfl : x j ≤ (b.floor : Rat) := by
+                        rw [hz]; exact Rat.intCast_le_intCast.mpr (Rat.le_floor_iff.mpr hle)
+                      refine ⟨x, ⟨(state_set_ub_opt_inVarBounds st hcol (b.floor : Rat) x).mpr ⟨hx.1, hfl⟩,
+                        fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                      rw [array_set_getElem_fin] at hr
+                      by_cases hir : i.1 = row
+                      · simp [hir] at hr
+                      · simp only [hir, ↓reduceIte] at hr
+                        exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                    · intro x' hx'
+                      obtain ⟨hb, hu⟩ := (state_set_ub_opt_inVarBounds st hcol (b.floor : Rat) x').mp hx'.1
+                      refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                      by_cases hir : i.1 = row
+                      · have hrEq : r = con := by
+                          have hget : st.rows[i] = some con := by
+                            change st.rows[i.1] = some con; simpa [hir] using hcon
+                          rw [hget] at hr; injection hr with h1; exact h1.symm
+                        subst r; exact (hsatIff x').mpr (Rat.le_trans hu (rat_floor_le b))
+                      · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                          (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+              · have hneg : a < 0 := Rat.lt_of_le_of_ne (Rat.not_lt.mp hpos) ha0
+                simp only [a, j, hpos, ↓reduceIte] at h
+                have hsatIff : ∀ x : Fin n → Rat, con.sat x ↔ b ≤ x j := by
+                  intro x; unfold LinCon.sat; rw [hs, hdot]
+                  constructor
+                  · intro hle
+                    have hdiv := rat_div_le_div_of_neg hle hneg
+                    rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · intro hge
+                    have hmul := rat_mul_le_mul_of_nonpos_left hge (Rat.le_of_lt hneg)
+                    rwa [rat_mul_div_cancel_left ha0] at hmul
+                cases roundInt
+                · simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  injection h with hst; subst hst
+                  constructor
+                  · intro x hx
+                    refine ⟨x, ⟨(state_set_lb_opt_inVarBounds st hcol b x).mpr
+                      ⟨hx.1, (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)⟩,
+                      fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                    rw [array_set_getElem_fin] at hr
+                    by_cases hir : i.1 = row
+                    · simp [hir] at hr
+                    · simp only [hir, ↓reduceIte] at hr
+                      exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                  · intro x' hx'
+                    obtain ⟨hb, hl⟩ := (state_set_lb_opt_inVarBounds st hcol b x').mp hx'.1
+                    refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                    by_cases hir : i.1 = row
+                    · have hrEq : r = con := by
+                        have hget : st.rows[i] = some con := by
+                          change st.rows[i.1] = some con; simpa [hir] using hcon
+                        rw [hget] at hr; injection hr with h1; exact h1.symm
+                      subst r; exact (hsatIff x').mpr hl
+                    · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                        (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+                · simp only [↓reduceIte] at h
+                  cases hint : st.isIntAt ⟨col, hcol⟩ with
+                  | false => simp [hint] at h
+                  | true =>
+                    simp only [hint, ↓reduceIte] at h; injection h with hst; subst hst
+                    constructor
+                    · intro x hx
+                      obtain ⟨z, hz⟩ := hx.2.2 j hint
+                      have hge : b ≤ (z : Rat) := hz ▸ (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)
+                      have hcl : (b.ceil : Rat) ≤ x j := by
+                        rw [hz]; exact Rat.intCast_le_intCast.mpr (Rat.ceil_le_iff.mpr hge)
+                      refine ⟨x, ⟨(state_set_lb_opt_inVarBounds st hcol (b.ceil : Rat) x).mpr ⟨hx.1, hcl⟩,
+                        fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                      rw [array_set_getElem_fin] at hr
+                      by_cases hir : i.1 = row
+                      · simp [hir] at hr
+                      · simp only [hir, ↓reduceIte] at hr
+                        exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                    · intro x' hx'
+                      obtain ⟨hb, hl⟩ := (state_set_lb_opt_inVarBounds st hcol (b.ceil : Rat) x').mp hx'.1
+                      refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                      by_cases hir : i.1 = row
+                      · have hrEq : r = con := by
+                          have hget : st.rows[i] = some con := by
+                            change st.rows[i.1] = some con; simpa [hir] using hcon
+                          rw [hget] at hr; injection hr with h1; exact h1.symm
+                        subst r; exact (hsatIff x').mpr (Rat.le_trans (rat_le_ceil b) hl)
+                      · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                          (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+            | ge =>
+              rw [hs] at h; dsimp only at h
+              by_cases hpos : 0 < a
+              · simp only [a, j, hpos, ↓reduceIte] at h
+                have hsatIff : ∀ x : Fin n → Rat, con.sat x ↔ b ≤ x j := by
+                  intro x; unfold LinCon.sat; rw [hs, hdot]
+                  constructor
+                  · intro hge
+                    have hdiv := rat_div_le_div_of_pos hge hpos
+                    rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · intro hge
+                    have hmul := Rat.mul_le_mul_of_nonneg_left hge (Rat.le_of_lt hpos)
+                    rwa [rat_mul_div_cancel_left ha0] at hmul
+                cases roundInt
+                · simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  injection h with hst; subst hst
+                  constructor
+                  · intro x hx
+                    refine ⟨x, ⟨(state_set_lb_opt_inVarBounds st hcol b x).mpr
+                      ⟨hx.1, (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)⟩,
+                      fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                    rw [array_set_getElem_fin] at hr
+                    by_cases hir : i.1 = row
+                    · simp [hir] at hr
+                    · simp only [hir, ↓reduceIte] at hr
+                      exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                  · intro x' hx'
+                    obtain ⟨hb, hl⟩ := (state_set_lb_opt_inVarBounds st hcol b x').mp hx'.1
+                    refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                    by_cases hir : i.1 = row
+                    · have hrEq : r = con := by
+                        have hget : st.rows[i] = some con := by
+                          change st.rows[i.1] = some con; simpa [hir] using hcon
+                        rw [hget] at hr; injection hr with h1; exact h1.symm
+                      subst r; exact (hsatIff x').mpr hl
+                    · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                        (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+                · simp only [↓reduceIte] at h
+                  cases hint : st.isIntAt ⟨col, hcol⟩ with
+                  | false => simp [hint] at h
+                  | true =>
+                    simp only [hint, ↓reduceIte] at h; injection h with hst; subst hst
+                    constructor
+                    · intro x hx
+                      obtain ⟨z, hz⟩ := hx.2.2 j hint
+                      have hge : b ≤ (z : Rat) := hz ▸ (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)
+                      have hcl : (b.ceil : Rat) ≤ x j := by
+                        rw [hz]; exact Rat.intCast_le_intCast.mpr (Rat.ceil_le_iff.mpr hge)
+                      refine ⟨x, ⟨(state_set_lb_opt_inVarBounds st hcol (b.ceil : Rat) x).mpr ⟨hx.1, hcl⟩,
+                        fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                      rw [array_set_getElem_fin] at hr
+                      by_cases hir : i.1 = row
+                      · simp [hir] at hr
+                      · simp only [hir, ↓reduceIte] at hr
+                        exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                    · intro x' hx'
+                      obtain ⟨hb, hl⟩ := (state_set_lb_opt_inVarBounds st hcol (b.ceil : Rat) x').mp hx'.1
+                      refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                      by_cases hir : i.1 = row
+                      · have hrEq : r = con := by
+                          have hget : st.rows[i] = some con := by
+                            change st.rows[i.1] = some con; simpa [hir] using hcon
+                          rw [hget] at hr; injection hr with h1; exact h1.symm
+                        subst r; exact (hsatIff x').mpr (Rat.le_trans (rat_le_ceil b) hl)
+                      · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                          (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+              · have hneg : a < 0 := Rat.lt_of_le_of_ne (Rat.not_lt.mp hpos) ha0
+                simp only [a, j, hpos, ↓reduceIte] at h
+                have hsatIff : ∀ x : Fin n → Rat, con.sat x ↔ x j ≤ b := by
+                  intro x; unfold LinCon.sat; rw [hs, hdot]
+                  constructor
+                  · intro hge
+                    have hdiv := rat_div_le_div_of_neg hge hneg
+                    rwa [Rat.mul_comm a (x j), rat_div_mul_eq ha0] at hdiv
+                  · intro hle
+                    have hmul := rat_mul_le_mul_of_nonpos_left hle (Rat.le_of_lt hneg)
+                    rwa [rat_mul_div_cancel_left ha0] at hmul
+                cases roundInt
+                · simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  injection h with hst; subst hst
+                  constructor
+                  · intro x hx
+                    refine ⟨x, ⟨(state_set_ub_opt_inVarBounds st hcol b x).mpr
+                      ⟨hx.1, (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)⟩,
+                      fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                    rw [array_set_getElem_fin] at hr
+                    by_cases hir : i.1 = row
+                    · simp [hir] at hr
+                    · simp only [hir, ↓reduceIte] at hr
+                      exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                  · intro x' hx'
+                    obtain ⟨hb, hu⟩ := (state_set_ub_opt_inVarBounds st hcol b x').mp hx'.1
+                    refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                    by_cases hir : i.1 = row
+                    · have hrEq : r = con := by
+                        have hget : st.rows[i] = some con := by
+                          change st.rows[i.1] = some con; simpa [hir] using hcon
+                        rw [hget] at hr; injection hr with h1; exact h1.symm
+                      subst r; exact (hsatIff x').mpr hu
+                    · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                        (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+                · simp only [↓reduceIte] at h
+                  cases hint : st.isIntAt ⟨col, hcol⟩ with
+                  | false => simp [hint] at h
+                  | true =>
+                    simp only [hint, ↓reduceIte] at h; injection h with hst; subst hst
+                    constructor
+                    · intro x hx
+                      obtain ⟨z, hz⟩ := hx.2.2 j hint
+                      have hle : (z : Rat) ≤ b := hz ▸ (hsatIff x).mp (hx.2.1 ⟨row, hrow⟩ con hcon)
+                      have hfl : x j ≤ (b.floor : Rat) := by
+                        rw [hz]; exact Rat.intCast_le_intCast.mpr (Rat.le_floor_iff.mpr hle)
+                      refine ⟨x, ⟨(state_set_ub_opt_inVarBounds st hcol (b.floor : Rat) x).mpr ⟨hx.1, hfl⟩,
+                        fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                      rw [array_set_getElem_fin] at hr
+                      by_cases hir : i.1 = row
+                      · simp [hir] at hr
+                      · simp only [hir, ↓reduceIte] at hr
+                        exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                    · intro x' hx'
+                      obtain ⟨hb, hu⟩ := (state_set_ub_opt_inVarBounds st hcol (b.floor : Rat) x').mp hx'.1
+                      refine ⟨⟨hb, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                      by_cases hir : i.1 = row
+                      · have hrEq : r = con := by
+                          have hget : st.rows[i] = some con := by
+                            change st.rows[i.1] = some con; simpa [hir] using hcon
+                          rw [hget] at hr; injection hr with h1; exact h1.symm
+                        subst r; exact (hsatIff x').mpr (Rat.le_trans hu (rat_floor_le b))
+                      · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                          (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+          · contradiction
+      · contradiction
+    · contradiction
+  | redundantRow row =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hrow =>
+      cases hcon : st.rows[row] with
+      | none => simp [hcon] at h
+      | some con =>
+        simp only [hcon] at h
+        generalize hisRedEq :
+          (match con.sense with
+          | .le =>
+            match sumMaxAct st con.coeffs none with
+            | some M => decide (M ≤ con.rhs)
+            | none => false
+          | .ge =>
+            match sumMinAct st con.coeffs none with
+            | some m => decide (con.rhs ≤ m)
+            | none => false
+          | .eq =>
+            match sumMinAct st con.coeffs none, sumMaxAct st con.coeffs none with
+            | some m, some M => decide (con.rhs ≤ m) && decide (M ≤ con.rhs)
+            | _, _ => false) = isRed at h
+        cases hokB : isRed with
+        | false => simp [hokB] at h
+        | true =>
+          simp only [hokB, ↓reduceIte] at h
+          injection h with hst; subst hst
+          have hok :
+              (match con.sense with
+              | .le =>
+                match sumMaxAct st con.coeffs none with
+                | some M => decide (M ≤ con.rhs)
+                | none => false
+              | .ge =>
+                match sumMinAct st con.coeffs none with
+                | some m => decide (con.rhs ≤ m)
+                | none => false
+              | .eq =>
+                match sumMinAct st con.coeffs none, sumMaxAct st con.coeffs none with
+                | some m, some M => decide (con.rhs ≤ m) && decide (M ≤ con.rhs)
+                | _, _ => false) = true := hisRedEq.trans hokB
+          have himplied : ∀ x' : Fin n → Rat, inVarBounds st.lbAt st.ubAt x' → con.sat x' := by
+            intro x' hb
+            unfold LinCon.sat
+            cases hs : con.sense with
+            | le =>
+              rw [hs] at hok
+              cases hM : sumMaxAct st con.coeffs none with
+              | none => simp [hM] at hok
+              | some M =>
+                rw [hM] at hok
+                exact Rat.le_trans (sumMaxAct_none_ge hb hM) (decide_eq_true_eq.mp hok)
+            | ge =>
+              rw [hs] at hok
+              cases hm : sumMinAct st con.coeffs none with
+              | none => simp [hm] at hok
+              | some m =>
+                rw [hm] at hok
+                exact Rat.le_trans (decide_eq_true_eq.mp hok) (sumMinAct_none_le hb hm)
+            | eq =>
+              rw [hs] at hok
+              cases hm : sumMinAct st con.coeffs none with
+              | none => simp [hm] at hok
+              | some m =>
+                cases hM : sumMaxAct st con.coeffs none with
+                | none => simp [hm, hM] at hok
+                | some M =>
+                  rw [hm, hM] at hok
+                  simp only [Bool.and_eq_true] at hok
+                  exact Rat.le_antisymm
+                    (Rat.le_trans (sumMaxAct_none_ge hb hM) (decide_eq_true_eq.mp hok.2))
+                    (Rat.le_trans (decide_eq_true_eq.mp hok.1) (sumMinAct_none_le hb hm))
+          constructor
+          · intro x hx
+            refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+            rw [array_set_getElem_fin] at hr
+            by_cases hir : i.1 = row
+            · simp [hir] at hr
+            · simp only [hir, ↓reduceIte] at hr
+              exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+          · intro x' hx'
+            refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+            by_cases hir : i.1 = row
+            · have hrEq : r = con := by
+                have hget : st.rows[i] = some con := by
+                  change st.rows[i.1] = some con; simpa [hir] using hcon
+                rw [hget] at hr; injection hr with h1; exact h1.symm
+              subst r; exact himplied x' hx'.1
+            · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+    · contradiction
+  | binStrengthen row col delta =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hrow =>
+      split at h
+      · next hcol =>
+        let j : Fin n := ⟨col, hcol⟩
+        split at h
+        · next hbin =>
+          simp only [Bool.and_eq_true, beq_iff_eq] at hbin
+          rcases hbin with ⟨⟨⟨hint, hlb0⟩, hub1⟩, hdelB⟩
+          have hdel : 0 ≤ delta := decide_eq_true_eq.mp hdelB
+          cases hcon : st.rows[row] with
+          | none => simp [hcon] at h
+          | some con =>
+            simp only [hcon] at h
+            split at h
+            · next hleSense =>
+              have hsEq : con.sense = .le := beq_iff_eq.mp hleSense
+              let a : Rat := con.coeffs.get j
+              by_cases ha0 : a = 0
+              · have ha0b : (a == 0) = true := beq_iff_eq.mpr ha0
+                simp only [a, j, ha0b, ↓reduceIte] at h; contradiction
+              · have ha0b : (a == 0) = false := beq_false_of_ne ha0
+                simp only [a, j, ha0b, Bool.false_eq_true, ↓reduceIte] at h
+                cases hM : sumMaxAct st con.coeffs (some ⟨col, hcol⟩) with
+                | none => simp [hM] at h
+                | some maxExcl =>
+                  simp only [hM] at h
+                  by_cases hpos : 0 < a
+                  · simp only [a, j, hpos, ↓reduceIte] at h
+                    split at h
+                    · next hMle =>
+                      injection h with hst; subst hst
+                      have hMle' : maxExcl ≤ con.rhs - delta := decide_eq_true_eq.mp hMle
+                      let newCoeffs : RatVec n :=
+                        RatVec.ofFn (fun k => if k = j then a - delta else con.coeffs.get k)
+                      have hdotDiff : ∀ x : Fin n → Rat,
+                          newCoeffs.dot x = con.coeffs.dot x - delta * x j := by
+                        intro x
+                        rw [dot_split_col newCoeffs j x, dot_split_col con.coeffs j x]
+                        have hrest :
+                            finSum n (fun k => if some j = some k then 0 else newCoeffs.get k * x k) =
+                            finSum n (fun k => if some j = some k then 0 else con.coeffs.get k * x k) := by
+                          apply finSum_congr; intro k
+                          by_cases hkj : k = j
+                          · subst hkj; simp
+                          · have hne : some j ≠ some k := fun e => hkj (Option.some.inj e).symm
+                            simp [newCoeffs, hkj, hne]
+                        rw [hrest]
+                        have hgetJ : newCoeffs.get j = a - delta := by simp [newCoeffs]
+                        rw [hgetJ]
+                        change _ + (a - delta) * x j = _ + a * x j - delta * x j
+                        rw [Rat.sub_eq_add_neg, Rat.add_mul, Rat.neg_mul, ← Rat.add_assoc, ← Rat.sub_eq_add_neg]
+                      constructor
+                      · intro x hx
+                        have hbin01 := rat_binary_zero_or_one ((hx.1 j).1 0 hlb0) ((hx.1 j).2 1 hub1) (hx.2.2 j hint)
+                        have hnewSat : ({ coeffs := newCoeffs, sense := .le, rhs := con.rhs - delta } : LinCon n).sat x := by
+                          unfold LinCon.sat; dsimp only
+                          rcases hbin01 with hx0 | hx1
+                          · rw [dot_split_col newCoeffs j x, hx0, Rat.mul_zero, Rat.add_zero]
+                            have hrest :
+                                finSum n (fun k => if some j = some k then 0 else newCoeffs.get k * x k) =
+                                finSum n (fun k => if some j = some k then 0 else con.coeffs.get k * x k) := by
+                              apply finSum_congr; intro k
+                              by_cases hkj : k = j
+                              · subst hkj; simp
+                              · have hne : some j ≠ some k := fun e => hkj (Option.some.inj e).symm
+                                simp [newCoeffs, hkj, hne]
+                            rw [hrest]
+                            have hleM := sumMaxAct_go_ge st con.coeffs (some j) x hx.1 0 (Nat.zero_le n) 0 maxExcl Rat.le_refl hM
+                            exact Rat.le_trans hleM hMle'
+                          · rw [hdotDiff, hx1, Rat.mul_one]
+                            have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                            unfold LinCon.sat at hsat; rw [hsEq] at hsat
+                            rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg]
+                            exact Rat.add_le_add_right.mpr hsat
+                        refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                        rw [array_set_getElem_fin] at hr
+                        by_cases hir : i.1 = row
+                        · simp only [hir, ↓reduceIte] at hr
+                          injection hr with hrEq; subst r; exact hnewSat
+                        · simp only [hir, ↓reduceIte] at hr
+                          exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                      · intro x' hx'
+                        refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                        by_cases hir : i.1 = row
+                        · have hrEq : r = con := by
+                            have hget : st.rows[i] = some con := by
+                              change st.rows[i.1] = some con; simpa [hir] using hcon
+                            rw [hget] at hr; injection hr with h1; exact h1.symm
+                          subst r
+                          have hs' := hx'.2.1 ⟨row, by rw [Array.size_set]; exact hrow⟩
+                            { coeffs := newCoeffs, sense := .le, rhs := con.rhs - delta }
+                            (by rw [array_set_getElem_fin]; simp only [↓reduceIte]; rfl)
+                          unfold LinCon.sat at hs' ⊢; rw [hsEq]
+                          rw [hdotDiff] at hs'
+                          have hdx : delta * x' j ≤ delta := by
+                            have hmul := Rat.mul_le_mul_of_nonneg_left ((hx'.1 j).2 1 hub1) hdel
+                            simpa [Rat.mul_one] using hmul
+                          have h1 := Rat.add_le_add_right (c := delta * x' j) |>.mpr hs'
+                          have h2 : con.coeffs.dot x' ≤ con.rhs - delta + delta * x' j := by
+                            simpa [Rat.sub_eq_add_neg, Rat.add_assoc, Rat.neg_add_cancel, Rat.add_zero] using h1
+                          have h3 : con.rhs - delta + delta * x' j ≤ con.rhs - delta + delta :=
+                            Rat.add_le_add_left.mpr hdx
+                          have h4 : con.rhs - delta + delta = con.rhs := Rat.sub_add_cancel
+                          exact Rat.le_trans h2 (Rat.le_trans h3 (by rw [h4]; exact Rat.le_refl))
+                        · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                            (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+                    · contradiction
+                  · simp only [a, j, hpos, ↓reduceIte] at h
+                    split at h
+                    · next hMle =>
+                      injection h with hst; subst hst
+                      have hMle' : maxExcl + (a + delta) ≤ con.rhs := decide_eq_true_eq.mp hMle
+                      let newCoeffs : RatVec n :=
+                        RatVec.ofFn (fun k => if k = j then a + delta else con.coeffs.get k)
+                      have hdotDiff : ∀ x : Fin n → Rat,
+                          newCoeffs.dot x = con.coeffs.dot x + delta * x j := by
+                        intro x
+                        rw [dot_split_col newCoeffs j x, dot_split_col con.coeffs j x]
+                        have hrest :
+                            finSum n (fun k => if some j = some k then 0 else newCoeffs.get k * x k) =
+                            finSum n (fun k => if some j = some k then 0 else con.coeffs.get k * x k) := by
+                          apply finSum_congr; intro k
+                          by_cases hkj : k = j
+                          · subst hkj; simp
+                          · have hne : some j ≠ some k := fun e => hkj (Option.some.inj e).symm
+                            simp [newCoeffs, hkj, hne]
+                        rw [hrest]
+                        have hgetJ : newCoeffs.get j = a + delta := by simp [newCoeffs]
+                        rw [hgetJ]
+                        change _ + (a + delta) * x j = _ + a * x j + delta * x j
+                        rw [Rat.add_mul, Rat.add_assoc]
+                      constructor
+                      · intro x hx
+                        have hbin01 := rat_binary_zero_or_one ((hx.1 j).1 0 hlb0) ((hx.1 j).2 1 hub1) (hx.2.2 j hint)
+                        have hnewSat : ({ coeffs := newCoeffs, sense := .le, rhs := con.rhs } : LinCon n).sat x := by
+                          unfold LinCon.sat; dsimp only
+                          rcases hbin01 with hx0 | hx1
+                          · rw [hdotDiff, hx0, Rat.mul_zero, Rat.add_zero]
+                            have hsat := hx.2.1 ⟨row, hrow⟩ con hcon
+                            unfold LinCon.sat at hsat; rwa [hsEq] at hsat
+                          · rw [dot_split_col newCoeffs j x, hx1, Rat.mul_one]
+                            have hrest :
+                                finSum n (fun k => if some j = some k then 0 else newCoeffs.get k * x k) =
+                                finSum n (fun k => if some j = some k then 0 else con.coeffs.get k * x k) := by
+                              apply finSum_congr; intro k
+                              by_cases hkj : k = j
+                              · subst hkj; simp
+                              · have hne : some j ≠ some k := fun e => hkj (Option.some.inj e).symm
+                                simp [newCoeffs, hkj, hne]
+                            rw [hrest]
+                            have hgetJ : newCoeffs.get j = a + delta := by simp [newCoeffs]
+                            rw [hgetJ]
+                            have hleM := sumMaxAct_go_ge st con.coeffs (some j) x hx.1 0 (Nat.zero_le n) 0 maxExcl Rat.le_refl hM
+                            exact Rat.le_trans (Rat.add_le_add_right.mpr hleM) hMle'
+                        refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                        rw [array_set_getElem_fin] at hr
+                        by_cases hir : i.1 = row
+                        · simp only [hir, ↓reduceIte] at hr
+                          injection hr with hrEq; subst r; exact hnewSat
+                        · simp only [hir, ↓reduceIte] at hr
+                          exact hx.2.1 ⟨i.1, by simpa [Array.size_set] using i.2⟩ r hr
+                      · intro x' hx'
+                        refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                        by_cases hir : i.1 = row
+                        · have hrEq : r = con := by
+                            have hget : st.rows[i] = some con := by
+                              change st.rows[i.1] = some con; simpa [hir] using hcon
+                            rw [hget] at hr; injection hr with h1; exact h1.symm
+                          subst r
+                          have hs' := hx'.2.1 ⟨row, by rw [Array.size_set]; exact hrow⟩
+                            { coeffs := newCoeffs, sense := .le, rhs := con.rhs }
+                            (by rw [array_set_getElem_fin]; simp only [↓reduceIte]; rfl)
+                          unfold LinCon.sat at hs' ⊢; rw [hsEq]
+                          rw [hdotDiff] at hs'
+                          have hdx : 0 ≤ delta * x' j :=
+                            Rat.mul_nonneg hdel ((hx'.1 j).1 0 hlb0)
+                          have hle : con.coeffs.dot x' ≤ con.coeffs.dot x' + delta * x' j := by
+                            simpa [Rat.add_zero] using Rat.add_le_add_left (c := con.coeffs.dot x') |>.mpr hdx
+                          exact Rat.le_trans hle hs'
+                        · exact hx'.2.1 ⟨i.1, by rw [Array.size_set]; exact i.2⟩ r
+                            (by rw [array_set_getElem_fin]; simp only [hir, ↓reduceIte]; exact hr)
+                    · contradiction
+            · contradiction
+        · contradiction
+      · contradiction
+    · contradiction
+  | symBreakLe u v colPerm rowPerm =>
+    unfold applyPresolveStep at h; dsimp only at h
+    split at h
+    · next hu =>
+      split at h
+      · next hv =>
+        split at h
+        · next huvNe =>
+          by_cases hpu : u < colPerm.size
+          · simp only [hpu, ↓reduceDIte] at h
+            split at h
+            · next hok =>
+              injection h with hst; subst hst
+              let ju : Fin n := ⟨u, hu⟩
+              let jv : Fin n := ⟨v, hv⟩
+              have hne : ju ≠ jv := fun e => (bne_iff_ne.mp huvNe) (congrArg Fin.val e)
+              simp only [Bool.and_eq_true] at hok
+              rcases hok with ⟨⟨⟨⟨hinvB, huvMap⟩, hcols⟩, hobj⟩, hrows⟩
+              obtain ⟨hsz, hlt, hinv, hf⟩ := checkPermInvolution_spec hinvB
+              have huvEq : colPerm[u]'hpu = v := beq_iff_eq.mp huvMap
+              have hfu : permFn colPerm hsz hlt ju = jv := Fin.ext huvEq
+              have hfv : permFn colPerm hsz hlt jv = ju := by rw [← hfu, hinv]
+              have hcolSpec := checkSymBreakCols_sound st colPerm hsz hlt 0 (Nat.zero_le n)
+                (fun _ hi => by omega) hcols
+              unfold checkSymBreakObj at hobj
+              simp only [Bool.and_eq_true] at hobj
+              have hobjMono : st.obj.get jv ≤ st.obj.get ju := decide_eq_true_eq.mp hobj.1
+              have hobjOther := checkSymBreakObj_loop_sound st ju jv colPerm hsz hlt 0 (Nat.zero_le n)
+                (fun _ hi => by omega) hobj.2
+              unfold checkSymBreakRows at hrows
+              simp only [Bool.and_eq_true] at hrows
+              have hrsz : rowPerm.size = st.rows.size := beq_iff_eq.mp hrows.1
+              have hrowSpec := checkSymBreakRows_sound st ju jv colPerm rowPerm hsz hlt hf hfv hrsz
+                0 (Nat.zero_le st.rows.size) (fun _ hi => by omega) hrows.2
+              let newCon : LinCon n :=
+                { coeffs := RatVec.ofFn (fun j => if j = ju then 1 else if j = jv then -1 else 0),
+                  sense := .le, rhs := 0 }
+              constructor
+              · intro x hx
+                rcases Rat.le_total (a := x ju) (b := x jv) with hle | hge
+                · refine ⟨x, ⟨hx.1, fun i r hr => ?_, hx.2.2⟩, Rat.le_refl⟩
+                  have hisz : i.1 < st.rows.size + 1 := by simpa [Array.size_push] using i.2
+                  change (st.rows.push (some newCon))[i.1] = some r at hr
+                  by_cases hilt : i.1 < st.rows.size
+                  · simp only [Array.getElem_push_lt hilt] at hr
+                    exact hx.2.1 ⟨i.1, hilt⟩ r hr
+                  · have heq : i.1 = st.rows.size := by omega
+                    simp only [heq, Array.getElem_push_eq] at hr
+                    injection hr with hrEq; subst r
+                    unfold LinCon.sat; rw [dot_diff_unit hne]
+                    have := Rat.add_le_add_right (c := -x jv) |>.mpr hle
+                    simpa [Rat.sub_eq_add_neg, Rat.add_neg_cancel] using this
+                · let x' : Fin n → Rat := fun j => x (permFn colPerm hsz hlt j)
+                  have hx'B : inVarBounds st.lbAt st.ubAt x' := by
+                    intro j
+                    refine ⟨fun l hl => ?_, fun ub huB => ?_⟩
+                    · obtain ⟨l', hl', hle'⟩ := (hcolSpec j).2.1 l hl
+                      exact Rat.le_trans hle' ((hx.1 (permFn colPerm hsz hlt j)).1 l' hl')
+                    · obtain ⟨u', hu', hle'⟩ := (hcolSpec j).2.2 ub huB
+                      exact Rat.le_trans ((hx.1 (permFn colPerm hsz hlt j)).2 u' hu') hle'
+                  have hx'I : ∀ j : Fin n, st.isIntAt j = true → isRatInt (x' j) :=
+                    fun j hj => hx.2.2 (permFn colPerm hsz hlt j) ((hcolSpec j).1 hj)
+                  have hx'R : ∀ i : Fin (st.rows.push (some newCon)).size, ∀ r,
+                      (st.rows.push (some newCon))[i] = some r → r.sat x' := by
+                    intro i r hr
+                    have hisz : i.1 < st.rows.size + 1 := by simpa [Array.size_push] using i.2
+                    change (st.rows.push (some newCon))[i.1] = some r at hr
+                    by_cases hilt : i.1 < st.rows.size
+                    · simp only [Array.getElem_push_lt hilt] at hr
+                      exact hrowSpec ⟨i.1, hilt⟩ r hr x hx hge
+                    · have heq : i.1 = st.rows.size := by omega
+                      simp only [heq, Array.getElem_push_eq] at hr
+                      injection hr with hrEq; subst r
+                      unfold LinCon.sat; rw [dot_diff_unit hne]
+                      dsimp only [x']; rw [hfu, hfv]
+                      have := Rat.add_le_add_right (c := -x ju) |>.mpr hge
+                      simpa [Rat.sub_eq_add_neg, Rat.add_neg_cancel] using this
+                  have hx'Obj : StateObjective { st with rows := st.rows.push (some newCon) } x' ≤ StateObjective st x := by
+                    unfold StateObjective
+                    exact Rat.add_le_add_left.mpr
+                      (stateObj_perm_le_of_mono hinv hf hfu hne hobjOther hobjMono hge)
+                  exact ⟨x', ⟨hx'B, hx'R, hx'I⟩, hx'Obj⟩
+              · intro x' hx'
+                refine ⟨⟨hx'.1, fun i r hr => ?_, hx'.2.2⟩, rfl⟩
+                exact hx'.2.1 ⟨i.1, by rw [Array.size_push]; exact Nat.lt_succ_of_lt i.2⟩ r
+                  (by change (st.rows.push (some newCon))[i.1] = some r; simpa [Array.getElem_push_lt i.2] using hr)
+            · contradiction
+          · simp [hpu] at h
+        · contradiction
+      · contradiction
+    · contradiction
+
+/-- Applies a sequence of presolve steps starting from index `idx`. -/
+def runPresolveSteps {n : Nat} (steps : Array PresolveStep) (idx : Nat)
+    (st : PresolveState n) : Option (PresolveState n) :=
+  if h : idx < steps.size then
+    match applyPresolveStep st steps[idx] with
+    | some st' => runPresolveSteps steps (idx + 1) st'
+    | none => none
+  else
+    some st
+termination_by steps.size - idx
+
+/-- Soundness of a sequence of presolve steps: preserves both forward objective-bounding
+projection and backward feasible solution lifting with exact objective equality. -/
+theorem runPresolveSteps_sound {n : Nat} (steps : Array PresolveStep) :
+    ∀ idx (st stFinal : PresolveState n),
+      runPresolveSteps steps idx st = some stFinal →
+      (∀ x : Fin n → Rat, StateFeasible st x →
+        ∃ x' : Fin n → Rat, StateFeasible stFinal x' ∧ StateObjective stFinal x' ≤ StateObjective st x) ∧
+      (∀ x' : Fin n → Rat, StateFeasible stFinal x' →
+        StateFeasible st x' ∧ StateObjective st x' = StateObjective stFinal x') := by
+  intro idx st stFinal hrun
+  unfold runPresolveSteps at hrun
+  split at hrun
+  · next hlt =>
+    cases hstep : applyPresolveStep st steps[idx] with
+    | none => simp [hstep] at hrun
+    | some stMid =>
+      simp only [hstep] at hrun
+      obtain ⟨hFwd1, hBwd1⟩ := applyPresolveStep_sound hstep
+      obtain ⟨hFwd2, hBwd2⟩ := runPresolveSteps_sound steps (idx + 1) stMid stFinal hrun
+      constructor
+      · intro x hx
+        obtain ⟨xMid, hxMid, hobj1⟩ := hFwd1 x hx
+        obtain ⟨xFinal, hxFinal, hobj2⟩ := hFwd2 xMid hxMid
+        exact ⟨xFinal, hxFinal, Rat.le_trans hobj2 hobj1⟩
+      · intro xFinal hxFinal
+        obtain ⟨hxMid, hobj2⟩ := hBwd2 xFinal hxFinal
+        obtain ⟨hxOrig, hobj1⟩ := hBwd1 xFinal hxMid
+        exact ⟨hxOrig, hobj1.trans hobj2⟩
+  · next hge =>
+    injection hrun with hEq; subst hEq
+    exact ⟨fun x hx => ⟨x, hx, Rat.le_refl⟩, fun x' hx' => ⟨hx', rfl⟩⟩
+termination_by idx _ _ _ => steps.size - idx
+
+/-- Exact structural equality check between two `VIPRInstance`s sharing dimension `n`. -/
+def checkVIPRInstanceEqSame {n : Nat} (objConst1 objConst2 : Rat)
+    (obj1 obj2 : Fin n → Rat) (isInt1 isInt2 : Fin n → Bool)
+    (lb1 lb2 ub1 ub2 : Fin n → Option Rat)
+    (rows1 rows2 : Array (LinCon n)) : Bool :=
+  objConst1 == objConst2 &&
+  checkCols 0 &&
+  (rows1.size == rows2.size) &&
+  checkRows 0
+where
+  checkCols (k : Nat) : Bool :=
+    if hk : k < n then
+      let j : Fin n := ⟨k, hk⟩
+      if obj1 j == obj2 j && isInt1 j == isInt2 j && lb1 j == lb2 j && ub1 j == ub2 j then
+        checkCols (k + 1)
+      else false
+    else true
+  termination_by n - k
+  checkRows (i : Nat) : Bool :=
+    if hi : i < rows1.size then
+      if hi2 : i < rows2.size then
+        if rows1[i].beq rows2[i] then checkRows (i + 1) else false
+      else false
+    else true
+  termination_by rows1.size - i
+
+private theorem checkVIPRInstanceEqSame_cols_sound {n : Nat}
+    (obj1 obj2 : Fin n → Rat) (isInt1 isInt2 : Fin n → Bool)
+    (lb1 lb2 ub1 ub2 : Fin n → Option Rat) :
+    ∀ k (hk : k ≤ n),
+      (∀ i (hi : i < k),
+        let j : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hk⟩
+        obj1 j = obj2 j ∧ isInt1 j = isInt2 j ∧ lb1 j = lb2 j ∧ ub1 j = ub2 j) →
+      checkVIPRInstanceEqSame.checkCols obj1 obj2 isInt1 isInt2 lb1 lb2 ub1 ub2 k = true →
+      ∀ j : Fin n, obj1 j = obj2 j ∧ isInt1 j = isInt2 j ∧ lb1 j = lb2 j ∧ ub1 j = ub2 j := by
+  intro k hk hprev hloop j
+  unfold checkVIPRInstanceEqSame.checkCols at hloop
+  dsimp only at hloop
+  split at hloop
+  · next hlt =>
+    split at hloop
+    · next hok =>
+      simp only [Bool.and_eq_true, beq_iff_eq] at hok
+      have hnext : ∀ i (hi : i < k + 1),
+          let ji : Fin n := ⟨i, Nat.lt_of_lt_of_le hi hlt⟩
+          obj1 ji = obj2 ji ∧ isInt1 ji = isInt2 ji ∧ lb1 ji = lb2 ji ∧ ub1 ji = ub2 ji := by
+        intro i hi
+        by_cases hik : i = k
+        · subst hik; exact ⟨hok.1.1.1, hok.1.1.2, hok.1.2, hok.2⟩
+        · exact hprev i (by omega)
+      exact checkVIPRInstanceEqSame_cols_sound obj1 obj2 isInt1 isInt2 lb1 lb2 ub1 ub2 (k + 1) hlt hnext hloop j
+    · contradiction
+  · next hge =>
+    have hkn : k = n := by omega
+    subst hkn
+    exact hprev j.1 j.2
+termination_by k _ _ _ => n - k
+
+private theorem checkVIPRInstanceEqSame_rows_sound {n : Nat}
+    (rows1 rows2 : Array (LinCon n)) (hsz : rows1.size = rows2.size) :
+    ∀ k (hk : k ≤ rows1.size),
+      (∀ i (hi : i < k),
+        rows1[i]'(Nat.lt_of_lt_of_le hi hk) = rows2[i]'(hsz ▸ Nat.lt_of_lt_of_le hi hk)) →
+      checkVIPRInstanceEqSame.checkRows rows1 rows2 k = true →
+      ∀ i (hi : i < rows1.size), rows1[i]'hi = rows2[i]'(hsz ▸ hi) := by
+  intro k hk hprev hloop i hi
+  unfold checkVIPRInstanceEqSame.checkRows at hloop
+  split at hloop
+  · next hlt =>
+    have hlt2 : k < rows2.size := by rw [← hsz]; exact hlt
+    simp only [hlt2, ↓reduceDIte] at hloop
+    split at hloop
+    · next hok =>
+      have heq : rows1[k]'hlt = rows2[k]'hlt2 := LinCon.eq_of_beq hok
+      have hnext : ∀ m (hm : m < k + 1),
+          rows1[m]'(Nat.lt_of_lt_of_le hm hlt) = rows2[m]'(hsz ▸ Nat.lt_of_lt_of_le hm hlt) := by
+        intro m hm
+        by_cases hmk : m = k
+        · subst hmk; exact heq
+        · exact hprev m (by omega)
+      exact checkVIPRInstanceEqSame_rows_sound rows1 rows2 hsz (k + 1) hlt hnext hloop i hi
+    · contradiction
+  · next hge =>
+    have hkn : k = rows1.size := by omega
+    subst hkn
+    exact hprev i hi
+termination_by k _ _ _ _ => rows1.size - k
+
+private theorem checkVIPRInstanceEqSame_sound {n : Nat} {objConst1 objConst2 : Rat}
+    {obj1 obj2 : Fin n → Rat} {isInt1 isInt2 : Fin n → Bool}
+    {lb1 lb2 ub1 ub2 : Fin n → Option Rat}
+    {rows1 rows2 : Array (LinCon n)}
+    (h : checkVIPRInstanceEqSame objConst1 objConst2 obj1 obj2 isInt1 isInt2 lb1 lb2 ub1 ub2 rows1 rows2 = true) :
+    objConst1 = objConst2 ∧ obj1 = obj2 ∧ isInt1 = isInt2 ∧ lb1 = lb2 ∧ ub1 = ub2 ∧ rows1 = rows2 := by
+  unfold checkVIPRInstanceEqSame at h
+  simp only [Bool.and_eq_true, beq_iff_eq] at h
+  rcases h with ⟨⟨⟨hc, hcols⟩, hsz⟩, hrows⟩
+  have hcolSpec := checkVIPRInstanceEqSame_cols_sound obj1 obj2 isInt1 isInt2 lb1 lb2 ub1 ub2 0 (Nat.zero_le n)
+    (fun _ hi => by omega) hcols
+  have hrowSpec := checkVIPRInstanceEqSame_rows_sound rows1 rows2 hsz 0 (Nat.zero_le rows1.size)
+    (fun _ hi => by omega) hrows
+  refine ⟨hc, funext (fun j => (hcolSpec j).1), funext (fun j => (hcolSpec j).2.1),
+    funext (fun j => (hcolSpec j).2.2.1), funext (fun j => (hcolSpec j).2.2.2),
+    Array.ext hsz (fun i hi1 hi2 => by simpa using hrowSpec i hi1)⟩
+
+/-- Exact structural equality check between two `VIPRInstance` values. -/
+def checkVIPRInstanceEq : VIPRInstance → VIPRInstance → Bool
+  | ⟨n1, c1, o1, i1, r1, l1, u1⟩, ⟨n2, c2, o2, i2, r2, l2, u2⟩ =>
+    if hN : n1 = n2 then
+      match n2, hN, c2, o2, i2, r2, l2, u2 with
+      | _, rfl, c2, o2, i2, r2, l2, u2 =>
+        checkVIPRInstanceEqSame c1 c2 o1 o2 i1 i2 l1 l2 u1 u2 r1 r2
+    else false
+
+theorem checkVIPRInstanceEq_sound {P Q : VIPRInstance}
+    (h : checkVIPRInstanceEq P Q = true) : P = Q := by
+  cases P with | mk n1 c1 o1 i1 r1 l1 u1 =>
+  cases Q with | mk n2 c2 o2 i2 r2 l2 u2 =>
+  unfold checkVIPRInstanceEq at h
+  dsimp only at h
+  split at h
+  · next hN =>
+    subst hN
+    dsimp only at h
+    obtain ⟨hc, ho, hi, hl, hu, hr⟩ := checkVIPRInstanceEqSame_sound h
+    subst hc; subst ho; subst hi; subst hl; subst hu; subst hr
+    rfl
+  · contradiction
+
+/-- Combined presolve + Mini-VIPR certificate relating an original MILP `orig`
+through a verified presolve reduction sequence to a verified `reduced` Mini-VIPR proof. -/
+structure VIPRWithPresolveCert where
+  orig : VIPRInstance
+  presolve : Array PresolveStep
+  reduced : MiniVIPRCert
+
+/-- Executable verifier for a presolve-enveloped Mini-VIPR certificate. -/
+def checkVIPRWithPresolve (cert : VIPRWithPresolveCert) : Bool :=
+  match runPresolveSteps cert.presolve 0 (PresolveState.ofInstance cert.orig) with
+  | none => false
+  | some stFinal =>
+    checkVIPRInstanceEq stFinal.toInstance cert.reduced.inst &&
+    checkMiniVIPR cert.reduced
+
+/-- Top-level soundness theorem for presolve-enveloped Mini-VIPR certificates:
+directly certifies infeasibility, global optimality (with a feasible lifted solution
+on `cert.orig`), or a global objective lower bound on `cert.orig`. -/
+theorem checkVIPRWithPresolve_sound (cert : VIPRWithPresolveCert)
+    (h : checkVIPRWithPresolve cert = true) :
+    match cert.reduced.mode with
+    | .infeasible =>
+      ¬ ∃ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x
+    | .optimal xStar =>
+      ∃ xOrig : Fin cert.orig.n → Rat,
+        MILPFeasible cert.orig xOrig ∧
+        LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xStar.get ∧
+        ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+          LPObjective cert.orig xOrig ≤ LPObjective cert.orig x
+    | .bound targetLB =>
+      (∀ xInc, cert.reduced.incumbent? = some xInc →
+        ∃ xOrig : Fin cert.orig.n → Rat,
+          MILPFeasible cert.orig xOrig ∧
+          LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xInc.get) ∧
+      ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+        targetLB ≤ LPObjective cert.orig x := by
+  cases cert with
+  | mk orig presolve reduced =>
+    unfold checkVIPRWithPresolve at h
+    dsimp only at h
+    cases hrun : runPresolveSteps presolve 0 (PresolveState.ofInstance orig) with
+    | none => simp [hrun] at h
+    | some stFinal =>
+      simp only [hrun, Bool.and_eq_true] at h
+      have hInstEq : stFinal.toInstance = reduced.inst := checkVIPRInstanceEq_sound h.1
+      have hRedSound := checkMiniVIPR_sound reduced h.2
+      obtain ⟨hFwdSt, hBwdSt⟩ := runPresolveSteps_sound presolve 0 (PresolveState.ofInstance orig) stFinal hrun
+      have hFwd : ∀ x : Fin orig.n → Rat, MILPFeasible orig x →
+          ∃ x' : Fin orig.n → Rat, MILPFeasible stFinal.toInstance x' ∧
+            LPObjective stFinal.toInstance x' ≤ LPObjective orig x := by
+        intro x hx
+        obtain ⟨x', hx', hobj⟩ := hFwdSt x ((stateFeasible_ofInstance orig x).mpr hx)
+        refine ⟨x', (stateFeasible_toInstance stFinal x').mp hx', ?_⟩
+        rw [← stateObjective_toInstance, ← stateObjective_ofInstance]
+        exact hobj
+      have hBwd : ∀ x' : Fin orig.n → Rat, MILPFeasible stFinal.toInstance x' →
+          MILPFeasible orig x' ∧ LPObjective orig x' = LPObjective stFinal.toInstance x' := by
+        intro x' hx'
+        obtain ⟨hxOrig, hobj⟩ := hBwdSt x' ((stateFeasible_toInstance stFinal x').mpr hx')
+        refine ⟨(stateFeasible_ofInstance orig x').mp hxOrig, ?_⟩
+        rw [← stateObjective_ofInstance, ← stateObjective_toInstance]
+        exact hobj
+      cases reduced with
+      | mk redInst mode steps rootStep inc =>
+        dsimp only at hInstEq hRedSound ⊢
+        subst hInstEq
+        cases mode with
+        | infeasible =>
+          rintro ⟨x, hx⟩
+          obtain ⟨x', hx', _⟩ := hFwd x hx
+          exact hRedSound ⟨x', hx'⟩
+        | optimal xStar =>
+          obtain ⟨hFeasStar, hOptStar⟩ := hRedSound
+          obtain ⟨hOrigFeas, hObjEq⟩ := hBwd xStar.get hFeasStar
+          refine ⟨xStar.get, hOrigFeas, hObjEq, fun x hx => ?_⟩
+          obtain ⟨x', hx', hObjLe⟩ := hFwd x hx
+          rw [hObjEq]
+          exact Rat.le_trans (hOptStar x' hx') hObjLe
+        | bound targetLB =>
+          obtain ⟨hIncSound, hBoundSound⟩ := hRedSound
+          refine ⟨fun xInc hxInc => ?_, fun x hx => ?_⟩
+          · obtain ⟨hOrigFeas, hObjEq⟩ := hBwd xInc.get (hIncSound xInc hxInc)
+            exact ⟨xInc.get, hOrigFeas, hObjEq⟩
+          · obtain ⟨x', hx', hObjLe⟩ := hFwd x hx
+            exact Rat.le_trans (hBoundSound x' hx') hObjLe
+
+theorem checkVIPRWithPresolve_infeasible_sound (cert : VIPRWithPresolveCert)
+    (hmode : cert.reduced.mode = .infeasible) (h : checkVIPRWithPresolve cert = true) :
+    ¬ ∃ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x := by
+  have hs := checkVIPRWithPresolve_sound cert h
+  rwa [hmode] at hs
+
+theorem checkVIPRWithPresolve_optimal_sound (cert : VIPRWithPresolveCert)
+    (xStar : RatVec cert.reduced.inst.n)
+    (hmode : cert.reduced.mode = .optimal xStar) (h : checkVIPRWithPresolve cert = true) :
+    ∃ xOrig : Fin cert.orig.n → Rat,
+      MILPFeasible cert.orig xOrig ∧
+      LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xStar.get ∧
+      ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+        LPObjective cert.orig xOrig ≤ LPObjective cert.orig x := by
+  have hs := checkVIPRWithPresolve_sound cert h
+  rwa [hmode] at hs
+
+theorem checkVIPRWithPresolve_bound_sound (cert : VIPRWithPresolveCert) {targetLB : Rat}
+    (h : checkVIPRWithPresolve cert = true) (hmode : cert.reduced.mode = .bound targetLB) :
+    ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+      targetLB ≤ LPObjective cert.orig x := by
+  have hs := checkVIPRWithPresolve_sound cert h
+  rw [hmode] at hs
+  exact hs.2
+
+
+/-! ## Section 5: JSON Decoding & Verification Entry Point -/
 
 private def parseRowSense (s : String) : Except String RowSense :=
   match s with
@@ -3472,6 +7746,34 @@ private def decodeProofStep (n : Nat) (v : JsonVal) : Except String (ProofStep n
       let left ← v.getNat "left"
       let right ← v.getNat "right"
       .ok (.branch col splitVal leftAsm rightAsm left right)
+    | "orbitBranch" =>
+      let col ← v.getNat "col"
+      let leftAsm ← v.getNat "leftAsm"
+      let rightAsm ← v.getNat "rightAsm"
+      let left ← v.getNat "left"
+      let right ← v.getNat "right"
+      let orbitAsms ← v.getField "orbitAsms" >>= decodeNatArray
+      let witArr ← v.getArray "witnesses"
+      let mut witnesses : Array OrbitWitness := Array.mkEmpty witArr.size
+      for wv in witArr do
+        let comp ← wv.getNat "companion"
+        let colPerm ← wv.getField "colPerm" >>= decodeNatArray
+        let rowPerm ← wv.getField "rowPerm" >>= decodeNatArray
+        let supportEntries ←
+          match wv.getField? "supportEntries" with
+          | none | some .null => .ok #[]
+          | some sv => decodeNatArray sv
+        witnesses := witnesses.push {
+          companion := comp
+          colPerm := colPerm
+          rowPerm := rowPerm
+          supportEntries := supportEntries
+        }
+      let extraAsms ←
+        match v.getField? "extraAsms" with
+        | none | some .null => .ok #[]
+        | some ev => decodeNatArray ev
+      .ok (.orbitBranch col leftAsm rightAsm left right orbitAsms witnesses extraAsms)
     | "farkas" =>
       let refs ← decodeLinRefs v "refs"
       let bounds ← decodeVarBoundRefs v
@@ -3509,8 +7811,13 @@ private def decodeProofStep (n : Nat) (v : JsonVal) : Except String (ProofStep n
       .ok (some arr)
   .ok { rule := rule, claimedCon := claimedCon, claimedAssumptions := claimedAssumptions }
 
-/-- Decodes a `MiniVIPRCert` from a parsed `JsonVal`. -/
-def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
+private def decodeOptBool (v : JsonVal) (key : String) (default : Bool) : Except String Bool :=
+  match v.getField? key with
+  | none | some .null => .ok default
+  | some bv => bv.asBool
+
+/-- Decodes a `VIPRInstance` from a parsed `JsonVal` object. -/
+def decodeVIPRInstance (v : JsonVal) : Except String VIPRInstance := do
   let n ← v.getNat "n"
   let objConst ←
     match v.getField? "objConst" with
@@ -3526,7 +7833,7 @@ def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
   for rv in rowsArr do
     let rc ← decodeLinCon n rv
     baseRows := baseRows.push rc
-  let inst : VIPRInstance := {
+  .ok {
     n := n
     objConst := objConst
     obj := fun j => objVec.get j
@@ -3535,6 +7842,60 @@ def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
     lb := fun j => lbVec.1[j.1]'(by rw [lbVec.2]; exact j.2)
     ub := fun j => ubVec.1[j.1]'(by rw [ubVec.2]; exact j.2)
   }
+
+/-- Decodes a single `PresolveStep` from a parsed `JsonVal`. -/
+def decodePresolveStep (v : JsonVal) : Except String PresolveStep := do
+  let opName ← v.getString "op"
+  match opName with
+  | "roundBound" =>
+    let col ← v.getNat "col"
+    let isUpper ← v.getBool "isUpper"
+    let newBound ← v.getRat "newBound"
+    .ok (.roundBound col isUpper newBound)
+  | "activityBound" =>
+    let row ← v.getNat "row"
+    let col ← v.getNat "col"
+    let isUpper ← v.getBool "isUpper"
+    let roundInt ← decodeOptBool v "roundInt" false
+    let newBound ← v.getRat "newBound"
+    .ok (.activityBound row col isUpper roundInt newBound)
+  | "gcdRowDiv" =>
+    let row ← v.getNat "row"
+    let divisor ← v.getInt "divisor"
+    .ok (.gcdRowDiv row divisor)
+  | "substFixedRow" =>
+    let row ← v.getNat "row"
+    let col ← v.getNat "col"
+    let val ← v.getRat "val"
+    .ok (.substFixedRow row col val)
+  | "substFixedObj" =>
+    let col ← v.getNat "col"
+    let val ← v.getRat "val"
+    .ok (.substFixedObj col val)
+  | "singletonRowElim" =>
+    let row ← v.getNat "row"
+    let col ← v.getNat "col"
+    let roundInt ← decodeOptBool v "roundInt" false
+    .ok (.singletonRowElim row col roundInt)
+  | "redundantRow" =>
+    let row ← v.getNat "row"
+    .ok (.redundantRow row)
+  | "binStrengthen" =>
+    let row ← v.getNat "row"
+    let col ← v.getNat "col"
+    let delta ← v.getRat "delta"
+    .ok (.binStrengthen row col delta)
+  | "symBreakLe" =>
+    let u ← v.getNat "u"
+    let vCol ← v.getNat "v"
+    let colPerm ← v.getField "colPerm" >>= decodeNatArray
+    let rowPerm ← v.getField "rowPerm" >>= decodeNatArray
+    .ok (.symBreakLe u vCol colPerm rowPerm)
+  | _ => .error s!"unknown presolve op '{opName}'"
+
+/-- Decodes a `MiniVIPRCert` from a parsed `JsonVal`. -/
+def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
+  let inst ← decodeVIPRInstance v
   let modeStr ← v.getString "mode"
   let (mode, optInc) : CertMode inst.n × Option (RatVec inst.n) ←
     match modeStr with
@@ -3564,6 +7925,23 @@ def decodeMiniVIPRCert (v : JsonVal) : Except String MiniVIPRCert := do
       else .error "missing rootStep and steps is empty"
   .ok { inst := inst, mode := mode, steps := steps, rootStep := rootStep, incumbent? := optInc }
 
+/-- Decodes a presolve-enveloped `VIPRWithPresolveCert` from a parsed `JsonVal`. -/
+def decodeVIPRWithPresolveCert (v : JsonVal) : Except String VIPRWithPresolveCert := do
+  let origVal ← v.getField "orig"
+  let orig ← decodeVIPRInstance origVal
+  let presolve ←
+    match v.getField? "presolve" with
+    | none | some .null => .ok #[]
+    | some pv =>
+      let arr ← pv.asArray
+      let mut out : Array PresolveStep := Array.mkEmpty arr.size
+      for sv in arr do
+        let ps ← decodePresolveStep sv
+        out := out.push ps
+      .ok out
+  let reduced ← decodeMiniVIPRCert v
+  .ok { orig := orig, presolve := presolve, reduced := reduced }
+
 /-- Decodes and verifies a parsed `JsonVal` Mini-VIPR certificate. -/
 def verifyMiniVIPRJsonVal (jv : JsonVal) : Except String MiniVIPRCert := do
   let cert ← decodeMiniVIPRCert jv
@@ -3576,6 +7954,20 @@ def verifyMiniVIPRJsonVal (jv : JsonVal) : Except String MiniVIPRCert := do
 def verifyMiniVIPRJson (raw : String) : Except String Unit := do
   let jv ← parseJson raw
   let _ ← verifyMiniVIPRJsonVal jv
+  .ok ()
+
+/-- Decodes and verifies a parsed `JsonVal` presolve-enveloped Mini-VIPR certificate. -/
+def verifyVIPRWithPresolveJsonVal (jv : JsonVal) : Except String VIPRWithPresolveCert := do
+  let cert ← decodeVIPRWithPresolveCert jv
+  if checkVIPRWithPresolve cert then
+    .ok cert
+  else
+    .error "Presolve-enveloped Mini-VIPR trace failed verification"
+
+/-- Parses and verifies a JSON-encoded presolve-enveloped Mini-VIPR certificate. -/
+def verifyVIPRWithPresolveJson (raw : String) : Except String Unit := do
+  let jv ← parseJson raw
+  let _ ← verifyVIPRWithPresolveJsonVal jv
   .ok ()
 
 end GoblinFormal.Track4

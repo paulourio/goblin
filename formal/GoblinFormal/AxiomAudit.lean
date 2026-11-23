@@ -370,6 +370,50 @@ import GoblinFormal.Track5D
 #guard_msgs in
 #print axioms GoblinFormal.Track4.checkMiniVIPR_bound_sound
 
+/-- info: 'GoblinFormal.Track4.checkPermBijection_spec' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkPermBijection_spec
+
+/-- info: 'GoblinFormal.Track4.checkPermInvolution_spec' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkPermInvolution_spec
+
+/-- info: 'GoblinFormal.Track4.checkConPermImplies_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkConPermImplies_sound
+
+/-- info: 'GoblinFormal.Track4.checkOrbitAutomorphism_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkOrbitAutomorphism_sound
+
+/-- info: 'GoblinFormal.Track4.applyPresolveStep_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.applyPresolveStep_sound
+
+/-- info: 'GoblinFormal.Track4.runPresolveSteps_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.runPresolveSteps_sound
+
+/-- info: 'GoblinFormal.Track4.checkVIPRInstanceEq_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkVIPRInstanceEq_sound
+
+/-- info: 'GoblinFormal.Track4.checkVIPRWithPresolve_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkVIPRWithPresolve_sound
+
+/-- info: 'GoblinFormal.Track4.checkVIPRWithPresolve_infeasible_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkVIPRWithPresolve_infeasible_sound
+
+/-- info: 'GoblinFormal.Track4.checkVIPRWithPresolve_optimal_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkVIPRWithPresolve_optimal_sound
+
+/-- info: 'GoblinFormal.Track4.checkVIPRWithPresolve_bound_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track4.checkVIPRWithPresolve_bound_sound
+
 /-! ### Track 5A: Tier 5A ARM64 Leaf Binary Equivalence -/
 
 /--

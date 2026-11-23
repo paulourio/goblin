@@ -245,7 +245,67 @@ type babEngine struct {
 	touchedCols        []int
 	sym                nodeSymmetry
 	orbitBuf           []int
-	vipr               *babVIPRRecorder
+	vipr               babVIPRHook
+}
+
+type viprBoundCand struct {
+	col     int
+	isUpper bool
+	bound   float64
+}
+
+type babVIPRHook interface {
+	close()
+	finalize(res Result)
+	rootNode() *viprTreeNode
+	recordRootInfeasibleEqRow(p *CompiledProblem)
+	newDisabledOrbitSubTrace() viprTraceHook
+	adoptSubTraceInfeas(p *CompiledProblem, sub viprTraceHook)
+	certifyRootInfeasible(s *LPSolver, lpRes LPResult)
+	recordNodeDual(vn *viprTreeNode, s *LPSolver, lpRes LPResult)
+	certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes LPResult)
+	stageCertifiedCutRound(s *LPSolver, lpPrimal []float64, maxCuts int, minEff float64, ws *cutGenWorkspace) bool
+	commitStagedCutPlanes(lpSolver *LPSolver, isRoot bool) int
+	snapshotActiveCuts() int
+	restoreActiveCuts(n int)
+	purgeSlackCuts(s *LPSolver, slackTol float64) int
+	certifyAndApplyRCF(
+		vn *viprTreeNode,
+		s *LPSolver,
+		lpRes LPResult,
+		bestPrimal []float64,
+		bestObjMin, searchShift float64,
+		hasCutoff bool,
+		origLB, origUB []float64,
+		cands []boundDelta,
+	) (nextVN *viprTreeNode, applied []boundDelta, pruned bool)
+	certifyAndApplyUnboundedIntTightening(
+		vn *viprTreeNode,
+		bestPrimal []float64,
+		bestObjMin, searchShift float64,
+		hasCutoff bool,
+		cands []viprBoundCand,
+	) (nextVN *viprTreeNode, changed, pruned bool)
+	fillNodeBoundsFloat(vn *viprTreeNode, dstLB, dstUB []float64)
+	propagateNode(vn *viprTreeNode, curLB, curUB []float64, maxPasses int) (feasible, converged bool)
+	checkNodeBoundConflict(vn *viprTreeNode) bool
+	recordSBPruned(vn *viprTreeNode, col int, splitFloat float64)
+	recordSBFix(vn *viprTreeNode, col int, splitFloat float64, downPruned bool) *viprTreeNode
+	createChildNodes(
+		p *CompiledProblem,
+		sym *nodeSymmetry,
+		deadline time.Time,
+		done <-chan struct{},
+		parentLB float64,
+		parentDepth int,
+		parent *searchNode,
+		parentVN *viprTreeNode,
+		brVar int,
+		brVal float64,
+		curLB, curUB []float64,
+		pc pseudoCost,
+		counter *int,
+	) (downNode, upNode *searchNode)
 }
 
 func (b *babEngine) contLinkedIntCols() []bool {
@@ -448,7 +508,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 		nodesExplored:    1,
 	}
 	if opts.viprTrace != nil {
-		b.vipr = newBabVIPRRecorder(opts.viprTrace, p, opts.DisableSIMD)
+		b.vipr = opts.viprTrace.newBabRecorder(p, opts.DisableSIMD)
 	}
 	defer func() {
 		b.heurSolver.Close()
@@ -502,7 +562,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	}
 	b.rootLPUser = b.userObjFromSearchMin(b.rootLPMin)
 	if b.vipr != nil {
-		b.vipr.recordNodeDual(b.vipr.root, b.lpSolver, rootRes)
+		b.vipr.recordNodeDual(b.vipr.rootNode(), b.lpSolver, rootRes)
 	}
 
 	if !p.isMIP || len(p.intCols) == 0 {
@@ -640,7 +700,7 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 	p := b.p
 	if hasExactGCDInfeasibleEqRow(p) {
 		if b.vipr != nil {
-			b.vipr.trace.recordRootInfeasibleEqRow(p)
+			b.vipr.recordRootInfeasibleEqRow(p)
 		}
 		return Result{
 			modelID:    p.modelID,
@@ -658,9 +718,9 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 	feasProb.objConstMinVal = 0
 	feasOpts := b.opts
 	feasOpts.Workers = 1
-	var subTrace *VIPRTrace
+	var subTrace viprTraceHook
 	if b.vipr != nil {
-		subTrace = NewVIPRTrace()
+		subTrace = b.vipr.newDisabledOrbitSubTrace()
 		feasOpts.viprTrace = subTrace
 	}
 	if b.opts.MaxIter > 0 {
@@ -706,7 +766,7 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 			}
 		}
 	} else if st == StatusInfeasible && b.vipr != nil && subTrace != nil {
-		b.vipr.trace.adoptInfeasSteps(p, subTrace)
+		b.vipr.adoptSubTraceInfeas(p, subTrace)
 	}
 	return Result{
 		modelID:    p.modelID,
@@ -830,10 +890,8 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			break
 		}
 		var newCuts []cutPlane
-		var certCuts []viprCertifiedCut
 		if b.vipr != nil {
-			certCuts = b.vipr.generateCertifiedCutRound(lpSolver, curLPRes.Primal, maxCutsPerRound, minCutEfficacy, &b.cutWS)
-			if len(certCuts) == 0 || b.timeExpired() {
+			if !b.vipr.stageCertifiedCutRound(lpSolver, curLPRes.Primal, maxCutsPerRound, minCutEfficacy, &b.cutWS) || b.timeExpired() {
 				break
 			}
 		} else {
@@ -849,14 +907,17 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		prevObj := curMin
 		// Take one snapshot per round. Share immutable slices when still at anchor.
 		curSnap := lpSolver.snapshot()
-		curCutSnap := b.vipr.snapshotActiveCuts()
+		var curCutSnap int
+		if b.vipr != nil {
+			curCutSnap = b.vipr.snapshotActiveCuts()
+		}
 		if b.cutsAdded == anchorCuts {
 			anchorSnap = curSnap
 			anchorCutSnap = curCutSnap
 		}
 		var addedBatch int
 		if b.vipr != nil {
-			addedBatch = b.vipr.addCertifiedCutPlanes(lpSolver, certCuts, true)
+			addedBatch = b.vipr.commitStagedCutPlanes(lpSolver, true)
 		} else {
 			addedBatch = addDynamicCutPlanes(lpSolver, newCuts)
 		}
@@ -871,7 +932,9 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			// leaves no usable basis. Roll the round back so branch-and-bound starts
 			// from the last optimal LP state.
 			lpSolver.restore(curSnap)
-			b.vipr.restoreActiveCuts(curCutSnap)
+			if b.vipr != nil {
+				b.vipr.restoreActiveCuts(curCutSnap)
+			}
 			switch {
 			case nextRes.Status == StatusTimeLimit:
 				b.hitTimeLimit = true
@@ -883,7 +946,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		b.cutsAdded += addedBatch
 		curLPRes = nextRes
 		if b.vipr != nil {
-			b.vipr.recordNodeDual(b.vipr.root, lpSolver, nextRes)
+			b.vipr.recordNodeDual(b.vipr.rootNode(), lpSolver, nextRes)
 		}
 
 		if isIntegerFeasible(p, curLPRes.Primal) {
@@ -932,7 +995,9 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 	anchorEndMin := b.lpSearchMin(anchorLPRes)
 	if curEndMin-anchorEndMin <= max(zeroGainAbsTol, zeroGainRelTol*math.Abs(anchorEndMin)) && b.cutsAdded > anchorCuts {
 		lpSolver.restore(anchorSnap)
-		b.vipr.restoreActiveCuts(anchorCutSnap)
+		if b.vipr != nil {
+			b.vipr.restoreActiveCuts(anchorCutSnap)
+		}
 		curLPRes = anchorLPRes
 		b.cutsAdded = anchorCuts
 	}
@@ -1007,7 +1072,7 @@ func (b *babEngine) updateCutAgesAndMaybePurge(allowPurge bool) {
 	updateCutAgesState(b.p, b.lpSolver, b.vipr, &b.cutAges, &b.nodesSincePurge, allowPurge)
 }
 
-func updateCutAgesState(p *CompiledProblem, s *LPSolver, vipr *babVIPRRecorder, cutAges *[]int, nodesSincePurge *int, allowPurge bool) {
+func updateCutAgesState(p *CompiledProblem, s *LPSolver, vipr babVIPRHook, cutAges *[]int, nodesSincePurge *int, allowPurge bool) {
 	numExtra := len(s.extraRows)
 	if numExtra == 0 || !s.luValid || s.ws == nil {
 		return
@@ -1091,10 +1156,8 @@ func (b *babEngine) tryInTreeCuts(
 		return false, false
 	}
 	var newCuts []cutPlane
-	var certCuts []viprCertifiedCut
 	if b.vipr != nil {
-		certCuts = b.vipr.generateCertifiedCutRound(b.lpSolver, nodeRes.Primal, batchCap, inTreeCutMinEff, &b.cutWS)
-		if len(certCuts) == 0 {
+		if !b.vipr.stageCertifiedCutRound(b.lpSolver, nodeRes.Primal, batchCap, inTreeCutMinEff, &b.cutWS) {
 			b.inTreeCutMisses++
 			return false, false
 		}
@@ -1112,10 +1175,13 @@ func (b *babEngine) tryInTreeCuts(
 		return false, true
 	}
 	snap := b.lpSolver.snapshot()
-	cutSnap := b.vipr.snapshotActiveCuts()
+	var cutSnap int
+	if b.vipr != nil {
+		cutSnap = b.vipr.snapshotActiveCuts()
+	}
 	var added int
 	if b.vipr != nil {
-		added = b.vipr.addCertifiedCutPlanes(b.lpSolver, certCuts, false)
+		added = b.vipr.commitStagedCutPlanes(b.lpSolver, false)
 	} else {
 		added = addDynamicCutPlanes(b.lpSolver, newCuts)
 	}
@@ -1136,7 +1202,9 @@ func (b *babEngine) tryInTreeCuts(
 	}
 	if nextRes.Status == StatusTimeLimit || (nextRes.Status == StatusIterationLimit && b.budgetBound(b.lpSolver)) {
 		b.lpSolver.restore(snap)
-		b.vipr.restoreActiveCuts(cutSnap)
+		if b.vipr != nil {
+			b.vipr.restoreActiveCuts(cutSnap)
+		}
 		node.lowerBound = max(node.lowerBound, *nodeMin)
 		heap.Push(&b.pq, node)
 		if nextRes.Status == StatusTimeLimit {
@@ -1150,7 +1218,9 @@ func (b *babEngine) tryInTreeCuts(
 	gainTol := max(inTreeCutMinGainAbs, inTreeCutMinGainRel*math.Abs(*nodeMin))
 	if nextRes.Status != StatusOptimal || math.IsNaN(nextMin) || math.IsInf(nextMin, 0) || nextMin-*nodeMin <= gainTol {
 		b.lpSolver.restore(snap)
-		b.vipr.restoreActiveCuts(cutSnap)
+		if b.vipr != nil {
+			b.vipr.restoreActiveCuts(cutSnap)
+		}
 		b.inTreeCutMisses++
 		return false, false
 	}
@@ -1194,13 +1264,13 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 	b.pq = make(nodeQueue, 0, initNodeQueueCap)
 	heap.Init(&b.pq)
+	b.sym = initNodeSymmetry(p)
 	var symPtr *nodeSymmetry
 	var rootVN *viprTreeNode
 	if b.vipr == nil {
-		b.sym = initNodeSymmetry(p)
 		symPtr = &b.sym
 	} else {
-		rootVN = b.vipr.root
+		rootVN = b.vipr.rootNode()
 	}
 
 	baseLB := slices.Clone(p.varLB)
@@ -1570,14 +1640,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	}
 
 	nodeCounter := 1
-	downNode, upNode := b.createChildNodesWithOrbit(rootNodeMin, 0, nil, brVar, brVal, curLB, curUB, pCosts[brVar], &nodeCounter)
-	if b.vipr != nil {
-		if splitInt, ok := viprFloorBigInt(downNode.delta.ub); !ok {
-			b.vipr.invalid = true
-		} else {
-			downNode.viprNode, upNode.viprNode = b.vipr.recordBranch(rootVN, brVar, splitInt)
-		}
-	}
+	downNode, upNode := b.createChildNodesWithOrbit(rootNodeMin, 0, nil, rootVN, brVar, brVal, curLB, curUB, pCosts[brVar], &nodeCounter)
 	heap.Push(&b.pq, downNode)
 	heap.Push(&b.pq, upNode)
 
@@ -2044,6 +2107,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			nodeMin,
 			node.depth,
 			node,
+			node.viprNode,
 			bVar,
 			bVal,
 			curLB,
@@ -2051,13 +2115,6 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			pCosts[bVar],
 			&nodeCounter,
 		)
-		if b.vipr != nil {
-			if splitInt, ok := viprFloorBigInt(cDown.delta.ub); !ok {
-				b.vipr.invalid = true
-			} else {
-				cDown.viprNode, cUp.viprNode = b.vipr.recordBranch(node.viprNode, bVar, splitInt)
-			}
-		}
 
 		if bVal-math.Floor(bVal) >= halfFracTarget {
 			b.plungeNode = cUp
@@ -3378,26 +3435,23 @@ func (b *babEngine) createChildNodesWithOrbit(
 	parentLB float64,
 	parentDepth int,
 	parent *searchNode,
+	parentVN *viprTreeNode,
 	brVar int,
 	brVal float64,
 	curLB, curUB []float64,
 	pc pseudoCost,
 	counter *int,
 ) (downNode, upNode *searchNode) {
-	var sym *nodeSymmetry
 	if b.vipr == nil {
-		sym = &b.sym
+		return createChildNodesWithOrbitState(
+			b.p, &b.sym, b.deadline, b.done, &b.orbitBuf,
+			parentLB, parentDepth, parent, brVar, brVal, curLB, curUB, pc, counter,
+		)
 	}
-	downNode, upNode = createChildNodesWithOrbitState(
-		b.p, sym, b.deadline, b.done, &b.orbitBuf,
-		parentLB, parentDepth, parent, brVar, brVal, curLB, curUB, pc, counter,
+	return b.vipr.createChildNodes(
+		b.p, &b.sym, b.deadline, b.done,
+		parentLB, parentDepth, parent, parentVN, brVar, brVal, curLB, curUB, pc, counter,
 	)
-	if b.vipr != nil {
-		fl := math.Floor(downNode.delta.ub)
-		downNode.delta.ub = fl
-		upNode.delta.lb = fl + 1.0
-	}
-	return downNode, upNode
 }
 
 func createChildNodesWithOrbitState(
@@ -3965,7 +4019,7 @@ func resolveFixedIntLeaf(
 	deadline time.Time,
 	done <-chan struct{},
 	ensureHeur func() *LPSolver,
-	vipr *babVIPRRecorder,
+	vipr babVIPRHook,
 	vn *viprTreeNode,
 ) (res LPResult, objMin float64, infeas, ok bool) {
 	if stopRequested(deadline, done) {

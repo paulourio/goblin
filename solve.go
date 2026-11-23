@@ -11,6 +11,22 @@ import (
 // ErrNilProblem indicates that a nil *CompiledProblem was passed to SolveCompiled.
 var ErrNilProblem = errors.New("goblin: nil CompiledProblem")
 
+type viprTraceHook interface {
+	reset(p *CompiledProblem)
+	hasCertificate() bool
+	recordPresolveInfeasible(p *CompiledProblem, disableSIMD bool)
+	recordRootInfeasibleEqRow(p *CompiledProblem)
+	presolveMIP(
+		ctx context.Context,
+		p *CompiledProblem,
+		backend Backend,
+		disableSIMD bool,
+		start, deadline time.Time,
+		done <-chan struct{},
+	) (workProb *CompiledProblem, earlyRes Result, doneEarly bool)
+	newBabRecorder(p *CompiledProblem, disableSIMD bool) babVIPRHook
+}
+
 // Backend selects the underlying LP and MILP solver engine.
 type Backend uint8
 
@@ -75,7 +91,7 @@ type Options struct {
 	isSubMIP             bool
 	defaultMaxNodesUsed  bool
 	defaultCutPassesUsed bool
-	viprTrace            *VIPRTrace
+	viprTrace            viprTraceHook
 }
 
 const (
@@ -110,6 +126,13 @@ type Option func(*Options)
 
 // ApplyOptions folds a slice of functional modifiers onto the default solver settings.
 func ApplyOptions(opts ...Option) Options {
+	if len(opts) == 0 {
+		return DefaultOptions()
+	}
+	return applyRootOptionsSlow(opts)
+}
+
+func applyRootOptionsSlow(opts []Option) Options {
 	cfg := DefaultOptions()
 	for _, fn := range opts {
 		if fn != nil {
@@ -221,16 +244,6 @@ func WithAbsGapTol(tol float64) Option {
 // WithTimeLimit sets the wall-clock time limit for the solve.
 func WithTimeLimit(d time.Duration) Option {
 	return func(cfg *Options) { cfg.TimeLimit = d }
-}
-
-// WithVIPRTrace enables single-threaded rational Mini-VIPR proof tracing into tr on BackendGo.
-func WithVIPRTrace(tr *VIPRTrace) Option {
-	return func(cfg *Options) {
-		cfg.viprTrace = tr
-		if tr != nil {
-			cfg.Workers = 1
-		}
-	}
 }
 
 func stopRequested(deadline time.Time, done <-chan struct{}) bool {
@@ -389,31 +402,37 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 	var lpPre LPPresolveResult
 	usedLPPresolve := false
 	if opt.EnablePresolve && p.isMIP {
-		preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
-		if ctx != nil && ctx.Err() != nil {
-			return Result{}
-		}
-		if preRes.TimedOut {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   backend,
-				Status:    StatusTimeLimit,
-				SolveTime: time.Since(start),
+		if opt.viprTrace != nil {
+			var earlyRes Result
+			var doneEarly bool
+			workProb, earlyRes, doneEarly = opt.viprTrace.presolveMIP(ctx, p, backend, opt.DisableSIMD, start, deadline, done)
+			if doneEarly {
+				return earlyRes
 			}
-		}
-		if preRes.Infeasible {
-			if opt.viprTrace != nil {
-				opt.viprTrace.recordPresolveInfeasible(p, opt.DisableSIMD)
+		} else {
+			preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
+			if ctx != nil && ctx.Err() != nil {
+				return Result{}
 			}
-			return Result{
-				modelID:   p.modelID,
-				Backend:   backend,
-				Status:    StatusInfeasible,
-				SolveTime: time.Since(start),
+			if preRes.TimedOut {
+				return Result{
+					modelID:   p.modelID,
+					Backend:   backend,
+					Status:    StatusTimeLimit,
+					SolveTime: time.Since(start),
+				}
 			}
-		}
-		if preRes.Reduced != nil && preRes.Reduced.invalidErr == nil {
-			workProb = preRes.Reduced
+			if preRes.Infeasible {
+				return Result{
+					modelID:   p.modelID,
+					Backend:   backend,
+					Status:    StatusInfeasible,
+					SolveTime: time.Since(start),
+				}
+			}
+			if preRes.Reduced != nil && preRes.Reduced.invalidErr == nil {
+				workProb = preRes.Reduced
+			}
 		}
 	} else if opt.EnablePresolve && !p.isMIP && p.numConstraints > 0 && p.numVars > 0 {
 		lpPre = presolveLPWithDeadline(p, defaultPresolveMaxPass, deadline, done)
@@ -458,6 +477,8 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 				needFallback = true
 			}
 		} else if res.Status == StatusUnbounded || res.Status == StatusNumericalError {
+			needFallback = true
+		} else if opt.viprTrace != nil && (res.Status == StatusOptimal || res.Status == StatusInfeasible) && !opt.viprTrace.hasCertificate() {
 			needFallback = true
 		} else if len(res.Values) == p.numVars {
 			bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
