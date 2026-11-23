@@ -475,7 +475,7 @@ func TestFormalExportHelpers(t *testing.T) {
 			res := lp.Solve()
 			mode, payload, ok := ExportLPCheckPayload(p, lp, res)
 			lp.Close()
-			if !ok || mode != "safe-bound" || len(payload) == 0 {
+			if !ok || (mode != "optimal" && mode != "safe-bound") || len(payload) == 0 {
 				t.Fatalf("%s ExportLPCheckPayload failed: mode=%q ok=%v len=%d", mdl.Name(), mode, ok, len(payload))
 			}
 			lpItems = append(lpItems, payload)
@@ -2362,4 +2362,81 @@ func TestVIPRTraceOrbitAndPresolveNegativeControls(t *testing.T) {
 		rawBin, _ := json.Marshal(badBin)
 		requireVIPRBytesRejected(t, viprExe, "bad_presolve_binStrengthen", rawBin)
 	})
+}
+
+func TestVIPRTraceTinyScaledKnapsackAndStrictBounds(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	var certs [][]byte
+
+	for _, scale := range []float64{1e-6, 1e-7, 1e-8} {
+		m := NewModel("vipr_tiny_knap", Maximize)
+		var objTerms, rowTerms []Term
+		for i := range 6 {
+			v := m.AddIntVar("", 0, 10)
+			objTerms = append(objTerms, v.T(scale*float64(i+3)))
+			rowTerms = append(rowTerms, v.T(float64(2*i+3)))
+		}
+		m.SetObjective(NewExpr(objTerms...))
+		m.AddConstraint("cap", Le(NewExpr(rowTerms...), 37))
+
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || tr.Mode() != "optimal" {
+			t.Fatalf("scale=%g: status=%v mode=%q err=%v", scale, res.Status, tr.Mode(), err)
+		}
+		raw, errM := tr.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("scale=%g MarshalVIPRJSON: %v", scale, errM)
+		}
+		certs = append(certs, raw)
+	}
+
+	// Fractional integer UB 2.9999999999995 -> exact floor 2 in exported orig header.
+	{
+		m := NewModel("vipr_strict_ub", Maximize)
+		x := m.AddIntVar("x", 0, 2.9999999999995)
+		y := m.AddIntVar("y", 0, 10)
+		m.SetObjective(NewExpr(x.T(1), y.T(0)))
+		m.AddConstraint("c", Le(NewExpr(x.T(1), y.T(1)), 20))
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || res.Objective != 2 || tr.Mode() != "optimal" {
+			t.Fatalf("vipr_strict_ub: status=%v obj=%v mode=%q err=%v", res.Status, res.Objective, tr.Mode(), err)
+		}
+		raw, errM := tr.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("vipr_strict_ub MarshalVIPRJSON: %v", errM)
+		}
+		certs = append(certs, raw)
+	}
+
+	// Near-integer RHS 2x + 2y <= 3.99999995 with and without presolve.
+	for _, pre := range []bool{true, false} {
+		m := NewModel("vipr_gcd_near_int", Maximize)
+		x := m.AddIntVar("x", 0, 10)
+		y := m.AddIntVar("y", 0, 10)
+		m.SetObjective(NewExpr(x.T(1), y.T(1)))
+		m.AddConstraint("r", Le(NewExpr(x.T(2), y.T(2)), 3.99999995))
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithPresolve(pre), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || res.Objective != 1 || tr.Mode() != "optimal" {
+			t.Fatalf("vipr_gcd_near_int pre=%v: status=%v obj=%v mode=%q err=%v", pre, res.Status, res.Objective, tr.Mode(), err)
+		}
+		raw, errM := tr.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("vipr_gcd_near_int pre=%v MarshalVIPRJSON: %v", pre, errM)
+		}
+		certs = append(certs, raw)
+	}
+
+	if formalOn {
+		runJSONLItems(t, viprExe, certs)
+	}
 }

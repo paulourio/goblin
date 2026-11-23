@@ -1320,3 +1320,204 @@ func main() {
 		t.Fatalf("unreferenced certified/VIPR/json symbols linked into default binary (%d): %v", len(leaked), leaked[:min(len(leaked), 10)])
 	}
 }
+
+func TestCertifiedExactZeroGapDefaultAndScaledKnapsack(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	// Unset gap tolerances default to 0 under WithCertified(true), independent of option order.
+	cfgCert := ApplyOptions(WithCertified(true))
+	if cfgCert.RelGapTol != 0 || cfgCert.AbsGapTol != 0 {
+		t.Fatalf("ApplyOptions(WithCertified(true)) gap tols = (%g, %g), want (0, 0)", cfgCert.RelGapTol, cfgCert.AbsGapTol)
+	}
+	cfgRelFirst := ApplyOptions(WithRelGapTol(0.25), WithCertified(true))
+	if cfgRelFirst.RelGapTol != 0.25 || cfgRelFirst.AbsGapTol != 0 {
+		t.Fatalf("WithRelGapTol(0.25)+WithCertified(true) gap tols = (%g, %g), want (0.25, 0)", cfgRelFirst.RelGapTol, cfgRelFirst.AbsGapTol)
+	}
+	cfgAbsAfter := ApplyOptions(WithCertified(true), WithAbsGapTol(1e-4))
+	if cfgAbsAfter.RelGapTol != 0 || cfgAbsAfter.AbsGapTol != 1e-4 {
+		t.Fatalf("WithCertified(true)+WithAbsGapTol(1e-4) gap tols = (%g, %g), want (0, 1e-4)", cfgAbsAfter.RelGapTol, cfgAbsAfter.AbsGapTol)
+	}
+	cfgDisabled := ApplyOptions(WithCertified(true), WithCertified(false))
+	if cfgDisabled.RelGapTol != defaultRelGapTol || cfgDisabled.AbsGapTol != defaultAbsGapTol {
+		t.Fatalf("WithCertified(false) gap tols = (%g, %g), want (%g, %g)",
+			cfgDisabled.RelGapTol, cfgDisabled.AbsGapTol, defaultRelGapTol, defaultAbsGapTol)
+	}
+
+	// Tiny-scaled 6-variable integer knapsack: default WithCertified(true) must prove exact mode="optimal".
+	for _, scale := range []float64{1, 1e-6, 1e-7, 1e-8} {
+		m := NewModel("tiny_knap", Maximize)
+		var objTerms, rowTerms []Term
+		for i := range 6 {
+			v := m.AddIntVar("", 0, 10)
+			objTerms = append(objTerms, v.T(scale*float64(i+3)))
+			rowTerms = append(rowTerms, v.T(float64(2*i+3)))
+		}
+		m.SetObjective(NewExpr(objTerms...))
+		m.AddConstraint("cap", Le(NewExpr(rowTerms...), 37))
+
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithVIPRTrace(tr))
+		if err != nil {
+			t.Fatalf("scale=%g certified solve failed: %v", scale, err)
+		}
+		if res.Status != StatusOptimal {
+			t.Fatalf("scale=%g status=%v, want StatusOptimal", scale, res.Status)
+		}
+		if tr.Mode() != "optimal" {
+			t.Fatalf("scale=%g trace mode=%q, want \"optimal\"", scale, tr.Mode())
+		}
+		// Optimal integer vector has objective 35 * scale (x0=1, x5=2 -> 3 + 2*8 = 19? No: x0=9, x1=2 -> 27+8=35, weight 27+10=37).
+		wantRat := new(big.Rat).Mul(big.NewRat(35, 1), new(big.Rat).SetFloat64(scale))
+		// Exact objective is sum_i x_i * float64(scale*(i+3)): x0=9, x1=2 gives 9*(3*scale) + 2*(4*scale).
+		c0, _ := exactRatFromFloat(scale * 3)
+		c1, _ := exactRatFromFloat(scale * 4)
+		wantExact := new(big.Rat).Add(new(big.Rat).Mul(big.NewRat(9, 1), c0), new(big.Rat).Mul(big.NewRat(2, 1), c1))
+		_ = wantRat
+		wantF := exactRatToFloat(wantExact)
+		if res.Objective != wantF || res.BestBound != wantF {
+			t.Fatalf("scale=%g got (obj=%.17g, bound=%.17g), want %.17g", scale, res.Objective, res.BestBound, wantF)
+		}
+	}
+
+	// Pure LP sub-1e-6 dual gap must fail closed under default WithCertified(true), while explicit WithAbsGapTol honors caller tolerance.
+	mLP := NewModel("lp_zero_gap_gate", Minimize)
+	x := mLP.AddContVar("x", 0, 10)
+	mLP.AddConstraint("ge", Ge(VarExpr(x), 2))
+	mLP.SetObjective(VarExpr(x))
+	subTolDual := 1.0 - 1e-8 // Dual bound 2*(1 - 1e-8) leaves 2e-8 gap < 1e-6.
+	injectSubTolDual := func(_ *CompiledProblem, _ *VIPRTrace, wit *lpCertWitness, res *Result) {
+		r, _ := exactRatFromFloat(subTolDual)
+		wit.dualMin[0] = r
+		res.Duals[0] = subTolDual
+		res.ReducedCosts[0] = 1.0 - subTolDual
+		res.BestBound = 2.0 * subTolDual
+	}
+	resFail, errFail := mLP.Solve(withGoblinCertFault(ctx, injectSubTolDual), WithCertified(true))
+	if !errors.Is(errFail, ErrCertificationFailed) || resFail.Status != StatusNumericalError {
+		t.Fatalf("expected pure LP sub-1e-6 gap to fail closed under default WithCertified(true), got (%v, %v)", resFail.Status, errFail)
+	}
+	resExplicit, errExplicit := mLP.Solve(withGoblinCertFault(ctx, injectSubTolDual), WithCertified(true), WithAbsGapTol(1e-6))
+	if errExplicit != nil || resExplicit.Status != StatusOptimal {
+		t.Fatalf("expected explicit WithAbsGapTol(1e-6) to succeed, got (%v, %v)", resExplicit.Status, errExplicit)
+	}
+}
+
+func TestStrictIntegerBoundRoundingAndNearIntRHS(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	// Fractional integer UB 2.9999999999995 must floor strictly to 2 in both default and certified modes.
+	for _, cert := range []bool{false, true} {
+		m := NewModel("strict_int_ub", Maximize)
+		x := m.AddIntVar("x", 0, 2.9999999999995)
+		y := m.AddIntVar("y", 0, 10)
+		m.SetObjective(NewExpr(x.T(1), y.T(0)))
+		m.AddConstraint("c", Le(NewExpr(x.T(1), y.T(1)), 20))
+		tr := NewVIPRTrace()
+		var opts []Option
+		if cert {
+			opts = append(opts, WithCertified(true), WithVIPRTrace(tr))
+		}
+		res, err := m.Solve(ctx, opts...)
+		if err != nil || res.Status != StatusOptimal {
+			t.Fatalf("cert=%v strict_int_ub: status=%v err=%v", cert, res.Status, err)
+		}
+		if res.Values[0] != 2 || res.Objective != 2 {
+			t.Fatalf("cert=%v strict_int_ub: got x=%.17g obj=%.17g, want 2", cert, res.Values[0], res.Objective)
+		}
+		if cert && tr.Mode() != "optimal" {
+			t.Fatalf("strict_int_ub trace mode=%q, want \"optimal\"", tr.Mode())
+		}
+	}
+
+	// Symmetric strict rounding on fractional integer LB, Binary UB, and SetVarBounds.
+	mLB := NewModel("strict_int_lb", Minimize)
+	xl := mLB.AddIntVar("xl", 0.0000000000005, 5)
+	xb := mLB.AddVar("xb", 0, 0.9999999999995, Binary)
+	xs := mLB.AddIntVar("xs", 0, 5)
+	mLB.SetVarBounds(xs, 0, 2.9999999999995)
+	mLB.SetObjective(NewExpr(xl.T(1), xb.T(-10), xs.T(-1)))
+	resLB, errLB := mLB.Solve(ctx, WithCertified(true))
+	if errLB != nil || resLB.Status != StatusOptimal {
+		t.Fatalf("strict_int_lb: status=%v err=%v", resLB.Status, errLB)
+	}
+	if resLB.Values[0] != 1 || resLB.Values[1] != 0 || resLB.Values[2] != 2 || resLB.Objective != -1 {
+		t.Fatalf("strict_int_lb: got vals=%v obj=%v, want [1 0 2] obj=-1", resLB.Values, resLB.Objective)
+	}
+
+	// Near-integer RHS on exact-integer rows: max x+y s.t. 2x + 2y <= 3.99999995 -> obj = 1.
+	for _, rhs := range []float64{3.99999995, 3.9999999} {
+		for _, tc := range []struct {
+			name string
+			opts []Option
+		}{
+			{"default", nil},
+			{"no_presolve", []Option{WithPresolve(false)}},
+			{"no_presolve_no_cuts", []Option{WithPresolve(false), WithCuts(false)}},
+			{"parallel_no_presolve", []Option{WithPresolve(false), WithCuts(false), WithWorkers(4)}},
+			{"certified_default", []Option{WithCertified(true)}},
+			{"certified_no_presolve", []Option{WithCertified(true), WithPresolve(false)}},
+			{"certified_no_presolve_no_cuts", []Option{WithCertified(true), WithPresolve(false), WithCuts(false)}},
+		} {
+			m := NewModel("gcd_near_int", Maximize)
+			x := m.AddIntVar("x", 0, 10)
+			y := m.AddIntVar("y", 0, 10)
+			m.SetObjective(NewExpr(x.T(1), y.T(1)))
+			m.AddConstraint("r", Le(NewExpr(x.T(2), y.T(2)), rhs))
+			res, err := m.Solve(ctx, tc.opts...)
+			if err != nil || res.Status != StatusOptimal || res.Objective != 1 {
+				t.Fatalf("rhs=%.10g %s: got (status=%v, obj=%v, vals=%v, err=%v), want (Optimal, 1)",
+					rhs, tc.name, res.Status, res.Objective, res.Values, err)
+			}
+		}
+	}
+}
+
+func TestVerifyVIPRTraceStrictPolishedVsUnpolished(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	m := NewModel("verify_strict_vs_approx", Maximize)
+	x := m.AddIntVar("x", 0, 10)
+	y := m.AddIntVar("y", 0, 10)
+	z := m.AddContVar("z", 0, 10)
+	m.AddConstraint("c1", Le(NewExpr(T(x, 6), T(y, 4)), 24))
+	m.AddConstraint("c2", Le(NewExpr(T(x, 1), T(y, 2)), 6))
+	m.AddConstraint("eq_cont", Eq(NewExpr(T(z, 3), T(x, 1)), 4))
+	m.SetObjective(NewExpr(T(x, 5.5), T(y, 5), T(z, 3)))
+	p := m.Compile()
+
+	tr := NewVIPRTrace()
+	res, err := SolveCompiled(ctx, p, WithCertified(true), WithVIPRTrace(tr))
+	if err != nil || res.Status != StatusOptimal {
+		t.Fatalf("certified solve failed: status=%v err=%v", res.Status, err)
+	}
+	if errV := VerifyVIPRTrace(p, tr, res, ApplyOptions(WithCertified(true))); errV != nil {
+		t.Fatalf("strict VerifyVIPRTrace failed on polished certified result: %v", errV)
+	}
+
+	// 1e-8 perturbations on continuous Values, Objective, and BestBound fail strict WithCertified(true) check
+	// while remaining within unpolished DefaultOptions() float tolerance.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Result)
+	}{
+		{"cont_val_1e-8", func(r *Result) { r.Values[2] += 1e-8 }},
+		{"obj_1e-8", func(r *Result) { r.Objective -= 1e-8 }},
+		{"best_bound_1e-8", func(r *Result) {
+			r.BestBound -= 1e-8
+			r.Objective -= 1e-8
+		}},
+	} {
+		mut := res
+		mut.Values = append([]float64(nil), res.Values...)
+		tc.mutate(&mut)
+		if errStrict := VerifyVIPRTrace(p, tr, mut, ApplyOptions(WithCertified(true))); !errors.Is(errStrict, ErrCertificationFailed) {
+			t.Fatalf("%s: strict VerifyVIPRTrace got %v, want ErrCertificationFailed", tc.name, errStrict)
+		}
+		if errUnpol := VerifyVIPRTrace(p, tr, mut, DefaultOptions()); errUnpol != nil {
+			t.Fatalf("%s: unpolished VerifyVIPRTrace unexpectedly rejected 1e-8 float drift: %v", tc.name, errUnpol)
+		}
+	}
+}

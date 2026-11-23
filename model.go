@@ -135,9 +135,8 @@ func (s Status) String() string {
 type Var uint64
 
 const (
-	varModelShift    = 32
-	defaultModelCap  = 64
-	intBoundRoundTol = 1e-12
+	varModelShift   = 32
+	defaultModelCap = 64
 )
 
 func modelVarTag(modelID uint64) uint32 {
@@ -309,17 +308,17 @@ func roundBoundsForCategory(lb, ub float64, cat VarCategory) (float64, float64) 
 			ub = 1
 		}
 		if !math.IsNaN(lb) {
-			lb = math.Ceil(lb - intBoundRoundTol)
+			lb = math.Ceil(lb)
 		}
 		if !math.IsNaN(ub) {
-			ub = math.Floor(ub + intBoundRoundTol)
+			ub = math.Floor(ub)
 		}
 	case Integer:
 		if !math.IsInf(lb, 0) && !math.IsNaN(lb) {
-			lb = math.Ceil(lb - intBoundRoundTol)
+			lb = math.Ceil(lb)
 		}
 		if !math.IsInf(ub, 0) && !math.IsNaN(ub) {
-			ub = math.Floor(ub + intBoundRoundTol)
+			ub = math.Floor(ub)
 		}
 	}
 	if lb == 0 {

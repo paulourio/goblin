@@ -19,7 +19,10 @@ func setRootCertifiedFalse(cfg *Options) {
 	cfg.certifyFn = nil
 }
 
-// WithCertified enables or disables fail-closed exact rational verification at runtime.
+// WithCertified enables or disables fail-closed exact rational checking at runtime.
+// When enabled is true, any gap threshold not explicitly set via WithRelGapTol or
+// WithAbsGapTol (or overridden in WithOptions) defaults to 0, requiring zero rational
+// dual gap on pure LPs and exact optimal Mini-VIPR proofs on MILPs.
 func WithCertified(enabled bool) Option {
 	if enabled {
 		return setRootCertifiedTrue
@@ -69,6 +72,7 @@ func failClosedResult(p *CompiledProblem, res Result, backend Backend, start tim
 }
 
 func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start time.Time, done <-chan struct{}) (Result, error) {
+	opt.RelGapTol, opt.AbsGapTol = opt.effectiveGapTols()
 	var deadline time.Time
 	if opt.TimeLimit < 0 {
 		res := Result{
@@ -267,12 +271,16 @@ func finalizeCertifiedSolve(
 	return res, nil
 }
 
-// VerifyVIPRTrace checks in exact rational arithmetic that trace and res form a valid
-// certificate for p under opt, mirroring Track 4's checkMiniVIPR and checkVIPRWithPresolve
-// rules (including presolve reduction envelopes and orbital-symmetry branching), Meyer MILP
-// unboundedness certificates, and primal feasibility checks on resource-limit exits.
+// VerifyVIPRTrace checks trace against p in exact rational arithmetic, covering
+// Mini-VIPR proof steps, presolve envelopes, orbital-symmetry witnesses, feasible
+// incumbents, rational gap closure under opt, and Meyer MILP unbounded rays.
+// Integer coordinates in res.Values must match the certificate incumbent exactly.
+// When opt.Certified is false, res.Objective, res.BestBound, and continuous coordinates
+// in res.Values allow 1e-6 relative floating-point slack; passing WithCertified(true)
+// in opt requires bit-exact float64 matches against the rounded rational witness
+// values and defaults unset gap thresholds to zero.
 func VerifyVIPRTrace(p *CompiledProblem, trace *VIPRTrace, res Result, opt Options) error {
-	return verifyCertifiedMIP(exactStop{}, p, trace, nil, res, opt, false)
+	return verifyCertifiedMIP(exactStop{}, p, trace, nil, res, opt, opt.Certified)
 }
 
 func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result) {
@@ -664,14 +672,7 @@ func floatBestBoundValidAndClosed(p *CompiledProblem, x []*big.Rat, safeMinBnd *
 	if diff < -ulpSlack {
 		return false
 	}
-	cleanAbs := max(0.0, opt.AbsGapTol)
-	if math.IsNaN(opt.AbsGapTol) {
-		cleanAbs = 0
-	}
-	cleanRel := max(0.0, opt.RelGapTol)
-	if math.IsNaN(opt.RelGapTol) {
-		cleanRel = 0
-	}
+	cleanRel, cleanAbs := opt.effectiveGapTols()
 	_, linAbs, ok := evalExactMinAndLinObjRat(p, x)
 	if !ok {
 		return false
@@ -822,8 +823,7 @@ func approxLPPrimalDualValid(p *CompiledProblem, res Result, opt Options) bool {
 
 	primalMin := minObjective(p, res.Values)
 	scale := max(1.0, math.Abs(primalMin)+math.Abs(dualBnd))
-	cleanAbs := max(0.0, opt.AbsGapTol)
-	cleanRel := max(0.0, opt.RelGapTol)
+	cleanRel, cleanAbs := opt.effectiveGapTols()
 	allowed := max(1e-4*scale, max(cleanAbs, cleanRel*scale))
 	return math.Abs(primalMin-dualBnd) <= allowed
 }
@@ -1063,10 +1063,11 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 			return &lpCertWitness{primal: emptyX, dualMin: zeroDuals, polished: true}
 		}
 
+		relTol, absTol := opt.effectiveGapTols()
 		xDirect, okP := floatSliceToExactPrimalIfFeasible(p, res.Values, false)
 		yDirect, okY := userDualsToCanonicalMinRat(p, res.Duals)
 		if okP && okY {
-			if safeBnd, okS := ExactSafeDualBound(p, yDirect); okS && exactGapClosedRat(p, xDirect, safeBnd, opt.RelGapTol, opt.AbsGapTol) {
+			if safeBnd, okS := ExactSafeDualBound(p, yDirect); okS && exactGapClosedRat(p, xDirect, safeBnd, relTol, absTol) {
 				objU, okO := evalExactUserObjRat(p, xDirect)
 				rcUser, okRC := computeExactUserReducedCostsRat(p, yDirect)
 				if okO && okRC {
@@ -1132,7 +1133,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		if okP {
 			if snap, okSnap := buildExactSolverSnapshot(stop, lp); okSnap {
 				if yMin, _, dualUser, rcUser, okD := snap.extractExactDuals(stop); okD {
-					if safeBnd, okS := ExactSafeDualBound(p, yMin); okS && exactGapClosedRat(p, xDirect, safeBnd, opt.RelGapTol, opt.AbsGapTol) {
+					if safeBnd, okS := ExactSafeDualBound(p, yMin); okS && exactGapClosedRat(p, xDirect, safeBnd, relTol, absTol) {
 						for i, r := range dualUser {
 							res.Duals[i] = exactRatToFloat(r)
 						}
@@ -1247,7 +1248,8 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 		if !okSafe {
 			return ErrCertificationFailed
 		}
-		if !exactGapClosedRat(p, wit.primal, safeMinBnd, opt.RelGapTol, opt.AbsGapTol) {
+		relTol, absTol := opt.effectiveGapTols()
+		if !exactGapClosedRat(p, wit.primal, safeMinBnd, relTol, absTol) {
 			return ErrCertificationFailed
 		}
 		objUser, okObj := evalExactUserObjRat(p, wit.primal)
@@ -1379,7 +1381,11 @@ func verifyCertifiedMIP(
 		if !verifyValuesMatchExactIncumbent(p, res.Values, chk.incumbent, strictPolished) {
 			return ErrCertificationFailed
 		}
-		if !exactGapClosedRat(p, chk.incumbent, chk.certifiedMinLB, opt.RelGapTol, opt.AbsGapTol) {
+		relTol, absTol := opt.effectiveGapTols()
+		if relTol == 0 && absTol == 0 && chk.mode != "optimal" {
+			return ErrCertificationFailed
+		}
+		if !exactGapClosedRat(p, chk.incumbent, chk.certifiedMinLB, relTol, absTol) {
 			return ErrCertificationFailed
 		}
 		objUser, okObj := evalExactUserObjRat(p, chk.incumbent)

@@ -2511,6 +2511,15 @@ func (r *babVIPRRecorder) extractNodeFarkasActive(s *LPSolver, lpDuals []float64
 		}
 	}
 
+	for i := range m {
+		gID := r.activeRowID(i)
+		for _, sgn := range []int64{1, -1} {
+			if w, _, ok := r.projectFarkasMults([]viprRowMult{{rowID: gID, mult: big.NewRat(sgn, 1)}}, nodeLB, nodeUB); ok {
+				return w, true
+			}
+		}
+	}
+
 	return nil, false
 }
 
@@ -2629,6 +2638,37 @@ func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes
 		}
 	}
 	r.invalid = true
+}
+
+func (r *babVIPRRecorder) certifyRowActivityFarkas(vn *viprTreeNode, row int) bool {
+	if r == nil || r.invalid || vn == nil || row < 0 || row >= r.rp.m {
+		return false
+	}
+	lbR, ubR := r.nodeBoundsRat(vn)
+	for _, sgn := range []int64{1, -1} {
+		cand := []viprRowMult{{rowID: row, mult: big.NewRat(sgn, 1)}}
+		if w, _, ok := r.projectFarkasMults(cand, lbR, ubR); ok {
+			vn.kind = viprNodeLeafFarkas
+			vn.farkas = w
+			return true
+		}
+	}
+	return false
+}
+
+func (r *babVIPRRecorder) canCertifyIncumbent(cand []float64, candMin float64) bool {
+	if r == nil || r.invalid || r.rp == nil || len(cand) < r.rp.n {
+		return false
+	}
+	incRat, incObj, ok := r.rp.refineExactIncumbent(cand[:r.rp.n], r.ensureBaseScratchLP)
+	if ok && len(cand) > 0 {
+		r.cachedIncPtr = &cand[0]
+		r.cachedIncObjMin = candMin
+		r.cachedIncRat = incRat
+		r.cachedIncObj = incObj
+		r.cachedIncOK = true
+	}
+	return ok
 }
 
 func (r *babVIPRRecorder) certifySubtreeLeaf(vn *viprTreeNode) {

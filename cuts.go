@@ -86,17 +86,140 @@ type cutPlane struct {
 }
 
 type disaggVUBTerm struct {
+	rowIdx int
 	col    int
 	binCol int
 	effUB  float64
 }
 
 type flowNode struct {
-	invIn   int
-	prodCol int
-	binCol  int
-	invOut  int
-	demand  float64
+	invIn      int
+	prodCol    int
+	binCol     int
+	invOut     int
+	demand     float64
+	flowRowIdx int
+	vubRowIdx  int
+	vubCap     float64
+	vubRHS     float64
+}
+
+type liveRowMult struct {
+	rowIdx int
+	mu     float64
+}
+
+type liveGMIRecord struct {
+	basicRowIdx int
+	basicCol    int
+	numRows     int
+	basis       []int
+	colAtUpper  []bool
+	cStruct     []float64
+	cSlack      []float64
+	scaleExp    int
+	cut         cutPlane
+}
+
+type liveCoverItem struct {
+	col     int
+	weight  float64
+	comp    bool
+	inCover bool
+	alpha   int
+}
+
+type liveCoverRecord struct {
+	rowIdx   int
+	aggMults []liveRowMult
+	rowCols  []int
+	rowVals  []float64
+	rowSense ConstraintSense
+	rowRHS   float64
+	sign     float64
+	items    []liveCoverItem
+	knapRHS  float64
+	rawCols  []int
+	rawVals  []float64
+	rawRHS   float64
+	scaleExp int
+	cut      cutPlane
+}
+
+type liveLotSizingNode struct {
+	prodCol    int
+	invOutCol  int
+	binCol     int
+	demand     float64
+	vubCap     float64
+	vubRHS     float64
+	flowRowIdx int
+	vubRowIdx  int
+	inS        bool
+	coeffY     float64
+}
+
+type liveLotSizingRecord struct {
+	invInCol int
+	nodes    []liveLotSizingNode
+	cutDem   float64
+	rawCols  []int
+	rawVals  []float64
+	rawRHS   float64
+	scaleExp int
+	cut      cutPlane
+}
+
+type liveVUBRecord struct {
+	rowIdx    int
+	binCol    int
+	targetCol int
+	effUB     float64
+	scaleExp  int
+	cut       cutPlane
+}
+
+type liveCMIRRecord struct {
+	rows     []liveRowMult
+	aggCols  []int
+	aggVals  []float64
+	aggRHS   float64
+	delta    float64
+	useLower []bool
+	betaB0   float64
+	betaF0   float64
+	betaHat  float64
+	alphaHat []float64
+	cInt     []float64
+	cCont    []float64
+	rawCols  []int
+	rawVals  []float64
+	rawRHS   float64
+	scaleExp int
+	cut      cutPlane
+}
+
+type liveDropRecord struct {
+	rawCols  []int
+	rawVals  []float64
+	rawRHS   float64
+	scaleExp int
+	finalCut cutPlane
+}
+
+// cutCertObserver captures algebraic cut derivation witnesses when attached to cutGenWorkspace.
+type cutCertObserver struct {
+	srcRowIdx    int
+	srcRowSign   float64
+	srcAggMults  []liveRowMult
+	lastScaleExp int
+
+	gmis       []liveGMIRecord
+	covers     []liveCoverRecord
+	lotSizings []liveLotSizingRecord
+	vubs       []liveVUBRecord
+	cmirs      []liveCMIRRecord
+	drops      []liveDropRecord
 }
 
 type coverItem struct {
@@ -152,6 +275,9 @@ type cutGenWorkspace struct {
 	coverIn      []bool
 	coverWeights []float64
 	coverMinW    []float64
+
+	// Optional witness recorder; nil in production solves.
+	certObs *cutCertObserver
 }
 
 func (w *cutGenWorkspace) ensureVars(n int) {
@@ -236,8 +362,12 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 	m := p.numConstraints
 
 	vubBinCol := make([]int, n)
+	vubRowIdx := make([]int, n)
+	vubCap := make([]float64, n)
+	vubRHS := make([]float64, n)
 	for j := range n {
 		vubBinCol[j] = -1
+		vubRowIdx[j] = -1
 	}
 	cache.aggRowOK = make([]bool, m)
 
@@ -346,6 +476,9 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 				val := p.rowVal[k]
 				if col != binCol && val == 1.0 {
 					vubBinCol[col] = binCol
+					vubRowIdx[col] = i
+					vubCap[col] = capVal
+					vubRHS[col] = p.rowRHS[i]
 				}
 			}
 			continue
@@ -367,6 +500,7 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 				continue
 			}
 			cache.disaggVUBs = append(cache.disaggVUBs, disaggVUBTerm{
+				rowIdx: i,
 				col:    col,
 				binCol: binCol,
 				effUB:  effUB,
@@ -426,11 +560,15 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 			invOutCount = make(map[int]int)
 		}
 		fn := flowNode{
-			invIn:   invIn,
-			prodCol: prodCol,
-			binCol:  vubBinCol[prodCol],
-			invOut:  invOut,
-			demand:  p.rowRHS[i],
+			invIn:      invIn,
+			prodCol:    prodCol,
+			binCol:     vubBinCol[prodCol],
+			invOut:     invOut,
+			demand:     p.rowRHS[i],
+			flowRowIdx: i,
+			vubRowIdx:  vubRowIdx[prodCol],
+			vubCap:     vubCap[prodCol],
+			vubRHS:     vubRHS[prodCol],
 		}
 		candNodes = append(candNodes, fn)
 		if invIn != -1 {
@@ -717,11 +855,10 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 		if f0 < minIntInfeas || f0 > 1.0-minIntInfeas {
 			continue
 		}
-		f0Lo, f0Hi := f0, f0
-		if exactXVal < 0 && f0 > 0 {
-			f0Lo = nextDown(f0)
-			f0Hi = nextUp(f0)
-		}
+		// Account for computeExactTableauRow basis-residual and scaling error when bracketing f0.
+		f0Err := max(1e-10, 64.0*unitRoundoff64*(1.0+math.Abs(exactXVal)))
+		f0Lo := nextDown(f0 - f0Err)
+		f0Hi := nextUp(f0 + f0Err)
 		oneMinusF0Lo := nextDown(1.0 - f0Hi)
 		if !(f0Lo > 0) || !(oneMinusF0Lo > 0) {
 			continue
@@ -732,6 +869,15 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 		var rhsAcc dot2Acc
 		rhsAcc.addVal(1.0)
 		validRow := true
+
+		var obsColAtUpper []bool
+		var obsCStruct []float64
+		var obsCSlack []float64
+		if cutWS.certObs != nil && m == p.numConstraints {
+			obsColAtUpper = make([]bool, n)
+			obsCStruct = make([]float64, n)
+			obsCSlack = make([]float64, m)
+		}
 
 		for k := range n + m {
 			if k == bVar {
@@ -784,6 +930,9 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 						break
 					}
 				}
+				if obsColAtUpper != nil && effSt == statusAtUpper {
+					obsColAtUpper[k] = true
+				}
 			} else {
 				bndVal = solver.unscaledBound(k, st == statusAtUpper)
 			}
@@ -792,6 +941,8 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			if effSt == statusAtUpper {
 				alphaTilde = -alpha
 			}
+			// Account for LU basis residual (<= 1e-11) and unscaling roundoff in alpha.
+			alphaErr = max(alphaErr, max(64.0*unitRoundoff64*(1.0+math.Abs(alphaTilde)), 1e-10*math.Abs(alphaTilde)))
 
 			var gamma float64
 			isIntVar := k < n && varCat[k] != Continuous
@@ -830,6 +981,9 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			}
 
 			if k < n {
+				if obsCStruct != nil {
+					obsCStruct[k] = gamma
+				}
 				if gmiMark[k] != gen {
 					gmiMark[k] = gen
 					gmiAcc[k] = dot2Acc{}
@@ -844,6 +998,9 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 				}
 			} else {
 				rowIdx := k - n
+				if obsCSlack != nil {
+					obsCSlack[rowIdx] = gamma
+				}
 				if effSt == statusAtLower {
 					rhsAcc.addProd(-gamma, solver.unscaledRowRHS(rowIdx))
 					rhsAcc.addProd(gamma, bndVal)
@@ -921,6 +1078,19 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 		}
 
 		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, gmiMaxNNZ, cutWS); ok {
+			if obsColAtUpper != nil {
+				cutWS.certObs.gmis = append(cutWS.certObs.gmis, liveGMIRecord{
+					basicRowIdx: r,
+					basicCol:    bVar,
+					numRows:     m,
+					basis:       slices.Clone(basis),
+					colAtUpper:  obsColAtUpper,
+					cStruct:     obsCStruct,
+					cSlack:      obsCSlack,
+					scaleExp:    cutWS.certObs.lastScaleExp,
+					cut:         cut,
+				})
+			}
 			cuts = append(cuts, cut)
 		}
 	}
@@ -986,6 +1156,11 @@ func separateKnapsackCoverCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGe
 		sign := 1.0
 		if p.rowSense[i] == GreaterEqual {
 			sign = -1.0
+		}
+		if ws.certObs != nil {
+			ws.certObs.srcRowIdx = i
+			ws.certObs.srcRowSign = sign
+			ws.certObs.srcAggMults = nil
 		}
 		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		if cut, ok := separateCoverFromSparseRow(p, p.colIdx[s:e], p.rowVal[s:e], p.rowRHS[i], sign, lpPrimal, 0, ws); ok {
@@ -1175,6 +1350,10 @@ func separateCoverFromSparseRow(
 	lhsStar := 0.0
 	idxBuf := ws.tmpIdx[:0]
 	valBuf := ws.tmpVal[:0]
+	var obsAlphas []int
+	if ws.certObs != nil {
+		obsAlphas = make([]int, len(items))
+	}
 
 	for idx, it := range items {
 		var alpha int
@@ -1211,6 +1390,9 @@ func separateCoverFromSparseRow(
 				}
 			}
 		}
+		if obsAlphas != nil && alpha > 0 {
+			obsAlphas[idx] = alpha
+		}
 		if alpha <= 0 {
 			continue
 		}
@@ -1234,7 +1416,41 @@ func separateCoverFromSparseRow(
 		finalRHS = nextUp(finalRHS)
 	}
 
-	return finalizeSparseCut(p, idxBuf, valBuf, finalRHS, lpPrimal, maxNNZ, ws)
+	cut, ok := finalizeSparseCut(p, idxBuf, valBuf, finalRHS, lpPrimal, maxNNZ, ws)
+	if ok && ws.certObs != nil {
+		obs := ws.certObs
+		liveItems := make([]liveCoverItem, len(items))
+		for idx, it := range items {
+			liveItems[idx] = liveCoverItem{
+				col:     it.col,
+				weight:  it.weight,
+				comp:    it.comp,
+				inCover: inCover[idx],
+				alpha:   obsAlphas[idx],
+			}
+		}
+		rowSense := LessEqual
+		if obs.srcRowIdx >= 0 && obs.srcRowIdx < p.numConstraints {
+			rowSense = p.rowSense[obs.srcRowIdx]
+		}
+		obs.covers = append(obs.covers, liveCoverRecord{
+			rowIdx:   obs.srcRowIdx,
+			aggMults: slices.Clone(obs.srcAggMults),
+			rowCols:  slices.Clone(cols),
+			rowVals:  slices.Clone(vals),
+			rowSense: rowSense,
+			rowRHS:   rawRHS,
+			sign:     sign,
+			items:    liveItems,
+			knapRHS:  rhs,
+			rawCols:  slices.Clone(idxBuf),
+			rawVals:  slices.Clone(valBuf),
+			rawRHS:   finalRHS,
+			scaleExp: obs.lastScaleExp,
+			cut:      cut,
+		})
+	}
+	return cut, ok
 }
 
 // separateFlowAndVUBCuts separates disaggregated variable-upper-bound inequalities and Barany-Van Roy-Wolsey (l, S) lot-sizing cuts.
@@ -1257,6 +1473,16 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 			vubIdx[0], vubIdx[1] = term.col, term.binCol
 			vubVal[0], vubVal[1] = 1.0, -term.effUB
 			if cut, ok := finalizeSparseCut(p, vubIdx[:], vubVal[:], 0, lpPrimal, 0, ws); ok {
+				if ws.certObs != nil {
+					ws.certObs.vubs = append(ws.certObs.vubs, liveVUBRecord{
+						rowIdx:    term.rowIdx,
+						binCol:    term.binCol,
+						targetCol: term.col,
+						effUB:     term.effUB,
+						scaleExp:  ws.certObs.lastScaleExp,
+						cut:       cut,
+					})
+				}
 				cuts = append(cuts, cut)
 			}
 		}
@@ -1378,6 +1604,55 @@ func separateFlowAndVUBCuts(p *CompiledProblem, lpPrimal []float64, ws *cutGenWo
 				}
 
 				if cut, ok := finalizeSparseCut(p, flowIdx[:nf], flowVal[:nf], -cumDemLo, lpPrimal, 0, ws); ok {
+					if ws.certObs != nil {
+						lsNodes := make([]liveLotSizingNode, 0, q-t+1)
+						obsSeen := 0
+						for tau := t; tau <= q; tau++ {
+							nd := chain[tau]
+							alreadyInS := false
+							for k := range obsSeen {
+								if seenBins[k] == nd.binCol {
+									alreadyInS = true
+									break
+								}
+							}
+							inS := false
+							coeffY := 0.0
+							if alreadyInS {
+								inS = true
+							} else {
+								rem := remDemHi[tau-t]
+								if rem*lpPrimal[nd.binCol] < lpPrimal[nd.prodCol]-cutCompareTol {
+									seenBins[obsSeen] = nd.binCol
+									obsSeen++
+									inS = true
+									coeffY = rem
+								}
+							}
+							lsNodes = append(lsNodes, liveLotSizingNode{
+								prodCol:    nd.prodCol,
+								invOutCol:  nd.invOut,
+								binCol:     nd.binCol,
+								demand:     nd.demand,
+								vubCap:     nd.vubCap,
+								vubRHS:     nd.vubRHS,
+								flowRowIdx: nd.flowRowIdx,
+								vubRowIdx:  nd.vubRowIdx,
+								inS:        inS,
+								coeffY:     coeffY,
+							})
+						}
+						ws.certObs.lotSizings = append(ws.certObs.lotSizings, liveLotSizingRecord{
+							invInCol: chain[t].invIn,
+							nodes:    lsNodes,
+							cutDem:   cumDemLo,
+							rawCols:  slices.Clone(flowIdx[:nf]),
+							rawVals:  slices.Clone(flowVal[:nf]),
+							rawRHS:   -cumDemLo,
+							scaleExp: ws.certObs.lastScaleExp,
+							cut:      cut,
+						})
+					}
 					cuts = append(cuts, cut)
 				}
 			}
@@ -1415,6 +1690,11 @@ func separateRowMIRCutsWithWS(p *CompiledProblem, lpPrimal []float64, ws *cutGen
 		sign := 1.0
 		if p.rowSense[i] == GreaterEqual {
 			sign = -1.0
+		}
+		if ws.certObs != nil {
+			ws.certObs.srcRowIdx = i
+			ws.certObs.srcRowSign = sign
+			ws.certObs.srcAggMults = nil
 		}
 		s, e := p.rowPtr[i], p.rowPtr[i+1]
 		cuts = separateCMIRFromSparseRow(p, p.colIdx[s:e], p.rowVal[s:e], p.rowRHS[i], sign, lpPrimal, mirMaxNNZ, maxMIRDivisors, ws, cuts)
@@ -1578,6 +1858,16 @@ func separateCMIRFromSparseRow(
 		valBuf := ws.tmpVal[:needCols]
 		outLen := 0
 		validCut := true
+		var obsUseLower []bool
+		var obsAlphaHat []float64
+		var obsCInt []float64
+		var obsCCont []float64
+		if ws.certObs != nil {
+			obsUseLower = make([]bool, n)
+			obsAlphaHat = make([]float64, n)
+			obsCInt = make([]float64, n)
+			obsCCont = make([]float64, n)
+		}
 		for k, col := range cols {
 			a := sign * vals[k]
 			l, u := varLB[col], varUB[col]
@@ -1585,10 +1875,24 @@ func separateCMIRFromSparseRow(
 				l = math.Ceil(l)
 				u = math.Floor(u)
 			}
+			atLower := mirUseLower(lpPrimal[col], l, u)
+			if obsUseLower != nil {
+				obsUseLower[col] = atLower
+			}
 			if l == u {
+				if obsAlphaHat != nil && varCat[col] != Continuous {
+					num := a
+					if !atLower {
+						num = -a
+					}
+					al := num / delta
+					if al != 0 || num < 0 {
+						al = nextDown(al)
+					}
+					obsAlphaHat[col] = al
+				}
 				continue
 			}
-			atLower := mirUseLower(lpPrimal[col], l, u)
 
 			if varCat[col] == Continuous {
 				if a > 0 {
@@ -1599,6 +1903,9 @@ func separateCMIRFromSparseRow(
 					if math.IsInf(g, 0) || math.IsNaN(g) {
 						validCut = false
 						break
+					}
+					if obsCCont != nil {
+						obsCCont[col] = g
 					}
 					if g != 0 && outLen < len(idxBuf) {
 						idxBuf[outLen] = col
@@ -1614,6 +1921,9 @@ func separateCMIRFromSparseRow(
 					if math.IsInf(g, 0) || math.IsNaN(g) {
 						validCut = false
 						break
+					}
+					if obsCCont != nil {
+						obsCCont[col] = g
 					}
 					if g != 0 && outLen < len(idxBuf) {
 						idxBuf[outLen] = col
@@ -1655,6 +1965,10 @@ func separateCMIRFromSparseRow(
 						}
 					}
 				}
+				if obsAlphaHat != nil {
+					obsAlphaHat[col] = alpha
+					obsCInt[col] = coeff
+				}
 				if !comp {
 					if coeff != 0 && outLen < len(idxBuf) {
 						idxBuf[outLen] = col
@@ -1688,6 +2002,40 @@ func separateCMIRFromSparseRow(
 			cutRHS = nextUp(cutRHS)
 		}
 		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, maxNNZ, ws); ok {
+			if ws.certObs != nil {
+				obs := ws.certObs
+				var srcRows []liveRowMult
+				if len(obs.srcAggMults) > 0 {
+					srcRows = slices.Clone(obs.srcAggMults)
+				} else if obs.srcRowIdx >= 0 && obs.srcRowIdx < p.numConstraints {
+					srcRows = []liveRowMult{{rowIdx: obs.srcRowIdx, mu: obs.srcRowSign}}
+				}
+				if len(srcRows) > 0 {
+					signedVals := make([]float64, len(cols))
+					for k := range cols {
+						signedVals[k] = sign * vals[k]
+					}
+					obs.cmirs = append(obs.cmirs, liveCMIRRecord{
+						rows:     srcRows,
+						aggCols:  slices.Clone(cols),
+						aggVals:  signedVals,
+						aggRHS:   rhs,
+						delta:    delta,
+						useLower: obsUseLower,
+						betaB0:   b0,
+						betaF0:   f0,
+						betaHat:  betaHat,
+						alphaHat: obsAlphaHat,
+						cInt:     obsCInt,
+						cCont:    obsCCont,
+						rawCols:  slices.Clone(idxBuf),
+						rawVals:  slices.Clone(valBuf),
+						rawRHS:   cutRHS,
+						scaleExp: obs.lastScaleExp,
+						cut:      cut,
+					})
+				}
+			}
 			cuts = append(cuts, cut)
 		}
 	}
@@ -1973,6 +2321,10 @@ func separateAggregatedCore(solver *LPSolver, lpPrimal []float64, ws *cutGenWork
 			rowGen := ws.nextAggRowGen()
 			aggCols := ws.aggCols[:0]
 			var rhsAcc dot2Acc
+			var obsMults []liveRowMult
+			if ws.certObs != nil {
+				obsMults = append(obsMults, liveRowMult{rowIdx: r0, mu: mu0})
+			}
 
 			ws.aggRowUsed[r0] = rowGen
 			addScaledProblemRowToAgg(p, r0, mu0, &rhsAcc, ws, colGen, &aggCols)
@@ -2052,10 +2404,17 @@ func separateAggregatedCore(solver *LPSolver, lpPrimal []float64, ws *cutGenWork
 				}
 				ws.aggRowUsed[bestRow] = rowGen
 				addScaledProblemRowToAgg(p, bestRow, bestMu, &rhsAcc, ws, colGen, &aggCols)
+				if ws.certObs != nil {
+					obsMults = append(obsMults, liveRowMult{rowIdx: bestRow, mu: bestMu})
+				}
 				var aggRHS float64
 				outCols, outVals, aggRHS, ok = materializeAggRow(p, rhsAcc, aggCols, mirMaxNNZ, ws)
 				if !ok {
 					break
+				}
+				if ws.certObs != nil {
+					ws.certObs.srcRowIdx = -1
+					ws.certObs.srcAggMults = obsMults
 				}
 				cuts = separateCMIRFromSparseRow(p, outCols, outVals, aggRHS, 1.0, lpPrimal, mirMaxNNZ, maxMIRDivisors+2, ws, cuts)
 			}
@@ -2094,9 +2453,13 @@ func separateAggregatedCore(solver *LPSolver, lpPrimal []float64, ws *cutGenWork
 			rowGen := ws.nextAggRowGen()
 			aggCols := ws.aggCols[:0]
 			var rhsAcc dot2Acc
+			var obsMults []liveRowMult
 			for _, r := range sub {
 				ws.aggRowUsed[r] = rowGen
 				addScaledProblemRowToAgg(p, r, 1.0, &rhsAcc, ws, colGen, &aggCols)
+				if ws.certObs != nil {
+					obsMults = append(obsMults, liveRowMult{rowIdx: r, mu: 1.0})
+				}
 			}
 			elimCount := 0
 			for i := range m {
@@ -2139,11 +2502,22 @@ func separateAggregatedCore(solver *LPSolver, lpPrimal []float64, ws *cutGenWork
 				}
 				ws.aggRowUsed[i] = rowGen
 				addScaledProblemRowToAgg(p, i, mu, &rhsAcc, ws, colGen, &aggCols)
+				if ws.certObs != nil {
+					obsMults = append(obsMults, liveRowMult{rowIdx: i, mu: mu})
+				}
 				elimCount++
 			}
 			if elimCount > 0 {
 				if outCols, outVals, aggRHS, ok := materializeAggRow(p, rhsAcc, aggCols, mirMaxNNZ, ws); ok {
+					if ws.certObs != nil {
+						ws.certObs.srcRowIdx = -1
+						ws.certObs.srcAggMults = obsMults
+					}
 					cuts = separateCMIRFromSparseRow(p, outCols, outVals, aggRHS, 1.0, lpPrimal, mirMaxNNZ, maxMIRDivisors+2, ws, cuts)
+					if ws.certObs != nil {
+						ws.certObs.srcRowIdx = -1
+						ws.certObs.srcAggMults = obsMults
+					}
 					if cov, covOK := separateCoverFromSparseRow(p, outCols, outVals, aggRHS, 1.0, lpPrimal, mirMaxNNZ, ws); covOK {
 						cuts = append(cuts, cov)
 					}
@@ -2272,7 +2646,15 @@ func separatePairwiseSurrogateCuts(ctx *aggCutContext) []cutPlane {
 				if !ok {
 					continue
 				}
+				if ws.certObs != nil {
+					ws.certObs.srcRowIdx = -1
+					ws.certObs.srcAggMults = []liveRowMult{{rowIdx: r1, mu: s1}, {rowIdx: r2, mu: s2 * mu}}
+				}
 				cuts = separateCMIRFromSparseRow(p, outCols, outVals, aggRHS, 1.0, ctx.lpPrimal, pairNNZCap, maxMIRDivisors, ws, cuts)
+				if ws.certObs != nil {
+					ws.certObs.srcRowIdx = -1
+					ws.certObs.srcAggMults = []liveRowMult{{rowIdx: r1, mu: s1}, {rowIdx: r2, mu: s2 * mu}}
+				}
 				if cov, covOK := separateCoverFromSparseRow(p, outCols, outVals, aggRHS, 1.0, ctx.lpPrimal, pairNNZCap, ws); covOK {
 					cuts = append(cuts, cov)
 				}
@@ -2298,6 +2680,7 @@ func finalizeSparseCut(
 	if math.IsNaN(rhs) || math.IsInf(rhs, 0) || len(idx) == 0 || len(idx) != len(val) {
 		return cutPlane{}, false
 	}
+	origRHS := rhs
 	if ws == nil {
 		var localWS cutGenWorkspace
 		ws = &localWS
@@ -2484,13 +2867,24 @@ func finalizeSparseCut(
 		colIdx[k] = j
 		outVal[k] = ws.acc[j]
 	}
-	return cutPlane{
+	cut := cutPlane{
 		ColIdx:   colIdx,
 		Val:      outVal,
 		RHS:      scaledRHS,
 		Efficacy: efficacy,
 		Norm:     scaledNorm,
-	}, true
+	}
+	if ws.certObs != nil {
+		ws.certObs.lastScaleExp = -normExp
+		ws.certObs.drops = append(ws.certObs.drops, liveDropRecord{
+			rawCols:  slices.Clone(idx),
+			rawVals:  slices.Clone(val),
+			rawRHS:   origRHS,
+			scaleExp: -normExp,
+			finalCut: cut,
+		})
+	}
+	return cut, true
 }
 
 // finalizeCut converts the dense cut dense*x <= rhs into a power-of-two normalized sparse cut row.

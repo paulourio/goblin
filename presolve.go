@@ -31,6 +31,35 @@ const (
 	rowStateInvariant           = -2
 )
 
+type lpPresolveStepKind uint8
+
+const (
+	lpStepFixedSubst lpPresolveStepKind = iota + 1
+	lpStepSingletonRow
+	lpStepDropRedundantRow
+	lpStepDualColFix
+	lpStepZeroObjEmptyColFix
+)
+
+type lpPresolveEvent struct {
+	kind    lpPresolveStepKind
+	col     int
+	row     int
+	toLower bool
+	val     float64
+}
+
+type presolveObserver struct {
+	onGcdInfeas     func(rowIdx int, cols []int, origVals []float64, origRHS float64, loInt, hiInt, g int64, goInf bool, maxRoundErr float64)
+	onGcdDiv        func(rowIdx int, cols []int, origVals, lb, ub []float64, sense ConstraintSense, origRHS, rhsComp float64, g int64, divCoeffs []int64, divRHS int64, maxRoundErr float64)
+	onActivityRow   func(rowIdx int, cols []int, vals []float64, rhs float64, hasLo, hasHi bool, lb, ub []float64)
+	onActivityTight func(rowIdx, termIdx int, cols []int, vals []float64, rhs float64, hasLo, hasHi, isUpper bool, preLB, preUB []float64, newBound float64)
+	onSkipTerm      func(slackLo, absA, l, u, targetBound float64, isInt, goSkip bool)
+	onBinTight      func(rowIdx, targetIdx int, cols []int, preVals []float64, preRHS float64, lb, ub []float64, a, surplus, newA, newRHS float64)
+	onOrbit         func(rows []presolveWorkRow, lb, ub []float64, gCount int, sc *orbitTrialScratch)
+	onLPStep        func(ev lpPresolveEvent)
+}
+
 type presolveWorkRow struct {
 	name   string
 	cols   []int
@@ -70,6 +99,10 @@ func Presolve(orig *CompiledProblem, maxPasses int) PresolveResult {
 }
 
 func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}) PresolveResult {
+	return presolveWithObserver(orig, maxPasses, deadline, done, nil)
+}
+
+func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}, obs *presolveObserver) PresolveResult {
 	if maxPasses <= 0 {
 		maxPasses = defaultPresolveMaxPass
 	}
@@ -175,7 +208,12 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						allInt = false
 						break
 					}
-					maxRoundErr += diff * maxDom
+					termErr := nextUp(diff * maxDom)
+					if math.IsInf(termErr, 0) || math.IsNaN(termErr) {
+						allInt = false
+						break
+					}
+					maxRoundErr = nextUp(maxRoundErr + termErr)
 					if maxRoundErr > presolveGCDMaxRowErr {
 						allInt = false
 						break
@@ -187,22 +225,46 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 				if r.sense == Equal && maxRoundErr == 0 && math.Abs(r.rhs) <= 0x1p62 {
 					loInt := int64(math.Ceil(r.rhs - presolveFeasTol))
 					hiInt := int64(math.Floor(r.rhs + presolveFeasTol))
-					if q := divCeilInt64(loInt, g); q*g > hiInt {
+					q := divCeilInt64(loInt, g)
+					goInf := q*g > hiInt
+					if obs != nil && obs.onGcdInfeas != nil {
+						obs.onGcdInfeas(i, r.cols, r.vals, r.rhs, loInt, hiInt, g, goInf, 0)
+					}
+					if goInf {
 						return PresolveResult{Infeasible: true}
 					}
 				}
 				if math.Abs(r.rhs) <= 0x1p52 {
 					if r.sense == Equal {
-						loInt := int64(math.Ceil(r.rhs - presolveFeasTol - maxRoundErr))
-						hiInt := int64(math.Floor(r.rhs + presolveFeasTol + maxRoundErr))
+						loF := r.rhs - presolveFeasTol
+						hiF := r.rhs + presolveFeasTol
+						if maxRoundErr > 0 {
+							loF = nextDown(loF - maxRoundErr)
+							hiF = nextUp(hiF + maxRoundErr)
+						}
+						loInt := int64(math.Ceil(loF))
+						hiInt := int64(math.Floor(hiF))
 						q := divCeilInt64(loInt, g)
 						if q*g > hiInt {
+							if obs != nil && obs.onGcdInfeas != nil && maxRoundErr > 0 {
+								obs.onGcdInfeas(i, r.cols, r.vals, r.rhs, loInt, hiInt, g, true, maxRoundErr)
+							}
 							return PresolveResult{Infeasible: true}
 						}
 						// Do not round a sub-tolerance non-multiple equality RHS
 						// (such as 2x - 2y = 5e-7) into a falsely feasible integer multiple.
-						if maxRoundErr == 0 && r.rhs != float64(q*g) {
+						qgFloat := float64(q * g)
+						if maxRoundErr == 0 {
+							if r.rhs != qgFloat {
+								continue
+							}
+						} else if qgFloat < nextDown(r.rhs-maxRoundErr) || qgFloat > nextUp(r.rhs+maxRoundErr) {
 							continue
+						}
+						var preVals []float64
+						origRHS := r.rhs
+						if obs != nil && obs.onGcdDiv != nil {
+							preVals = slices.Clone(r.vals)
 						}
 						r.ensureOwned()
 						fg := float64(g)
@@ -211,49 +273,129 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						}
 						r.rhs = float64(q)
 						strengthened++
+						if obs != nil && obs.onGcdDiv != nil {
+							divCoeffs := make([]int64, len(r.vals))
+							for k, v := range r.vals {
+								divCoeffs[k] = int64(v)
+							}
+							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, qgFloat, g, divCoeffs, q, maxRoundErr)
+						}
 					} else {
+						var preVals []float64
+						origRHS := r.rhs
+						if obs != nil && obs.onGcdDiv != nil {
+							preVals = slices.Clone(r.vals)
+						}
 						r.ensureOwned()
 						fg := float64(g)
 						for k := range r.vals {
 							r.vals[k] = math.Round(r.vals[k]) / fg
 						}
+						var rhsComp float64
+						var divRHS int64
 						if r.sense == LessEqual {
-							ubInt := int64(math.Floor(r.rhs + maxRoundErr + presolveIntTol))
-							r.rhs = float64(divFloorInt64(ubInt, g))
+							rhsComp = origRHS
+							if maxRoundErr > 0 {
+								rhsComp = nextUp(origRHS + maxRoundErr)
+							}
+							ubInt := int64(math.Floor(rhsComp))
+							divRHS = divFloorInt64(ubInt, g)
 						} else {
-							lbInt := int64(math.Ceil(r.rhs - maxRoundErr - presolveIntTol))
-							r.rhs = float64(divCeilInt64(lbInt, g))
+							rhsComp = origRHS
+							if maxRoundErr > 0 {
+								rhsComp = nextDown(origRHS - maxRoundErr)
+							}
+							lbInt := int64(math.Ceil(rhsComp))
+							divRHS = divCeilInt64(lbInt, g)
 						}
+						r.rhs = float64(divRHS)
 						strengthened++
+						if obs != nil && obs.onGcdDiv != nil {
+							divCoeffs := make([]int64, len(r.vals))
+							for k, v := range r.vals {
+								divCoeffs[k] = int64(v)
+							}
+							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, rhsComp, g, divCoeffs, divRHS, maxRoundErr)
+						}
 					}
 				}
 			} else if allInt && g == 1 && math.Abs(r.rhs) <= 0x1p52 {
-				if maxRoundErr > 0 {
-					r.ensureOwned()
-					for k := range r.vals {
-						r.vals[k] = math.Round(r.vals[k])
-					}
-				}
 				switch r.sense {
-				case LessEqual:
-					fl := math.Floor(r.rhs + maxRoundErr + presolveIntTol)
-					if fl < r.rhs-presolveBoundChangeTol {
-						r.rhs = fl
-						strengthened++
+				case LessEqual, GreaterEqual:
+					origRHS := r.rhs
+					rhsComp := origRHS
+					var intRHS float64
+					var tighter bool
+					if r.sense == LessEqual {
+						if maxRoundErr > 0 {
+							rhsComp = nextUp(origRHS + maxRoundErr)
+						}
+						intRHS = math.Floor(rhsComp)
+						tighter = intRHS < origRHS
+					} else {
+						if maxRoundErr > 0 {
+							rhsComp = nextDown(origRHS - maxRoundErr)
+						}
+						intRHS = math.Ceil(rhsComp)
+						tighter = intRHS > origRHS
 					}
-				case GreaterEqual:
-					cl := math.Ceil(r.rhs - maxRoundErr - presolveIntTol)
-					if cl > r.rhs+presolveBoundChangeTol {
-						r.rhs = cl
+					if maxRoundErr > 0 || tighter {
+						var preVals []float64
+						if obs != nil && obs.onGcdDiv != nil {
+							preVals = slices.Clone(r.vals)
+						}
+						if maxRoundErr > 0 {
+							r.ensureOwned()
+							for k := range r.vals {
+								r.vals[k] = math.Round(r.vals[k])
+							}
+						}
+						r.rhs = intRHS
 						strengthened++
+						if obs != nil && obs.onGcdDiv != nil {
+							divCoeffs := make([]int64, len(r.vals))
+							for k, v := range r.vals {
+								divCoeffs[k] = int64(v)
+							}
+							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, rhsComp, 1, divCoeffs, int64(intRHS), maxRoundErr)
+						}
 					}
 				case Equal:
-					nearest := math.Round(r.rhs)
-					if math.Abs(r.rhs-nearest) > presolveFeasTol+maxRoundErr {
+					loF := r.rhs - presolveFeasTol
+					hiF := r.rhs + presolveFeasTol
+					if maxRoundErr > 0 {
+						loF = nextDown(loF - maxRoundErr)
+						hiF = nextUp(hiF + maxRoundErr)
+					}
+					loInt := int64(math.Ceil(loF))
+					hiInt := int64(math.Floor(hiF))
+					goInf := loInt > hiInt
+					if obs != nil && obs.onGcdInfeas != nil && maxRoundErr == 0 {
+						obs.onGcdInfeas(i, r.cols, r.vals, r.rhs, loInt, hiInt, 1, goInf, 0)
+					}
+					if goInf {
 						return PresolveResult{Infeasible: true}
 					}
-					if maxRoundErr > 0 {
+					nearest := math.Round(r.rhs)
+					if maxRoundErr > 0 && nearest >= nextDown(r.rhs-maxRoundErr) && nearest <= nextUp(r.rhs+maxRoundErr) {
+						var preVals []float64
+						origRHS := r.rhs
+						if obs != nil && obs.onGcdDiv != nil {
+							preVals = slices.Clone(r.vals)
+						}
+						r.ensureOwned()
+						for k := range r.vals {
+							r.vals[k] = math.Round(r.vals[k])
+						}
 						r.rhs = nearest
+						strengthened++
+						if obs != nil && obs.onGcdDiv != nil {
+							divCoeffs := make([]int64, len(r.vals))
+							for k, v := range r.vals {
+								divCoeffs[k] = int64(v)
+							}
+							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, nearest, 1, divCoeffs, int64(nearest), maxRoundErr)
+						}
 					}
 				}
 			}
@@ -261,7 +403,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	}
 
 	// 2. Iterative Savelsbergh activity bound tightening and redundant row dropping
-	actTight, actRem, infeas, timedOut := runActivityTighteningDirty(orig, rows, lb, ub, nil, maxPasses, deadline, done)
+	actTight, actRem, infeas, timedOut := runActivityTighteningDirtyObs(orig, rows, lb, ub, nil, maxPasses, deadline, done, obs)
 	if infeas {
 		return PresolveResult{Infeasible: true}
 	}
@@ -279,7 +421,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			prevLB = slices.Clone(lb)
 			prevUB = slices.Clone(ub)
 		}
-		symTight, symRows, symTimedOut := applyOrbitSymmetryBreaking(orig, rows, lb, ub, deadline, done)
+		symTight, symRows, symTimedOut := applyOrbitSymmetryBreakingObs(orig, rows, lb, ub, deadline, done, obs)
 		if symTimedOut {
 			return PresolveResult{Reduced: orig, TimedOut: true}
 		}
@@ -304,7 +446,7 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					postDirty[i] = true
 				}
 			}
-			postTight, postRem, postInfeas, postTimedOut := runActivityTighteningDirty(orig, rows, lb, ub, postDirty, maxPasses, deadline, done)
+			postTight, postRem, postInfeas, postTimedOut := runActivityTighteningDirtyObs(orig, rows, lb, ub, postDirty, maxPasses, deadline, done, obs)
 			if postInfeas {
 				return PresolveResult{Infeasible: true}
 			}
@@ -347,6 +489,9 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 							top = nextUp(top)
 						}
 						if newVal > 0 && newVal < a-binTol && top < r.rhs-binTol && !isNonFinite(top) {
+							if obs != nil && obs.onBinTight != nil {
+								obs.onBinTight(i, k, r.cols, slices.Clone(r.vals), r.rhs, lb, ub, a, surplusHi, newVal, top)
+							}
 							r.ensureOwned()
 							r.vals[k] = newVal
 							r.rhs = top
@@ -365,6 +510,9 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					} else if a < -binTol && surplusHi < -a-binTol {
 						newVal := -surplusHi
 						if newVal > a+binTol && newVal < 0 {
+							if obs != nil && obs.onBinTight != nil {
+								obs.onBinTight(i, k, r.cols, slices.Clone(r.vals), r.rhs, lb, ub, a, surplusHi, newVal, r.rhs)
+							}
 							r.ensureOwned()
 							r.vals[k] = newVal
 							strengthened++
@@ -920,6 +1068,19 @@ func runActivityTighteningDirty(
 	deadline time.Time,
 	done <-chan struct{},
 ) (tightened, removedRows int, infeas, timedOut bool) {
+	return runActivityTighteningDirtyObs(orig, rows, lb, ub, initDirty, maxPasses, deadline, done, nil)
+}
+
+func runActivityTighteningDirtyObs(
+	orig *CompiledProblem,
+	rows []presolveWorkRow,
+	lb, ub []float64,
+	initDirty []bool,
+	maxPasses int,
+	deadline time.Time,
+	done <-chan struct{},
+	obs *presolveObserver,
+) (tightened, removedRows int, infeas, timedOut bool) {
 	m := len(rows)
 	baseM := orig.numConstraints
 	hasCSC := len(orig.colPtr) == orig.numVars+1 && m >= baseM
@@ -967,12 +1128,15 @@ func runActivityTighteningDirty(
 			if !r.active {
 				continue
 			}
+			hasUpper := r.sense == LessEqual || r.sense == Equal
+			hasLower := r.sense == GreaterEqual || r.sense == Equal
 			if fastRowCanSkip(orig, r, lb, ub) {
+				if obs != nil && obs.onActivityRow != nil {
+					obs.onActivityRow(i, r.cols, r.vals, r.rhs, hasLower, hasUpper, lb, ub)
+				}
 				continue
 			}
 
-			hasUpper := r.sense == LessEqual || r.sense == Equal
-			hasLower := r.sense == GreaterEqual || r.sense == Equal
 			var s rowActivitySummary
 			evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, true, true)
 			if s.extreme {
@@ -1014,6 +1178,7 @@ func runActivityTighteningDirty(
 			}
 
 			upperTightenedRow := false
+			lowerTightenedRow := false
 			if hasUpper && s.minInfCount <= 1 {
 				canGuardUB := s.minInfCount == 0 && !s.useWideSlack
 				ubSlackLo := s.slackLo
@@ -1028,8 +1193,14 @@ func runActivityTighteningDirty(
 						if s.minInfCount == 1 && !math.IsInf(l, -1) {
 							continue
 						}
-						if canGuardUB && presolveCanSkipTerm(ubSlackLo, a, l, u, u, isInt) {
-							continue
+						if canGuardUB {
+							skip := presolveCanSkipTerm(ubSlackLo, a, l, u, u, isInt)
+							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && ubSlackLo > 0 {
+								obs.onSkipTerm(ubSlackLo, a, l, u, u, isInt, skip)
+							}
+							if skip {
+								continue
+							}
 						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
 						if !qOK {
@@ -1051,6 +1222,9 @@ func runActivityTighteningDirty(
 								newUB = lb[col]
 							}
 							if newUB < u-presolveIntTol {
+								if obs != nil && obs.onActivityTight != nil {
+									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, false, true, true, lb, ub, newUB)
+								}
 								ub[col] = newUB
 								tightened++
 								changedInPass = true
@@ -1063,8 +1237,14 @@ func runActivityTighteningDirty(
 							continue
 						}
 						absA := -a
-						if canGuardUB && presolveCanSkipTerm(ubSlackLo, absA, l, u, l, isInt) {
-							continue
+						if canGuardUB {
+							skip := presolveCanSkipTerm(ubSlackLo, absA, l, u, l, isInt)
+							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && ubSlackLo > 0 {
+								obs.onSkipTerm(ubSlackLo, absA, l, u, l, isInt, skip)
+							}
+							if skip {
+								continue
+							}
 						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
 						if !qOK {
@@ -1086,6 +1266,9 @@ func runActivityTighteningDirty(
 								newLB = ub[col]
 							}
 							if newLB > l+presolveIntTol {
+								if obs != nil && obs.onActivityTight != nil {
+									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, false, true, false, lb, ub, newLB)
+								}
 								lb[col] = newLB
 								tightened++
 								changedInPass = true
@@ -1123,8 +1306,14 @@ func runActivityTighteningDirty(
 						if s.maxInfCount == 1 && !math.IsInf(u, 1) {
 							continue
 						}
-						if canGuardLB && presolveCanSkipTerm(lbSlackLo, a, l, u, l, isInt) {
-							continue
+						if canGuardLB {
+							skip := presolveCanSkipTerm(lbSlackLo, a, l, u, l, isInt)
+							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && lbSlackLo > 0 {
+								obs.onSkipTerm(lbSlackLo, a, l, u, l, isInt, skip)
+							}
+							if skip {
+								continue
+							}
 						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
 						if !qOK {
@@ -1146,9 +1335,13 @@ func runActivityTighteningDirty(
 								newLB = ub[col]
 							}
 							if newLB > l+presolveIntTol {
+								if obs != nil && obs.onActivityTight != nil {
+									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, true, false, false, lb, ub, newLB)
+								}
 								lb[col] = newLB
 								tightened++
 								changedInPass = true
+								lowerTightenedRow = true
 								markColDirty(col, i)
 							}
 						}
@@ -1157,8 +1350,14 @@ func runActivityTighteningDirty(
 							continue
 						}
 						absA := -a
-						if canGuardLB && presolveCanSkipTerm(lbSlackLo, absA, l, u, u, isInt) {
-							continue
+						if canGuardLB {
+							skip := presolveCanSkipTerm(lbSlackLo, absA, l, u, u, isInt)
+							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && lbSlackLo > 0 {
+								obs.onSkipTerm(lbSlackLo, absA, l, u, u, isInt, skip)
+							}
+							if skip {
+								continue
+							}
 						}
 						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
 						if !qOK {
@@ -1180,14 +1379,21 @@ func runActivityTighteningDirty(
 								newUB = lb[col]
 							}
 							if newUB < u-presolveIntTol {
+								if obs != nil && obs.onActivityTight != nil {
+									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, true, false, true, lb, ub, newUB)
+								}
 								ub[col] = newUB
 								tightened++
 								changedInPass = true
+								lowerTightenedRow = true
 								markColDirty(col, i)
 							}
 						}
 					}
 				}
+			}
+			if !upperTightenedRow && !lowerTightenedRow && obs != nil && obs.onActivityRow != nil {
+				obs.onActivityRow(i, r.cols, r.vals, r.rhs, hasLower, hasUpper, lb, ub)
 			}
 		}
 
@@ -1740,6 +1946,17 @@ func applyOrbitSymmetryBreaking(
 	deadline time.Time,
 	done <-chan struct{},
 ) (tightened int, addedRows []presolveWorkRow, timedOut bool) {
+	return applyOrbitSymmetryBreakingObs(orig, rows, lb, ub, deadline, done, nil)
+}
+
+func applyOrbitSymmetryBreakingObs(
+	orig *CompiledProblem,
+	rows []presolveWorkRow,
+	lb, ub []float64,
+	deadline time.Time,
+	done <-chan struct{},
+	obs *presolveObserver,
+) (tightened int, addedRows []presolveWorkRow, timedOut bool) {
 	n := orig.numVars
 	m := len(rows)
 	if n < 4 || m < 2 {
@@ -1822,6 +2039,9 @@ func applyOrbitSymmetryBreaking(
 		}
 		if !ok || len(sc.orbits) == 0 {
 			continue
+		}
+		if obs != nil && obs.onOrbit != nil {
+			obs.onOrbit(rows, lb, ub, gCount, &sc)
 		}
 		t, add := reduceVerifiedOrbits(orig, rows, lb, ub, sc.orbits, gCount, sc.colOrbit, sc.rowTuples)
 		if t > 0 || len(add) > 0 {
@@ -3507,6 +3727,10 @@ type LPPresolveResult struct {
 // presolveLPWithDeadline performs dual-exact LP presolve (fixed-variable substitution,
 // singleton bound absorption, redundant/empty row dropping, and dual-dominated column fixing).
 func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}) LPPresolveResult {
+	return presolveLPWithObserver(orig, maxPasses, deadline, done, nil)
+}
+
+func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}, obs *presolveObserver) LPPresolveResult {
 	if maxPasses <= 0 {
 		maxPasses = defaultPresolveMaxPass
 	}
@@ -3543,6 +3767,10 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 
 	colSubstDone := make([]bool, n)
 	colSkipped := make([]bool, n)
+	var colTouched []bool
+	if obs != nil && obs.onLPStep != nil {
+		colTouched = make([]bool, n)
+	}
 	colDirMask := make([]uint8, n) // bit 0: blocks up (LE a>0 or GE a<0), bit 1: blocks down (LE a<0 or GE a>0), bit 2: touches EQ
 	var nzSubstIdx []int
 	var singletons []lpSingletonAction
@@ -3589,6 +3817,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 		}
 		if hasNewFixed {
 			clear(colSkipped)
+			if colTouched != nil {
+				clear(colTouched)
+			}
 			for i := range m {
 				r := &rows[i]
 				if !r.active || len(r.cols) == 0 {
@@ -3598,6 +3829,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 				for k < len(r.cols) {
 					col := r.cols[k]
 					if !colSubstDone[col] && lb[col] == 0 && ub[col] == 0 {
+						if colTouched != nil && r.vals[k] != 0 {
+							colTouched[col] = true
+						}
 						r.ensureOwned()
 						last := len(r.cols) - 1
 						r.cols[k] = r.cols[last]
@@ -3633,6 +3867,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 						r.ensureOwned()
 						r.rhs = top
 						for _, pos := range slices.Backward(nzSubstIdx) {
+							if colTouched != nil && r.vals[pos] != 0 {
+								colTouched[r.cols[pos]] = true
+							}
 							last := len(r.cols) - 1
 							r.cols[pos] = r.cols[last]
 							r.vals[pos] = r.vals[last]
@@ -3651,6 +3888,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 			for j := range n {
 				if !colSubstDone[j] && !colSkipped[j] && lb[j] == ub[j] && !math.IsNaN(lb[j]) && math.Abs(lb[j]) <= lpFixedMaxVal {
 					colSubstDone[j] = true
+					if colTouched != nil && colTouched[j] {
+						obs.onLPStep(lpPresolveEvent{kind: lpStepFixedSubst, col: j, val: lb[j]})
+					}
 				}
 			}
 		}
@@ -3679,6 +3919,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 				r.active = false
 				removedRows++
 				progress = true
+				if obs != nil && obs.onLPStep != nil {
+					obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+				}
 				continue
 			}
 			if len(r.cols) == 1 {
@@ -3715,6 +3958,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 							r.active = false
 							removedRows++
 							progress = true
+							if obs != nil && obs.onLPStep != nil {
+								obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
+							}
 							continue
 						}
 						if isUpper {
@@ -3745,12 +3991,18 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 								r.active = false
 								removedRows++
 								progress = true
+								if obs != nil && obs.onLPStep != nil {
+									obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
+								}
 								continue
 							}
 							if imp >= ub[col]+lpRedundMargin {
 								r.active = false
 								removedRows++
 								progress = true
+								if obs != nil && obs.onLPStep != nil {
+									obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+								}
 								continue
 							}
 						} else if isLower {
@@ -3781,12 +4033,18 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 								r.active = false
 								removedRows++
 								progress = true
+								if obs != nil && obs.onLPStep != nil {
+									obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
+								}
 								continue
 							}
 							if imp <= lb[col]-lpRedundMargin {
 								r.active = false
 								removedRows++
 								progress = true
+								if obs != nil && obs.onLPStep != nil {
+									obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+								}
 								continue
 							}
 						}
@@ -3808,6 +4066,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 						r.active = false
 						removedRows++
 						progress = true
+						if obs != nil && obs.onLPStep != nil {
+							obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+						}
 					}
 				}
 			case GreaterEqual:
@@ -3821,6 +4082,9 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 						r.active = false
 						removedRows++
 						progress = true
+						if obs != nil && obs.onLPStep != nil {
+							obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+						}
 					}
 				}
 			}
@@ -3870,10 +4134,16 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 					ub[j] = lb[j]
 					tightened++
 					progress = true
+					if obs != nil && obs.onLPStep != nil {
+						obs.onLPStep(lpPresolveEvent{kind: lpStepDualColFix, col: j, toLower: true})
+					}
 				} else if cj < 0 && !math.IsInf(ub[j], 1) {
 					lb[j] = ub[j]
 					tightened++
 					progress = true
+					if obs != nil && obs.onLPStep != nil {
+						obs.onLPStep(lpPresolveEvent{kind: lpStepDualColFix, col: j, toLower: false})
+					}
 				} else if cj == 0 {
 					if !math.IsInf(lb[j], -1) && !math.IsInf(ub[j], 1) {
 						val := lb[j]
@@ -3884,28 +4154,43 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 						ub[j] = val
 						tightened++
 						progress = true
+						if obs != nil && obs.onLPStep != nil {
+							obs.onLPStep(lpPresolveEvent{kind: lpStepZeroObjEmptyColFix, col: j, val: val})
+						}
 					} else if !math.IsInf(lb[j], -1) {
 						val := max(0.0, lb[j])
 						lb[j] = val
 						ub[j] = val
 						tightened++
 						progress = true
+						if obs != nil && obs.onLPStep != nil {
+							obs.onLPStep(lpPresolveEvent{kind: lpStepZeroObjEmptyColFix, col: j, val: val})
+						}
 					} else if !math.IsInf(ub[j], 1) {
 						val := min(0.0, ub[j])
 						lb[j] = val
 						ub[j] = val
 						tightened++
 						progress = true
+						if obs != nil && obs.onLPStep != nil {
+							obs.onLPStep(lpPresolveEvent{kind: lpStepZeroObjEmptyColFix, col: j, val: val})
+						}
 					}
 				}
 			} else if mask == 1 && cj >= 0 && !math.IsInf(lb[j], -1) {
 				ub[j] = lb[j]
 				tightened++
 				progress = true
+				if obs != nil && obs.onLPStep != nil {
+					obs.onLPStep(lpPresolveEvent{kind: lpStepDualColFix, col: j, toLower: true})
+				}
 			} else if mask == 2 && cj <= 0 && !math.IsInf(ub[j], 1) {
 				lb[j] = ub[j]
 				tightened++
 				progress = true
+				if obs != nil && obs.onLPStep != nil {
+					obs.onLPStep(lpPresolveEvent{kind: lpStepDualColFix, col: j, toLower: false})
+				}
 			}
 		}
 
@@ -3916,6 +4201,42 @@ func presolveLPWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.
 
 	if tightened == 0 && removedRows == 0 && fixedSubst == 0 {
 		return LPPresolveResult{Reduced: orig}
+	}
+
+	if obs != nil && obs.onLPStep != nil {
+		clear(colTouched)
+		for i := range rows {
+			r := &rows[i]
+			if !r.active {
+				continue
+			}
+			for k, col := range r.cols {
+				if lb[col] == 0 && ub[col] == 0 && r.vals[k] != 0 {
+					colTouched[col] = true
+				}
+			}
+		}
+		for j := range n {
+			if colTouched[j] {
+				obs.onLPStep(lpPresolveEvent{kind: lpStepFixedSubst, col: j, val: 0})
+			}
+		}
+		for i := range rows {
+			r := &rows[i]
+			if !r.active {
+				continue
+			}
+			kept := 0
+			for _, col := range r.cols {
+				if lb[col] == 0 && ub[col] == 0 {
+					continue
+				}
+				kept++
+			}
+			if kept == 0 {
+				obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+			}
+		}
 	}
 
 	red, origRowIdx, droppedEmpty, infeas := buildCompiledDirectWithRowMap(orig, rows, lb, ub, true)

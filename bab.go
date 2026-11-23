@@ -232,6 +232,7 @@ type babEngine struct {
 	rcScratch          []boundDelta
 	maxObjAbs          float64
 	rootDualAmp        []float64
+	exactIntRows       []int
 	isContLinked       []bool
 	isContLinkedReady  bool
 	sbCands            []branchCand
@@ -264,6 +265,8 @@ type babVIPRHook interface {
 	certifyRootInfeasible(s *LPSolver, lpRes LPResult)
 	recordNodeDual(vn *viprTreeNode, s *LPSolver, lpRes LPResult)
 	certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes LPResult)
+	certifyRowActivityFarkas(vn *viprTreeNode, row int) bool
+	canCertifyIncumbent(cand []float64, candMin float64) bool
 	stageCertifiedCutRound(s *LPSolver, lpPrimal []float64, maxCuts int, minEff float64, ws *cutGenWorkspace) bool
 	commitStagedCutPlanes(lpSolver *LPSolver, isRoot bool) int
 	snapshotActiveCuts() int
@@ -584,6 +587,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 
 	b.maxObjAbs = maxAbsFloat64(p.objMin)
 	b.rootDualAmp = computeRootDualAmp(p.numConstraints, rootRes.Dual, b.maxObjAbs)
+	b.exactIntRows = findExactIntRows(p)
 
 	if opts.hasCutoff {
 		b.bestObjMin = opts.cutoffMin + b.searchShift
@@ -1358,6 +1362,11 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 	curLB := slices.Clone(baseLB)
 	curUB := slices.Clone(baseUB)
+	if row, conflict := hasExactIntRowActivityConflict(p, b.exactIntRows, curLB, curUB); conflict {
+		if b.vipr == nil || b.vipr.certifyRowActivityFarkas(rootVN, row) {
+			return Result{}, false
+		}
+	}
 
 	switch {
 	case b.hitTimeLimit || b.timeExpired():
@@ -1606,7 +1615,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	}
 	if brVar == -1 {
 		if leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
-			p, curLB, curUB, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.vipr, rootVN,
+			p, curLB, curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.vipr, rootVN,
 		); leafOK {
 			b.totalLPIters += leafRes.Iterations
 			if leafInfeas {
@@ -1772,6 +1781,11 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 				} else if !propagateBounds(p, curLB, curUB, nodePropPasses) {
 					continue
 				}
+			}
+		}
+		if row, conflict := hasExactIntRowActivityConflict(p, b.exactIntRows, curLB, curUB); conflict {
+			if b.vipr == nil || b.vipr.certifyRowActivityFarkas(node.viprNode, row) {
+				continue
 			}
 		}
 
@@ -2076,7 +2090,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		}
 		if bVar == -1 {
 			if leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
-				p, curLB, curUB, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.vipr, node.viprNode,
+				p, curLB, curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.vipr, node.viprNode,
 			); leafOK {
 				b.totalLPIters += leafRes.Iterations
 				if leafInfeas {
@@ -2448,7 +2462,7 @@ func (w *parWorker) ensureHeurSolver() *LPSolver {
 
 func (w *parWorker) polishIncumbent(x []float64) ([]float64, bool) {
 	b := w.coord.b
-	return polishIncumbentWith(b.p, b.deadline, b.done, x, b.rootDualAmp, &w.fixScratchLB, &w.fixScratchUB, w.ensureHeurSolver)
+	return polishIncumbentCore(b.p, b.exactIntRows, b.deadline, b.done, x, b.rootDualAmp, &w.fixScratchLB, &w.fixScratchUB, w.ensureHeurSolver)
 }
 
 func (w *parWorker) isPruned(bound float64) bool {
@@ -2603,6 +2617,9 @@ func (w *parWorker) run() {
 		prevStatus = StatusNotSolved
 
 		if !w.applyNodeBounds(node, fromPlunge) {
+			continue
+		}
+		if _, conflict := hasExactIntRowActivityConflict(p, b.exactIntRows, w.curLB, w.curUB); conflict {
 			continue
 		}
 
@@ -2858,7 +2875,7 @@ func (w *parWorker) run() {
 		}
 		if bVar == -1 {
 			if leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
-				p, w.curLB, w.curUB, b.searchShift, b.deadline, b.done, w.ensureHeurSolver, nil, nil,
+				p, w.curLB, w.curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, w.ensureHeurSolver, nil, nil,
 			); leafOK {
 				c.addIters(leafRes.Iterations)
 				if leafInfeas {
@@ -3210,6 +3227,9 @@ func (b *babEngine) isValidIncumbentWith(cand []float64, candMin float64, dualCh
 	if isNonFinite(candMin) {
 		return false
 	}
+	if !dualChecked && violatesExactIntRows(b.p, b.exactIntRows, cand) {
+		return false
+	}
 	if !dualChecked && len(b.rootDualAmp) > 0 && !incumbentFeasibleWithDual(b.p, cand, b.rootDualAmp, incumbentTol) {
 		return false
 	}
@@ -3218,6 +3238,9 @@ func (b *babEngine) isValidIncumbentWith(cand []float64, candMin float64, dualCh
 		if candMin < b.rootLPMin-tol && !incumbentFeasibleScaled(b.p, cand, 0) && !exactMIPFeasibleRat(b.p, cand) {
 			return false
 		}
+	}
+	if b.vipr != nil && !b.vipr.canCertifyIncumbent(cand, candMin) {
+		return false
 	}
 	return true
 }
@@ -3944,11 +3967,23 @@ func selectNearIntegralBranchVar(p *CompiledProblem, x, curLB, curUB []float64) 
 // polishIncumbent snaps near-integral integer components of x, re-optimizes continuous
 // variables when needed to eliminate snapping residuals, and verifies all bounds and rows within incumbentTol.
 func (b *babEngine) polishIncumbent(x []float64) ([]float64, bool) {
-	return polishIncumbentWith(b.p, b.deadline, b.done, x, b.rootDualAmp, &b.fixScratchLB, &b.fixScratchUB, b.ensureHeurSolver)
+	return polishIncumbentCore(b.p, b.exactIntRows, b.deadline, b.done, x, b.rootDualAmp, &b.fixScratchLB, &b.fixScratchUB, b.ensureHeurSolver)
 }
 
 func polishIncumbentWith(
 	p *CompiledProblem,
+	deadline time.Time,
+	done <-chan struct{},
+	x, dualAmp []float64,
+	fixScratchLB, fixScratchUB *[]float64,
+	ensureHeur func() *LPSolver,
+) ([]float64, bool) {
+	return polishIncumbentCore(p, findExactIntRows(p), deadline, done, x, dualAmp, fixScratchLB, fixScratchUB, ensureHeur)
+}
+
+func polishIncumbentCore(
+	p *CompiledProblem,
+	exactIntRows []int,
 	deadline time.Time,
 	done <-chan struct{},
 	x, dualAmp []float64,
@@ -3968,6 +4003,9 @@ func polishIncumbentWith(
 		} else if diff > incumbentTol {
 			return nil, false
 		}
+	}
+	if violatesExactIntRows(p, exactIntRows, cand) {
+		return nil, false
 	}
 	if len(p.intCols) < p.numVars && !stopRequested(deadline, done) {
 		if incumbentFeasibleWithDual(p, cand, dualAmp, primalTol) {
@@ -4003,6 +4041,9 @@ func polishIncumbentWith(
 			if polRes.Status == StatusOptimal && len(polRes.Primal) == n {
 				copy(cand, polRes.Primal)
 				snapToIntegers(p, cand)
+				if violatesExactIntRows(p, exactIntRows, cand) {
+					return nil, false
+				}
 			}
 		}
 	}
@@ -4015,6 +4056,7 @@ func polishIncumbentWith(
 func resolveFixedIntLeaf(
 	p *CompiledProblem,
 	curLB, curUB []float64,
+	exactIntRows []int,
 	searchShift float64,
 	deadline time.Time,
 	done <-chan struct{},
@@ -4029,6 +4071,11 @@ func resolveFixedIntLeaf(
 		lb, ub := curLB[col], curUB[col]
 		if isNonFinite(lb) || isNonFinite(ub) || lb != ub || math.Floor(lb) != lb {
 			return LPResult{}, 0, false, false
+		}
+	}
+	if row, conflict := hasExactIntRowActivityConflict(p, exactIntRows, curLB, curUB); conflict {
+		if vipr == nil || (vn != nil && vipr.certifyRowActivityFarkas(vn, row)) {
+			return LPResult{Status: StatusInfeasible}, 0, true, true
 		}
 	}
 	hs := ensureHeur()
@@ -4472,4 +4519,224 @@ func applyReducedCostFixing(
 		}
 	}
 	return dst, false
+}
+
+func findExactIntRows(p *CompiledProblem) []int {
+	if p == nil || !p.isMIP {
+		return nil
+	}
+	var rows []int
+	for i := range p.numConstraints {
+		s, e := p.rowPtr[i], p.rowPtr[i+1]
+		if s == e || p.rowSense[i] == Equal {
+			continue
+		}
+		allExact := true
+		for k := s; k < e; k++ {
+			if p.varCat[p.colIdx[k]] == Continuous || isFractionalFloat64(p.rowVal[k]) {
+				allExact = false
+				break
+			}
+		}
+		if allExact {
+			rows = append(rows, i)
+		}
+	}
+	return rows
+}
+
+//go:noinline
+func evalExactIntRowViolWide(p *CompiledProblem, row int, x []float64) (viol float64, ok bool) {
+	s, e := p.rowPtr[row], p.rowPtr[row+1]
+	rhs := p.rowRHS[row]
+	if isNonFinite(rhs) {
+		return 0, false
+	}
+	var w wideDotAcc
+	w.addVal(-rhs)
+	for k := s; k < e; k++ {
+		rv := math.Round(x[p.colIdx[k]])
+		if isNonFinite(rv) {
+			return 0, false
+		}
+		w.addProd(p.rowVal[k], rv)
+	}
+	res := w.finish(math.NaN())
+	if isNonFinite(res) {
+		return 0, false
+	}
+	switch p.rowSense[row] {
+	case LessEqual:
+		return max(0.0, res), true
+	case GreaterEqual:
+		return max(0.0, -res), true
+	case Equal:
+		return math.Abs(res), true
+	default:
+		return 0, false
+	}
+}
+
+func violatesExactIntRows(p *CompiledProblem, exactRows []int, x []float64) bool {
+	if len(exactRows) == 0 || len(x) < p.numVars {
+		return false
+	}
+	for _, r := range exactRows {
+		s, e := p.rowPtr[r], p.rowPtr[r+1]
+		var sum, l1 float64
+		nonFin := false
+		for k := s; k < e; k++ {
+			rv := math.Round(x[p.colIdx[k]])
+			if isNonFinite(rv) {
+				nonFin = true
+				break
+			}
+			prod := p.rowVal[k] * rv
+			sum += prod
+			l1 += math.Abs(prod)
+		}
+		if nonFin {
+			return true
+		}
+		if l1 > 0x1p52 {
+			viol, ok := evalExactIntRowViolWide(p, r, x)
+			if !ok || viol > 0 {
+				return true
+			}
+			continue
+		}
+		rhs := p.rowRHS[r]
+		switch p.rowSense[r] {
+		case LessEqual:
+			if sum > rhs {
+				return true
+			}
+		case GreaterEqual:
+			if sum < rhs {
+				return true
+			}
+		case Equal:
+			if sum != rhs {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+//go:noinline
+func exactIntRowActConflictWide(p *CompiledProblem, row int, curLB, curUB []float64, checkMin bool) bool {
+	s, e := p.rowPtr[row], p.rowPtr[row+1]
+	rhs := p.rowRHS[row]
+	if isNonFinite(rhs) {
+		return false
+	}
+	var w wideDotAcc
+	w.addVal(-rhs)
+	for k := s; k < e; k++ {
+		a := p.rowVal[k]
+		if a == 0 {
+			continue
+		}
+		col := p.colIdx[k]
+		var b float64
+		if (a > 0) == checkMin {
+			b = math.Ceil(curLB[col])
+		} else {
+			b = math.Floor(curUB[col])
+		}
+		if isNonFinite(b) {
+			return false
+		}
+		w.addProd(a, b)
+	}
+	res := w.finish(math.NaN())
+	if isNonFinite(res) {
+		return false
+	}
+	if checkMin {
+		return res > 0
+	}
+	return res < 0
+}
+
+func hasExactIntRowActivityConflict(p *CompiledProblem, exactRows []int, curLB, curUB []float64) (int, bool) {
+	if len(exactRows) == 0 || len(curLB) < p.numVars || len(curUB) < p.numVars {
+		return -1, false
+	}
+	for _, r := range exactRows {
+		sense := p.rowSense[r]
+		rhs := p.rowRHS[r]
+		if isNonFinite(rhs) {
+			continue
+		}
+		s, e := p.rowPtr[r], p.rowPtr[r+1]
+		if sense == LessEqual || sense == Equal {
+			var minAct, l1 float64
+			fin := true
+			for k := s; k < e; k++ {
+				a := p.rowVal[k]
+				if a == 0 {
+					continue
+				}
+				col := p.colIdx[k]
+				var b float64
+				if a > 0 {
+					b = math.Ceil(curLB[col])
+				} else {
+					b = math.Floor(curUB[col])
+				}
+				if isNonFinite(b) {
+					fin = false
+					break
+				}
+				prod := a * b
+				minAct += prod
+				l1 += math.Abs(prod)
+			}
+			if fin {
+				if l1 > 0x1p52 {
+					if exactIntRowActConflictWide(p, r, curLB, curUB, true) {
+						return r, true
+					}
+				} else if minAct > rhs {
+					return r, true
+				}
+			}
+		}
+		if sense == GreaterEqual || sense == Equal {
+			var maxAct, l1 float64
+			fin := true
+			for k := s; k < e; k++ {
+				a := p.rowVal[k]
+				if a == 0 {
+					continue
+				}
+				col := p.colIdx[k]
+				var b float64
+				if a > 0 {
+					b = math.Floor(curUB[col])
+				} else {
+					b = math.Ceil(curLB[col])
+				}
+				if isNonFinite(b) {
+					fin = false
+					break
+				}
+				prod := a * b
+				maxAct += prod
+				l1 += math.Abs(prod)
+			}
+			if fin {
+				if l1 > 0x1p52 {
+					if exactIntRowActConflictWide(p, r, curLB, curUB, false) {
+						return r, true
+					}
+				} else if maxAct < rhs {
+					return r, true
+				}
+			}
+		}
+	}
+	return -1, false
 }

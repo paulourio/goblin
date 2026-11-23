@@ -90,12 +90,15 @@ type Options struct {
 	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
 	EnableHeuristics bool
 	// Certified enables fail-closed exact rational verification on the original problem.
+	// When Certified is true, any gap tolerance not explicitly set defaults to 0.
 	Certified bool
 
 	hasCutoff            bool
 	isSubMIP             bool
 	defaultMaxNodesUsed  bool
 	defaultCutPassesUsed bool
+	relGapTolSet         bool
+	absGapTolSet         bool
 	viprTrace            viprTraceHook
 	certifyFn            func(context.Context, *CompiledProblem, Options, time.Time, <-chan struct{}) (Result, error)
 }
@@ -138,6 +141,26 @@ func ApplyOptions(opts ...Option) Options {
 	return applyRootOptionsSlow(opts)
 }
 
+func (o Options) effectiveGapTols() (relTol, absTol float64) {
+	relTol = o.RelGapTol
+	absTol = o.AbsGapTol
+	if o.Certified {
+		if !o.relGapTolSet {
+			relTol = 0
+		}
+		if !o.absGapTolSet {
+			absTol = 0
+		}
+	}
+	if relTol < 0 || math.IsNaN(relTol) {
+		relTol = 0
+	}
+	if absTol < 0 || math.IsNaN(absTol) {
+		absTol = 0
+	}
+	return relTol, absTol
+}
+
 func applyRootOptionsSlow(opts []Option) Options {
 	cfg := DefaultOptions()
 	for _, fn := range opts {
@@ -145,12 +168,7 @@ func applyRootOptionsSlow(opts []Option) Options {
 			fn(&cfg)
 		}
 	}
-	if cfg.RelGapTol < 0 || math.IsNaN(cfg.RelGapTol) {
-		cfg.RelGapTol = 0
-	}
-	if cfg.AbsGapTol < 0 || math.IsNaN(cfg.AbsGapTol) {
-		cfg.AbsGapTol = 0
-	}
+	cfg.RelGapTol, cfg.AbsGapTol = cfg.effectiveGapTols()
 	if cfg.viprTrace != nil {
 		cfg.Workers = 1
 	}
@@ -163,6 +181,12 @@ func WithOptions(o Options) Option {
 		*cfg = o
 		cfg.defaultMaxNodesUsed = false
 		cfg.defaultCutPassesUsed = false
+		if o.RelGapTol != defaultRelGapTol {
+			cfg.relGapTolSet = true
+		}
+		if o.AbsGapTol != defaultAbsGapTol {
+			cfg.absGapTolSet = true
+		}
 	}
 }
 
@@ -239,12 +263,18 @@ func WithMaxIter(n int) Option {
 
 // WithRelGapTol sets the relative MIP gap threshold.
 func WithRelGapTol(tol float64) Option {
-	return func(cfg *Options) { cfg.RelGapTol = tol }
+	return func(cfg *Options) {
+		cfg.RelGapTol = tol
+		cfg.relGapTolSet = true
+	}
 }
 
 // WithAbsGapTol sets the absolute MIP gap threshold.
 func WithAbsGapTol(tol float64) Option {
-	return func(cfg *Options) { cfg.AbsGapTol = tol }
+	return func(cfg *Options) {
+		cfg.AbsGapTol = tol
+		cfg.absGapTolSet = true
+	}
 }
 
 // WithTimeLimit sets the wall-clock time limit for the solve.
@@ -499,7 +529,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			needFallback = true
 		} else if len(res.Values) == p.numVars {
 			bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
-			if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) {
+			if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) || (p.isMIP && violatesExactIntRows(p, findExactIntRows(p), res.Values)) {
 				needFallback = true
 			}
 		}
