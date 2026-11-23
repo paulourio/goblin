@@ -169,4 +169,132 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 	if _, err := telemetryProvenance(bBadSIMDFlag); err == nil {
 		t.Fatal("expected error for SIMD assign entry with simd_enabled=false")
 	}
+
+	validBinMap := func() map[string]BinarySizeEntry {
+		return map[string]BinarySizeEntry{
+			"assign_default": {
+				ID:                "assign_default",
+				Label:             "`assign` default (`LinearSum` + `SolveInto`)",
+				RawBytes:          2840000,
+				StrippedBytes:     1774000,
+				SIMDRawBytes:      2950000,
+				SIMDStrippedBytes: 1850000,
+				GoblinTextBytes:   98000,
+				GitCommit:         "abc",
+				SourceFingerprint: "fp1",
+				UnameRelease:      "6.1",
+				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
+				SIMDGoVersion:     "go1.27.3-X:simd",
+			},
+			"assign_certified": {
+				ID:                "assign_certified",
+				Label:             "`assign` certified (`+ assign.WithCertified(true)`)",
+				RawBytes:          2890000,
+				StrippedBytes:     1810000,
+				SIMDRawBytes:      3000000,
+				SIMDStrippedBytes: 1886000,
+				GoblinTextBytes:   122000,
+				CertSyms:          14,
+				CertBytes:         24000,
+				GitCommit:         "abc",
+				SourceFingerprint: "fp1",
+				UnameRelease:      "6.1",
+				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
+				SIMDGoVersion:     "go1.27.3-X:simd",
+			},
+			"goblin_default": {
+				ID:                "goblin_default",
+				Label:             "`goblin` default (`Model.Solve`, `DefaultOptions`)",
+				RawBytes:          5310000,
+				StrippedBytes:     3380000,
+				SIMDRawBytes:      5520000,
+				SIMDStrippedBytes: 3510000,
+				GoblinTextBytes:   620000,
+				MathBigSyms:       121,
+				MathBigBytes:      73000,
+				GitCommit:         "abc",
+				SourceFingerprint: "fp1",
+				UnameRelease:      "6.1",
+				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
+				SIMDGoVersion:     "go1.27.3-X:simd",
+			},
+			"goblin_certified_vipr": {
+				ID:                "goblin_certified_vipr",
+				Label:             "`goblin` certified + VIPR (`+ WithCertified + WithVIPRTrace`)",
+				RawBytes:          6810000,
+				StrippedBytes:     4366000,
+				SIMDRawBytes:      7020000,
+				SIMDStrippedBytes: 4496000,
+				GoblinTextBytes:   1120000,
+				MathBigSyms:       134,
+				MathBigBytes:      81000,
+				VIPRSyms:          194,
+				VIPRBytes:         288000,
+				CertSyms:          82,
+				CertBytes:         195000,
+				GitCommit:         "abc",
+				SourceFingerprint: "fp1",
+				UnameRelease:      "6.1",
+				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
+				SIMDGoVersion:     "go1.27.3-X:simd",
+			},
+		}
+	}
+
+	bWithBin := baseBundle()
+	bWithBin.BinarySize = validBinMap()
+	if _, err := telemetryProvenance(bWithBin); err != nil {
+		t.Fatalf("valid telemetryProvenance with BinarySize failed: %v", err)
+	}
+	if err := ValidateBinarySizeTelemetry(bWithBin.BinarySize); err != nil {
+		t.Fatalf("valid ValidateBinarySizeTelemetry failed: %v", err)
+	}
+	rendered, err := RenderBlock("BINARY_SIZE_TABLE", bWithBin)
+	if err != nil || !strings.Contains(rendered, "baseline") || !strings.Contains(rendered, "+962.9 KiB") {
+		t.Fatalf("RenderBlock(BINARY_SIZE_TABLE) = (%q, %v)", rendered, err)
+	}
+
+	// Negative provenance controls on BinarySize.
+	bBadBinFP := baseBundle()
+	bBadBinFP.BinarySize = validBinMap()
+	eFP := bBadBinFP.BinarySize["goblin_default"]
+	eFP.SourceFingerprint = "fp_stale"
+	bBadBinFP.BinarySize["goblin_default"] = eFP
+	if _, err := telemetryProvenance(bBadBinFP); err == nil {
+		t.Fatal("expected error for stale BinarySize source_fingerprint")
+	}
+
+	bBadBinSIMDVer := baseBundle()
+	bBadBinSIMDVer.BinarySize = validBinMap()
+	eVer := bBadBinSIMDVer.BinarySize["assign_default"]
+	eVer.SIMDGoVersion = "go1.27.3-X:nodwarf5"
+	bBadBinSIMDVer.BinarySize["assign_default"] = eVer
+	if _, err := telemetryProvenance(bBadBinSIMDVer); err == nil {
+		t.Fatal("expected error for BinarySize simd_go_version missing -X:simd")
+	}
+
+	// Negative DCE zero-leakage controls.
+	leakAssignBig := validBinMap()
+	ad := leakAssignBig["assign_default"]
+	ad.MathBigSyms = 1
+	leakAssignBig["assign_default"] = ad
+	if err := ValidateBinarySizeTelemetry(leakAssignBig); err == nil {
+		t.Fatal("expected error when assign_default leaks math/big symbols")
+	}
+
+	leakGoblinVIPR := validBinMap()
+	gd := leakGoblinVIPR["goblin_default"]
+	gd.VIPRSyms = 1
+	leakGoblinVIPR["goblin_default"] = gd
+	if err := ValidateBinarySizeTelemetry(leakGoblinVIPR); err == nil {
+		t.Fatal("expected error when goblin_default leaks VIPR symbols")
+	}
+
+	leakJSON := validBinMap()
+	gcv := leakJSON["goblin_certified_vipr"]
+	gcv.EncodingJSONSyms = 1
+	leakJSON["goblin_certified_vipr"] = gcv
+	if err := ValidateBinarySizeTelemetry(leakJSON); err == nil {
+		t.Fatal("expected error when goblin_certified_vipr links encoding/json symbols")
+	}
 }

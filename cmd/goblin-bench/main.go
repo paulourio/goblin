@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"debug/buildinfo"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"flag"
@@ -11,9 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -90,7 +93,10 @@ func durationsMS(d []time.Duration) []float64 {
 // mixed-commit telemetry before rendering markdown tables. Always pin runs to a
 // single core.
 func gitProvenance() (commit string, dirty bool) {
-	ctx := context.Background()
+	return gitProvenanceCtx(context.Background())
+}
+
+func gitProvenanceCtx(ctx context.Context) (commit string, dirty bool) {
 	out, err := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
 	if err != nil {
 		return "unknown", true
@@ -553,6 +559,7 @@ func main() {
 	genCorpus := flag.Bool("generate-corpus", false, "Generate deterministic 3-tier JSON corpus")
 	printFP := flag.Bool("print-fingerprint", false, "Print canonical source and corpus SHA-256 fingerprint")
 	assignFlag := flag.Bool("assign", false, "Run Linear Sum Assignment (LSAP) benchmark suite")
+	binSizeFlag := flag.Bool("binary-size", false, "Measure production binary sizes and linker DCE invariants")
 	pyRefPath := flag.String("python-ref", "bench/results/python_baseline.json", "Path to Python baseline JSON")
 	scipyRefPath := flag.String("scipy-ref", "bench/results/scipy_assign_baseline.json", "Path to SciPy LSAP baseline JSON")
 	outPath := flag.String("out", "", "Optional output JSON path for benchmark results")
@@ -603,6 +610,16 @@ func main() {
 
 	if *assignFlag {
 		runAssignBenchSuite(*scipyRefPath, *outPath, *pairedScalarOut, *noSIMD, *trials)
+		return
+	}
+
+	if *binSizeFlag {
+		resMap, err := measureBinarySizeSuite(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "binary-size suite failed: %v\n", err)
+			os.Exit(1)
+		}
+		writeJSONReport(*outPath, resMap, "binary size ")
 		return
 	}
 
@@ -1272,4 +1289,352 @@ func printMILPBenchRow(
 		pySolveMS, r.TSolveMS,
 		pyTotalMS, r.TTotalMS,
 		speedupStr, parityStr)
+}
+
+var (
+	reNMLine  = regexp.MustCompile(`^\s*(?:[0-9a-fA-F]+\s+)?([0-9]+)\s+([A-Za-z?])\s+(.+)$`)
+	reVIPRSym = regexp.MustCompile(`(VIPR|vipr)`)
+	reCertSym = regexp.MustCompile(`(solveCertified|finalizeCertifiedSolve|verifyCertified|VerifyVIPRTrace|verifyMiniVIPR|certPresolve|certEvalProofStep|certifyLinearSum|certifySolveInto|certifyAssign|dyadic2304|dyadicFromFloat|bellmanFordResidual|extractHallWitness|defaultAssignCertHooks|setCertifiedTrue|setRootCertifiedTrue)`)
+)
+
+type binSizeProfileSpec struct {
+	id      string
+	label   string
+	desc    string
+	wantOut string
+	src     string
+}
+
+func binSizeProfiles() []binSizeProfileSpec {
+	return []binSizeProfileSpec{
+		{
+			id:      "assign_default",
+			label:   "`assign` default (`LinearSum` + `SolveInto`)",
+			desc:    "Uncertified LSAP solver (`assign.LinearSum` and `assign.SolveInto`)",
+			wantOut: "2 2 <nil>",
+			src: `package main
+
+import (
+	"context"
+	"fmt"
+	as "github.com/paulourio/goblin/assign"
+)
+
+func main() {
+	ctx := context.Background()
+	res, err := as.LinearSum(ctx, [][]float64{{1, 2}, {3, 1}}, as.Minimize)
+	if err != nil {
+		panic(err)
+	}
+	ws := as.AcquireWorkspace(2, 2)
+	defer as.ReleaseWorkspace(ws)
+	rInd := make([]int, 2)
+	cInd := make([]int, 2)
+	obj, errInto := as.SolveInto(ctx, 2, 2, []float64{1, 2, 3, 1}, as.Minimize, rInd, cInd, ws)
+	fmt.Println(res.Objective, obj, errInto)
+}
+`,
+		},
+		{
+			id:      "assign_certified",
+			label:   "`assign` certified (`+ assign.WithCertified(true)`)",
+			desc:    "LSAP solver with fail-closed 2304-bit dyadic verification (`assign.WithCertified(true)`)",
+			wantOut: "2 2 <nil>",
+			src: `package main
+
+import (
+	"context"
+	"fmt"
+	as "github.com/paulourio/goblin/assign"
+)
+
+func main() {
+	ctx := context.Background()
+	res, err := as.LinearSum(ctx, [][]float64{{1, 2}, {3, 1}}, as.Minimize, as.WithCertified(true))
+	if err != nil {
+		panic(err)
+	}
+	ws := as.AcquireWorkspace(2, 2)
+	defer as.ReleaseWorkspace(ws)
+	rInd := make([]int, 2)
+	cInd := make([]int, 2)
+	obj, errInto := as.SolveInto(ctx, 2, 2, []float64{1, 2, 3, 1}, as.Minimize, rInd, cInd, ws, as.WithCertified(true))
+	fmt.Println(res.Objective, obj, errInto)
+}
+`,
+		},
+		{
+			id:      "goblin_default",
+			label:   "`goblin` default (`Model.Solve`, `DefaultOptions`)",
+			desc:    "Uncertified LP/MILP Branch-and-Cut solver (`Model.Solve` with `WithOptions(DefaultOptions())`)",
+			wantOut: "2 <nil>",
+			src: `package main
+
+import (
+	"context"
+	"fmt"
+	gb "github.com/paulourio/goblin"
+)
+
+func main() {
+	m := gb.NewModel("t", gb.Minimize)
+	x := m.AddBinaryVar("x")
+	y := m.AddBinaryVar("y")
+	m.AddConstraint("c1", gb.Ge(gb.NewExpr(gb.T(x, 1), gb.T(y, 1)), 1))
+	m.SetObjective(gb.NewExpr(gb.T(x, 2), gb.T(y, 3)))
+	res, err := m.Solve(context.Background(), gb.WithOptions(gb.DefaultOptions()))
+	fmt.Println(res.Objective, err)
+}
+`,
+		},
+		{
+			id:      "goblin_certified_vipr",
+			label:   "`goblin` certified + VIPR (`+ WithCertified + WithVIPRTrace`)",
+			desc:    "LP/MILP solver with fail-closed `*big.Rat` certification and presolve/orbital `VIPRTrace` (`WithCertified(true)`, `WithVIPRTrace(NewVIPRTrace())`)",
+			wantOut: "2 <nil> true",
+			src: `package main
+
+import (
+	"context"
+	"fmt"
+	gb "github.com/paulourio/goblin"
+)
+
+func main() {
+	m := gb.NewModel("t", gb.Minimize)
+	x := m.AddBinaryVar("x")
+	y := m.AddBinaryVar("y")
+	m.AddConstraint("c1", gb.Ge(gb.NewExpr(gb.T(x, 1), gb.T(y, 1)), 1))
+	m.SetObjective(gb.NewExpr(gb.T(x, 2), gb.T(y, 3)))
+	tr := gb.NewVIPRTrace()
+	res, err := m.Solve(context.Background(), gb.WithCertified(true), gb.WithVIPRTrace(tr))
+	fmt.Println(res.Objective, err, tr.HasCertificate())
+}
+`,
+		},
+	}
+}
+
+func cleanGoBuildEnv(enableSIMD bool) []string {
+	base := os.Environ()
+	out := make([]string, 0, len(base)+2)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "GOEXPERIMENT=") || strings.HasPrefix(kv, "CGO_ENABLED=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out, "CGO_ENABLED=0")
+	if enableSIMD {
+		out = append(out, "GOEXPERIMENT=simd")
+	}
+	return out
+}
+
+func buildProbeBinary(ctx context.Context, dir, pkg, outBin string, strip, enableSIMD bool) (int64, error) {
+	args := []string{"build"}
+	if strip {
+		args = append(args, "-ldflags=-s -w")
+	}
+	args = append(args, "-o", outBin, pkg)
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = dir
+	cmd.Env = cleanGoBuildEnv(enableSIMD)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return 0, fmt.Errorf("go %v (simd=%v): %w\n%s", args, enableSIMD, err, out)
+	}
+	info, err := os.Stat(outBin)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func readBinaryBuildMeta(binPath string) (goVer, goOS, goArch, goAMD64 string, err error) {
+	bi, err := buildinfo.ReadFile(binPath)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	goOS = runtime.GOOS
+	goArch = runtime.GOARCH
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "GOOS":
+			goOS = s.Value
+		case "GOARCH":
+			goArch = s.Value
+		case "GOAMD64":
+			goAMD64 = s.Value
+		}
+	}
+	if goAMD64 == "" {
+		if goArch == "amd64" {
+			goAMD64 = "v1"
+		} else {
+			goAMD64 = goArch
+		}
+	}
+	return bi.GoVersion, goOS, goArch, goAMD64, nil
+}
+
+func measureBinarySizeSuite(ctx context.Context) (map[string]bench.BinarySizeEntry, error) {
+	absRoot, err := filepath.Abs(".")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(absRoot, "go.mod")); err != nil {
+		return nil, fmt.Errorf("missing go.mod in %s: %w", absRoot, err)
+	}
+	gitCommit, gitDirty := gitProvenanceCtx(ctx)
+	kernelRel := unameRelease()
+	measuredAt := time.Now().UTC().Format(time.RFC3339)
+	fingerprint, err := bench.SourceFingerprint(".")
+	if err != nil {
+		return nil, fmt.Errorf("source fingerprint: %w", err)
+	}
+	if gitDirty {
+		fmt.Fprintln(os.Stderr, "warning: working tree is dirty; binary size telemetry will be marked git_dirty=true")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "goblin-binsize-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	goMod := fmt.Sprintf("module goblinbinsizeprobe\n\ngo 1.27\n\nrequire github.com/paulourio/goblin v0.0.0\n\nreplace github.com/paulourio/goblin => %s\n", absRoot)
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0o600); err != nil {
+		return nil, err
+	}
+
+	specs := binSizeProfiles()
+	results := make(map[string]bench.BinarySizeEntry, len(specs))
+
+	fmt.Printf("=== GOBLIN PRODUCTION BINARY SIZE & LINKER DCE SUITE (CGO_ENABLED=0) ===\n")
+	fmt.Printf("%-24s | %19s | %19s | %10s | %5s %5s %5s %5s\n",
+		"Profile ID", "Default Raw/Strip", "SIMD Raw/Strip", "GoblinText", "Big", "JSON", "VIPR", "Cert")
+	fmt.Println(strings.Repeat("-", tableRuleWidth))
+
+	for _, sp := range specs {
+		pkgDir := filepath.Join(tmpDir, sp.id)
+		if err := os.MkdirAll(pkgDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(pkgDir, "main.go"), []byte(sp.src), 0o600); err != nil {
+			return nil, err
+		}
+
+		pkgSpec := "./" + sp.id
+		rawDefBin := filepath.Join(tmpDir, sp.id+"_def_raw")
+		stripDefBin := filepath.Join(tmpDir, sp.id+"_def_strip")
+		rawSIMDBin := filepath.Join(tmpDir, sp.id+"_simd_raw")
+		stripSIMDBin := filepath.Join(tmpDir, sp.id+"_simd_strip")
+
+		rawBytes, err := buildProbeBinary(ctx, tmpDir, pkgSpec, rawDefBin, false, false)
+		if err != nil {
+			return nil, err
+		}
+		stripBytes, err := buildProbeBinary(ctx, tmpDir, pkgSpec, stripDefBin, true, false)
+		if err != nil {
+			return nil, err
+		}
+		simdRawBytes, err := buildProbeBinary(ctx, tmpDir, pkgSpec, rawSIMDBin, false, true)
+		if err != nil {
+			return nil, err
+		}
+		simdStripBytes, err := buildProbeBinary(ctx, tmpDir, pkgSpec, stripSIMDBin, true, true)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, binPath := range []string{rawDefBin, rawSIMDBin} {
+			runOut, errRun := exec.CommandContext(ctx, binPath).CombinedOutput()
+			if errRun != nil {
+				return nil, fmt.Errorf("execute %s: %w\n%s", filepath.Base(binPath), errRun, runOut)
+			}
+			if got := strings.TrimSpace(string(runOut)); got != sp.wantOut {
+				return nil, fmt.Errorf("%s output = %q, want %q", filepath.Base(binPath), got, sp.wantOut)
+			}
+		}
+
+		defVer, goOS, goArch, goAMD64, err := readBinaryBuildMeta(rawDefBin)
+		if err != nil {
+			return nil, fmt.Errorf("buildinfo %s: %w", sp.id, err)
+		}
+		simdVer, _, _, _, err := readBinaryBuildMeta(rawSIMDBin)
+		if err != nil {
+			return nil, fmt.Errorf("simd buildinfo %s: %w", sp.id, err)
+		}
+
+		nmRaw, err := exec.CommandContext(ctx, "go", "tool", "nm", "-size", rawDefBin).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("go tool nm %s: %w\n%s", sp.id, err, nmRaw)
+		}
+
+		entry := bench.BinarySizeEntry{
+			ID:                sp.id,
+			Label:             sp.label,
+			Description:       sp.desc,
+			RawBytes:          rawBytes,
+			StrippedBytes:     stripBytes,
+			SIMDRawBytes:      simdRawBytes,
+			SIMDStrippedBytes: simdStripBytes,
+			GitCommit:         gitCommit,
+			GitDirty:          gitDirty,
+			DefaultGoVersion:  defVer,
+			SIMDGoVersion:     simdVer,
+			GOOS:              goOS,
+			GOARCH:            goArch,
+			GOAMD64:           goAMD64,
+			SourceFingerprint: fingerprint,
+			UnameRelease:      kernelRel,
+			MeasuredAt:        measuredAt,
+		}
+
+		for line := range strings.SplitSeq(string(nmRaw), "\n") {
+			m := reNMLine.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			sz, errSz := strconv.ParseInt(m[1], 10, 64)
+			if errSz != nil {
+				continue
+			}
+			typ := m[2]
+			sym := m[3]
+			isGoblinPkg := strings.HasPrefix(sym, "github.com/paulourio/goblin")
+			if (typ == "T" || typ == "t") && isGoblinPkg {
+				entry.GoblinTextBytes += sz
+			}
+			if strings.Contains(sym, "math/big") {
+				entry.MathBigSyms++
+				entry.MathBigBytes += sz
+			}
+			if strings.Contains(sym, "encoding/json") {
+				entry.EncodingJSONSyms++
+				entry.EncodingJSONBytes += sz
+			}
+			if isGoblinPkg && reVIPRSym.MatchString(sym) {
+				entry.VIPRSyms++
+				entry.VIPRBytes += sz
+			}
+			if isGoblinPkg && reCertSym.MatchString(sym) {
+				entry.CertSyms++
+				entry.CertBytes += sz
+			}
+		}
+
+		results[sp.id] = entry
+		fmt.Printf("%-24s | %8.1f / %7.1fK | %8.1f / %7.1fK | %8.1f K | %5d %5d %5d %5d\n",
+			sp.id,
+			float64(entry.RawBytes)/1024.0, float64(entry.StrippedBytes)/1024.0,
+			float64(entry.SIMDRawBytes)/1024.0, float64(entry.SIMDStrippedBytes)/1024.0,
+			float64(entry.GoblinTextBytes)/1024.0,
+			entry.MathBigSyms, entry.EncodingJSONSyms, entry.VIPRSyms, entry.CertSyms)
+	}
+
+	if err := bench.ValidateBinarySizeTelemetry(results); err != nil {
+		return nil, err
+	}
+	return results, nil
 }

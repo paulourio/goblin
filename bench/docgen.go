@@ -164,6 +164,44 @@ type AssignBenchResult struct {
 	MeasuredAt        string    `json:"measured_at,omitempty"`
 }
 
+// CanonicalBinarySizeIDs lists the four required binary-size and linker-DCE profiles in table order.
+var CanonicalBinarySizeIDs = []string{
+	"assign_default",
+	"assign_certified",
+	"goblin_default",
+	"goblin_certified_vipr",
+}
+
+// BinarySizeEntry records compiled binary sizes and symbol-table DCE counts for one build profile.
+type BinarySizeEntry struct {
+	ID                string `json:"id"`
+	Label             string `json:"label"`
+	Description       string `json:"description"`
+	RawBytes          int64  `json:"raw_bytes"`
+	StrippedBytes     int64  `json:"stripped_bytes"`
+	SIMDRawBytes      int64  `json:"simd_raw_bytes"`
+	SIMDStrippedBytes int64  `json:"simd_stripped_bytes"`
+	GoblinTextBytes   int64  `json:"goblin_text_bytes"`
+	MathBigSyms       int    `json:"math_big_syms"`
+	MathBigBytes      int64  `json:"math_big_bytes"`
+	EncodingJSONSyms  int    `json:"encoding_json_syms"`
+	EncodingJSONBytes int64  `json:"encoding_json_bytes"`
+	VIPRSyms          int    `json:"vipr_syms"`
+	VIPRBytes         int64  `json:"vipr_bytes"`
+	CertSyms          int    `json:"cert_syms"`
+	CertBytes         int64  `json:"cert_bytes"`
+	GitCommit         string `json:"git_commit,omitempty"`
+	GitDirty          bool   `json:"git_dirty,omitzero"`
+	DefaultGoVersion  string `json:"default_go_version,omitempty"`
+	SIMDGoVersion     string `json:"simd_go_version,omitempty"`
+	GOOS              string `json:"goos,omitempty"`
+	GOARCH            string `json:"goarch,omitempty"`
+	GOAMD64           string `json:"goamd64,omitempty"`
+	SourceFingerprint string `json:"source_fingerprint,omitempty"`
+	UnameRelease      string `json:"uname_release,omitempty"`
+	MeasuredAt        string `json:"measured_at,omitempty"`
+}
+
 // TelemetryBundle holds the loaded benchmark results from canonical JSON files.
 type TelemetryBundle struct {
 	Python       map[string]PythonBaselineEntry
@@ -173,12 +211,13 @@ type TelemetryBundle struct {
 	SciPyAssign  map[string]SciPyAssignEntry
 	AssignScalar map[string]AssignBenchResult
 	AssignSIMD   map[string]AssignBenchResult
+	BinarySize   map[string]BinarySizeEntry
 }
 
 // LoadTelemetryBundle reads the Python, pure-Go scalar, and pure-Go SIMD telemetry files plus the
-// in-process CBC backend telemetry (goblin_cbc.json) and the LSAP telemetry files
-// (scipy_assign_baseline.json, goblin_assign_scalar.json, goblin_assign_simd.json) stored next to
-// the scalar file.
+// in-process CBC backend telemetry (goblin_cbc.json), the LSAP telemetry files
+// (scipy_assign_baseline.json, goblin_assign_scalar.json, goblin_assign_simd.json), and the
+// binary-size and linker-DCE telemetry (goblin_binary_size.json) stored next to the scalar file.
 func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle, error) {
 	var pyMap map[string]PythonBaselineEntry
 	if err := readJSON(pyPath, &pyMap); err != nil {
@@ -210,6 +249,10 @@ func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle,
 	if err := readJSON(filepath.Join(resultsDir, "goblin_assign_simd.json"), &assignSIMDMap); err != nil {
 		return nil, fmt.Errorf("assign simd telemetry: %w", err)
 	}
+	var binSizeMap map[string]BinarySizeEntry
+	if err := readJSON(filepath.Join(resultsDir, "goblin_binary_size.json"), &binSizeMap); err != nil {
+		return nil, fmt.Errorf("binary size telemetry: %w", err)
+	}
 	return &TelemetryBundle{
 		Python:       pyMap,
 		Goblin:       goblinMap,
@@ -218,6 +261,7 @@ func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle,
 		SciPyAssign:  scipyAssignMap,
 		AssignScalar: assignScalarMap,
 		AssignSIMD:   assignSIMDMap,
+		BinarySize:   binSizeMap,
 	}, nil
 }
 
@@ -232,10 +276,66 @@ func readJSON(path string, dst any) error {
 	return nil
 }
 
+// ValidateBinarySizeTelemetry checks that all four canonical binary-size profiles are present with
+// positive byte counts and satisfy the linker dead-code-elimination zero-leakage invariants.
+func ValidateBinarySizeTelemetry(binMap map[string]BinarySizeEntry) error {
+	if len(binMap) != len(CanonicalBinarySizeIDs) {
+		return fmt.Errorf("binary size telemetry has %d entries, want %d", len(binMap), len(CanonicalBinarySizeIDs))
+	}
+	for _, id := range CanonicalBinarySizeIDs {
+		bs, ok := binMap[id]
+		if !ok {
+			return fmt.Errorf("missing %q in binary size telemetry", id)
+		}
+		if bs.ID != id {
+			return fmt.Errorf("binary size entry %q has mismatched id %q", id, bs.ID)
+		}
+		if bs.Label == "" {
+			return fmt.Errorf("binary size entry %q has empty label", id)
+		}
+		if bs.RawBytes <= 0 || bs.StrippedBytes <= 0 || bs.StrippedBytes > bs.RawBytes {
+			return fmt.Errorf("binary size entry %q has invalid default sizes raw=%d stripped=%d", id, bs.RawBytes, bs.StrippedBytes)
+		}
+		if bs.SIMDRawBytes <= 0 || bs.SIMDStrippedBytes <= 0 || bs.SIMDStrippedBytes > bs.SIMDRawBytes {
+			return fmt.Errorf("binary size entry %q has invalid SIMD sizes raw=%d stripped=%d", id, bs.SIMDRawBytes, bs.SIMDStrippedBytes)
+		}
+		if bs.GoblinTextBytes <= 0 {
+			return fmt.Errorf("binary size entry %q has non-positive goblin_text_bytes=%d", id, bs.GoblinTextBytes)
+		}
+		switch id {
+		case "assign_default":
+			if bs.MathBigSyms != 0 || bs.MathBigBytes != 0 || bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 ||
+				bs.VIPRSyms != 0 || bs.VIPRBytes != 0 || bs.CertSyms != 0 || bs.CertBytes != 0 {
+				return fmt.Errorf("assign_default linker DCE violation: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want all 0",
+					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
+			}
+		case "assign_certified":
+			if bs.MathBigSyms != 0 || bs.MathBigBytes != 0 || bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 ||
+				bs.VIPRSyms != 0 || bs.VIPRBytes != 0 || bs.CertSyms <= 0 || bs.CertBytes <= 0 {
+				return fmt.Errorf("assign_certified symbol invariant failed: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want 0/0/0 and cert>0",
+					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
+			}
+		case "goblin_default":
+			if bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 || bs.VIPRSyms != 0 || bs.VIPRBytes != 0 ||
+				bs.CertSyms != 0 || bs.CertBytes != 0 {
+				return fmt.Errorf("goblin_default linker DCE violation: json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want all 0",
+					bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
+			}
+		case "goblin_certified_vipr":
+			if bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 || bs.VIPRSyms <= 0 || bs.VIPRBytes <= 0 ||
+				bs.CertSyms <= 0 || bs.CertBytes <= 0 {
+				return fmt.Errorf("goblin_certified_vipr symbol invariant failed: json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want json=0 and vipr,cert>0",
+					bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
+			}
+		}
+	}
+	return nil
+}
+
 // ValidateTelemetryAgainstCorpus verifies that every problem in BuildCorpus() exists in
-// testdata/corpus and in all telemetry maps with matching dimensions, that all seven telemetry
-// files carry uniform provenance, and that every goblin build agrees with the Python CBC
-// reference on status, canonical objective, per-trial status, and per-trial objective.
+// testdata/corpus and in all telemetry maps with matching dimensions, that all eight telemetry
+// files carry uniform provenance and linker-DCE invariants, and that every goblin build agrees
+// with the Python CBC reference on status, canonical objective, per-trial status, and per-trial objective.
 func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error {
 	cases := BuildCorpus()
 	if len(tb.Python) != len(cases) {
@@ -315,6 +415,9 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 
 	if len(mismatches) > 0 {
 		return fmt.Errorf("parity check failed (%d mismatches):\n  %s", len(mismatches), strings.Join(mismatches, "\n  "))
+	}
+	if err := ValidateBinarySizeTelemetry(tb.BinarySize); err != nil {
+		return err
 	}
 	if _, err := telemetryProvenance(tb); err != nil {
 		return err
@@ -587,6 +690,17 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 			}
 		}
 	}
+	for id, bs := range tb.BinarySize {
+		if err := checkRec("goblin_binary_size", id, bs.GitCommit, bs.SourceFingerprint, bs.UnameRelease, "", bs.GitDirty, false); err != nil {
+			return pv, err
+		}
+		if err := checkGoBuild("goblin_binary_size(default)", id, bs.DefaultGoVersion, false, false); err != nil {
+			return pv, err
+		}
+		if err := checkGoBuild("goblin_binary_size(simd)", id, bs.SIMDGoVersion, true, true); err != nil {
+			return pv, err
+		}
+	}
 	return pv, nil
 }
 
@@ -833,6 +947,10 @@ func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
 		renderAssignSIMDSummary(&b, tb)
 	case "ASSIGN_SIMD_TABLE":
 		renderAssignSIMDTable(&b, tb)
+	case "BINARY_SIZE_TABLE":
+		if err := renderBinarySizeTable(&b, tb); err != nil {
+			return "", err
+		}
 	default:
 		return "", fmt.Errorf("unknown generated block %q", blockName)
 	}
@@ -1352,6 +1470,40 @@ func renderAssignSIMDTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	}
 }
 
+const bytesPerKiB = 1024.0
+
+func renderBinarySizeTable(b *bytes.Buffer, tb *TelemetryBundle) error {
+	if err := ValidateBinarySizeTelemetry(tb.BinarySize); err != nil {
+		return err
+	}
+	baseID := map[string]string{
+		"assign_default":        "assign_default",
+		"assign_certified":      "assign_default",
+		"goblin_default":        "goblin_default",
+		"goblin_certified_vipr": "goblin_default",
+	}
+	b.WriteString("| Profile | Default Raw / Stripped (KiB) | `GOEXPERIMENT=simd` Raw / Stripped (KiB) | Stripped Delta vs. Default | `goblin` Text (KiB) | `math/big` Syms | `encoding/json` Syms | `VIPR` Syms | `Certif` Syms |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, id := range CanonicalBinarySizeIDs {
+		bs := tb.BinarySize[id]
+		base := tb.BinarySize[baseID[id]]
+		deltaStr := "baseline"
+		if id != baseID[id] && base.StrippedBytes > 0 {
+			diffKiB := float64(bs.StrippedBytes-base.StrippedBytes) / bytesPerKiB
+			pct := 100.0 * float64(bs.StrippedBytes-base.StrippedBytes) / float64(base.StrippedBytes)
+			deltaStr = fmt.Sprintf("%+.1f KiB (%+.1f%%)", diffKiB, pct)
+		}
+		fmt.Fprintf(b, "| %s | %.1f / **%.1f** | %.1f / **%.1f** | %s | %.1f | `%d` | `%d` | `%d` | `%d` |\n",
+			bs.Label,
+			float64(bs.RawBytes)/bytesPerKiB, float64(bs.StrippedBytes)/bytesPerKiB,
+			float64(bs.SIMDRawBytes)/bytesPerKiB, float64(bs.SIMDStrippedBytes)/bytesPerKiB,
+			deltaStr,
+			float64(bs.GoblinTextBytes)/bytesPerKiB,
+			bs.MathBigSyms, bs.EncodingJSONSyms, bs.VIPRSyms, bs.CertSyms)
+	}
+	return nil
+}
+
 // SyncMarkdownContent replaces all <!-- BEGIN GENERATED:NAME --> ... <!-- END GENERATED:NAME -->
 // regions in content with fresh markdown rendered from tb.
 func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
@@ -1496,6 +1648,13 @@ The 22-family synthetic Linear Sum Assignment corpus (` + "`testdata/assign_corp
 
 <!-- BEGIN GENERATED:ASSIGN_SIMD_TABLE -->
 <!-- END GENERATED:ASSIGN_SIMD_TABLE -->
+
+## 7. Production Binary Footprint and Linker Dead-Code Elimination
+
+Standalone ` + "`CGO_ENABLED=0`" + ` binaries compiled across the four canonical ` + "`goblin/assign`" + ` and ` + "`goblin`" + ` build profiles (` + "`bench/results/goblin_binary_size.json`" + `), verifying that unreferenced ` + "`WithCertified`" + `, ` + "`WithVIPRTrace`" + `, ` + "`encoding/json`" + `, and (in ` + "`goblin/assign`" + `) ` + "`math/big`" + ` symbols are eliminated by the Go linker:
+
+<!-- BEGIN GENERATED:BINARY_SIZE_TABLE -->
+<!-- END GENERATED:BINARY_SIZE_TABLE -->
 `
 	return SyncMarkdownContent(tpl, tb)
 }
