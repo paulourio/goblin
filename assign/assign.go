@@ -46,6 +46,8 @@ var (
 	// ErrInfeasible indicates that forbidden edges (+Inf when minimizing, -Inf when maximizing)
 	// prevent any complete finite-cost matching of cardinality min(rows, cols).
 	ErrInfeasible = errors.New("assign: cost matrix is infeasible")
+	// ErrCertificationFailed indicates that runtime exact rational verification rejected the solver result.
+	ErrCertificationFailed = errors.New("assign: runtime exact rational certification failed")
 )
 
 func validDims(rows, cols, flatLen int) bool {
@@ -70,10 +72,19 @@ func emptyResult(rows, cols int) Result {
 	}
 }
 
+type assignCertHooks struct {
+	cert2D   func(ctx context.Context, rows, cols int, cost [][]float64, sense Sense, res Result, solveErr error) (Result, error)
+	certFlat func(ctx context.Context, rows, cols int, origCost []float64, sense Sense, res Result, solveErr error) (Result, error)
+	certInto func(ctx context.Context, rows, cols int, origCost []float64, sense Sense, rowInd, colInd []int, ws *Workspace, obj float64, solveErr error) (float64, error)
+}
+
 // Options configures the Linear Sum Assignment solver.
 type Options struct {
+	cert *assignCertHooks
 	// DisableSIMD forces the scalar reduced-cost kernels even when built with `GOEXPERIMENT=simd`.
 	DisableSIMD bool
+	// Certified enables fail-closed exact rational verification on the original cost matrix.
+	Certified bool
 }
 
 // Option mutates solver settings before a LinearSum call.
@@ -137,7 +148,16 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 	}
 	rows := len(cost)
 	if rows == 0 {
-		return emptyResult(0, 0), nil
+		res := emptyResult(0, 0)
+		if len(opts) > 0 {
+			if cfg := ApplyOptions(opts...); cfg.Certified {
+				if cfg.cert == nil {
+					return Result{}, ErrCertificationFailed
+				}
+				return cfg.cert.cert2D(ctx, 0, 0, nil, sense, res, nil)
+			}
+		}
+		return res, nil
 	}
 	cols := len(cost[0])
 	for i := 1; i < rows; i++ {
@@ -146,7 +166,16 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 		}
 	}
 	if cols == 0 {
-		return emptyResult(rows, 0), nil
+		res := emptyResult(rows, 0)
+		if len(opts) > 0 {
+			if cfg := ApplyOptions(opts...); cfg.Certified {
+				if cfg.cert == nil {
+					return Result{}, ErrCertificationFailed
+				}
+				return cfg.cert.cert2D(ctx, rows, 0, cost, sense, res, nil)
+			}
+		}
+		return res, nil
 	}
 	if rows > (math.MaxInt/2)/cols {
 		return Result{}, ErrInvalidDimensions
@@ -159,7 +188,15 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 	for i, row := range cost {
 		copy(flat[i*cols:(i+1)*cols], row)
 	}
-	return solveWithWorkspace(ctx, rows, cols, flat, true, sense, ws, ws.applyOptions(opts))
+	cfg := ws.applyOptions(opts)
+	res, err := solveWithWorkspace(ctx, rows, cols, flat, true, sense, ws, cfg)
+	if cfg.Certified {
+		if cfg.cert == nil {
+			return Result{}, ErrCertificationFailed
+		}
+		return cfg.cert.cert2D(ctx, rows, cols, cost, sense, res, err)
+	}
+	return res, err
 }
 
 // LinearSumFlat solves the rectangular Linear Sum Assignment Problem on a row-major flat slice
@@ -177,13 +214,31 @@ func LinearSumFlat(ctx context.Context, rows, cols int, cost []float64, sense Se
 		return Result{}, ErrInvalidDimensions
 	}
 	if rows == 0 || cols == 0 {
-		return emptyResult(rows, cols), nil
+		res := emptyResult(rows, cols)
+		if len(opts) > 0 {
+			if cfg := ApplyOptions(opts...); cfg.Certified {
+				if cfg.cert == nil {
+					return Result{}, ErrCertificationFailed
+				}
+				return cfg.cert.certFlat(ctx, rows, cols, nil, sense, res, nil)
+			}
+		}
+		return res, nil
 	}
 
 	ws := AcquireWorkspace(rows, cols)
 	defer ReleaseWorkspace(ws)
 
-	return solveWithWorkspace(ctx, rows, cols, cost[:rows*cols], false, sense, ws, ws.applyOptions(opts))
+	cfg := ws.applyOptions(opts)
+	origCost := cost[:rows*cols]
+	res, err := solveWithWorkspace(ctx, rows, cols, origCost, false, sense, ws, cfg)
+	if cfg.Certified {
+		if cfg.cert == nil {
+			return Result{}, ErrCertificationFailed
+		}
+		return cfg.cert.certFlat(ctx, rows, cols, origCost, sense, res, err)
+	}
+	return res, err
 }
 
 // SolveInto solves the rectangular Linear Sum Assignment Problem under ctx into caller-supplied
@@ -206,6 +261,14 @@ func SolveInto(ctx context.Context, rows, cols int, cost []float64, sense Sense,
 		return 0, ErrInvalidDimensions
 	}
 	if k == 0 {
+		if len(opts) > 0 {
+			if cfg := ApplyOptions(opts...); cfg.Certified {
+				if cfg.cert == nil {
+					return 0, ErrCertificationFailed
+				}
+				return cfg.cert.certInto(ctx, rows, cols, nil, sense, nil, nil, nil, 0, nil)
+			}
+		}
 		return 0, nil
 	}
 	if ws == nil {
@@ -216,5 +279,19 @@ func SolveInto(ctx context.Context, rows, cols int, cost []float64, sense Sense,
 	}
 
 	cfg := ws.applyOptions(opts)
-	return solveIntoPreallocated(ctx, rows, cols, cost[:rows*cols], false, sense, rowInd[:k], colInd[:k], ws, cfg)
+	origCost := cost[:rows*cols]
+	rOut := rowInd[:k]
+	cOut := colInd[:k]
+	obj, err := solveIntoPreallocated(ctx, rows, cols, origCost, false, sense, rOut, cOut, ws, cfg)
+	if cfg.Certified {
+		if cfg.cert == nil {
+			for i := range rOut {
+				rOut[i] = -1
+				cOut[i] = -1
+			}
+			return 0, ErrCertificationFailed
+		}
+		return cfg.cert.certInto(ctx, rows, cols, origCost, sense, rOut, cOut, ws, obj, err)
+	}
+	return obj, err
 }

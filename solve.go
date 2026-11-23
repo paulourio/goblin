@@ -11,6 +11,9 @@ import (
 // ErrNilProblem indicates that a nil *CompiledProblem was passed to SolveCompiled.
 var ErrNilProblem = errors.New("goblin: nil CompiledProblem")
 
+// ErrCertificationFailed indicates that runtime exact rational verification rejected the solver result.
+var ErrCertificationFailed = errors.New("goblin: runtime exact rational certification failed")
+
 type viprTraceHook interface {
 	reset(p *CompiledProblem)
 	hasCertificate() bool
@@ -86,12 +89,15 @@ type Options struct {
 	EnableCuts bool
 	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
 	EnableHeuristics bool
+	// Certified enables fail-closed exact rational verification on the original problem.
+	Certified bool
 
 	hasCutoff            bool
 	isSubMIP             bool
 	defaultMaxNodesUsed  bool
 	defaultCutPassesUsed bool
 	viprTrace            viprTraceHook
+	certifyFn            func(context.Context, *CompiledProblem, Options, time.Time, <-chan struct{}) (Result, error)
 }
 
 const (
@@ -357,6 +363,17 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			Status:    StatusUndefined,
 			SolveTime: time.Since(start),
 		}, p.invalidErr
+	}
+	if opt.Certified {
+		if opt.certifyFn == nil {
+			return Result{
+				modelID:   p.modelID,
+				Backend:   opt.Backend,
+				Status:    StatusNumericalError,
+				SolveTime: time.Since(start),
+			}, ErrCertificationFailed
+		}
+		return opt.certifyFn(ctx, p, opt, start, done)
 	}
 	var deadline time.Time
 	if opt.TimeLimit < 0 {
