@@ -71,7 +71,7 @@ wait_jobs() {
 }
 
 # 1. Repository Hygiene & Portability Gate
-log_step "1/4 Checking repository hygiene, line endings, and path portability..."
+log_step "1/5 Checking repository hygiene, line endings, and path portability..."
 
 # Ensure no cache directories or compiled artifacts exist in the working tree.
 bad_artifacts="$(find . \( -name '.mypy_cache' -o -name '.ruff_cache' -o -name '__pycache__' -o -name '*.prof' -o -name '*.test' \) -not -path './.git/*' -not -path './third_party/*' -not -path './formal/.lake/*' || true)"
@@ -81,8 +81,8 @@ if [ -n "${bad_artifacts}" ]; then
 fi
 
 # Ensure no CRLF line endings in source or documentation files.
-if grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >/dev/null 2>&1; then
-    grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >&2 || true
+if grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >/dev/null 2>&1; then
+    grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >&2 || true
     fail "Files with CRLF line endings detected. Normalize to LF."
 fi
 
@@ -92,17 +92,17 @@ unprefixed_import='"gob'"lin"'(/|")'
 unaliased_root_import='^[[:space:]]*"github\.com/paulourio/gob'"lin"'"'
 unaliased_pkg_qual='gob'"lin"'\.[A-Z]'
 forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${unaliased_root_import}|${unaliased_pkg_qual})"
-if grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >/dev/null 2>&1; then
-    grep -rnI --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >&2 || true
+if grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >/dev/null 2>&1; then
+    grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >&2 || true
     fail "Forbidden legacy identifier or unprefixed module import detected."
 fi
-if [ -n "${HOME:-}" ] && grep -rnIF --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >/dev/null 2>&1; then
-    grep -rnIF --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >&2 || true
+if [ -n "${HOME:-}" ] && grep -rnIF --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >/dev/null 2>&1; then
+    grep -rnIF --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >&2 || true
     fail "Hardcoded home directory path detected."
 fi
 
 # 2. Go Formatting Gate
-log_step "2/4 Checking Go formatting (gofmt)..."
+log_step "2/5 Checking Go formatting (gofmt)..."
 unformatted="$(gofmt -l .)"
 if [ -n "${unformatted}" ]; then
     printf '%s\n' "${unformatted}" >&2
@@ -110,7 +110,7 @@ if [ -n "${unformatted}" ]; then
 fi
 
 # 3. Parallel Static Analysis, Python Lint, Prose Quality Gate & Doc Sync
-log_step "3/4 Running Go linters, Python checks, prose gate, and doc sync in parallel..."
+log_step "3/5 Running Go linters, Python checks, prose gate, and doc sync in parallel..."
 if ! command -v golangci-lint >/dev/null 2>&1; then
     fail "golangci-lint is required but not installed in PATH."
 fi
@@ -266,12 +266,45 @@ start_job "check-docs" go run ./cmd/goblin-bench -check-docs
 
 wait_jobs
 
-# 4. Parallel Go Test Suite Gate (Default, SIMD, CGO_ENABLED=0, Race, and opt-in CBC)
-log_step "4/4 Running Go test suites across all build configurations in parallel..."
+# 4. Lean 4 Build & Track 5 ELF Binary Verification
+HAS_LAKE=0
+if command -v lake >/dev/null 2>&1; then
+    HAS_LAKE=1
+elif [ -n "${HOME:-}" ] && [ -x "${HOME}/.elan/bin/lake" ]; then
+    export PATH="${HOME}/.elan/bin:${PATH}"
+    HAS_LAKE=1
+fi
+
+run_lake_build() {
+    if command -v flock >/dev/null 2>&1; then
+        (cd formal && flock /tmp/goblin-formal-lake.lock lake build --wfail)
+    else
+        (cd formal && lake build --wfail)
+    fi
+}
+
+if [ "${HAS_LAKE}" -eq 1 ]; then
+    log_step "4/5 Building Lean 4 proofs and verifying Track 5 ELF binaries..."
+    start_job "lake-build" run_lake_build
+    start_job "track5-arm64-elf" env PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_elf_track5.py --verify
+    start_job "track5e-amd64-elf" env PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_amd64_track5e.py --verify
+    wait_jobs
+elif [ "${GOBLIN_STRICT_GATES:-0}" = "1" ]; then
+    fail "Lean 4 lake binary not found in PATH or elan toolchain directory."
+else
+    log_step "4/5 Skipping Lean 4 build and Track 5 ELF verification..."
+    printf 'WARNING: Lean 4 lake binary not found in PATH or .elan/bin; skipping lake build, Track 5 ELF verification, and GOBLIN_FORMAL=1 oracle tests.\n' >&2
+fi
+
+# 5. Parallel Go Test Suite Gate (Default, SIMD, CGO_ENABLED=0, Race, Formal, and opt-in CBC)
+log_step "5/5 Running Go test suites across all build configurations in parallel..."
 start_job "test-default" go test ./...
 start_job "test-simd" env GOEXPERIMENT=simd go test ./...
 start_job "test-cgo0" env CGO_ENABLED=0 go test ./...
 start_job "test-race-short" go test -race -short ./...
+if [ "${HAS_LAKE}" -eq 1 ]; then
+    start_job "test-formal-short" env GOBLIN_FORMAL=1 go test -short -run '^TestFormal' . ./assign
+fi
 if [ "${HAS_CBC}" -eq 1 ]; then
     start_job "test-cbc" go test -tags=cbc ./...
     start_job "test-race-cbc-short" go test -race -tags=cbc -short ./...

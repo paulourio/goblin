@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -89,6 +90,16 @@ func checkFormalLPJSONL(tb testing.TB, reqJSON []byte) (*big.Rat, error) {
 		return nil, fmt.Errorf("lp-check --jsonl invalid bound: %w", bErr)
 	}
 	return b, nil
+}
+
+// checkFormalLPJSONLForProblem verifies independently that the problem encoded
+// inside reqJSON matches p before accepting an lp-check verdict on reqJSON.
+func checkFormalLPJSONLForProblem(tb testing.TB, p *gb.CompiledProblem, reqJSON []byte) (*big.Rat, error) {
+	tb.Helper()
+	if err := verifySerializedLPPayloadMatchesProblem(p, reqJSON); err != nil {
+		return nil, err
+	}
+	return checkFormalLPJSONL(tb, reqJSON)
 }
 
 func mustFormalLPCheck(tb testing.TB, reqJSON []byte) *big.Rat {
@@ -274,6 +285,757 @@ func encodeProblemHeaderForLPCheck(p *gb.CompiledProblem) (
 		rows[i] = lpBridgeRowJSON{Sense: sTok, RHS: rhs, Terms: terms}
 	}
 	return oc, obj, lb, ub, rows, nil
+}
+
+type parsedProblemRow struct {
+	sense  gb.ConstraintSense
+	rhs    *big.Rat
+	coeffs map[int]*big.Rat
+}
+
+func isJSONNullToken(tok jsontext.Value) bool {
+	s := strings.TrimSpace(string(tok))
+	return s == "" || s == "null"
+}
+
+func parseJSONIntField(tok jsontext.Value) (*big.Int, error) {
+	s := strings.TrimSpace(string(tok))
+	if s == "" || s == "null" {
+		return nil, errors.New("missing integer token")
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(tok, &str); err != nil {
+			return nil, err
+		}
+		s = strings.TrimSpace(str)
+	}
+	val, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid base-10 integer %q", s)
+	}
+	return val, nil
+}
+
+func parseJSONUint64Field(tok jsontext.Value) (uint64, error) {
+	s := strings.TrimSpace(string(tok))
+	if s == "" || s == "null" {
+		return 0, errors.New("missing uint64 token")
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(tok, &str); err != nil {
+			return 0, err
+		}
+		s = strings.TrimSpace(str)
+	}
+	return strconv.ParseUint(s, 0, 64)
+}
+
+func parseFormalJSONRat(tok jsontext.Value, allowBits bool) (*big.Rat, error) {
+	s := strings.TrimSpace(string(tok))
+	if s == "" || s == "null" {
+		return nil, errors.New("missing or null rational token")
+	}
+	switch s[0] {
+	case '{':
+		var obj map[string]jsontext.Value
+		if err := json.Unmarshal(tok, &obj); err != nil {
+			return nil, err
+		}
+		if bitsTok, hasBits := obj["bits"]; hasBits && !isJSONNullToken(bitsTok) {
+			if !allowBits {
+				return nil, errors.New("float64 bits rational not permitted here")
+			}
+			bits, err := parseJSONUint64Field(bitsTok)
+			if err != nil {
+				return nil, fmt.Errorf("invalid float64 bits: %w", err)
+			}
+			f := math.Float64frombits(bits)
+			r := new(big.Rat).SetFloat64(f)
+			if r == nil {
+				return nil, fmt.Errorf("non-finite float64 bits %#x", bits)
+			}
+			return r, nil
+		}
+		num, err := parseJSONIntField(obj["num"])
+		if err != nil {
+			return nil, fmt.Errorf("rational num: %w", err)
+		}
+		den, err := parseJSONIntField(obj["den"])
+		if err != nil {
+			return nil, fmt.Errorf("rational den: %w", err)
+		}
+		if den.Sign() <= 0 {
+			return nil, fmt.Errorf("non-positive denominator %s", den.String())
+		}
+		return new(big.Rat).SetFrac(num, den), nil
+	case '"':
+		var str string
+		if err := json.Unmarshal(tok, &str); err != nil {
+			return nil, err
+		}
+		str = strings.TrimSpace(str)
+		r, ok := new(big.Rat).SetString(str)
+		if !ok {
+			return nil, fmt.Errorf("invalid rational string %q", str)
+		}
+		return r, nil
+	default:
+		r, ok := new(big.Rat).SetString(s)
+		if !ok {
+			return nil, fmt.Errorf("invalid rational number %q", s)
+		}
+		return r, nil
+	}
+}
+
+func parseConstraintSenseTokenStrict(s string) (gb.ConstraintSense, error) {
+	switch s {
+	case "le", "<=":
+		return gb.LessEqual, nil
+	case "ge", ">=":
+		return gb.GreaterEqual, nil
+	case "eq", "=", "==":
+		return gb.Equal, nil
+	default:
+		return 0, fmt.Errorf("invalid constraint sense %q", s)
+	}
+}
+
+func parseJSONNonNegInt(tok jsontext.Value, field string) (int, error) {
+	if isJSONNullToken(tok) {
+		return 0, fmt.Errorf("missing required field %q", field)
+	}
+	v, err := parseJSONIntField(tok)
+	if err != nil || v.Sign() < 0 || !v.IsInt64() {
+		return 0, fmt.Errorf("invalid non-negative integer field %q", field)
+	}
+	n := v.Int64()
+	if n > int64(int(^uint(0)>>1)) {
+		return 0, fmt.Errorf("integer overflow in field %q", field)
+	}
+	return int(n), nil
+}
+
+func addRatCoeff(dst map[int]*big.Rat, col, n int, r *big.Rat) error {
+	if col < 0 || col >= n {
+		return fmt.Errorf("column index %d out of range [0,%d)", col, n)
+	}
+	if r.Sign() == 0 {
+		return nil
+	}
+	if prev, exists := dst[col]; exists {
+		sum := new(big.Rat).Add(prev, r)
+		if sum.Sign() == 0 {
+			delete(dst, col)
+		} else {
+			dst[col] = sum
+		}
+		return nil
+	}
+	dst[col] = new(big.Rat).Set(r)
+	return nil
+}
+
+func parseDenseOrSparseRatVec(tok jsontext.Value, n int, allowBits, allowSparse bool, field string) ([]*big.Rat, error) {
+	if isJSONNullToken(tok) {
+		return nil, fmt.Errorf("missing required vector field %q", field)
+	}
+	s := strings.TrimSpace(string(tok))
+	if allowSparse && s[0] == '{' {
+		var obj map[string]jsontext.Value
+		if err := json.Unmarshal(tok, &obj); err != nil {
+			return nil, fmt.Errorf("%s: %w", field, err)
+		}
+		var terms []jsontext.Value
+		if err := json.Unmarshal(obj["terms"], &terms); err != nil || isJSONNullToken(obj["terms"]) {
+			return nil, fmt.Errorf("%s: invalid sparse terms", field)
+		}
+		acc := make(map[int]*big.Rat, len(terms))
+		for _, tTok := range terms {
+			var tm map[string]jsontext.Value
+			if err := json.Unmarshal(tTok, &tm); err != nil {
+				return nil, fmt.Errorf("%s term: %w", field, err)
+			}
+			col, err := parseJSONNonNegInt(tm["col"], "col")
+			if err != nil {
+				return nil, err
+			}
+			cRat, err := parseFormalJSONRat(tm["coeff"], allowBits)
+			if err != nil {
+				return nil, fmt.Errorf("%s coeff: %w", field, err)
+			}
+			if err := addRatCoeff(acc, col, n, cRat); err != nil {
+				return nil, err
+			}
+		}
+		out := make([]*big.Rat, n)
+		for j := range n {
+			if r, ok := acc[j]; ok {
+				out[j] = r
+			} else {
+				out[j] = new(big.Rat)
+			}
+		}
+		return out, nil
+	}
+	var elems []jsontext.Value
+	if err := json.Unmarshal(tok, &elems); err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if len(elems) != n {
+		return nil, fmt.Errorf("%s length %d != %d", field, len(elems), n)
+	}
+	out := make([]*big.Rat, n)
+	for j, el := range elems {
+		r, err := parseFormalJSONRat(el, allowBits)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", field, j, err)
+		}
+		out[j] = r
+	}
+	return out, nil
+}
+
+func parseOptRatSlice(tok jsontext.Value, n int, allowBits bool, field string) ([]*big.Rat, error) {
+	if isJSONNullToken(tok) {
+		return nil, fmt.Errorf("missing required bounds field %q", field)
+	}
+	var elems []jsontext.Value
+	if err := json.Unmarshal(tok, &elems); err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if len(elems) != n {
+		return nil, fmt.Errorf("%s length %d != %d", field, len(elems), n)
+	}
+	out := make([]*big.Rat, n)
+	for j, el := range elems {
+		if isJSONNullToken(el) {
+			continue
+		}
+		r, err := parseFormalJSONRat(el, allowBits)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", field, j, err)
+		}
+		out[j] = r
+	}
+	return out, nil
+}
+
+func parseBitsRatVec(tok jsontext.Value, n int, field string) ([]*big.Rat, error) {
+	var elems []jsontext.Value
+	if err := json.Unmarshal(tok, &elems); err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if len(elems) != n {
+		return nil, fmt.Errorf("%s length %d != %d", field, len(elems), n)
+	}
+	out := make([]*big.Rat, n)
+	for j, el := range elems {
+		bits, err := parseJSONUint64Field(el)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", field, j, err)
+		}
+		f := math.Float64frombits(bits)
+		r := new(big.Rat).SetFloat64(f)
+		if r == nil {
+			return nil, fmt.Errorf("%s[%d]: non-finite bits %#x", field, j, bits)
+		}
+		out[j] = r
+	}
+	return out, nil
+}
+
+func parseSparseRowTermArray(tok jsontext.Value, n int, allowBits bool) (map[int]*big.Rat, error) {
+	var terms []jsontext.Value
+	if err := json.Unmarshal(tok, &terms); err != nil {
+		return nil, err
+	}
+	acc := make(map[int]*big.Rat, len(terms))
+	for _, tTok := range terms {
+		var tm map[string]jsontext.Value
+		if err := json.Unmarshal(tTok, &tm); err != nil {
+			return nil, err
+		}
+		col, err := parseJSONNonNegInt(tm["col"], "col")
+		if err != nil {
+			return nil, err
+		}
+		cRat, err := parseFormalJSONRat(tm["coeff"], allowBits)
+		if err != nil {
+			return nil, err
+		}
+		if err := addRatCoeff(acc, col, n, cRat); err != nil {
+			return nil, err
+		}
+	}
+	return acc, nil
+}
+
+func verifyJSONProblemMatchesCompiled(
+	p *gb.CompiledProblem,
+	gotVars, gotRows int,
+	gotObjConst *big.Rat,
+	gotObj, gotLB, gotUB []*big.Rat,
+	gotCon []parsedProblemRow,
+) error {
+	if p == nil {
+		return errors.New("nil CompiledProblem")
+	}
+	wantVars := p.NumVars()
+	wantRows := p.NumConstraints()
+	if gotVars != wantVars {
+		return fmt.Errorf("serialized numVars=%d != CompiledProblem NumVars=%d", gotVars, wantVars)
+	}
+	if gotRows != wantRows || len(gotCon) != wantRows {
+		return fmt.Errorf("serialized numRows=%d != CompiledProblem NumConstraints=%d", gotRows, wantRows)
+	}
+	constMin := p.ObjConstant()
+	if p.Sense() == gb.Maximize && constMin != 0 {
+		constMin = -constMin
+	}
+	wantObjConst := new(big.Rat).SetFloat64(constMin)
+	if wantObjConst == nil {
+		return fmt.Errorf("non-finite CompiledProblem ObjConstant %v", constMin)
+	}
+	if gotObjConst.Cmp(wantObjConst) != 0 {
+		return fmt.Errorf("serialized objConst=%s != CompiledProblem minObjConst=%s",
+			gotObjConst.RatString(), wantObjConst.RatString())
+	}
+	if len(gotObj) != wantVars || len(gotLB) != wantVars || len(gotUB) != wantVars {
+		return fmt.Errorf("serialized column vector lengths mismatch numVars=%d", wantVars)
+	}
+	for j := range wantVars {
+		wantC := new(big.Rat).SetFloat64(p.ObjMinCoeff(j))
+		if wantC == nil {
+			return fmt.Errorf("non-finite CompiledProblem ObjMinCoeff[%d]", j)
+		}
+		if gotObj[j].Cmp(wantC) != 0 {
+			return fmt.Errorf("serialized obj[%d]=%s != CompiledProblem minObj=%s",
+				j, gotObj[j].RatString(), wantC.RatString())
+		}
+		lo, hi := p.VarBounds(j)
+		if math.IsNaN(lo) || math.IsNaN(hi) || math.IsInf(lo, 1) || math.IsInf(hi, -1) {
+			return fmt.Errorf("invalid CompiledProblem bounds [%v,%v] at col %d", lo, hi, j)
+		}
+		if math.IsInf(lo, -1) {
+			if gotLB[j] != nil {
+				return fmt.Errorf("serialized lb[%d]=%s != -Inf", j, gotLB[j].RatString())
+			}
+		} else {
+			wantLB := new(big.Rat).SetFloat64(lo)
+			if wantLB == nil || gotLB[j] == nil || gotLB[j].Cmp(wantLB) != 0 {
+				return fmt.Errorf("serialized lb[%d] mismatch (want %v)", j, lo)
+			}
+		}
+		if math.IsInf(hi, 1) {
+			if gotUB[j] != nil {
+				return fmt.Errorf("serialized ub[%d]=%s != +Inf", j, gotUB[j].RatString())
+			}
+		} else {
+			wantUB := new(big.Rat).SetFloat64(hi)
+			if wantUB == nil || gotUB[j] == nil || gotUB[j].Cmp(wantUB) != 0 {
+				return fmt.Errorf("serialized ub[%d] mismatch (want %v)", j, hi)
+			}
+		}
+	}
+	for i := range wantRows {
+		if gotCon[i].sense != p.RowSense(i) {
+			return fmt.Errorf("serialized row[%d].sense=%v != %v", i, gotCon[i].sense, p.RowSense(i))
+		}
+		wantRHS := new(big.Rat).SetFloat64(p.RowRHS(i))
+		if wantRHS == nil {
+			return fmt.Errorf("non-finite CompiledProblem RowRHS[%d]", i)
+		}
+		if gotCon[i].rhs.Cmp(wantRHS) != 0 {
+			return fmt.Errorf("serialized row[%d].rhs=%s != %s",
+				i, gotCon[i].rhs.RatString(), wantRHS.RatString())
+		}
+		wantCoeffs := make(map[int]*big.Rat, p.RowLen(i))
+		var rowErr error
+		p.ForEachRowTerm(i, func(col int, val float64) {
+			if rowErr != nil {
+				return
+			}
+			vr := new(big.Rat).SetFloat64(val)
+			if vr == nil {
+				rowErr = fmt.Errorf("non-finite CompiledProblem coeff at row %d col %d", i, col)
+				return
+			}
+			rowErr = addRatCoeff(wantCoeffs, col, wantVars, vr)
+		})
+		if rowErr != nil {
+			return rowErr
+		}
+		if len(gotCon[i].coeffs) != len(wantCoeffs) {
+			return fmt.Errorf("serialized row[%d] nonzero count=%d != %d",
+				i, len(gotCon[i].coeffs), len(wantCoeffs))
+		}
+		for col, wv := range wantCoeffs {
+			gv, ok := gotCon[i].coeffs[col]
+			if !ok || gv.Cmp(wv) != 0 {
+				return fmt.Errorf("serialized row[%d] col %d coeff mismatch", i, col)
+			}
+		}
+	}
+	return nil
+}
+
+// verifySerializedVIPRMatchesProblem parses the exact VIPR problem instance inside raw
+// ("orig" when non-null, otherwise top-level instance) and checks it against p.
+func verifySerializedVIPRMatchesProblem(p *gb.CompiledProblem, raw []byte) error {
+	if p == nil {
+		return errors.New("nil CompiledProblem")
+	}
+	var top map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return fmt.Errorf("unmarshal VIPR JSON object: %w", err)
+	}
+	inst := top
+	if origTok, hasOrig := top["orig"]; hasOrig && !isJSONNullToken(origTok) {
+		var origMap map[string]jsontext.Value
+		if err := json.Unmarshal(origTok, &origMap); err != nil {
+			return fmt.Errorf("unmarshal VIPR orig instance: %w", err)
+		}
+		inst = origMap
+	} else if preTok, hasPre := top["presolve"]; hasPre && !isJSONNullToken(preTok) {
+		return errors.New("serialized VIPR contains non-null presolve without orig instance")
+	}
+
+	n, err := parseJSONNonNegInt(inst["n"], "n")
+	if err != nil {
+		return err
+	}
+	objConst := new(big.Rat)
+	if ocTok, hasOC := inst["objConst"]; hasOC && !isJSONNullToken(ocTok) {
+		objConst, err = parseFormalJSONRat(ocTok, false)
+		if err != nil {
+			return fmt.Errorf("VIPR objConst: %w", err)
+		}
+	}
+	obj, err := parseDenseOrSparseRatVec(inst["obj"], n, false, true, "obj")
+	if err != nil {
+		return fmt.Errorf("VIPR %w", err)
+	}
+	var isInt []bool
+	if err := json.Unmarshal(inst["isInt"], &isInt); err != nil || isJSONNullToken(inst["isInt"]) {
+		return errors.New("VIPR missing or invalid isInt")
+	}
+	if len(isInt) != n {
+		return fmt.Errorf("VIPR isInt length %d != n=%d", len(isInt), n)
+	}
+	lb, err := parseOptRatSlice(inst["lb"], n, false, "lb")
+	if err != nil {
+		return fmt.Errorf("VIPR %w", err)
+	}
+	ub, err := parseOptRatSlice(inst["ub"], n, false, "ub")
+	if err != nil {
+		return fmt.Errorf("VIPR %w", err)
+	}
+	var rowToks []jsontext.Value
+	if err := json.Unmarshal(inst["baseRows"], &rowToks); err != nil || isJSONNullToken(inst["baseRows"]) {
+		return errors.New("VIPR missing or invalid baseRows")
+	}
+	rows := make([]parsedProblemRow, len(rowToks))
+	for i, rTok := range rowToks {
+		var rm map[string]jsontext.Value
+		if err := json.Unmarshal(rTok, &rm); err != nil {
+			return fmt.Errorf("VIPR baseRows[%d]: %w", i, err)
+		}
+		var senseStr string
+		if err := json.Unmarshal(rm["sense"], &senseStr); err != nil || isJSONNullToken(rm["sense"]) {
+			return fmt.Errorf("VIPR baseRows[%d] invalid sense", i)
+		}
+		sense, err := parseConstraintSenseTokenStrict(senseStr)
+		if err != nil {
+			return fmt.Errorf("VIPR baseRows[%d]: %w", i, err)
+		}
+		rhs, err := parseFormalJSONRat(rm["rhs"], false)
+		if err != nil {
+			return fmt.Errorf("VIPR baseRows[%d].rhs: %w", i, err)
+		}
+		coeffsTok := rTok
+		if ct, hasCoeffs := rm["coeffs"]; hasCoeffs && !isJSONNullToken(ct) {
+			coeffsTok = ct
+		}
+		vec, err := parseDenseOrSparseRatVec(coeffsTok, n, false, true, "baseRows.coeffs")
+		if err != nil {
+			return fmt.Errorf("VIPR baseRows[%d]: %w", i, err)
+		}
+		cmap := make(map[int]*big.Rat, len(vec))
+		for j, v := range vec {
+			if err := addRatCoeff(cmap, j, n, v); err != nil {
+				return err
+			}
+		}
+		rows[i] = parsedProblemRow{sense: sense, rhs: rhs, coeffs: cmap}
+	}
+	if err := verifyJSONProblemMatchesCompiled(p, n, len(rows), objConst, obj, lb, ub, rows); err != nil {
+		return fmt.Errorf("VIPR problem mismatch: %w", err)
+	}
+	for j := range n {
+		wantInt := p.VarCategory(j) != gb.Continuous
+		if isInt[j] != wantInt {
+			return fmt.Errorf("VIPR problem mismatch: isInt[%d]=%v != %v", j, isInt[j], wantInt)
+		}
+	}
+	return nil
+}
+
+func resolveLPCheckMode(top map[string]jsontext.Value) (string, error) {
+	mode := ""
+	setMode := func(next string) error {
+		switch next {
+		case "safe":
+			next = "safe-bound"
+		case "boundConflict", "bound_conflict":
+			next = "bound-conflict"
+		}
+		if mode != "" && mode != next {
+			return fmt.Errorf("conflicting LP check modes %q and %q", mode, next)
+		}
+		mode = next
+		return nil
+	}
+	for _, key := range []string{"mode", "subcommand", "op"} {
+		if tok, ok := top[key]; ok && !isJSONNullToken(tok) {
+			var s string
+			if err := json.Unmarshal(tok, &s); err != nil {
+				return "", fmt.Errorf("invalid LP check %q: %w", key, err)
+			}
+			if err := setMode(s); err != nil {
+				return "", err
+			}
+		}
+	}
+	if tok, ok := top["safe"]; ok && !isJSONNullToken(tok) {
+		var b bool
+		if err := json.Unmarshal(tok, &b); err != nil {
+			return "", fmt.Errorf("invalid LP check safe flag: %w", err)
+		}
+		if b {
+			if err := setMode("safe-bound"); err != nil {
+				return "", err
+			}
+		} else if err := setMode("optimal"); err != nil {
+			return "", err
+		}
+	}
+	if mode != "" {
+		return mode, nil
+	}
+	for _, key := range []string{"reduced", "lpReduced", "presolved"} {
+		if tok, ok := top[key]; ok && !isJSONNullToken(tok) {
+			return "lp-presolve", nil
+		}
+	}
+	return "", errors.New("missing LP check mode")
+}
+
+func parseSerializedLPIntFlags(top map[string]jsontext.Value, n int) ([]bool, error) {
+	parseMask := func(tok jsontext.Value, name string) ([]bool, error) {
+		var mask []bool
+		if err := json.Unmarshal(tok, &mask); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if len(mask) != n {
+			return nil, fmt.Errorf("%s length %d != numVars=%d", name, len(mask), n)
+		}
+		return mask, nil
+	}
+	parseCols := func(tok jsontext.Value, name string) ([]bool, error) {
+		var cols []int
+		if err := json.Unmarshal(tok, &cols); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		mask := make([]bool, n)
+		for _, c := range cols {
+			if c < 0 || c >= n {
+				return nil, fmt.Errorf("%s col %d out of range [0,%d)", name, c, n)
+			}
+			mask[c] = true
+		}
+		return mask, nil
+	}
+	var maskOut, colsOut []bool
+	if t, ok := top["isInt"]; ok && !isJSONNullToken(t) {
+		var err error
+		if maskOut, err = parseMask(t, "isInt"); err != nil {
+			return nil, err
+		}
+	}
+	if t, ok := top["intMask"]; ok && !isJSONNullToken(t) {
+		m2, err := parseMask(t, "intMask")
+		if err != nil {
+			return nil, err
+		}
+		if maskOut != nil {
+			for j := range n {
+				if maskOut[j] != m2[j] {
+					return nil, errors.New("conflicting isInt and intMask")
+				}
+			}
+		}
+		maskOut = m2
+	}
+	if t, ok := top["intCols"]; ok && !isJSONNullToken(t) {
+		var err error
+		if colsOut, err = parseCols(t, "intCols"); err != nil {
+			return nil, err
+		}
+	}
+	if t, ok := top["integerCols"]; ok && !isJSONNullToken(t) {
+		c2, err := parseCols(t, "integerCols")
+		if err != nil {
+			return nil, err
+		}
+		if colsOut != nil {
+			for j := range n {
+				if colsOut[j] != c2[j] {
+					return nil, errors.New("conflicting intCols and integerCols")
+				}
+			}
+		}
+		colsOut = c2
+	}
+	if maskOut != nil && colsOut != nil {
+		for j := range n {
+			if maskOut[j] != colsOut[j] {
+				return nil, errors.New("conflicting integer mask and column list")
+			}
+		}
+	}
+	final := maskOut
+	if final == nil {
+		final = colsOut
+	}
+	if final == nil {
+		return nil, errors.New("milp-unbounded payload missing integer column specification")
+	}
+	return final, nil
+}
+
+// verifySerializedLPPayloadMatchesProblem parses the serialized problem inside an
+// lp-check payload (resolving "orig"/"lpOrig" for lp-presolve) and checks it against p.
+func verifySerializedLPPayloadMatchesProblem(p *gb.CompiledProblem, payload []byte) error {
+	if p == nil {
+		return errors.New("nil CompiledProblem")
+	}
+	var top map[string]jsontext.Value
+	if err := json.Unmarshal(payload, &top); err != nil {
+		return fmt.Errorf("unmarshal lp-check JSON object: %w", err)
+	}
+	mode, err := resolveLPCheckMode(top)
+	if err != nil {
+		return err
+	}
+
+	inst := top
+	if mode == "lp-presolve" {
+		if ot, ok := top["orig"]; ok && !isJSONNullToken(ot) {
+			var om map[string]jsontext.Value
+			if err := json.Unmarshal(ot, &om); err != nil {
+				return fmt.Errorf("unmarshal lp-presolve orig: %w", err)
+			}
+			inst = om
+		} else if lot, ok := top["lpOrig"]; ok && !isJSONNullToken(lot) {
+			var om map[string]jsontext.Value
+			if err := json.Unmarshal(lot, &om); err != nil {
+				return fmt.Errorf("unmarshal lp-presolve lpOrig: %w", err)
+			}
+			inst = om
+		}
+	}
+
+	numVars, err := parseJSONNonNegInt(inst["numVars"], "numVars")
+	if err != nil {
+		return err
+	}
+	numRows, err := parseJSONNonNegInt(inst["numRows"], "numRows")
+	if err != nil {
+		return err
+	}
+	objConst := new(big.Rat)
+	if ocTok, hasOC := inst["objConst"]; hasOC && !isJSONNullToken(ocTok) {
+		objConst, err = parseFormalJSONRat(ocTok, true)
+		if err != nil {
+			return fmt.Errorf("lp objConst: %w", err)
+		}
+	}
+	var obj []*big.Rat
+	if objTok, hasObj := inst["obj"]; hasObj && !isJSONNullToken(objTok) {
+		obj, err = parseDenseOrSparseRatVec(objTok, numVars, true, false, "obj")
+	} else if allowBits := mode == "lp-presolve" || mode == "unbounded" || mode == "milp-unbounded"; allowBits {
+		if bitsTok, hasBits := inst["objBits"]; hasBits && !isJSONNullToken(bitsTok) {
+			obj, err = parseBitsRatVec(bitsTok, numVars, "objBits")
+		} else {
+			err = errors.New("missing obj")
+		}
+	} else {
+		err = errors.New("missing obj")
+	}
+	if err != nil {
+		return fmt.Errorf("lp %w", err)
+	}
+	lb, err := parseOptRatSlice(inst["lb"], numVars, true, "lb")
+	if err != nil {
+		return fmt.Errorf("lp %w", err)
+	}
+	ub, err := parseOptRatSlice(inst["ub"], numVars, true, "ub")
+	if err != nil {
+		return fmt.Errorf("lp %w", err)
+	}
+	var rowToks []jsontext.Value
+	if err := json.Unmarshal(inst["rows"], &rowToks); err != nil || isJSONNullToken(inst["rows"]) {
+		return errors.New("lp missing or invalid rows")
+	}
+	if len(rowToks) != numRows {
+		return fmt.Errorf("lp rows length %d != numRows=%d", len(rowToks), numRows)
+	}
+	rows := make([]parsedProblemRow, numRows)
+	for i, rTok := range rowToks {
+		var rm map[string]jsontext.Value
+		if err := json.Unmarshal(rTok, &rm); err != nil {
+			return fmt.Errorf("lp rows[%d]: %w", i, err)
+		}
+		var senseStr string
+		if err := json.Unmarshal(rm["sense"], &senseStr); err != nil || isJSONNullToken(rm["sense"]) {
+			return fmt.Errorf("lp rows[%d] invalid sense", i)
+		}
+		sense, err := parseConstraintSenseTokenStrict(senseStr)
+		if err != nil {
+			return fmt.Errorf("lp rows[%d]: %w", i, err)
+		}
+		rhs, err := parseFormalJSONRat(rm["rhs"], true)
+		if err != nil {
+			return fmt.Errorf("lp rows[%d].rhs: %w", i, err)
+		}
+		if isJSONNullToken(rm["terms"]) {
+			return fmt.Errorf("lp rows[%d] missing terms", i)
+		}
+		coeffs, err := parseSparseRowTermArray(rm["terms"], numVars, true)
+		if err != nil {
+			return fmt.Errorf("lp rows[%d].terms: %w", i, err)
+		}
+		rows[i] = parsedProblemRow{sense: sense, rhs: rhs, coeffs: coeffs}
+	}
+	if err := verifyJSONProblemMatchesCompiled(p, numVars, numRows, objConst, obj, lb, ub, rows); err != nil {
+		return fmt.Errorf("lp-check (%s) problem mismatch: %w", mode, err)
+	}
+	if mode == "milp-unbounded" {
+		intFlags, err := parseSerializedLPIntFlags(top, numVars)
+		if err != nil {
+			return fmt.Errorf("milp-unbounded: %w", err)
+		}
+		for j := range numVars {
+			wantInt := p.VarCategory(j) != gb.Continuous
+			if intFlags[j] != wantInt {
+				return fmt.Errorf("milp-unbounded int flag[%d]=%v != %v", j, intFlags[j], wantInt)
+			}
+		}
+	}
+	return nil
 }
 
 func buildPhase1FarkasJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, error) {
@@ -720,7 +1482,7 @@ func certifySubTolLPNumericalError(tb testing.TB, label string, p *gb.CompiledPr
 	boundedDim := p.NumVars() <= 128 && p.NumConstraints() <= 128
 	if unbPay, errU := buildSubTolUnboundedCertJSON(tb.Context(), p); errU == nil {
 		if formalFuzzEnabled() && boundedDim {
-			if _, err := checkFormalLPJSONL(tb, unbPay); err != nil {
+			if _, err := checkFormalLPJSONLForProblem(tb, p, unbPay); err != nil {
 				return fmt.Errorf("[%s] %w", label, err)
 			}
 		}
@@ -728,7 +1490,7 @@ func certifySubTolLPNumericalError(tb testing.TB, label string, p *gb.CompiledPr
 	}
 	if fPay, errF := buildPhase1FarkasJSON(tb.Context(), p); errF == nil {
 		if formalFuzzEnabled() && boundedDim {
-			if _, err := checkFormalLPJSONL(tb, fPay); err != nil {
+			if _, err := checkFormalLPJSONLForProblem(tb, p, fPay); err != nil {
 				return fmt.Errorf("[%s] %w", label, err)
 			}
 		}
@@ -791,7 +1553,7 @@ func checkFormalLPResult(
 		if mode != "optimal" && mode != "safe-bound" {
 			return fmt.Errorf("[%s] expected optimal or safe-bound LP certificate, got mode=%q", label, mode)
 		}
-		bnd, err := checkFormalLPJSONL(tb, payload)
+		bnd, err := checkFormalLPJSONLForProblem(tb, p, payload)
 		if err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
 		}
@@ -838,7 +1600,7 @@ func checkFormalLPResult(
 		if mode != "farkas" && mode != "bound-conflict" {
 			return fmt.Errorf("[%s] expected farkas or bound-conflict LP certificate, got mode=%q", label, mode)
 		}
-		if _, err := checkFormalLPJSONL(tb, payload); err != nil {
+		if _, err := checkFormalLPJSONLForProblem(tb, p, payload); err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
 		}
 		return nil
@@ -857,7 +1619,7 @@ func checkFormalLPResult(
 		if mode != "unbounded" && mode != "milp-unbounded" {
 			return fmt.Errorf("[%s] expected unbounded LP certificate, got mode=%q", label, mode)
 		}
-		if _, err := checkFormalLPJSONL(tb, payload); err != nil {
+		if _, err := checkFormalLPJSONLForProblem(tb, p, payload); err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
 		}
 		return nil
@@ -909,7 +1671,7 @@ func checkFormalPresolvedLPResult(
 				return fmt.Errorf("[%s] ExportUnboundedCheckPayload failed on presolved unbounded LP: ok=%v mode=%q",
 					label, okU, uMode)
 			}
-			if _, err := checkFormalLPJSONL(tb, uPayload); err != nil {
+			if _, err := checkFormalLPJSONLForProblem(tb, p, uPayload); err != nil {
 				return fmt.Errorf("[%s] %w", label, err)
 			}
 		}
@@ -921,7 +1683,7 @@ func checkFormalPresolvedLPResult(
 		}
 		if mode, bcPayload, okBC := gb.ExportLPCheckPayload(p, nil, gb.LPResult{Status: gb.StatusInfeasible, Dual: resPre.Duals}); okBC &&
 			(mode == "bound-conflict" || mode == "farkas") {
-			if _, err := checkFormalLPJSONL(tb, bcPayload); err != nil {
+			if _, err := checkFormalLPJSONLForProblem(tb, p, bcPayload); err != nil {
 				return fmt.Errorf("[%s] %w", label, err)
 			}
 			return nil
@@ -933,7 +1695,7 @@ func checkFormalPresolvedLPResult(
 		if err != nil {
 			return fmt.Errorf("[%s] presolved StatusInfeasible LP failed Farkas certification on original model: %w", label, err)
 		}
-		if _, err := checkFormalLPJSONL(tb, fPayload); err != nil {
+		if _, err := checkFormalLPJSONLForProblem(tb, p, fPayload); err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
 		}
 		return nil
@@ -952,7 +1714,7 @@ func checkFormalPresolvedLPResult(
 		}
 
 		if lpPrePay, okPre := gb.ExportLPPresolveCheckPayload(p); okPre {
-			if _, err := checkFormalLPJSONL(tb, lpPrePay); err != nil {
+			if _, err := checkFormalLPJSONLForProblem(tb, p, lpPrePay); err != nil {
 				return fmt.Errorf("[%s] lp-presolve chain rejected: %w", label, err)
 			}
 		}
@@ -983,7 +1745,7 @@ func checkFormalPresolvedLPResult(
 		if mode != "optimal" && mode != "safe-bound" {
 			return fmt.Errorf("[%s] expected mode optimal or safe-bound for presolved LP, got %q", label, mode)
 		}
-		bnd, err := checkFormalLPJSONL(tb, payload)
+		bnd, err := checkFormalLPJSONLForProblem(tb, p, payload)
 		if err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
 		}
@@ -1421,7 +2183,7 @@ func checkFormalUnboundedMILP(tb testing.TB, label string, p *gb.CompiledProblem
 	} else if uMode != "unbounded" {
 		return fmt.Errorf("[%s] expected unbounded certificate for LP, got %q", label, uMode)
 	}
-	if _, err := checkFormalLPJSONL(tb, uPay); err != nil {
+	if _, err := checkFormalLPJSONLForProblem(tb, p, uPay); err != nil {
 		return fmt.Errorf("[%s] %w", label, err)
 	}
 	return nil
@@ -1459,6 +2221,34 @@ func checkFormalVIPRResult(
 	if err != nil {
 		return fmt.Errorf("[%s] MarshalVIPRJSON failed: %w", label, err)
 	}
+	return checkFormalVIPRSerializedResult(tb, label, p, res, tr, raw, relTol, absTol)
+}
+
+func checkFormalVIPRSerializedResult(
+	tb testing.TB,
+	label string,
+	p *gb.CompiledProblem,
+	res gb.Result,
+	tr *gb.VIPRTrace,
+	raw []byte,
+	relTol, absTol float64,
+) error {
+	tb.Helper()
+	if !formalFuzzEnabled() {
+		return errors.New("GOBLIN_FORMAL=1 is not enabled")
+	}
+	if err := checkMILPInvariantsErr(label, p, res); err != nil {
+		return err
+	}
+	if tr == nil || !tr.HasCertificate() {
+		return fmt.Errorf("[%s] missing VIPRTrace certificate", label)
+	}
+	if tr.TracedProblem() != p {
+		return fmt.Errorf("[%s] VIPRTrace.TracedProblem() does not match target CompiledProblem", label)
+	}
+	if err := verifySerializedVIPRMatchesProblem(p, raw); err != nil {
+		return fmt.Errorf("[%s] %w", label, err)
+	}
 	bnd, err := checkFormalVIPRJSONL(tb, raw)
 	if err != nil {
 		return fmt.Errorf("[%s] %w", label, err)
@@ -1488,15 +2278,13 @@ func checkFormalVIPRResult(
 			if bnd != nil && bnd.Cmp(targetLB) != 0 {
 				return fmt.Errorf("[%s] vipr-check bound %s != TargetLB %s", label, bnd.RatString(), targetLB.RatString())
 			}
-			if tr.TracedProblem() == p {
-				incObj, errInc := evalSerializedVIPRIncumbentMinObj(p, raw)
-				if errInc != nil {
-					return fmt.Errorf("[%s] %w", label, errInc)
-				}
-				if incObj.Cmp(targetLB) != 0 {
-					return fmt.Errorf("[%s] VIPR optimal incumbent minObj %s != TargetLB %s",
-						label, incObj.RatString(), targetLB.RatString())
-				}
+			incObj, errInc := evalSerializedVIPRIncumbentMinObj(p, raw)
+			if errInc != nil {
+				return fmt.Errorf("[%s] %w", label, errInc)
+			}
+			if incObj.Cmp(targetLB) != 0 {
+				return fmt.Errorf("[%s] VIPR optimal incumbent minObj %s != TargetLB %s",
+					label, incObj.RatString(), targetLB.RatString())
 			}
 		default:
 			return fmt.Errorf("[%s] unexpected VIPR mode %q for status %v", label, tr.Mode(), res.Status)
@@ -1506,12 +2294,12 @@ func checkFormalVIPRResult(
 			if res.Status == gb.StatusOptimal && isStandardScaledProblem(p) && !okExact {
 				return fmt.Errorf("[%s] StatusOptimal solution is not exact-Q MIP feasible", label)
 			}
-			if okExact && tr.TracedProblem() == p && minRat.Cmp(targetLB) < 0 {
+			if okExact && minRat.Cmp(targetLB) < 0 {
 				return fmt.Errorf("[%s] exact-Q MIP objective %s < certified VIPR TargetLB %s",
 					label, minRat.RatString(), targetLB.RatString())
 			}
 		}
-		if tr.TracedProblem() == p && !math.IsNaN(res.BestBound) && !math.IsInf(res.BestBound, 0) {
+		if !math.IsNaN(res.BestBound) && !math.IsInf(res.BestBound, 0) {
 			userLB := userBoundFromMinRat(p, targetLB)
 			if tr.Mode() == "optimal" {
 				tol := 1e-4 * max(1.0, max(math.Abs(res.BestBound), math.Abs(userLB)))
@@ -1773,4 +2561,231 @@ func TestFormalFuzzBridgeConcurrent(t *testing.T) {
 	for e := range errCh {
 		t.Fatal(e)
 	}
+}
+
+func TestFormalFuzzBridgeSerializedProblemMismatch(t *testing.T) {
+	t.Parallel()
+
+	mTarget := gb.NewModel("vipr_problem_match", gb.Minimize)
+	x := mTarget.AddIntVar("x", 0, 5)
+	y := mTarget.AddIntVar("y", 0, 5)
+	mTarget.SetObjective(gb.NewExpr(x.T(2), y.T(3)))
+	mTarget.AddConstraint("c1", gb.NewExpr(x.T(1), y.T(1)).Ge(4))
+	pTarget := mTarget.Compile()
+
+	trTarget := gb.NewVIPRTrace()
+	resTarget, err := gb.SolveCompiled(t.Context(), pTarget, gb.WithPureGo(), gb.WithPresolve(false), gb.WithVIPRTrace(trTarget))
+	if err != nil || resTarget.Status != gb.StatusOptimal {
+		t.Fatalf("solve target failed: status=%v err=%v", resTarget.Status, err)
+	}
+	rawTarget, err := trTarget.MarshalVIPRJSON()
+	if err != nil {
+		t.Fatalf("MarshalVIPRJSON target: %v", err)
+	}
+	if err := verifySerializedVIPRMatchesProblem(pTarget, rawTarget); err != nil {
+		t.Fatalf("valid VIPR trace rejected by verifySerializedVIPRMatchesProblem: %v", err)
+	}
+
+	mWeak := gb.NewModel("vipr_problem_weak", gb.Minimize)
+	xw := mWeak.AddIntVar("x", 0, 5)
+	yw := mWeak.AddIntVar("y", 0, 5)
+	mWeak.SetObjective(gb.NewExpr(xw.T(2), yw.T(3)))
+	mWeak.AddConstraint("c1", gb.NewExpr(xw.T(1), yw.T(1)).Ge(1))
+	pWeak := mWeak.Compile()
+
+	trWeak := gb.NewVIPRTrace()
+	resWeak, err := gb.SolveCompiled(t.Context(), pWeak, gb.WithPureGo(), gb.WithPresolve(false), gb.WithVIPRTrace(trWeak))
+	if err != nil || resWeak.Status != gb.StatusOptimal {
+		t.Fatalf("solve weak failed: status=%v err=%v", resWeak.Status, err)
+	}
+	rawWeak, err := trWeak.MarshalVIPRJSON()
+	if err != nil {
+		t.Fatalf("MarshalVIPRJSON weak: %v", err)
+	}
+	if err := verifySerializedVIPRMatchesProblem(pTarget, rawWeak); err == nil {
+		t.Fatal("expected verifySerializedVIPRMatchesProblem to reject weakened constraint RHS")
+	}
+
+	// Verify duplicate JSON keys are rejected strictly by encoding/json/v2.
+	dupJSON := []byte(strings.Replace(string(rawTarget), `"n":2,`, `"n":2,"n":99,`, 1))
+	if len(dupJSON) > len(rawTarget) {
+		if err := verifySerializedVIPRMatchesProblem(pTarget, dupJSON); err == nil {
+			t.Fatal("expected duplicate JSON key to be rejected")
+		}
+	}
+
+	// Offline checks for mutated presolve-enveloped VIPR JSON and lp-check payloads.
+	mPre := gb.NewModel("pre_vipr_match", gb.Minimize)
+	xp := mPre.AddBinaryVar("x")
+	yp := mPre.AddIntVar("y", 0, 5)
+	mPre.SetObjective(gb.NewExpr(xp.T(3), yp.T(2)))
+	mPre.AddConstraint("fix", gb.NewExpr(xp.T(1)).Le(0))
+	mPre.AddConstraint("dem", gb.NewExpr(xp.T(1), yp.T(1)).Ge(2))
+	pPre := mPre.Compile()
+
+	trPre := gb.NewVIPRTrace()
+	resPre, err := gb.SolveCompiled(t.Context(), pPre, gb.WithPureGo(), gb.WithPresolve(true), gb.WithVIPRTrace(trPre))
+	if err != nil || resPre.Status != gb.StatusOptimal {
+		t.Fatalf("solve presolve MIP failed: status=%v err=%v", resPre.Status, err)
+	}
+	rawPre, err := trPre.MarshalVIPRJSON()
+	if err != nil {
+		t.Fatalf("MarshalVIPRJSON presolved: %v", err)
+	}
+	if err := verifySerializedVIPRMatchesProblem(pPre, rawPre); err != nil {
+		t.Fatalf("valid presolved VIPR rejected: %v", err)
+	}
+	if err := verifySerializedVIPRMatchesProblem(pTarget, rawPre); err == nil {
+		t.Fatal("expected presolved VIPR for pPre to fail against pTarget")
+	}
+	noOrigPre := []byte(strings.Replace(string(rawPre), `"orig":`, `"ignoredOrig":`, 1))
+	if len(noOrigPre) > len(rawPre) {
+		if err := verifySerializedVIPRMatchesProblem(pPre, noOrigPre); err == nil {
+			t.Fatal("expected presolve field without orig to be rejected")
+		}
+	}
+
+	mPreWeak := gb.NewModel("pre_vipr_weak", gb.Minimize)
+	xpw := mPreWeak.AddBinaryVar("x")
+	ypw := mPreWeak.AddIntVar("y", 0, 5)
+	mPreWeak.SetObjective(gb.NewExpr(xpw.T(3), ypw.T(2)))
+	mPreWeak.AddConstraint("fix", gb.NewExpr(xpw.T(1)).Le(0))
+	mPreWeak.AddConstraint("dem", gb.NewExpr(xpw.T(1), ypw.T(1)).Ge(1))
+	pPreWeak := mPreWeak.Compile()
+	trPreWeak := gb.NewVIPRTrace()
+	if _, err := gb.SolveCompiled(t.Context(), pPreWeak, gb.WithPureGo(), gb.WithPresolve(true), gb.WithVIPRTrace(trPreWeak)); err != nil {
+		t.Fatalf("solve weak presolve MIP failed: %v", err)
+	}
+	rawPreWeak, err := trPreWeak.MarshalVIPRJSON()
+	if err != nil {
+		t.Fatalf("MarshalVIPRJSON weak presolved: %v", err)
+	}
+
+	// LP presolve and MILP-unbounded payload verification against pTarget/pLP.
+	mLPPre := gb.NewModel("lp_pre_match", gb.Minimize)
+	xfl := mLPPre.AddContVar("xf", 1, 1)
+	yfl := mLPPre.AddContVar("yf", 0, 10)
+	mLPPre.SetObjective(gb.NewExpr(xfl.T(1), yfl.T(2)))
+	mLPPre.AddConstraint("dem", gb.NewExpr(xfl.T(1), yfl.T(1)).Ge(4))
+	pLPPre := mLPPre.Compile()
+	lpPrePay, okLPPre := gb.ExportLPPresolveCheckPayload(pLPPre)
+	if !okLPPre {
+		t.Fatal("ExportLPPresolveCheckPayload failed")
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pLPPre, lpPrePay); err != nil {
+		t.Fatalf("valid lp-presolve payload rejected: %v", err)
+	}
+
+	mLPPreWeak := gb.NewModel("lp_pre_weak", gb.Minimize)
+	xflw := mLPPreWeak.AddContVar("xf", 1, 1)
+	yflw := mLPPreWeak.AddContVar("yf", 0, 10)
+	mLPPreWeak.SetObjective(gb.NewExpr(xflw.T(1), yflw.T(2)))
+	mLPPreWeak.AddConstraint("dem", gb.NewExpr(xflw.T(1), yflw.T(1)).Ge(2))
+	pLPPreWeak := mLPPreWeak.Compile()
+	lpPrePayWeak, okLPPreW := gb.ExportLPPresolveCheckPayload(pLPPreWeak)
+	if !okLPPreW {
+		t.Fatal("ExportLPPresolveCheckPayload weak failed")
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pLPPre, lpPrePayWeak); err == nil {
+		t.Fatal("expected verifySerializedLPPayloadMatchesProblem to reject weakened lp-presolve orig")
+	}
+	mLP := gb.NewModel("lp_match", gb.Minimize)
+	xl := mLP.AddContVar("x", 0, 10)
+	mLP.SetObjective(gb.NewExpr(xl.T(3)))
+	mLP.AddConstraint("lb", gb.NewExpr(xl.T(1)).Ge(4))
+	pLP := mLP.Compile()
+	ws := gb.AcquireWorkspace(pLP.NumVars(), pLP.NumConstraints())
+	t.Cleanup(func() { gb.ReleaseWorkspace(ws) })
+	lpSolver := gb.NewLPSolver(pLP, ws)
+	lpRes := lpSolver.Solve()
+	if lpRes.Status != gb.StatusOptimal {
+		t.Fatalf("expected optimal LP, got %v", lpRes.Status)
+	}
+	_, lpPay, okLP := gb.ExportLPCheckPayload(pLP, lpSolver, lpRes)
+	if !okLP {
+		t.Fatal("ExportLPCheckPayload failed")
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pLP, lpPay); err != nil {
+		t.Fatalf("valid LP payload rejected: %v", err)
+	}
+
+	mLPWeak := gb.NewModel("lp_weak", gb.Minimize)
+	xlw := mLPWeak.AddContVar("x", 0, 10)
+	mLPWeak.SetObjective(gb.NewExpr(xlw.T(3)))
+	mLPWeak.AddConstraint("lb", gb.NewExpr(xlw.T(1)).Ge(1))
+	pLPWeak := mLPWeak.Compile()
+	wsW := gb.AcquireWorkspace(pLPWeak.NumVars(), pLPWeak.NumConstraints())
+	t.Cleanup(func() { gb.ReleaseWorkspace(wsW) })
+	lpSolverW := gb.NewLPSolver(pLPWeak, wsW)
+	lpResW := lpSolverW.Solve()
+	_, lpPayWeak, okLPW := gb.ExportLPCheckPayload(pLPWeak, lpSolverW, lpResW)
+	if !okLPW {
+		t.Fatal("ExportLPCheckPayload weak failed")
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pLP, lpPayWeak); err == nil {
+		t.Fatal("expected verifySerializedLPPayloadMatchesProblem to reject weakened LP RHS")
+	}
+
+	mUnb := gb.NewModel("milp_unb_match", gb.Minimize)
+	xu := mUnb.AddIntVar("x", 0, math.Inf(1))
+	yu := mUnb.AddContVar("y", 0, math.Inf(1))
+	mUnb.SetObjective(gb.NewExpr(xu.T(-1)))
+	mUnb.AddConstraint("c", gb.NewExpr(xu.T(1), yu.T(-1)).Le(0))
+	pUnb := mUnb.Compile()
+	uMode, uPay, okU := gb.ExportUnboundedCheckPayload(pUnb, nil, []float64{0, 0})
+	if !okU || uMode != "milp-unbounded" {
+		t.Fatalf("ExportUnboundedCheckPayload failed: mode=%q ok=%v", uMode, okU)
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pUnb, uPay); err != nil {
+		t.Fatalf("valid milp-unbounded payload rejected: %v", err)
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pTarget, uPay); err == nil {
+		t.Fatal("expected verifySerializedLPPayloadMatchesProblem to reject mismatched milp-unbounded problem")
+	}
+	var uMap map[string]jsontext.Value
+	if err := json.Unmarshal(uPay, &uMap); err != nil {
+		t.Fatalf("unmarshal milp-unbounded: %v", err)
+	}
+	uMap["intCols"] = jsontext.Value(`[1]`)
+	mutIntPay, err := json.Marshal(uMap)
+	if err != nil {
+		t.Fatalf("marshal mutated milp-unbounded: %v", err)
+	}
+	if err := verifySerializedLPPayloadMatchesProblem(pUnb, mutIntPay); err == nil {
+		t.Fatal("expected verifySerializedLPPayloadMatchesProblem to reject mutated intCols")
+	}
+
+	t.Run("LiveMutatedProblemPassesOracleYetRejectedByBridge", func(t *testing.T) {
+		t.Parallel()
+		if !formalFuzzEnabled() {
+			t.Skip("set GOBLIN_FORMAL=1 to run live negative oracle control")
+		}
+		if _, err := checkFormalVIPRJSONL(t, rawWeak); err != nil {
+			t.Fatalf("expected weakened VIPR JSON to pass vipr-check standalone, got: %v", err)
+		}
+		if err := checkFormalVIPRSerializedResult(t, "mutated_vipr_raw", pTarget, resTarget, trTarget, rawWeak, 1e-6, 1e-6); err == nil {
+			t.Fatal("checkFormalVIPRSerializedResult accepted mutated VIPR problem JSON")
+		}
+		if err := checkFormalVIPRResult(t, "wrong_traced_problem", pTarget, resTarget, trWeak, 1e-6, 1e-6); err == nil {
+			t.Fatal("checkFormalVIPRResult accepted VIPRTrace traced on a different CompiledProblem")
+		}
+		if _, err := checkFormalLPJSONL(t, lpPayWeak); err != nil {
+			t.Fatalf("expected weakened LP JSON to pass lp-check standalone, got: %v", err)
+		}
+		if _, err := checkFormalLPJSONLForProblem(t, pLP, lpPayWeak); err == nil {
+			t.Fatal("checkFormalLPJSONLForProblem accepted weakened LP problem JSON")
+		}
+		if _, err := checkFormalVIPRJSONL(t, rawPreWeak); err != nil {
+			t.Fatalf("expected weakened presolved VIPR JSON to pass vipr-check standalone, got: %v", err)
+		}
+		if err := checkFormalVIPRSerializedResult(t, "mutated_presolved_vipr_orig", pPre, resPre, trPre, rawPreWeak, 1e-6, 1e-6); err == nil {
+			t.Fatal("checkFormalVIPRSerializedResult accepted mutated presolved orig JSON")
+		}
+		if _, err := checkFormalLPJSONL(t, lpPrePayWeak); err != nil {
+			t.Fatalf("expected weakened lp-presolve JSON to pass lp-check standalone, got: %v", err)
+		}
+		if _, err := checkFormalLPJSONLForProblem(t, pLPPre, lpPrePayWeak); err == nil {
+			t.Fatal("checkFormalLPJSONLForProblem accepted weakened lp-presolve orig JSON")
+		}
+	})
 }

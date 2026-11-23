@@ -529,16 +529,26 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
 def strHasPrefix (s p : String) : Bool :=
   s.toList.take p.length == p.toList
 
-/-- Strict fail-closed allow-list of audited non-allocating external targets permitted by
-`checkZeroGC` in verified ARM64 kernels. Any symbol outside this list is rejected. -/
+/-- Strict fail-closed allow-list of the 18 audited non-allocating external targets permitted by
+`checkZeroGC` across all verified Go 1.27 ARM64 kernels (matching `ALLOWED_ZEROGC_SYMS` in
+`scripts/extract_elf_track5.py`). Any symbol outside this list is rejected.
+
+Why stack-growth and channel-poll runtime symbols appear here:
+- `"runtime.morestack_noctxt.abi0"`: Go 1.27 `arm64` emits a stack-check prologue calling
+  `runtime.morestack_noctxt.abi0` in every non-frameless function. `checkZeroGC` permits the
+  prologue branch target while `checkStackGuard` / `checkStackGuardWith_sound` independently
+  proves `.trapMorestack` unreachable whenever caller stack headroom holds
+  (`sp - headroom > gStackGuard0`).
+- `"runtime.selectnbrecv"`: appears solely in `augmentRowScalar`'s cold cancellation-poll path
+  (`case <-ctx.Done():`); `augmentRowScalar_done_nil_no_selectnbrecv` proves the fast path
+  (`done == nil`) bypasses it unconditionally. -/
 def allowedZeroGCSyms : List String := [
   "runtime.panicBounds",
   "runtime.panicdivide",
-  "runtime.panicDivide",
+  -- Stack-growth prologue branch target; ruled unreachable by `checkStackGuardWith_sound`.
   "runtime.morestack_noctxt.abi0",
-  "runtime.morestack_noctxt",
-  "runtime.morestack",
   "runtime.memclrNoHeapPointers",
+  -- Cold context-cancel poll in `augmentRowScalar`; bypassed when `done == nil`.
   "runtime.selectnbrecv",
   "math.Float64bits",
   "math.IsInf",
@@ -1781,6 +1791,25 @@ theorem checkPanicBoundsReachability_run_safe (prog : Array Arm64Insn)
     · rw [runArm64_of_not_running k prog ext s1 hRun1]
       exact hStep.1
 
+/-- Unconditional `panicBounds` unreachability theorem for routines with zero `runtime.panicBounds`
+CFG blocks (`inPb := fun _ => false`): requires NO `BoundsGuardsHold` hypothesis. -/
+theorem checkPanicBoundsReachability_run_unconditional (prog : Array Arm64Insn)
+    (getInsn : Nat → Option Arm64Insn) (ext : Nat → Option String)
+    (hOk : verifyPanicBoundsCertWith prog.size getInsn prog.toList ext (fun _ => false) = .ok ()) :
+    ∀ (fuel : Nat) (s : Arm64State),
+      s.status = .running →
+      (runArm64 fuel prog ext s).status ≠ .trapPanicBounds := by
+  intro fuel s hRun
+  have hHold : ∀ f st, BoundsGuardsHold prog getInsn ext (fun _ => false) f st := by
+    intro f
+    induction f with
+    | zero => intro _; trivial
+    | succ k ih =>
+      intro st
+      exact ⟨fun _ _ _ => rfl, ih (stepArm64 prog ext st)⟩
+  exact checkPanicBoundsReachability_run_safe prog getInsn ext (fun _ => false)
+    (fun _ _ => rfl) hOk fuel s hRun rfl (hHold fuel s)
+
 /-! ### Verified Safety Theorems on Actual Go 1.27 Tier 5B ELF Kernels -/
 
 private theorem hasInfChunks_len :
@@ -2041,7 +2070,7 @@ private theorem aug_stack_headroom_112 (sp sg : BitVec 64)
   simp only [BitVec.ult, decide_eq_true_eq] at hSp hGuard ⊢
   constructor <;> bv_omega
 
-/-- Tier 5B theorem: decoded Go 1.27 ARM64 `hasInfeasibleIntegerEqRow` guarantees Zero-GC allocation, stack-headroom safety (all fuels), and guarded `panicBounds` transitions. -/
+/-- Tier 5B theorem: decoded Go 1.27 ARM64 `hasInfeasibleIntegerEqRow` guarantees Zero-GC allocation, stack-headroom safety (all fuels), and structurally CFG-guarded `panicBounds` mediation (`BoundsGuardsHold`). -/
 theorem hasInfeasibleIntegerEqRow_elf_safe (s : Arm64State)
     (hRun : s.status = .running) (hPc : s.pcIdx = 0)
     (hSp : BitVec.ult 31#64 s.sp = true)
@@ -2069,7 +2098,7 @@ theorem hasInfeasibleIntegerEqRow_elf_safe (s : Arm64State)
             chunkDecode_hasInf (by rw [hProgSz]; exact hasInf_stackGuard) s hRun hPc hG hSp hGuard,
           fun fuel hHold => checkPanicBoundsReachability_run_safe _ (chunkDecode hasInfeasibleIntegerEqRowChunks) _ _ hBound hasInfeasible_pbCert fuel s hRun hSafe0 (hGet ▸ hHold)⟩
 
-/-- Tier 5B theorem: decoded Go 1.27 ARM64 `augmentRowScalar` and all three helpers (`InitReducedRow64`, `refillQueueIndirectScalar`, `relaxRowIndirectScalar`) guarantee Zero-GC allocation, stack-headroom safety, and guarded `panicBounds` transitions. -/
+/-- Tier 5B theorem: decoded Go 1.27 ARM64 `augmentRowScalar` and all three helpers (`InitReducedRow64`, `refillQueueIndirectScalar`, `relaxRowIndirectScalar`) guarantee Zero-GC allocation, stack-headroom safety, and structurally CFG-guarded `panicBounds` mediation (`BoundsGuardsHold`). -/
 theorem augmentRowScalar_elf_safe (sAug sInit sRefill sRelax : Arm64State)
     (hRunA : sAug.status = .running) (hPcA : sAug.pcIdx = 0)
     (hSpA : BitVec.ult 239#64 sAug.sp = true) (hGuardA : BitVec.ult sAug.gStackGuard0 (sAug.sp - 240#64) = true)

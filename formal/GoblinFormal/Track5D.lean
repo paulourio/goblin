@@ -750,7 +750,8 @@ private instance {ε α : Type} [DecidableEq ε] [DecidableEq α] : DecidableEq 
   | .ok _, .error _ => isFalse (by intro h; cases h)
   | .error _, .ok _ => isFalse (by intro h; cases h)
 
-/-- Direct `Track5B` safety theorem (`noAllocCall`, `checkStackGuard_sound`, `checkPanicBoundsReachability_run_safe`) on `-gcflags=-l` `assign.exactReducedCost`. -/
+/-- Direct `Track5B` safety theorem (`checkZeroGC_run_sound`, `checkStackGuard_sound`, `checkPanicBoundsReachability_run_unconditional`)
+on `-gcflags=-l` `assign.exactReducedCost`, which has zero `runtime.panicBounds` blocks (`inPb = fun _ => false`). -/
 theorem exactReducedCostNoinline_elf_safe (s : Arm64State)
     (hRun : s.status = .running) (hPc : s.pcIdx = 0)
     (hSp : BitVec.ult 31#64 s.sp = true)
@@ -760,8 +761,7 @@ theorem exactReducedCostNoinline_elf_safe (s : Arm64State)
     (∀ fuel tgt, (runArm64 fuel prog exactReducedCostNoinlineTargets s).status = .callExternal tgt →
       isForbiddenAllocSym tgt = false) ∧
     (∀ fuel, (runArm64 fuel prog exactReducedCostNoinlineTargets s).status ≠ .trapMorestack) ∧
-    (∀ fuel, BoundsGuardsHold prog (fun i => prog[i]?) exactReducedCostNoinlineTargets (fun _ => false) fuel s →
-      (runArm64 fuel prog exactReducedCostNoinlineTargets s).status ≠ .trapPanicBounds) := by
+    (∀ fuel, (runArm64 fuel prog exactReducedCostNoinlineTargets s).status ≠ .trapPanicBounds) := by
   have hEqProg : decodeArm64Prog exactReducedCostNoinlineWords = decodeArm64ProgCfg exactReducedCostNoinlineWords := by decide
   rw [hEqProg]
   have hLen : ∀ i c, exactReducedCostNoinlineChunks[i]? = some c →
@@ -793,8 +793,7 @@ theorem exactReducedCostNoinline_elf_safe (s : Arm64State)
     decide
   refine ⟨fun fuel tgt => checkZeroGC_run_sound _ _ hZeroGC fuel s tgt hRun,
           checkStackGuard_sound _ _ (.smallFrame 56 56) hStack s hRun hPc hG hSp hGuard,
-          fun fuel hHold => checkPanicBoundsReachability_run_safe _ (chunkDecodeCfg exactReducedCostNoinlineChunks) _ (fun _ => false)
-            (fun _ _ => rfl) hPb fuel s hRun rfl (hGetFun ▸ hHold)⟩
+          fun fuel => checkPanicBoundsReachability_run_unconditional _ (chunkDecodeCfg exactReducedCostNoinlineChunks) _ hPb fuel s hRun⟩
 
 /-- Contiguous O(1) cold `runtime.panicBounds` region predicate for the 1353-instruction `hasPotentialCancellation` ELF routine. -/
 def isCancelPbIdx (i : Nat) : Bool :=
@@ -881,7 +880,7 @@ private theorem cancel_stack_headroom_832 (sp sg : BitVec 64)
   simp only [BitVec.ult, decide_eq_true_eq] at hSp hGuard ⊢
   constructor <;> bv_omega
 
-/-- Tier 5D binary safety theorem for the 1353-instruction zero-allocation Kahn DAG cycle checker `assign.hasPotentialCancellation` via `Track5B` analyzers (`noAllocCall`, `checkStackGuard_sound`, `checkPanicBoundsReachability_run_safe`). -/
+/-- Tier 5D binary theorem for the 1353-instruction zero-allocation Kahn DAG cycle checker `assign.hasPotentialCancellation`: unconditional Zero-GC and stack-headroom safety (`checkZeroGC_run_sound`, `checkStackGuard_sound`) plus structurally CFG-guarded `panicBounds` mediation (`BoundsGuardsHold` via `checkPanicBoundsReachability_run_safe`). -/
 theorem hasPotentialCancellation_elf_safe (s : Arm64State)
     (hRun : s.status = .running) (hPc : s.pcIdx = 0)
     (hSp : BitVec.ult 831#64 s.sp = true)
@@ -917,7 +916,7 @@ def BoundsGuardsHoldD (words : Array UInt32) (getInsn : Nat → Option Arm64Insn
       isVerifiedBoundsGuard getInsn s.pcIdx s1.pcIdx = true → inPb s1.pcIdx = false) ∧
       BoundsGuardsHoldD words getInsn ext inPb k s1
 
-/-- All-fuel Zero-GC allocation & `panicBounds` safety lifted directly to the exact `runArm64D` interpreter on `hasPotentialCancellation`. -/
+/-- All-fuel unconditional Zero-GC allocation safety and structurally CFG-guarded `panicBounds` mediation (`BoundsGuardsHoldD`) lifted directly to the exact `runArm64D` interpreter on `hasPotentialCancellation`. -/
 theorem hasPotentialCancellation_exactD_zeroGC_and_pb (s : Arm64State)
     (hRun : s.status = .running) (hPc : s.pcIdx = 0) :
     let progD := decodeArm64ProgD hasPotentialCancellationWords

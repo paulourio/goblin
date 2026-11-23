@@ -620,6 +620,14 @@ info: 'GoblinFormal.Track4.checkVIPRWithPresolve_eps_optimal_zero_tol' depends o
 #guard_msgs in
 #print axioms GoblinFormal.Track5B.checkPanicBoundsReachability_run_safe
 
+/--
+info: 'GoblinFormal.Track5B.checkPanicBoundsReachability_run_unconditional' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5B.checkPanicBoundsReachability_run_unconditional
+
 /-- info: 'GoblinFormal.Track5B.hasInfeasibleIntegerEqRow_elf_safe' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms GoblinFormal.Track5B.hasInfeasibleIntegerEqRow_elf_safe

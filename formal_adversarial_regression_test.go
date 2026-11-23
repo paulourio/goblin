@@ -36,6 +36,13 @@ func assertVIPRVerifiedIfFormal(tb testing.TB, tr *VIPRTrace, wantMode string) {
 	if err != nil {
 		tb.Fatalf("MarshalVIPRJSON: %v", err)
 	}
+	trProb := tr.TracedProblem()
+	if trProb == nil {
+		tb.Fatal("VIPRTrace.TracedProblem() is nil")
+	}
+	if _, err := verifyMiniVIPRBytesAgainstProblem(trProb, raw); err != nil {
+		tb.Fatalf("serialized VIPR does not match TracedProblem: %v", err)
+	}
 	resp, err := FormalCheckVIPRJSONL(tb, raw)
 	if err != nil || !resp.OK {
 		tb.Fatalf("vipr-check rejected certificate: resp=%+v err=%v", resp, err)
