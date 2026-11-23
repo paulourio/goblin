@@ -17,10 +17,20 @@ const (
 	mpsSpaces         = "               "
 )
 
-var mpsBufPool = sync.Pool{
-	New: func() any {
-		return nil
-	},
+var mpsBufPool sync.Pool
+
+type mpsConflictRow struct {
+	col   int
+	name  string
+	rhs   float64
+	effLB float64
+}
+
+func mpsBoundTag(cat gb.VarCategory, contTag, intTag string) string {
+	if cat != gb.Continuous {
+		return intTag
+	}
+	return contTag
 }
 
 func appendMPSField(buf []byte, s string, width int, rightAlign bool) []byte {
@@ -181,26 +191,23 @@ func validateMPSIdent(kind, s string, allowEmpty bool) error {
 	return nil
 }
 
-// WriteMPS writes a CompiledProblem in free-format MPS (with INTORG/INTEND markers
-// for integer and binary variables) suitable for direct execution by COIN-OR CBC.
-// Like PuLP's writeMPS, the objective is written in minimization form (negated when Maximize).
-func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
+func validateMPSProblem(p *gb.CompiledProblem) (probName, objName string, conflictRows []mpsConflictRow, err error) {
 	if p == nil {
-		return gb.ErrNilProblem
+		return "", "", nil, gb.ErrNilProblem
 	}
 	if err := p.Err(); err != nil {
-		return err
+		return "", "", nil, err
 	}
-	probName := p.Name()
+	probName = p.Name()
 	if err := validateMPSIdent("problem", probName, true); err != nil {
-		return err
+		return "", "", nil, err
 	}
-	objName := p.ObjName()
+	objName = p.ObjName()
 	if objName == "" {
 		objName = "OBJ"
 	}
 	if err := validateMPSIdent("objective", objName, false); err != nil {
-		return err
+		return "", "", nil, err
 	}
 	numRows := p.NumConstraints()
 	numVars := p.NumVars()
@@ -210,44 +217,32 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		for i := range numRows {
 			rname := p.RowName(i)
 			if err := validateMPSIdent("row", rname, false); err != nil {
-				return err
+				return "", "", nil, err
 			}
 			if rname == objName {
-				return fmt.Errorf("MPS row name %q collides with objective row name", objName)
+				return "", "", nil, fmt.Errorf("MPS row name %q collides with objective row name", objName)
 			}
 			if _, dup := seenRows[rname]; dup {
-				return fmt.Errorf("MPS duplicate row name %q", rname)
+				return "", "", nil, fmt.Errorf("MPS duplicate row name %q", rname)
 			}
 			seenRows[rname] = struct{}{}
 		}
 	}
-	type conflictRow struct {
-		col  int
-		name string
-		rhs  float64
-	}
-	var (
-		conflictRows     []conflictRow
-		conflictRowByCol map[int]string
-	)
 	if numVars > 0 {
 		seenCols := make(map[string]struct{}, numVars)
 		for j := range numVars {
 			vname := p.VarName(j)
 			if err := validateMPSIdent("column", vname, false); err != nil {
-				return err
+				return "", "", nil, err
 			}
 			if _, dup := seenCols[vname]; dup {
-				return fmt.Errorf("MPS duplicate column name %q", vname)
+				return "", "", nil, fmt.Errorf("MPS duplicate column name %q", vname)
 			}
 			seenCols[vname] = struct{}{}
 			lb, ub := p.VarBounds(j)
 			if lb > ub {
 				if seenRows == nil {
 					seenRows = make(map[string]struct{}, 1)
-				}
-				if conflictRowByCol == nil {
-					conflictRowByCol = make(map[int]string, 1)
 				}
 				rname := fmt.Sprintf("_INFEAS_UB_%d", j)
 				for idx := 0; ; idx++ {
@@ -261,45 +256,25 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 					}
 				}
 				seenRows[rname] = struct{}{}
-				rhs := ub
+				rhs, effLB := ub, lb
 				if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
-					rhs = 0
+					rhs, effLB = 0, 1
 				}
-				conflictRows = append(conflictRows, conflictRow{col: j, name: rname, rhs: rhs})
-				conflictRowByCol[j] = rname
+				conflictRows = append(conflictRows, mpsConflictRow{col: j, name: rname, rhs: rhs, effLB: effLB})
 			}
 		}
 	}
+	return probName, objName, conflictRows, nil
+}
 
-	bp, _ := mpsBufPool.Get().(*[]byte)
-	var buf []byte
-	if bp != nil {
-		buf = (*bp)[:0]
-	} else {
-		initCap := min(mpsFlushThreshold, max(4096, (numVars+numRows)*128))
-		buf = make([]byte, 0, initCap)
-	}
-	mw := mpsWriter{w: w, buf: buf}
-	defer func() {
-		if cap(mw.buf) <= mpsPoolMaxCap {
-			if bp == nil {
-				b := mw.buf[:0]
-				bp = &b
-			} else {
-				*bp = mw.buf[:0]
-			}
-			mpsBufPool.Put(bp)
-		}
-	}()
-
-	sense := p.Sense()
+func writeMPSRowsSection(mw *mpsWriter, p *gb.CompiledProblem, probName, objName string, conflictRows []mpsConflictRow) {
 	mw.buf = append(mw.buf, "*SENSE:"...)
-	mw.buf = append(mw.buf, sense.String()...)
+	mw.buf = append(mw.buf, p.Sense().String()...)
 	mw.buf = append(mw.buf, "\nNAME          "...)
 	mw.buf = append(mw.buf, probName...)
 	mw.buf = append(mw.buf, "\nROWS\n"...)
 	mw.writeRowLine('N', objName)
-	for i := range numRows {
+	for i := range p.NumConstraints() {
 		var senseByte byte = 'E'
 		switch p.RowSense(i) {
 		case gb.LessEqual:
@@ -312,12 +287,12 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	for _, cr := range conflictRows {
 		mw.writeRowLine('L', cr.name)
 	}
-	if mw.err != nil {
-		return mw.err
-	}
+}
 
+func writeMPSColumnsSection(mw *mpsWriter, p *gb.CompiledProblem, objName string, conflictRows []mpsConflictRow) {
 	mw.writeString("COLUMNS\n")
 	inIntBlock := false
+	crIdx := 0
 	var (
 		curVarName string
 		hasEntry   bool
@@ -329,7 +304,7 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		mw.writeColEntry(curVarName, p.RowName(r), val)
 		hasEntry = true
 	}
-	for j := range numVars {
+	for j := range p.NumVars() {
 		isInt := p.VarCategory(j) != gb.Continuous
 		if isInt && !inIntBlock {
 			mw.writeString("    MARK      'MARKER'                 'INTORG'\n")
@@ -346,35 +321,36 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		}
 		p.ForEachColTerm(j, colTermFn)
 		if mw.err != nil {
-			return mw.err
+			return
 		}
-		if conflictRowByCol != nil {
-			if crName, ok := conflictRowByCol[j]; ok {
-				mw.writeColEntryText(curVarName, crName, "1")
-				hasEntry = true
-			}
+		if crIdx < len(conflictRows) && conflictRows[crIdx].col == j {
+			mw.writeColEntryText(curVarName, conflictRows[crIdx].name, "1")
+			hasEntry = true
+			crIdx++
 		}
 		if !hasEntry {
 			// Emit an explicit zero objective entry so MPS parsers register unused columns before BOUNDS.
 			mw.writeColEntryText(curVarName, objName, "0")
 		}
 		if mw.err != nil {
-			return mw.err
+			return
 		}
 	}
 	if inIntBlock {
 		mw.writeString("    MARKEND   'MARKER'                 'INTEND'\n")
 	}
+}
 
+func writeMPSRHSSection(mw *mpsWriter, p *gb.CompiledProblem, objName string, conflictRows []mpsConflictRow) {
 	mw.writeString("RHS\n")
 	if objConst := p.ObjConstant(); objConst != 0 {
 		senseSign := 1.0
-		if sense == gb.Maximize {
+		if p.Sense() == gb.Maximize {
 			senseSign = -1.0
 		}
 		mw.writeRHSEntry(objName, -senseSign*objConst)
 	}
-	for i := range numRows {
+	for i := range p.NumConstraints() {
 		if rhs := p.RowRHS(i); rhs != 0 {
 			mw.writeRHSEntry(p.RowName(i), rhs)
 		}
@@ -384,34 +360,26 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			mw.writeRHSEntry(cr.name, cr.rhs)
 		}
 	}
-	if mw.err != nil {
-		return mw.err
-	}
+}
 
+func writeMPSBoundsSection(mw *mpsWriter, p *gb.CompiledProblem, conflictRows []mpsConflictRow) {
 	mw.writeString("BOUNDS\n")
-	for j := range numVars {
+	crIdx := 0
+	for j := range p.NumVars() {
 		vname := p.VarName(j)
 		lb, ub := p.VarBounds(j)
 		cat := p.VarCategory(j)
-		if conflictRowByCol != nil {
-			if _, isConflict := conflictRowByCol[j]; isConflict {
-				effLB := lb
-				if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
-					effLB = 1
-				}
-				bndType := "LO"
-				if cat != gb.Continuous {
-					bndType = "LI"
-				}
-				mw.writeBoundVal(bndType, vname, effLB)
-				if cat != gb.Continuous {
-					mw.writeBoundFlag("PL", vname)
-				}
-				if mw.err != nil {
-					return mw.err
-				}
-				continue
+		if crIdx < len(conflictRows) && conflictRows[crIdx].col == j {
+			cr := conflictRows[crIdx]
+			crIdx++
+			mw.writeBoundVal(mpsBoundTag(cat, "LO", "LI"), vname, cr.effLB)
+			if cat != gb.Continuous {
+				mw.writeBoundFlag("PL", vname)
 			}
+			if mw.err != nil {
+				return
+			}
+			continue
 		}
 		if cat == gb.Binary && lb == 0 && ub == 1 {
 			mw.writeBoundFlag("BV", vname)
@@ -428,26 +396,65 @@ func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		if math.IsInf(lb, -1) {
 			mw.writeBoundFlag("MI", vname)
 		} else if lb != 0 || ub < 0 || cat != gb.Continuous {
-			bndType := "LO"
-			if cat != gb.Continuous {
-				bndType = "LI"
-			}
-			mw.writeBoundVal(bndType, vname, lb)
+			mw.writeBoundVal(mpsBoundTag(cat, "LO", "LI"), vname, lb)
 		}
 		if !math.IsInf(ub, 1) {
-			bndType := "UP"
-			if cat != gb.Continuous {
-				bndType = "UI"
-			}
-			mw.writeBoundVal(bndType, vname, ub)
+			mw.writeBoundVal(mpsBoundTag(cat, "UP", "UI"), vname, ub)
 		} else if cat != gb.Continuous {
 			mw.writeBoundFlag("PL", vname)
 		}
 		if mw.err != nil {
-			return mw.err
+			return
 		}
 	}
+}
 
+// WriteMPS writes a CompiledProblem in free-format MPS (with INTORG/INTEND markers
+// for integer and binary variables) suitable for direct execution by COIN-OR CBC.
+// Like PuLP's writeMPS, the objective is written in minimization form (negated when Maximize).
+func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
+	probName, objName, conflictRows, err := validateMPSProblem(p)
+	if err != nil {
+		return err
+	}
+
+	bp, _ := mpsBufPool.Get().(*[]byte)
+	var buf []byte
+	if bp != nil {
+		buf = (*bp)[:0]
+	} else {
+		initCap := min(mpsFlushThreshold, max(4096, (p.NumVars()+p.NumConstraints())*128))
+		buf = make([]byte, 0, initCap)
+	}
+	mw := mpsWriter{w: w, buf: buf}
+	defer func() {
+		if cap(mw.buf) <= mpsPoolMaxCap {
+			if bp == nil {
+				b := mw.buf[:0]
+				bp = &b
+			} else {
+				*bp = mw.buf[:0]
+			}
+			mpsBufPool.Put(bp)
+		}
+	}()
+
+	writeMPSRowsSection(&mw, p, probName, objName, conflictRows)
+	if mw.err != nil {
+		return mw.err
+	}
+	writeMPSColumnsSection(&mw, p, objName, conflictRows)
+	if mw.err != nil {
+		return mw.err
+	}
+	writeMPSRHSSection(&mw, p, objName, conflictRows)
+	if mw.err != nil {
+		return mw.err
+	}
+	writeMPSBoundsSection(&mw, p, conflictRows)
+	if mw.err != nil {
+		return mw.err
+	}
 	mw.writeString("ENDATA\n")
 	mw.flush()
 	return mw.err

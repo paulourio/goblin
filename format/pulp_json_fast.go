@@ -129,23 +129,36 @@ func hashString(s string) int {
 	return int(h & 0x7fffffff)
 }
 
-func buildVarHash(buf []int32, vars []PuLPVariable) []int32 {
-	if len(vars) == 0 || len(vars) >= math.MaxInt32/2 {
-		return nil
+func capPooledSlice[T any](s []T, maxCap int) []T {
+	if cap(s) <= maxCap {
+		return s[:0]
+	}
+	return nil
+}
+
+func allocVarHashTable(buf []int32, nVars int) ([]int32, bool) {
+	if nVars <= 0 || nVars >= math.MaxInt32/2 {
+		return nil, false
 	}
 	size := 16
-	target := len(vars) * 2
+	target := nVars * 2
 	for size < target {
 		size <<= 1
 	}
-	var table []int32
 	if cap(buf) >= size {
-		table = buf[:size]
+		table := buf[:size]
 		clear(table)
-	} else {
-		table = make([]int32, size)
+		return table, true
 	}
-	mask := size - 1
+	return make([]int32, size), true
+}
+
+func buildVarHash(buf []int32, vars []PuLPVariable) []int32 {
+	table, ok := allocVarHashTable(buf, len(vars))
+	if !ok {
+		return nil
+	}
+	mask := len(table) - 1
 	for i := range vars {
 		name := vars[i].Name
 		if name == "" {
@@ -1000,16 +1013,8 @@ func parsePuLPJSONFast(data []byte) (*PuLPJSON, bool) {
 		if cap(sc.varHash) > cap(hashBuf) {
 			hashBuf = sc.varHash
 		}
-		if cap(hashBuf) <= maxPoolVarHashCap {
-			scratch.varHash = hashBuf[:0]
-		} else {
-			scratch.varHash = nil
-		}
-		if cap(sc.ends) <= maxPoolEndsCap {
-			scratch.ends = sc.ends[:0]
-		} else {
-			scratch.ends = nil
-		}
+		scratch.varHash = capPooledSlice(hashBuf, maxPoolVarHashCap)
+		scratch.ends = capPooledSlice(sc.ends, maxPoolEndsCap)
 		pulpScratchPool.Put(scratch)
 	}()
 
@@ -1151,24 +1156,59 @@ func parseStreamCoeff(sc *pulpScanner) (start, end int, val float64, ok bool) {
 	}
 }
 
-func streamObjectiveSection(
-	sc *pulpScanner,
-	m *gb.Model,
-	varsReady bool,
-	table []int32,
-	varNames []string,
-	varIDs []gb.Var,
-	termsBuf *[]gb.Term,
-	spansBuf *[]rawObjCoeff,
-) (objName string, objConst float64, hasDeferred bool, ok bool) {
+type pulpModelStreamer struct {
+	sc       pulpScanner
+	m        *gb.Model
+	table    []int32
+	hashBuf  []int32
+	terms    []gb.Term
+	varIDs   []gb.Var
+	varNames []string
+	varMeta  []fastVarMeta
+	objSpans []rawObjCoeff
+}
+
+func (st *pulpModelStreamer) streamResolvedCoeffs() bool {
+	if st.sc.consumeNull() {
+		return true
+	}
+	if !st.sc.consumeByte('[') {
+		return false
+	}
+	if st.sc.consumeByte(']') {
+		return true
+	}
+	terms := st.terms
+	for {
+		s, e, val, cOK := parseStreamCoeff(&st.sc)
+		if !cOK {
+			st.terms = terms
+			return false
+		}
+		vid, hit := lookupStreamVarID(st.table, st.varNames, st.varIDs, st.sc.b[s:e])
+		if !hit {
+			st.terms = terms
+			return false
+		}
+		terms = append(terms, gb.Term{Var: vid, Coeff: val})
+		if st.sc.consumeByte(',') {
+			continue
+		}
+		st.terms = terms
+		return st.sc.consumeByte(']')
+	}
+}
+
+func (st *pulpModelStreamer) streamObjective(varsReady bool) (objName string, objConst float64, hasDeferred bool, ok bool) {
+	sc := &st.sc
 	if !sc.consumeByte('{') {
 		return "", 0, false, false
 	}
 	if sc.consumeByte('}') {
 		return "", 0, false, true
 	}
-	spans := (*spansBuf)[:0]
-	terms := (*termsBuf)[:0]
+	st.objSpans = st.objSpans[:0]
+	st.terms = st.terms[:0]
 	var seen uint8
 	for {
 		key, keyOK := sc.readUnescapedBytes()
@@ -1191,35 +1231,30 @@ func streamObjectiveSection(
 			}
 		case "coefficients":
 			bit = 1 << 1
-			if sc.consumeNull() {
+			if varsReady {
+				keyOK = st.streamResolvedCoeffs()
+			} else if sc.consumeNull() {
 				keyOK = true
 			} else if !sc.consumeByte('[') {
 				keyOK = false
 			} else if sc.consumeByte(']') {
 				keyOK = true
 			} else {
+				spans := st.objSpans
 				for {
 					s, e, val, cOK := parseStreamCoeff(sc)
 					if !cOK {
 						keyOK = false
 						break
 					}
-					if varsReady {
-						vid, hit := lookupStreamVarID(table, varNames, varIDs, sc.b[s:e])
-						if !hit {
-							keyOK = false
-							break
-						}
-						terms = append(terms, gb.Term{Var: vid, Coeff: val})
-					} else {
-						spans = append(spans, rawObjCoeff{start: s, end: e, val: val})
-					}
+					spans = append(spans, rawObjCoeff{start: s, end: e, val: val})
 					if sc.consumeByte(',') {
 						continue
 					}
 					keyOK = sc.consumeByte(']')
 					break
 				}
+				st.objSpans = spans
 			}
 		case "constant":
 			bit = 1 << 2
@@ -1239,31 +1274,25 @@ func streamObjectiveSection(
 		}
 		break
 	}
-	*spansBuf = spans
-	*termsBuf = terms
 	if varsReady {
-		m.SetObjectiveNamed(objName, gb.Expr{Terms: terms, Constant: objConst})
+		st.m.SetObjectiveNamed(objName, gb.Expr{Terms: st.terms, Constant: objConst})
 		return objName, objConst, false, true
 	}
 	return objName, objConst, true, true
 }
 
-func streamVariablesSection(
-	sc *pulpScanner,
-	m *gb.Model,
-	hashBuf *[]int32,
-	metaBuf *[]fastVarMeta,
-	namesBuf *[]string,
-	idsBuf *[]gb.Var,
-) ([]int32, bool) {
+func (st *pulpModelStreamer) streamVariables() bool {
+	sc := &st.sc
 	if sc.consumeNull() {
-		return nil, true
+		st.table = nil
+		return true
 	}
 	if !sc.consumeByte('[') {
-		return nil, false
+		return false
 	}
 	if sc.consumeByte(']') {
-		return nil, true
+		st.table = nil
+		return true
 	}
 	rem := len(sc.b) - sc.pos
 	varDiv := 1024
@@ -1273,7 +1302,7 @@ func streamVariablesSection(
 		conDiv = 768
 	}
 	estVars := max(8, rem/varDiv)
-	metas := (*metaBuf)[:0]
+	metas := st.varMeta[:0]
 	if cap(metas) < estVars {
 		metas = make([]fastVarMeta, 0, estVars)
 	}
@@ -1283,7 +1312,7 @@ func streamVariablesSection(
 
 	for {
 		if !sc.consumeByte('{') {
-			return nil, false
+			return false
 		}
 		var (
 			nameRaw           []byte
@@ -1298,7 +1327,7 @@ func streamVariablesSection(
 			for {
 				key, ok := sc.readUnescapedBytes()
 				if !ok || !sc.consumeByte(':') {
-					return nil, false
+					return false
 				}
 				var bit uint8
 				switch string(key) {
@@ -1334,10 +1363,10 @@ func streamVariablesSection(
 					bit = 1 << 5
 					ok = sc.skipIgnoredMetricFloat()
 				default:
-					return nil, false
+					return false
 				}
 				if !ok || seen&bit != 0 {
-					return nil, false
+					return false
 				}
 				seen |= bit
 				if sc.consumeByte(',') {
@@ -1346,36 +1375,17 @@ func streamVariablesSection(
 				if sc.consumeByte('}') {
 					break
 				}
-				return nil, false
+				return false
 			}
 		}
 		if len(nameRaw) == 0 {
-			return nil, false
+			return false
 		}
 		var cat gb.VarCategory
-		switch string(catRaw) {
-		case "Continuous":
-			cat = gb.Continuous
-		case "Binary":
-			if hasExplicitNullLB {
-				lb = 0
-			}
-			if !hasExplicitUB {
-				ub = 1
-			}
-			if lb >= 0 && ub <= 1 && lb <= ub {
-				cat = gb.Binary
-			} else {
-				cat = gb.Integer
-			}
-		case "Integer":
-			if lb >= 0 && ub <= 1 && lb <= ub {
-				cat = gb.Binary
-			} else {
-				cat = gb.Integer
-			}
-		default:
-			return nil, false
+		var catOK bool
+		lb, ub, cat, catOK = resolvePuLPVarSpec(string(catRaw), lb, ub, hasExplicitNullLB, !hasExplicitUB)
+		if !catOK {
+			return false
 		}
 		_, _ = varSB.Write(nameRaw)
 		varEnds = append(varEnds, varSB.Len())
@@ -1386,35 +1396,26 @@ func streamVariablesSection(
 		if sc.consumeByte(']') {
 			break
 		}
-		return nil, false
+		return false
 	}
 
 	nVars := len(metas)
-	*metaBuf = metas
+	st.varMeta = metas
 	estCons := max(8, (len(sc.b)-sc.pos)/conDiv)
-	m.Reserve(nVars, estCons)
+	st.m.Reserve(nVars, estCons)
 
-	if nVars >= math.MaxInt32/2 {
-		return nil, false
+	table, ok := allocVarHashTable(st.hashBuf, nVars)
+	if !ok {
+		return false
 	}
-	tableSize := 16
-	for tableSize < nVars*2 {
-		tableSize <<= 1
-	}
-	var table []int32
-	if cap(*hashBuf) >= tableSize {
-		table = (*hashBuf)[:tableSize]
-		clear(table)
-	} else {
-		table = make([]int32, tableSize)
-	}
-	*hashBuf = table
+	st.hashBuf = table
+	st.table = table
 
-	varNames := (*namesBuf)[:0]
+	varNames := st.varNames[:0]
 	if cap(varNames) < nVars {
 		varNames = make([]string, 0, nVars)
 	}
-	varIDs := (*idsBuf)[:0]
+	varIDs := st.varIDs[:0]
 	if cap(varIDs) < nVars {
 		varIDs = make([]gb.Var, 0, nVars)
 	}
@@ -1425,30 +1426,24 @@ func streamVariablesSection(
 		vName := allNames[off:end]
 		off = end
 		if !insertStreamVarHash(table, varNames, i, vName) {
-			*namesBuf = varNames
-			*idsBuf = varIDs
+			st.varNames = varNames
+			st.varIDs = varIDs
 			sc.ends = varEnds[:0]
-			return nil, false
+			return false
 		}
 		meta := metas[i]
-		vid := m.AddVar(vName, meta.lb, meta.ub, meta.cat)
+		vid := st.m.AddVar(vName, meta.lb, meta.ub, meta.cat)
 		varNames = append(varNames, vName)
 		varIDs = append(varIDs, vid)
 	}
-	*namesBuf = varNames
-	*idsBuf = varIDs
+	st.varNames = varNames
+	st.varIDs = varIDs
 	sc.ends = varEnds[:0]
-	return table, true
+	return true
 }
 
-func streamConstraintsSection(
-	sc *pulpScanner,
-	m *gb.Model,
-	table []int32,
-	varNames []string,
-	varIDs []gb.Var,
-	termsBuf *[]gb.Term,
-) bool {
+func (st *pulpModelStreamer) streamConstraints() bool {
+	sc := &st.sc
 	if sc.consumeNull() {
 		return true
 	}
@@ -1458,7 +1453,6 @@ func streamConstraintsSection(
 	if sc.consumeByte(']') {
 		return true
 	}
-	terms := (*termsBuf)[:0]
 	for {
 		if !sc.consumeByte('{') {
 			return false
@@ -1468,9 +1462,8 @@ func streamConstraintsSection(
 			senseInt int
 			constant float64
 			seen     uint8
-			termsOK  = true
 		)
-		terms = terms[:0]
+		st.terms = st.terms[:0]
 		if !sc.consumeByte('}') {
 			for {
 				key, ok := sc.readUnescapedBytes()
@@ -1487,33 +1480,7 @@ func streamConstraintsSection(
 					senseInt, ok = sc.readInt()
 				case "coefficients":
 					bit = 1 << 2
-					if sc.consumeNull() {
-						ok = true
-					} else if !sc.consumeByte('[') {
-						ok = false
-					} else if sc.consumeByte(']') {
-						ok = true
-					} else {
-						for {
-							s, e, val, cOK := parseStreamCoeff(sc)
-							if !cOK {
-								ok = false
-								break
-							}
-							vid, hit := lookupStreamVarID(table, varNames, varIDs, sc.b[s:e])
-							if !hit {
-								termsOK = false
-								ok = false
-								break
-							}
-							terms = append(terms, gb.Term{Var: vid, Coeff: val})
-							if sc.consumeByte(',') {
-								continue
-							}
-							ok = sc.consumeByte(']')
-							break
-						}
-					}
+					ok = st.streamResolvedCoeffs()
 				case "pi":
 					bit = 1 << 3
 					ok = sc.skipIgnoredMetricFloat()
@@ -1523,7 +1490,7 @@ func streamConstraintsSection(
 				default:
 					return false
 				}
-				if !ok || !termsOK || seen&bit != 0 {
+				if !ok || seen&bit != 0 {
 					return false
 				}
 				seen |= bit
@@ -1536,30 +1503,19 @@ func streamConstraintsSection(
 				return false
 			}
 		}
-		var csense gb.ConstraintSense
-		switch senseInt {
-		case -1:
-			csense = gb.LessEqual
-		case 0:
-			csense = gb.Equal
-		case 1:
-			csense = gb.GreaterEqual
-		default:
+		csense, ok := parsePuLPConstraintSense(senseInt)
+		if !ok {
 			return false
 		}
-		m.AddConstraint(cloneBytesToString(nameRaw), gb.Constraint{
-			Expr:  gb.Expr{Terms: terms},
+		st.m.AddConstraint(cloneBytesToString(nameRaw), gb.Constraint{
+			Expr:  gb.Expr{Terms: st.terms},
 			Sense: csense,
 			RHS:   -constant,
 		})
 		if sc.consumeByte(',') {
 			continue
 		}
-		if sc.consumeByte(']') {
-			*termsBuf = terms
-			return true
-		}
-		return false
+		return sc.consumeByte(']')
 	}
 }
 
@@ -1570,137 +1526,98 @@ func fromPuLPJSONFast(data []byte) (*gb.Model, bool) {
 	if scratch == nil {
 		scratch = &pulpFastScratch{}
 	}
-	sc := pulpScanner{
-		b:        data,
-		indented: detectIndented(data),
-		ends:     scratch.ends[:0],
+	st := pulpModelStreamer{
+		sc: pulpScanner{
+			b:        data,
+			indented: detectIndented(data),
+			ends:     scratch.ends[:0],
+		},
+		hashBuf:  scratch.varHash,
+		terms:    scratch.terms[:0],
+		varIDs:   scratch.varIDs[:0],
+		varNames: scratch.varNames[:0],
+		varMeta:  scratch.varMeta[:0],
+		objSpans: scratch.objSpans[:0],
 	}
-	hashBuf := scratch.varHash
-	termsBuf := scratch.terms[:0]
-	varIDs := scratch.varIDs[:0]
-	varNames := scratch.varNames[:0]
-	varMeta := scratch.varMeta[:0]
-	objSpans := scratch.objSpans[:0]
 
 	defer func() {
-		if cap(hashBuf) <= maxPoolVarHashCap {
-			scratch.varHash = hashBuf[:0]
-		} else {
-			scratch.varHash = nil
-		}
-		if cap(sc.ends) <= maxPoolEndsCap {
-			scratch.ends = sc.ends[:0]
-		} else {
-			scratch.ends = nil
-		}
-		if cap(termsBuf) <= maxPoolEndsCap {
-			scratch.terms = termsBuf[:0]
-		} else {
-			scratch.terms = nil
-		}
-		clear(varNames[:cap(varNames)])
-		if cap(varNames) <= maxPoolEndsCap {
-			scratch.varNames = varNames[:0]
-		} else {
-			scratch.varNames = nil
-		}
-		if cap(varIDs) <= maxPoolEndsCap {
-			scratch.varIDs = varIDs[:0]
-		} else {
-			scratch.varIDs = nil
-		}
-		if cap(varMeta) <= maxPoolEndsCap {
-			scratch.varMeta = varMeta[:0]
-		} else {
-			scratch.varMeta = nil
-		}
-		if cap(objSpans) <= maxPoolEndsCap {
-			scratch.objSpans = objSpans[:0]
-		} else {
-			scratch.objSpans = nil
-		}
+		scratch.varHash = capPooledSlice(st.hashBuf, maxPoolVarHashCap)
+		scratch.ends = capPooledSlice(st.sc.ends, maxPoolEndsCap)
+		scratch.terms = capPooledSlice(st.terms, maxPoolEndsCap)
+		clear(st.varNames[:cap(st.varNames)])
+		scratch.varNames = capPooledSlice(st.varNames, maxPoolEndsCap)
+		scratch.varIDs = capPooledSlice(st.varIDs, maxPoolEndsCap)
+		scratch.varMeta = capPooledSlice(st.varMeta, maxPoolEndsCap)
+		scratch.objSpans = capPooledSlice(st.objSpans, maxPoolEndsCap)
 		pulpScratchPool.Put(scratch)
 	}()
 
-	if !sc.consumeByte('{') {
+	if !st.sc.consumeByte('{') {
 		return nil, false
 	}
 	var (
 		params        PuLPParameters
-		m             *gb.Model
-		table         []int32
 		seen          uint8
 		hasDeferred   bool
 		defObjName    string
 		defObjConst   float64
 		hasObjSection bool
 	)
-	if !sc.consumeByte('}') {
+	if !st.sc.consumeByte('}') {
 		for {
-			key, ok := sc.readUnescapedBytes()
-			if !ok || !sc.consumeByte(':') {
+			key, ok := st.sc.readUnescapedBytes()
+			if !ok || !st.sc.consumeByte(':') {
 				return nil, false
 			}
 			var bit uint8
 			switch string(key) {
 			case "parameters":
 				bit = 1 << 0
-				ok = sc.readParameters(&params)
+				ok = st.sc.readParameters(&params)
 				if ok {
-					var sense gb.Sense
-					switch params.Sense {
-					case 1:
-						sense = gb.Minimize
-					case -1:
-						sense = gb.Maximize
-					default:
+					sense, senseOK := parsePuLPSense(params.Sense)
+					if !senseOK {
 						return nil, false
 					}
-					m = gb.NewModel(params.Name, sense)
+					st.m = gb.NewModel(params.Name, sense)
 				}
 			case "objective":
 				bit = 1 << 1
 				hasObjSection = true
 				varsReady := seen&(1<<2) != 0
-				defObjName, defObjConst, hasDeferred, ok = streamObjectiveSection(
-					&sc, m, varsReady, table, varNames, varIDs, &termsBuf, &objSpans,
-				)
+				defObjName, defObjConst, hasDeferred, ok = st.streamObjective(varsReady)
 			case "variables":
 				bit = 1 << 2
-				if m == nil {
+				if st.m == nil {
 					return nil, false
 				}
-				table, ok = streamVariablesSection(&sc, m, &hashBuf, &varMeta, &varNames, &varIDs)
+				ok = st.streamVariables()
 				if ok && hasObjSection && seen&(1<<1) != 0 {
-					termsBuf = termsBuf[:0]
+					st.terms = st.terms[:0]
 					if hasDeferred {
-						for _, sp := range objSpans {
-							vid, hit := lookupStreamVarID(table, varNames, varIDs, sc.b[sp.start:sp.end])
+						for _, sp := range st.objSpans {
+							vid, hit := lookupStreamVarID(st.table, st.varNames, st.varIDs, st.sc.b[sp.start:sp.end])
 							if !hit {
 								return nil, false
 							}
-							termsBuf = append(termsBuf, gb.Term{Var: vid, Coeff: sp.val})
+							st.terms = append(st.terms, gb.Term{Var: vid, Coeff: sp.val})
 						}
 					}
-					m.SetObjectiveNamed(defObjName, gb.Expr{Terms: termsBuf, Constant: defObjConst})
+					st.m.SetObjectiveNamed(defObjName, gb.Expr{Terms: st.terms, Constant: defObjConst})
 					hasDeferred = false
 				}
 			case "constraints":
 				bit = 1 << 3
-				if m == nil || seen&(1<<2) == 0 {
+				if st.m == nil || seen&(1<<2) == 0 {
 					return nil, false
 				}
-				ok = streamConstraintsSection(&sc, m, table, varNames, varIDs, &termsBuf)
+				ok = st.streamConstraints()
 			case "sos1":
 				bit = 1 << 4
-				var sos1 []any
-				sos1, ok = sc.readEmptyArray()
-				_ = sos1
+				_, ok = st.sc.readEmptyArray()
 			case "sos2":
 				bit = 1 << 5
-				var sos2 []any
-				sos2, ok = sc.readEmptyArray()
-				_ = sos2
+				_, ok = st.sc.readEmptyArray()
 			default:
 				return nil, false
 			}
@@ -1708,21 +1625,21 @@ func fromPuLPJSONFast(data []byte) (*gb.Model, bool) {
 				return nil, false
 			}
 			seen |= bit
-			if sc.consumeByte(',') {
+			if st.sc.consumeByte(',') {
 				continue
 			}
-			if sc.consumeByte('}') {
+			if st.sc.consumeByte('}') {
 				break
 			}
 			return nil, false
 		}
 	}
-	sc.skipWS()
-	if sc.pos != len(sc.b) || m == nil || hasDeferred {
+	st.sc.skipWS()
+	if st.sc.pos != len(st.sc.b) || st.m == nil || hasDeferred {
 		return nil, false
 	}
-	if err := m.Validate(); err != nil {
+	if err := st.m.Validate(); err != nil {
 		return nil, false
 	}
-	return m, true
+	return st.m, true
 }

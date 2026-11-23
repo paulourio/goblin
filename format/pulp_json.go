@@ -156,6 +156,55 @@ func ParsePuLPJSON(data []byte) (*PuLPJSON, error) {
 	return parsePuLPJSONStd(data)
 }
 
+func parsePuLPSense(raw int) (gb.Sense, bool) {
+	switch raw {
+	case 1:
+		return gb.Minimize, true
+	case -1:
+		return gb.Maximize, true
+	default:
+		return 0, false
+	}
+}
+
+func parsePuLPConstraintSense(raw int) (gb.ConstraintSense, bool) {
+	switch raw {
+	case -1:
+		return gb.LessEqual, true
+	case 0:
+		return gb.Equal, true
+	case 1:
+		return gb.GreaterEqual, true
+	default:
+		return 0, false
+	}
+}
+
+func resolvePuLPVarSpec(cat string, lb, ub float64, lbNil, ubNil bool) (float64, float64, gb.VarCategory, bool) {
+	switch cat {
+	case "Continuous":
+		return lb, ub, gb.Continuous, true
+	case "Binary":
+		if lbNil {
+			lb = 0
+		}
+		if ubNil {
+			ub = 1
+		}
+		if lb >= 0 && ub <= 1 && lb <= ub {
+			return lb, ub, gb.Binary, true
+		}
+		return lb, ub, gb.Integer, true
+	case "Integer":
+		if lb >= 0 && ub <= 1 && lb <= ub {
+			return lb, ub, gb.Binary, true
+		}
+		return lb, ub, gb.Integer, true
+	default:
+		return 0, 0, 0, false
+	}
+}
+
 // BuildModelFromPuLPJSON constructs a *gb.Model from a decoded PuLPJSON structure.
 func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 	if doc == nil {
@@ -164,13 +213,8 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 	if len(doc.SOS1) > 0 || len(doc.SOS2) > 0 {
 		return nil, fmt.Errorf("PuLP JSON contains unsupported SOS constraints (sos1=%d, sos2=%d)", len(doc.SOS1), len(doc.SOS2))
 	}
-	var sense gb.Sense
-	switch doc.Parameters.Sense {
-	case 1:
-		sense = gb.Minimize
-	case -1:
-		sense = gb.Maximize
-	default:
+	sense, ok := parsePuLPSense(doc.Parameters.Sense)
+	if !ok {
 		return nil, fmt.Errorf("PuLP JSON has invalid objective sense %d", doc.Parameters.Sense)
 	}
 	m := gb.NewModel(doc.Parameters.Name, sense)
@@ -192,29 +236,8 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 		if v.UpBound != nil {
 			ub = *v.UpBound
 		}
-		var cat gb.VarCategory
-		switch v.Cat {
-		case "Continuous":
-			cat = gb.Continuous
-		case "Binary":
-			if v.LowBound == nil {
-				lb = 0
-			}
-			if v.UpBound == nil {
-				ub = 1
-			}
-			if lb >= 0 && ub <= 1 && lb <= ub {
-				cat = gb.Binary
-			} else {
-				cat = gb.Integer
-			}
-		case "Integer":
-			if lb >= 0 && ub <= 1 && lb <= ub {
-				cat = gb.Binary
-			} else {
-				cat = gb.Integer
-			}
-		default:
+		lb, ub, cat, ok := resolvePuLPVarSpec(v.Cat, lb, ub, v.LowBound == nil, v.UpBound == nil)
+		if !ok {
 			return nil, fmt.Errorf("variable %q has invalid category %q", v.Name, v.Cat)
 		}
 		m.AddVar(v.Name, lb, ub, cat)
@@ -254,15 +277,8 @@ func BuildModelFromPuLPJSON(doc *PuLPJSON) (*gb.Model, error) {
 			}
 			terms = append(terms, gb.Term{Var: vid, Coeff: coeff.Value})
 		}
-		var csense gb.ConstraintSense
-		switch c.Sense {
-		case -1:
-			csense = gb.LessEqual
-		case 0:
-			csense = gb.Equal
-		case 1:
-			csense = gb.GreaterEqual
-		default:
+		csense, ok := parsePuLPConstraintSense(c.Sense)
+		if !ok {
 			return nil, fmt.Errorf("constraint %q has invalid sense %d", c.Name, c.Sense)
 		}
 		rhs := -c.Constant
