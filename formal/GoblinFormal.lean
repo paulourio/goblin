@@ -11,4 +11,5 @@ import GoblinFormal.Track5A
 import GoblinFormal.Track5B
 import GoblinFormal.Track5C
 import GoblinFormal.Track5D
+import GoblinFormal.Track5E
 import GoblinFormal.AxiomAudit

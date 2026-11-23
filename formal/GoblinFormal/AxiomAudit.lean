@@ -2,7 +2,7 @@
 GoblinFormal.AxiomAudit: machine-checked `#guard_msgs in #print axioms` lock
 for top-level theorems across Common.Basic and Tracks 1–5.
 Verifies zero `sorryAx`, zero `Lean.trustCompiler`, and zero custom axioms
-(Track 5A/5B/5D bitvector proofs use only kernel-checked `bv_decide` LRAT axioms).
+(Track 5A/5B/5D/5E bitvector proofs use only kernel-checked `bv_decide` LRAT axioms).
 -/
 
 import GoblinFormal.Common.Basic
@@ -17,6 +17,7 @@ import GoblinFormal.Track5A
 import GoblinFormal.Track5B
 import GoblinFormal.Track5C
 import GoblinFormal.Track5D
+import GoblinFormal.Track5E
 
 /-! ### Common.Basic -/
 
@@ -729,3 +730,272 @@ info: 'GoblinFormal.Track5D.scalarMin2Fold_witness_and_minimality' depends on ax
 /-- info: 'GoblinFormal.Track5D.min2FilteredStep_eq_scalarMin2Step' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms GoblinFormal.Track5D.min2FilteredStep_eq_scalarMin2Step
+
+/-! ### Track 5E: Tier 5E Decoded amd64 AVX2 / AVX-512 Machine-Code Equivalence -/
+
+/-- info: 'GoblinFormal.Track5E.decodeAmd64ProgramChunks_eq' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.decodeAmd64ProgramChunks_eq
+
+/-- info: 'GoblinFormal.Track5E.allAbsLE64AVX2_decodes' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX2_decodes
+
+/-- info: 'GoblinFormal.Track5E.allAbsLE64AVX512_decodes' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX512_decodes
+
+/-- info: 'GoblinFormal.Track5E.minNoNaN64AVX2_decodes' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX2_decodes
+
+/-- info: 'GoblinFormal.Track5E.minNoNaN64AVX512_decodes' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX512_decodes
+
+/-- info: 'GoblinFormal.Track5E.initReducedRow64AVX2_decodes' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX2_decodes
+
+/-- info: 'GoblinFormal.Track5E.initReducedRow64AVX512_decodes' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX512_decodes
+
+/--
+info: 'GoblinFormal.Track5E.evex_broadcast_and_zeromask_decode_witness' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.evex_broadcast_and_zeromask_decode_witness
+
+/-- info: 'GoblinFormal.Track5E.checkDecodedAbiSafety_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.checkDecodedAbiSafety_sound
+
+/-- info: 'GoblinFormal.Track5E.allAbsLE64AVX2_abi_and_zeroGC_safe' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX2_abi_and_zeroGC_safe
+
+/-- info: 'GoblinFormal.Track5E.allAbsLE64AVX512_abi_and_zeroGC_safe' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX512_abi_and_zeroGC_safe
+
+/-- info: 'GoblinFormal.Track5E.minNoNaN64AVX2_abi_and_zeroGC_safe' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX2_abi_and_zeroGC_safe
+
+/-- info: 'GoblinFormal.Track5E.minNoNaN64AVX512_abi_and_zeroGC_safe' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX512_abi_and_zeroGC_safe
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64AVX2_abi_and_zeroGC_safe' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX2_abi_and_zeroGC_safe
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64AVX512_abi_and_zeroGC_safe' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX512_abi_and_zeroGC_safe
+
+/-- info: 'GoblinFormal.Track5E.stripped_vzeroupper_rejected' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.stripped_vzeroupper_rejected
+
+/--
+info: 'GoblinFormal.Track5E.minsd_por_eq_f64Min' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.minsd_por_eq_f64Min._native.bv_decide.ax_1_5]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minsd_por_eq_f64Min
+
+/--
+info: 'GoblinFormal.Track5E.vminpd_track5d_canon_bridge' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5D.vminpdLane_numKey_assoc_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_10,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_5]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.vminpd_track5d_canon_bridge
+
+/--
+info: 'GoblinFormal.Track5E.allAbsLE64AVX2_functional_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Eq_self_eq_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX2_functional_equiv
+
+/--
+info: 'GoblinFormal.Track5E.allAbsLE64AVX512_functional_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Eq_self_eq_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX512_functional_equiv
+
+/--
+info: 'GoblinFormal.Track5E.allAbsLE64_avx2_eq_avx512_mult8' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Eq_self_eq_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64_avx2_eq_avx512_mult8
+
+/--
+info: 'GoblinFormal.Track5E.minNoNaN64AVX2_functional_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.cmin64_assoc._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_canonZero_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_minStepNoNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_posInf_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_sanitize_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_vminpdLane_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.evalX86Cond_a_ucomisd._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.minStepNoNaN_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.sanitizeNaNInf_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpdLane_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vpblendvb64_maskLane._native.bv_decide.ax_1_10,
+ GoblinFormal.Track5E.vpblendvb64_maskLane._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.x86_ucomisd_zero_canon_eq_canonZero64._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝,
+ GoblinFormal.Track5E.x86SubFlags64_le_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX2_functional_equiv
+
+/--
+info: 'GoblinFormal.Track5E.minNoNaN64AVX512_functional_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.cmin64_assoc._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_canonZero_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_minStepNoNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_posInf_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_sanitize_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_vminpdLane_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.evalX86Cond_a_ucomisd._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.evalX86Cond_be_sub64_unsigned._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.minStepNoNaN_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.sanitizeNaNInf_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpdLane_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.x86_ucomisd_zero_canon_eq_canonZero64._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝,
+ GoblinFormal.Track5E.x86SubFlags64_le_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX512_functional_equiv
+
+/--
+info: 'GoblinFormal.Track5E.minNoNaN64_avx2_eq_avx512' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5E.cmin64_assoc._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_canonZero_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_minStepNoNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_posInf_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_sanitize_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_vminpdLane_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.evalX86Cond_a_ucomisd._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.evalX86Cond_be_sub64_unsigned._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.minStepNoNaN_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.sanitizeNaNInf_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpdLane_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vpblendvb64_maskLane._native.bv_decide.ax_1_10,
+ GoblinFormal.Track5E.vpblendvb64_maskLane._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.x86_ucomisd_zero_canon_eq_canonZero64._native.bv_decide.ax_1_8,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝,
+ GoblinFormal.Track5E.x86SubFlags64_le_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64_avx2_eq_avx512
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64AVX2_functional_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5D.vminpdLane_numKey_assoc_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_assoc._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_canonZero_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_vminpdLane_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Eq_self_eq_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.minsd_por_eq_f64Min._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpdLane_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_10,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Min_notNaN._native.bv_decide.ax_1_5✝,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX2_functional_equiv
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64AVX512_functional_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5D.vminpdLane_numKey_assoc_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_assoc._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_canonZero_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_vminpdLane_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Eq_self_eq_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.minsd_por_eq_f64Min._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpdLane_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_10,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Min_notNaN._native.bv_decide.ax_1_5✝,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX512_functional_equiv
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64_avx2_eq_avx512_mult8' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound,
+ GoblinFormal.Track5D.vminpdLane_numKey_assoc_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_assoc._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_canonZero_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_comm._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.cmin64_vminpdLane_left._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.elemAddr_add._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Eq_self_eq_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.minsd_por_eq_f64Min._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpdLane_notNaN._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_10,
+ GoblinFormal.Track5E.vminpd_track5d_canon_bridge._native.bv_decide.ax_1_5,
+ GoblinFormal.Track5E.f64Min_notNaN._native.bv_decide.ax_1_5✝,
+ GoblinFormal.Track5E.x86SubFlags64_ge_bv._native.bv_decide.ax_1_8✝]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64_avx2_eq_avx512_mult8
