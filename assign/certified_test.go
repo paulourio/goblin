@@ -327,7 +327,7 @@ func TestAssignCertifiedValidModes(t *testing.T) {
 			{1.1 / 0.7, 0.4 / 0.3, 0.3, 0.6},
 		}
 		// Perturb V by 2 ULPs so fast exact reduced-cost check fails while approximate dual check passes,
-		// forcing verifyExactResidualOptimality to prove optimality over Q.
+		// forcing verifyExactResidualOptimality to prove optimality over Q and write back repaired U/V.
 		faultCtx := withAssignCertFault(ctx, func(_, _ int, _ Sense, res *Result, err *error) {
 			if *err == nil && len(res.V) > 0 {
 				for j := range res.V {
@@ -340,8 +340,29 @@ func TestAssignCertifiedValidModes(t *testing.T) {
 				}
 			}
 		})
-		if _, err := LinearSum(faultCtx, mat, Minimize, WithCertified(true)); err != nil {
+		res, err := LinearSum(faultCtx, mat, Minimize, WithCertified(true))
+		if err != nil {
 			t.Fatalf("expected residual Bellman-Ford fallback to certify optimal matching under 2-ULP V drift, got %v", err)
+		}
+		// Repaired float64 U/V must be strictly dual-feasible over Q with valid rectangular signs.
+		matchedCol := make([]bool, 4)
+		for _, c := range res.ColInd {
+			matchedCol[c] = true
+		}
+		for j := range 4 {
+			if res.V[j] > 0 || (!matchedCol[j] && res.V[j] != 0) {
+				t.Fatalf("repaired V[%d]=%g violates rectangular invariant (matched=%v)", j, res.V[j], matchedCol[j])
+			}
+		}
+		for i := range 3 {
+			ui := new(big.Rat).SetFloat64(res.U[i])
+			for j := range 4 {
+				vj := new(big.Rat).SetFloat64(res.V[j])
+				cij := new(big.Rat).SetFloat64(mat[i][j])
+				if new(big.Rat).Add(ui, vj).Cmp(cij) > 0 {
+					t.Fatalf("repaired dual infeasible at (%d,%d): U=%g V=%g C=%g", i, j, res.U[i], res.V[j], mat[i][j])
+				}
+			}
 		}
 	})
 }

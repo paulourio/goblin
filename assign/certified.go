@@ -27,7 +27,16 @@ func setCertifiedFalse(cfg *Options) {
 	cfg.cert = nil
 }
 
-// WithCertified enables or disables fail-closed exact rational verification at runtime.
+// WithCertified enables or disables fail-closed exact rational checks at runtime.
+// When enabled, the checker proves that the matching is optimal in 2304-bit fixed-point
+// dyadic arithmetic over the original IEEE-754 cost matrix, or proves via a Hall witness
+// that no finite matching exists. Result.Objective holds the nearest float64 to the exact
+// rational primal sum. When the checker verifies or repairs duals in 2304-bit dyadic
+// arithmetic, it writes finite float64 duals back to Result.U and Result.V (exact when
+// they fit in 53-bit float64, or rounded down so U[i] + V[j] <= C[i,j] holds over Q).
+// Because exact dyadic duals need not fit in 53-bit float64, Result.U and Result.V are
+// float64 duals while exact 2304-bit dyadic arithmetic proves the matching is globally
+// optimal.
 func WithCertified(enabled bool) Option {
 	if enabled {
 		return setCertifiedTrue
@@ -230,7 +239,7 @@ func certifyLinearSum2D(ctx context.Context, rows, cols int, cost [][]float64, s
 	costAt := func(r, c int) float64 {
 		return cost[r][c]
 	}
-	exactObj, err := certifyAssignCore(ctx, rows, cols, costAt, sense, res.RowInd, res.ColInd, res.U, res.V, true, res.Objective, solveErr)
+	exactObj, err := certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, res.RowInd, res.ColInd, res.U, res.V, true, true, res.Objective, solveErr)
 	if err != nil {
 		return Result{}, err
 	}
@@ -250,7 +259,7 @@ func certifyLinearSumFlat(ctx context.Context, rows, cols int, origCost []float6
 	costAt := func(r, c int) float64 {
 		return origCost[r*cols+c]
 	}
-	exactObj, err := certifyAssignCore(ctx, rows, cols, costAt, sense, res.RowInd, res.ColInd, res.U, res.V, true, res.Objective, solveErr)
+	exactObj, err := certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, res.RowInd, res.ColInd, res.U, res.V, true, true, res.Objective, solveErr)
 	if err != nil {
 		return Result{}, err
 	}
@@ -309,7 +318,7 @@ func certifySolveInto(ctx context.Context, rows, cols int, origCost []float64, s
 	costAt := func(r, c int) float64 {
 		return origCost[r*cols+c]
 	}
-	exactObj, err := certifyAssignCore(ctx, rows, cols, costAt, sense, rowInd, colInd, uHint, vHint, hasDuals, obj, solveErr)
+	exactObj, err := certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, rowInd, colInd, uHint, vHint, hasDuals, false, obj, solveErr)
 	if err != nil {
 		if errors.Is(err, ErrCertificationFailed) {
 			for i := range rowInd {
@@ -335,6 +344,127 @@ func hasInvalidMatrixEntry(rows, cols int, costAt func(int, int) float64, sense 
 	return false
 }
 
+func (d dyadic2304) toFloat64Floor() float64 {
+	f, exact := d.toFloat64()
+	if exact || math.IsNaN(f) || math.IsInf(f, 0) {
+		return f
+	}
+	fd, ok := dyadicFromFloat(f)
+	if ok && dyadicCmp(fd, d) > 0 {
+		return math.Nextafter(f, math.Inf(-1))
+	}
+	return f
+}
+
+func writeRepairedDualsFast(uExact, vExact []dyadic2304, uNormOut, vNormOut []float64) {
+	if len(uNormOut) != len(uExact) || len(vNormOut) != len(vExact) {
+		return
+	}
+	uTmp := make([]float64, len(uExact))
+	for i, d := range uExact {
+		// Floor rounding preserves uOut[i] + vOut[j] <= C[i,j] over Q
+		// when vExact is already exact in float64.
+		f := d.toFloat64Floor()
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return
+		}
+		if f == 0 {
+			f = 0
+		}
+		uTmp[i] = f
+	}
+	vTmp := make([]float64, len(vExact))
+	for j, d := range vExact {
+		f, _ := d.toFloat64()
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return
+		}
+		if f == 0 {
+			f = 0
+		}
+		vTmp[j] = f
+	}
+	copy(uNormOut, uTmp)
+	copy(vNormOut, vTmp)
+}
+
+func writeRepairedDualsFromMatrix(
+	m, n int,
+	cMat []dyadic2304,
+	cFin []bool,
+	uExact, vExact []dyadic2304,
+	uNormOut, vNormOut []float64,
+) {
+	if len(uNormOut) != m || len(vNormOut) != n {
+		return
+	}
+	vTmp := make([]float64, n)
+	vTmpD := make([]dyadic2304, n)
+	vAllExact := true
+	for j, d := range vExact {
+		f, exact := d.toFloat64()
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			return
+		}
+		if f == 0 {
+			f = 0
+		}
+		if !exact {
+			vAllExact = false
+		}
+		vTmp[j] = f
+		fd, ok := dyadicFromFloat(f)
+		if !ok {
+			return
+		}
+		vTmpD[j] = fd
+	}
+	uTmp := make([]float64, m)
+	if vAllExact {
+		for i, d := range uExact {
+			f := d.toFloat64Floor()
+			if math.IsInf(f, 0) || math.IsNaN(f) {
+				return
+			}
+			if f == 0 {
+				f = 0
+			}
+			uTmp[i] = f
+		}
+	} else {
+		// Recompute uSafe[i] = min_{j finite} (C[i,j] - vOut[j]) floored to float64 so the
+		// returned float64 pair (uOut, vOut) remains strictly dual-feasible over Q.
+		for i := range m {
+			base := i * n
+			var minU dyadic2304
+			hasFin := false
+			for j := range n {
+				if !cFin[base+j] {
+					continue
+				}
+				cand := dyadicSub(cMat[base+j], vTmpD[j])
+				if !hasFin || dyadicCmp(cand, minU) < 0 {
+					minU = cand
+					hasFin = true
+				}
+			}
+			if !hasFin {
+				return
+			}
+			f := minU.toFloat64Floor()
+			if math.IsInf(f, 0) || math.IsNaN(f) {
+				return
+			}
+			if f == 0 {
+				f = 0
+			}
+			uTmp[i] = f
+		}
+	}
+	copy(uNormOut, uTmp)
+	copy(vNormOut, vTmp)
+}
+
 func certifyAssignCore(
 	ctx context.Context,
 	rows, cols int,
@@ -343,6 +473,21 @@ func certifyAssignCore(
 	rowInd, colInd []int,
 	uRaw, vRaw []float64,
 	checkDualVecs bool,
+	claimedObj float64,
+	solveErr error,
+) (float64, error) {
+	return certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, rowInd, colInd, uRaw, vRaw, checkDualVecs, checkDualVecs, claimedObj, solveErr)
+}
+
+func certifyAssignCoreImpl(
+	ctx context.Context,
+	rows, cols int,
+	costAt func(int, int) float64,
+	sense Sense,
+	rowInd, colInd []int,
+	uRaw, vRaw []float64,
+	checkDualVecs bool,
+	writeDuals bool,
 	claimedObj float64,
 	solveErr error,
 ) (float64, error) {
@@ -522,11 +667,20 @@ func certifyAssignCore(
 		}
 	}
 
-	if len(vNorm) == n && verifyFastExactDuals(m, n, normEntry, col4row, row4col, vNorm) {
-		return exactObjFloat, nil
+	if len(vNorm) == n {
+		if uFast, vFast, okFast := verifyFastExactDuals(m, n, normEntry, col4row, row4col, vNorm); okFast {
+			if writeDuals {
+				writeRepairedDualsFast(uFast, vFast, uNorm, vNorm)
+			}
+			return exactObjFloat, nil
+		}
 	}
 
-	if err := verifyExactResidualOptimality(ctx, m, n, normEntry, col4row, row4col, vNorm); err != nil {
+	var uOut, vOut []float64
+	if writeDuals {
+		uOut, vOut = uNorm, vNorm
+	}
+	if err := verifyExactResidualOptimality(ctx, m, n, normEntry, col4row, row4col, vNorm, uOut, vOut); err != nil {
 		return 0, err
 	}
 	return exactObjFloat, nil
@@ -585,7 +739,7 @@ func verifyFastExactDuals(
 	normEntry func(int, int) (float64, bool),
 	col4row, row4col []int,
 	vFloat []float64,
-) bool {
+) ([]dyadic2304, []dyadic2304, bool) {
 	vRat := make([]dyadic2304, n)
 	for j := range n {
 		if m < n && row4col[j] < 0 {
@@ -593,10 +747,10 @@ func verifyFastExactDuals(
 		}
 		r, ok := dyadicFromFloat(vFloat[j])
 		if !ok {
-			return false
+			return nil, nil, false
 		}
 		if m < n && r.sign() > 0 {
-			return false
+			return nil, nil, false
 		}
 		vRat[j] = r
 	}
@@ -605,11 +759,11 @@ func verifyFastExactDuals(
 	for i := range m {
 		cm, ok := normEntry(i, col4row[i])
 		if !ok {
-			return false
+			return nil, nil, false
 		}
 		cmD, okD := dyadicFromFloat(cm)
 		if !okD {
-			return false
+			return nil, nil, false
 		}
 		uRat[i] = dyadicSub(cmD, vRat[col4row[i]])
 	}
@@ -623,14 +777,14 @@ func verifyFastExactDuals(
 			}
 			cTmp, okD := dyadicFromFloat(cij)
 			if !okD {
-				return false
+				return nil, nil, false
 			}
 			if dyadicCmp(dyadicAdd(ui, vRat[j]), cTmp) > 0 {
-				return false
+				return nil, nil, false
 			}
 		}
 	}
-	return true
+	return uRat, vRat, true
 }
 
 type ratArc struct {
@@ -644,6 +798,7 @@ func verifyExactResidualOptimality(
 	normEntry func(int, int) (float64, bool),
 	col4row, row4col []int,
 	vHint []float64,
+	uOut, vOut []float64,
 ) error {
 	cMat := make([]dyadic2304, m*n)
 	cFin := make([]bool, m*n)
@@ -776,6 +931,9 @@ func verifyExactResidualOptimality(
 
 	if !verifyExactLSAPDualsRat(m, n, cMat, cFin, col4row, row4col, uExact, vExact) {
 		return ErrCertificationFailed
+	}
+	if len(uOut) == m && len(vOut) == n {
+		writeRepairedDualsFromMatrix(m, n, cMat, cFin, uExact, vExact, uOut, vOut)
 	}
 	return nil
 }
