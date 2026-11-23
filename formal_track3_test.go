@@ -33,6 +33,7 @@ type lpCertPayload struct {
 	LB        []*ratPayload  `json:"lb"`
 	UB        []*ratPayload  `json:"ub"`
 	Rows      []lpRowPayload `json:"rows"`
+	Col       *int           `json:"col,omitzero"`
 	X         []ratPayload   `json:"x,omitzero"`
 	Y         []ratPayload   `json:"y,omitzero"`
 	YBits     []uint64       `json:"yBits,omitzero"`
@@ -163,14 +164,26 @@ func evalMinObjRat(p *CompiledProblem, x []float64) (*big.Rat, error) {
 	return sum, nil
 }
 
+func assertLPCheckVerifiedMode(tb testing.TB, name, out, wantMode string) {
+	tb.Helper()
+	firstLine, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	if strings.TrimSpace(firstLine) != "VERIFIED" {
+		tb.Fatalf("%s expected first line VERIFIED, got %q", name, out)
+	}
+	if wantMode != "" && !strings.Contains(out, "MODE "+wantMode) {
+		tb.Fatalf("%s expected MODE %s in lp-check output %q", name, wantMode, out)
+	}
+}
+
 func assertSafeDualBoundTight(tb testing.TB, exe, name string, p *CompiledProblem, primal []float64, yRats []ratPayload, yBits []uint64) {
 	tb.Helper()
 	payload := compiledProblemToLPPayload(tb, p, "safe-bound")
 	payload.Y = yRats
 	out, runErr := runLPCheck(tb, exe, name+"_safe", payload, true)
-	if runErr != nil || !strings.Contains(out, "VERIFIED") {
+	if runErr != nil {
 		tb.Fatalf("%s safe-bound failed: err=%v out=%q", name, runErr, out)
 	}
+	assertLPCheckVerifiedMode(tb, name+"_safe", out, "safe-bound")
 	lbRat := parseBoundFromLPCheck(tb, out)
 	primalObjRat, err := evalMinObjRat(p, primal)
 	if err != nil {
@@ -199,9 +212,10 @@ func assertSafeDualBoundTight(tb testing.TB, exe, name string, p *CompiledProble
 		payloadBits := compiledProblemToLPPayload(tb, p, "safe-bound")
 		payloadBits.YBits = yBits
 		outBits, bitsErr := runLPCheck(tb, exe, name+"_safe_bits", payloadBits, false)
-		if bitsErr != nil || strings.TrimSpace(outBits) != "VERIFIED" {
+		if bitsErr != nil {
 			tb.Fatalf("%s yBits safe-bound failed: err=%v out=%q", name, bitsErr, outBits)
 		}
+		assertLPCheckVerifiedMode(tb, name+"_safe_bits", outBits, "safe-bound")
 	}
 }
 
@@ -751,17 +765,19 @@ func TestFormalTrack3(t *testing.T) {
 				payload.X = xVec
 				payload.Y = yRats
 				out, runErr := runLPCheck(t, exe, tc.name+"_rat", payload, true)
-				if runErr != nil || !strings.Contains(out, "VERIFIED") {
+				if runErr != nil {
 					t.Fatalf("%s rat optimal failed: err=%v out=%q", tc.name, runErr, out)
 				}
+				assertLPCheckVerifiedMode(t, tc.name+"_rat", out, "optimal")
 
 				payloadBits := payload
 				payloadBits.Y = nil
 				payloadBits.YBits = yBits
 				outBits, bitsErr := runLPCheck(t, exe, tc.name+"_bits", payloadBits, false)
-				if bitsErr != nil || strings.TrimSpace(outBits) != "VERIFIED" {
+				if bitsErr != nil {
 					t.Fatalf("%s bits optimal failed: err=%v out=%q", tc.name, bitsErr, outBits)
 				}
+				assertLPCheckVerifiedMode(t, tc.name+"_bits", outBits, "optimal")
 			})
 		}
 	})
@@ -909,10 +925,36 @@ func TestFormalTrack3(t *testing.T) {
 				}
 				payload.W = wPayload
 				out, err := runLPCheck(t, exe, tc.name+"_farkas", payload, false)
-				if err != nil || strings.TrimSpace(out) != "VERIFIED" {
+				if err != nil {
 					t.Fatalf("%s lp-check farkas failed: err=%v out=%q", tc.name, err, out)
 				}
+				assertLPCheckVerifiedMode(t, tc.name+"_farkas", out, "farkas")
 			})
+		}
+	})
+
+	t.Run("BoundConflictInfeasible", func(t *testing.T) {
+		t.Parallel()
+		mBC := NewModel("bound_conflict_m0", Minimize)
+		x0 := mBC.AddContVar("x0", 0, 5)
+		x1 := mBC.AddContVar("x1", 7, 3)
+		mBC.SetObjective(NewExpr(x0.T(1), x1.T(2)))
+		pBC := mBC.Compile()
+
+		colOne := 1
+		bcPayload := compiledProblemToLPPayload(t, pBC, "bound-conflict")
+		bcPayload.Col = &colOne
+		out, err := runLPCheck(t, exe, "bc_pos", bcPayload, false)
+		if err != nil {
+			t.Fatalf("bound-conflict positive control failed: err=%v out=%q", err, out)
+		}
+		assertLPCheckVerifiedMode(t, "bc_pos", out, "bound-conflict")
+
+		colZero := 0
+		badBC := bcPayload
+		badBC.Col = &colZero
+		if badOut, badErr := runLPCheck(t, exe, "bc_neg_col0", badBC, false); badErr == nil {
+			t.Fatalf("expected bound-conflict rejection on non-conflicting col 0, got: %q", badOut)
 		}
 	})
 

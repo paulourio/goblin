@@ -791,3 +791,209 @@ func TestFormalTrack3BLeanOracleEndToEnd(t *testing.T) {
 		t.Fatalf("Track3B Lean end-to-end oracle failed: err=%v\n%s", err, out)
 	}
 }
+
+func TestFormalTrack3BLiveLPPresolveAndNegativeControls(t *testing.T) {
+	t.Parallel()
+	requireFormalEnv(t)
+	lpExe := formalExe(t, "lp-check")
+
+	runRawLPCheck := func(name string, subcmd string, raw []byte, printBound bool) (string, error) {
+		p := filepath.Join(t.TempDir(), name+".json")
+		if err := os.WriteFile(p, raw, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		var args []string
+		if subcmd != "" {
+			args = append(args, subcmd)
+		}
+		if printBound {
+			args = append(args, "--print-bound")
+		}
+		args = append(args, p)
+		cmd := exec.CommandContext(t.Context(), lpExe, args...)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	t.Run("live_multistep_lp_presolve_chains", func(t *testing.T) {
+		t.Parallel()
+		// 1. Multi-pass Maximize LP with ObjConstant = 7.5 exercising fixedSubst,
+		// singletonRow, dropRedundantRow, and dualColFix -> second-pass fixedSubst + dropRedundantRow.
+		mMax := NewModel("live_lp_presolve_max_chain", Maximize)
+		xFix := mMax.AddContVar("x_fix", 3, 3)
+		xSng := mMax.AddContVar("x_sng", 0, 20)
+		xDual := mMax.AddContVar("x_dual", 2, 8)
+		xMain := mMax.AddContVar("x_main", 0, 10)
+		mMax.SetObjective(NewExpr(xFix.T(4), xSng.T(3), xDual.T(-2), xMain.T(5)).AddConstant(7.5))
+		mMax.AddConstraint("sng", NewExpr(xSng.T(2)).Le(10))
+		mMax.AddConstraint("couple", NewExpr(xFix.T(1), xSng.T(1), xMain.T(2)).Le(16))
+		mMax.AddConstraint("ge_dual", NewExpr(xDual.T(-1), xMain.T(1)).Ge(-6))
+		mMax.AddConstraint("red", NewExpr(xMain.T(1)).Le(100))
+		pMax := mMax.Compile()
+
+		rawMax, okMax := ExportLPPresolveCheckPayload(pMax)
+		if !okMax {
+			t.Fatal("ExportLPPresolveCheckPayload returned false on pMax")
+		}
+		var parsedMax lpPresolveChainCertExport
+		if err := json.Unmarshal(rawMax, &parsedMax); err != nil {
+			t.Fatalf("unmarshal rawMax: %v", err)
+		}
+		if len(parsedMax.Steps) < 5 {
+			t.Fatalf("expected multi-step chain (>=5 steps), got %d", len(parsedMax.Steps))
+		}
+		outMax, errMax := runRawLPCheck("live_max_chain", "", rawMax, true)
+		if errMax != nil {
+			t.Fatalf("lp-check rejected live Maximize presolve chain: err=%v out=%s", errMax, outMax)
+		}
+		assertLPCheckVerifiedMode(t, "live_max_chain", outMax, "lp-presolve")
+
+		// Check certified bound matches exact basis optimum on original LP.
+		lpOrigMax := NewLPSolver(pMax, nil)
+		defer lpOrigMax.Close()
+		if r := lpOrigMax.Solve(); r.Status != StatusOptimal {
+			t.Fatalf("lpOrigMax status=%v", r.Status)
+		}
+		solOrigMax, okSol := ExactBasisSolution(t.Context(), lpOrigMax)
+		if !okSol {
+			t.Fatal("ExactBasisSolution failed on pMax")
+		}
+		gotBnd := parseBoundFromLPCheck(t, outMax)
+		if gotBnd.Cmp(solOrigMax.ObjectiveMin) != 0 {
+			t.Fatalf("lp-presolve bound=%v != exact ObjectiveMin=%v", gotBnd, solOrigMax.ObjectiveMin)
+		}
+
+		// 2. Multi-step Minimize LP exercising zeroObjEmptyColFix, Equal singletonRow,
+		// negative-coeff GreaterEqual singletonRow, dualColFix (toLower=false), fixedSubst, and dropRedundantRow.
+		mMin := NewModel("live_lp_presolve_min_all_ops", Minimize)
+		vZero := mMin.AddContVar("v_zero", -3, 4)
+		vEq := mMin.AddContVar("v_eq", 0, 10)
+		vNegGe := mMin.AddContVar("v_neg_ge", 0, 10)
+		vDualHi := mMin.AddContVar("v_dual_hi", 1, 6)
+		vCore := mMin.AddContVar("v_core", 0, 10)
+		mMin.SetObjective(NewExpr(vZero.T(0), vEq.T(2), vNegGe.T(-1), vDualHi.T(-3), vCore.T(4)).AddConstant(-2.25))
+		mMin.AddConstraint("eq_sng", NewExpr(vEq.T(2)).Eq(4))
+		mMin.AddConstraint("neg_ge_sng", NewExpr(vNegGe.T(-2)).Ge(-8))
+		mMin.AddConstraint("dual_le", NewExpr(vDualHi.T(-1), vCore.T(1)).Le(20))
+		mMin.AddConstraint("main", NewExpr(vEq.T(1), vNegGe.T(1), vCore.T(2)).Ge(9))
+		mMin.AddConstraint("red_ge", NewExpr(vCore.T(1)).Ge(-5))
+		pMin := mMin.Compile()
+
+		rawMin, okMin := ExportLPPresolveCheckPayload(pMin)
+		if !okMin {
+			t.Fatal("ExportLPPresolveCheckPayload returned false on pMin")
+		}
+		var parsedMin lpPresolveChainCertExport
+		if err := json.Unmarshal(rawMin, &parsedMin); err != nil {
+			t.Fatalf("unmarshal rawMin: %v", err)
+		}
+		seenKinds := make(map[string]bool)
+		for _, st := range parsedMin.Steps {
+			seenKinds[st.Kind] = true
+		}
+		for _, wantKind := range []string{"zeroObjEmptyColFix", "singletonRow", "dualColFix", "fixedSubst", "dropRedundantRow"} {
+			if !seenKinds[wantKind] {
+				t.Fatalf("expected live chain to contain %q, got kinds=%v", wantKind, seenKinds)
+			}
+		}
+		outMin, errMin := runRawLPCheck("live_min_all_ops", "", rawMin, true)
+		if errMin != nil {
+			t.Fatalf("lp-check rejected live Minimize all-ops chain: err=%v out=%s", errMin, outMin)
+		}
+		assertLPCheckVerifiedMode(t, "live_min_all_ops", outMin, "lp-presolve")
+	})
+
+	t.Run("negative_controls_t3_6_t3_8_t3_9_t3_10_t3_7", func(t *testing.T) {
+		t.Parallel()
+		// Setup valid 1-step presolve certificate for T3-6 mutation testing.
+		mPre := NewModel("t3_6_base", Minimize)
+		px0 := mPre.AddContVar("x0", 0, 10)
+		px1 := mPre.AddContVar("x1", 0, 10)
+		mPre.SetObjective(NewExpr(px0.T(1), px1.T(1)))
+		mPre.AddConstraint("sng", NewExpr(px0.T(1)).Ge(4))
+		mPre.AddConstraint("cap", NewExpr(px0.T(1), px1.T(1)).Ge(6))
+		rawBase, okBase := ExportLPPresolveCheckPayload(mPre.Compile())
+		if !okBase {
+			t.Fatal("ExportLPPresolveCheckPayload failed on t3_6_base")
+		}
+
+		// T3-6 positive control: feasible xReduced without yReduced succeeds.
+		var feasNoY lpPresolveChainCertExport
+		if err := json.Unmarshal(rawBase, &feasNoY); err != nil {
+			t.Fatalf("unmarshal rawBase: %v", err)
+		}
+		feasNoY.YReduced = nil
+		rawFeasNoY, _ := json.Marshal(feasNoY)
+		if out, err := runRawLPCheck("t3_6_feas_no_y", "", rawFeasNoY, false); err != nil {
+			t.Fatalf("expected feasible xReduced without yReduced to pass, got err=%v out=%s", err, out)
+		}
+
+		// T3-6 negative control: primal-infeasible xReduced without yReduced MUST fail.
+		badNoY := feasNoY
+		badNoY.XReduced = []ratPayload{int64ToPayload(0), int64ToPayload(0)}
+		rawBadNoY, _ := json.Marshal(badNoY)
+		if out, err := runRawLPCheck("t3_6_infeas_no_y", "", rawBadNoY, false); err == nil {
+			t.Fatalf("T3-6 regression: lp-check accepted infeasible xReduced without yReduced: %s", out)
+		}
+
+		// T3-8 negative controls: safe-bound with primalObj/gapTol without x, or negative gapTol.
+		mSB := NewModel("t3_8_sb", Minimize)
+		sx := mSB.AddContVar("x", 0, 5)
+		mSB.SetObjective(NewExpr(sx.T(2)))
+		mSB.AddConstraint("ge", NewExpr(sx.T(1)).Ge(2))
+		pSB := mSB.Compile()
+		sbNoX := compiledProblemToLPPayload(t, pSB, "safe-bound")
+		sbNoX.Y = []ratPayload{int64ToPayload(2)}
+		pObj := int64ToPayload(4)
+		gTol := int64ToPayload(0)
+		sbNoX.PrimalObj = &pObj
+		sbNoX.GapTol = &gTol
+		rawSBNoX, _ := json.Marshal(sbNoX)
+		if out, err := runRawLPCheck("t3_8_no_x", "", rawSBNoX, false); err == nil {
+			t.Fatalf("T3-8 regression: safe-bound accepted primalObj/gapTol without x: %s", out)
+		}
+
+		sbNegGap := sbNoX
+		sbNegGap.X = []ratPayload{int64ToPayload(2)}
+		negTol := int64ToPayload(-1)
+		sbNegGap.GapTol = &negTol
+		rawSBNegGap, _ := json.Marshal(sbNegGap)
+		if out, err := runRawLPCheck("t3_8_neg_gaptol", "", rawSBNegGap, false); err == nil {
+			t.Fatalf("T3-8 regression: safe-bound accepted negative gapTol: %s", out)
+		}
+
+		// T3-9 negative controls: CLI subcommand vs JSON mode mismatch & duplicate keys.
+		sbPlain := compiledProblemToLPPayload(t, pSB, "safe-bound")
+		sbPlain.Y = []ratPayload{int64ToPayload(2)}
+		rawSBPlain, _ := json.Marshal(sbPlain)
+		if out, err := runRawLPCheck("t3_9_cli_mismatch", "optimal", rawSBPlain, false); err == nil {
+			t.Fatalf("T3-9 regression: lp-check optimal accepted JSON mode=safe-bound: %s", out)
+		}
+		dupKeyJSON := []byte(`{"mode":"farkas","mode":"safe-bound","numVars":1,"numRows":0,"objConst":"0/1","obj":["1/1"],"lb":["0/1"],"ub":["1/1"],"rows":[],"y":[]}`)
+		if out, err := runRawLPCheck("t3_9_dup_key", "", dupKeyJSON, false); err == nil {
+			t.Fatalf("T3-9 regression: lp-check accepted duplicate JSON key: %s", out)
+		}
+
+		// T3-10 negative controls: milp-unbounded with 0 int cols and conflicting isInt/intCols.
+		zeroIntUnb := []byte(`{"mode":"milp-unbounded","numVars":1,"numRows":0,"objConst":"0/1","obj":["-1/1"],"lb":["0/1"],"ub":[null],"rows":[],"isInt":[false],"x0":["0/1"],"d":["1/1"]}`)
+		if out, err := runRawLPCheck("t3_10_zero_int", "", zeroIntUnb, false); err == nil {
+			t.Fatalf("T3-10 regression: milp-unbounded accepted 0 integer columns: %s", out)
+		}
+		conflictIntUnb := []byte(`{"mode":"milp-unbounded","numVars":2,"numRows":0,"objConst":"0/1","obj":["-1/1","0/1"],"lb":["0/1","0/1"],"ub":[null,"1/1"],"rows":[],"isInt":[true,false],"intCols":[1],"x0":["0/1","0/1"],"d":["1/1","0/1"]}`)
+		if out, err := runRawLPCheck("t3_10_conflict_int", "", conflictIntUnb, false); err == nil {
+			t.Fatalf("T3-10 regression: milp-unbounded accepted conflicting isInt and intCols: %s", out)
+		}
+
+		// T3-7 negative controls on gcd-div-check via rules-check --jsonl.
+		for _, badGCD := range [][]byte{
+			[]byte(`{"subcommand":"gcd-div-check","op":"gcd-div-check","coeffs":[2,2],"sense":"le","rhs":"399999995/100000000","div_coeffs":[1,1],"div_rhs":2}`),
+			[]byte(`{"subcommand":"gcd-div-check","op":"gcd-div-check","coeffs":[6,9],"sense":"le","rhs":"17/2","div_coeffs":[2,3]}`),
+			[]byte(`{"subcommand":"gcd-div-check","op":"gcd-div-check","coeffs":[6,9],"sense":"le","rhs":"17/2","divisor":2}`),
+		} {
+			resp, err := FormalCheckRulesJSONL(t, badGCD)
+			if err == nil && resp.OK {
+				t.Fatalf("T3-7 regression: rules-check accepted invalid gcd-div-check %s", badGCD)
+			}
+		}
+	})
+}

@@ -1,9 +1,13 @@
 package goblin
 
 import (
+	"bytes"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"math/big"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -326,6 +330,39 @@ func TestFormalTrack2CKnapsackCoverSoundnessAndRegressions(t *testing.T) {
 	})
 }
 
+func buildSharedBinLotSizingModel(name string) (*CompiledProblem, []float64, Var, Var, Var, Var, []Var, []Var, []int64) {
+	const T = 4
+	dems := []int64{10, 12, 8, 15}
+	m := NewModel(name, Minimize)
+	inv0 := m.AddContVar("inv_init", 0, 100)
+	y0 := m.AddBinaryVar("y0")
+	yShared := m.AddBinaryVar("yShared")
+	y2 := m.AddBinaryVar("y2")
+	yByPer := []Var{y0, yShared, y2, yShared}
+	prod := make([]Var, T)
+	inv := make([]Var, T)
+	for tau := range T {
+		prod[tau] = m.AddContVar(fmt.Sprintf("p%d", tau), 0, 100)
+		inv[tau] = m.AddContVar(fmt.Sprintf("s%d", tau), 0, 100)
+		m.AddConstraint(fmt.Sprintf("vub%d", tau), NewExpr(prod[tau].T(1), yByPer[tau].T(-60)).Le(0))
+		if tau == 0 {
+			m.AddConstraint("bal0", NewExpr(inv0.T(1), prod[0].T(1), inv[0].T(-1)).Eq(float64(dems[0])))
+		} else {
+			m.AddConstraint(fmt.Sprintf("bal%d", tau), NewExpr(inv[tau-1].T(1), prod[tau].T(1), inv[tau].T(-1)).Eq(float64(dems[tau])))
+		}
+	}
+	m.SetObjective(NewExpr(inv0.T(5), y0.T(10), yShared.T(12), y2.T(10)))
+	p := m.Compile()
+	lpPrimal := make([]float64, p.numVars)
+	lpPrimal[y0.Index()] = 0.2
+	lpPrimal[yShared.Index()] = 0.25
+	lpPrimal[y2.Index()] = 0.15
+	for tau := range T {
+		lpPrimal[prod[tau].Index()] = float64(dems[tau])
+	}
+	return p, lpPrimal, inv0, y0, yShared, y2, prod, inv, dems
+}
+
 func TestFormalTrack2CLotSizingChainSoundnessAndRegressions(t *testing.T) {
 	t.Parallel()
 
@@ -470,35 +507,7 @@ func TestFormalTrack2CLotSizingChainSoundnessAndRegressions(t *testing.T) {
 		t.Parallel()
 		// 4-period chain with initial inventory invIn (not -1) AND periods 1 & 3 sharing the SAME binary setup variable yShared!
 		const T = 4
-		dems := []int64{10, 12, 8, 15}
-		m := NewModel("lotsizing_shared_bin", Minimize)
-		inv0 := m.AddContVar("inv_init", 0, 100)
-		y0 := m.AddBinaryVar("y0")
-		yShared := m.AddBinaryVar("yShared")
-		y2 := m.AddBinaryVar("y2")
-		yByPer := []Var{y0, yShared, y2, yShared}
-		prod := make([]Var, T)
-		inv := make([]Var, T)
-		for tau := range T {
-			prod[tau] = m.AddContVar(fmt.Sprintf("p%d", tau), 0, 100)
-			inv[tau] = m.AddContVar(fmt.Sprintf("s%d", tau), 0, 100)
-			m.AddConstraint(fmt.Sprintf("vub%d", tau), NewExpr(prod[tau].T(1), yByPer[tau].T(-60)).Le(0))
-			if tau == 0 {
-				m.AddConstraint("bal0", NewExpr(inv0.T(1), prod[0].T(1), inv[0].T(-1)).Eq(float64(dems[0])))
-			} else {
-				m.AddConstraint(fmt.Sprintf("bal%d", tau), NewExpr(inv[tau-1].T(1), prod[tau].T(1), inv[tau].T(-1)).Eq(float64(dems[tau])))
-			}
-		}
-		m.SetObjective(NewExpr(inv0.T(5), y0.T(10), yShared.T(12), y2.T(10)))
-		p := m.Compile()
-
-		lpPrimal := make([]float64, p.numVars)
-		lpPrimal[y0.Index()] = 0.2
-		lpPrimal[yShared.Index()] = 0.25
-		lpPrimal[y2.Index()] = 0.15
-		for tau := range T {
-			lpPrimal[prod[tau].Index()] = float64(dems[tau])
-		}
+		p, lpPrimal, inv0, y0, yShared, y2, prod, inv, dems := buildSharedBinLotSizingModel("lotsizing_shared_bin")
 
 		var ws cutGenWorkspace
 		cuts := separateFlowAndVUBCuts(p, lpPrimal, &ws)
@@ -895,6 +904,319 @@ func TestFormalTrack2CFinalizeSparseCutUniversal(t *testing.T) {
 		}
 		if _, ok := finalizeSparseCut(p, []int{0}, []float64{1.0}, math.Inf(-1), []float64{1.0}, 0, &ws); ok {
 			t.Fatal("finalizeSparseCut should reject -Inf RHS")
+		}
+	})
+}
+
+func TestFormalTrack2CLiveProductionCertificates(t *testing.T) {
+	t.Parallel()
+	requireFormalEnv(t)
+	exe := formalExe(t, "cuts-check")
+
+	countOps := func(tb testing.TB, items [][]byte) map[string]int {
+		tb.Helper()
+		counts := make(map[string]int)
+		type opPeek struct {
+			Op string `json:"op"`
+		}
+		for i, raw := range items {
+			var p opPeek
+			if err := json.Unmarshal(raw, &p); err != nil {
+				tb.Fatalf("unmarshal live item %d: %v", i, err)
+			}
+			counts[p.Op]++
+		}
+		return counts
+	}
+
+	t.Run("LiveCoverAndLotSizingAndAggCutsVerified", func(t *testing.T) {
+		t.Parallel()
+
+		// 1. Complemented knapsack cover with continuous relaxation (<= and >=).
+		for _, useGE := range []bool{false, true} {
+			m := NewModel(fmt.Sprintf("live_cover_ge_%v", useGE), Maximize)
+			x := make([]Var, 5)
+			for i := range 5 {
+				x[i] = m.AddBinaryVar(fmt.Sprintf("x%d", i))
+			}
+			c := m.AddContVar("c", 1, 10)
+			m.SetObjective(NewExpr(x[0].T(1), x[1].T(1), x[2].T(1), x[3].T(-1), x[4].T(1)))
+			if !useGE {
+				m.AddConstraint("row", NewExpr(x[0].T(4), x[1].T(4), x[2].T(6), x[3].T(-3), x[4].T(5), c.T(2)).Le(8))
+			} else {
+				m.AddConstraint("row", NewExpr(x[0].T(-4), x[1].T(-4), x[2].T(-6), x[3].T(3), x[4].T(-5), c.T(-2)).Ge(-8))
+			}
+			p := m.Compile()
+			obs := &cutCertObserver{srcRowIdx: -1}
+			ws := cutGenWorkspace{certObs: obs}
+			cuts := separateKnapsackCoverCuts(p, []float64{0.9, 0.9, 0.9, 0.1, 0.8, 1.0}, &ws)
+			if len(cuts) == 0 || len(obs.covers) == 0 {
+				t.Fatalf("useGE=%v: expected live cover cut and observer record", useGE)
+			}
+			items, err := exportObserverItems(p, obs, [][]float64{{1, 0, 0, 0, 0, 1}, {0, 0, 1, 0, 0, 1}})
+			if err != nil {
+				t.Fatalf("exportObserverItems(cover useGE=%v): %v", useGE, err)
+			}
+			runCutsCheckJSONLItems(t, exe, items)
+		}
+
+		// 2. Shared-binCol lot-sizing chain with initial inventory invIn.
+		pLS, lpLS, _, _, _, _, _, _, _ := buildSharedBinLotSizingModel("live_lotsizing_shared")
+		obsLS := &cutCertObserver{srcRowIdx: -1}
+		wsLS := cutGenWorkspace{certObs: obsLS}
+		lsCuts := separateFlowAndVUBCuts(pLS, lpLS, &wsLS)
+		if len(lsCuts) == 0 || len(obsLS.lotSizings) == 0 {
+			t.Fatal("expected live lot-sizing cuts on shared-binCol chain")
+		}
+		lsItems, err := exportObserverItems(pLS, obsLS, nil)
+		if err != nil {
+			t.Fatalf("exportObserverItems(pLS): %v", err)
+		}
+		runCutsCheckJSONLItems(t, exe, lsItems)
+
+		// 3. Full ExportLiveSeparatedCutsItems over multi-family MIP (GMI + VUB + agg-cMIR + pairwise + cover + drop).
+		mFull := NewModel("live_full_export", Maximize)
+		fx0 := mFull.AddIntVar("x0", 0, 5)
+		fx1 := mFull.AddIntVar("x1", 0, 5)
+		fs := mFull.AddContVar("s", 0, math.Inf(1))
+		fy0 := mFull.AddBinaryVar("y0")
+		fy1 := mFull.AddBinaryVar("y1")
+		ff0 := mFull.AddContVar("f0", 0, 10)
+		ff1 := mFull.AddContVar("f1", 0, 10)
+		ff2 := mFull.AddContVar("f2", 0, 10)
+		ff3 := mFull.AddContVar("f3", 0, 10)
+		mFull.SetObjective(NewExpr(fx0.T(3), fx1.T(3), fy0.T(-1), fy1.T(-1)))
+		mFull.AddConstraint("eq_s", NewExpr(fx0.T(2), fs.T(1)).Eq(3))
+		mFull.AddConstraint("le_s", NewExpr(fs.T(-1), fx1.T(2)).Le(2))
+		mFull.AddConstraint("p1", NewExpr(fx0.T(3), fx1.T(1)).Le(7))
+		mFull.AddConstraint("p2", NewExpr(fx0.T(1), fx1.T(3)).Le(7))
+		mFull.AddConstraint("vub0", NewExpr(ff0.T(1), ff1.T(1), fy0.T(-3)).Le(0))
+		mFull.AddConstraint("vub1", NewExpr(ff2.T(1), ff3.T(1), fy1.T(-3)).Le(0))
+		mFull.AddConstraint("dem", NewExpr(ff0.T(1), ff1.T(1), ff2.T(1), ff3.T(1)).Ge(4))
+		pFull := mFull.Compile()
+
+		fullItems, err := ExportLiveSeparatedCutsItems(pFull, [][]float64{
+			{1, 1, 1, 1, 1, 2, 0, 2, 0},
+			{0, 2, 3, 1, 1, 3, 0, 1, 0},
+		})
+		if err != nil {
+			t.Fatalf("ExportLiveSeparatedCutsItems(pFull): %v", err)
+		}
+		ops := countOps(t, fullItems)
+		if ops["agg-cmir-check"] == 0 || ops["drop-check"] == 0 {
+			t.Fatalf("expected live agg-cmir-check and drop-check items on pFull, got ops=%v", ops)
+		}
+		runCutsCheckJSONLItems(t, exe, fullItems)
+	})
+
+	t.Run("LiveExportOnCorpusMIPs", func(t *testing.T) {
+		t.Parallel()
+		totals := make(map[string]int)
+		for _, relPath := range []string{
+			"testdata/corpus/t1_knapsack_12.json",
+			"testdata/corpus/t2_cflp_36.json",
+			"testdata/corpus/t2_lotsizing_48.json",
+			"testdata/public/miplib_p0033.json",
+		} {
+			pC := loadLocalPuLPJSONModel(t, relPath)
+			resC, err := SolveCompiled(t.Context(), pC)
+			if err != nil || resC.Status != StatusOptimal {
+				t.Fatalf("solve %s: status=%v err=%v", relPath, resC.Status, err)
+			}
+			sol := snapExactMIPSolution(t, pC, resC.Values)
+			items, err := ExportLiveSeparatedCutsItems(pC, [][]float64{sol})
+			if err != nil {
+				t.Fatalf("ExportLiveSeparatedCutsItems(%s): %v", relPath, err)
+			}
+			if len(items) == 0 {
+				t.Fatalf("expected live separated cut items on %s", relPath)
+			}
+			for op, cnt := range countOps(t, items) {
+				totals[op] += cnt
+			}
+			runCutsCheckJSONLItems(t, exe, items)
+		}
+		for _, reqOp := range []string{"gmi-check", "cover-check", "vub-check", "lotsizing-check", "agg-cmir-check", "drop-check"} {
+			if totals[reqOp] == 0 {
+				t.Fatalf("expected at least one verified live %s across corpus MIPs, got totals=%v", reqOp, totals)
+			}
+		}
+	})
+
+	t.Run("Track2CNegativeControlsRejected", func(t *testing.T) {
+		t.Parallel()
+		negCases := []struct {
+			subcmd string
+			json   string
+		}{
+			// Continuous cover items missing isInt/baseRows (adv_cuts.jsonl line 4).
+			{
+				"cover-check",
+				`{"numVars":2,"lb":[0,0],"ub":[1,1],"row":{"terms":[{"col":0,"val":2},{"col":1,"val":2}],"sense":"le","rhs":3},"items":[{"col":0,"weight":2,"inCover":true,"alpha":1},{"col":1,"weight":2,"inCover":true,"alpha":1}],"knapRHS":3,"cut":{"terms":[{"col":0,"val":1},{"col":1,"val":1}],"rhs":1}}`,
+			},
+			// Continuous cover items WITH isInt=[false,false] and valid baseRows MUST be rejected.
+			{
+				"cover-check",
+				`{"numVars":2,"isInt":[false,false],"lb":[0,0],"ub":[1,1],"baseRows":[{"terms":[{"col":0,"val":2},{"col":1,"val":2}],"sense":"le","rhs":3}],"row":{"terms":[{"col":0,"val":2},{"col":1,"val":2}],"sense":"le","rhs":3},"items":[{"col":0,"weight":2,"inCover":true,"alpha":1},{"col":1,"weight":2,"inCover":true,"alpha":1}],"knapRHS":3,"cut":{"terms":[{"col":0,"val":1},{"col":1,"val":1}],"rhs":1}}`,
+			},
+			// Cover row not present in baseRows MUST be rejected.
+			{
+				"cover-check",
+				`{"numVars":2,"isInt":[true,true],"lb":[0,0],"ub":[1,1],"baseRows":[{"terms":[{"col":0,"val":1},{"col":1,"val":1}],"sense":"le","rhs":2}],"row":{"terms":[{"col":0,"val":2},{"col":1,"val":2}],"sense":"le","rhs":3},"items":[{"col":0,"weight":2,"inCover":true,"alpha":1},{"col":1,"weight":2,"inCover":true,"alpha":1}],"knapRHS":3,"cut":{"terms":[{"col":0,"val":1},{"col":1,"val":1}],"rhs":1}}`,
+			},
+			// Lot-sizing missing isInt/baseRows (adv_cuts.jsonl line 5).
+			{
+				"lotsizing-check",
+				`{"numVars":3,"invInCol":null,"nodes":[{"prodCol":0,"invOutCol":1,"binCol":2,"demand":5,"vubCap":1,"vubRHS":0,"inS":true,"coeffY":5}],"cutDem":5,"cut":{"terms":[{"col":2,"val":-5}],"rhs":-5}}`,
+			},
+			// Lot-sizing fabricated demand not matching baseRows MUST be rejected.
+			{
+				"lotsizing-check",
+				`{"numVars":3,"isInt":[false,false,true],"lb":[0,0,0],"ub":[10,10,1],"baseRows":[{"terms":[{"col":0,"val":1},{"col":2,"val":-1}],"sense":"le","rhs":0}],"invInCol":null,"nodes":[{"prodCol":0,"invOutCol":1,"binCol":2,"demand":5,"vubCap":1,"vubRHS":0,"inS":true,"coeffY":5}],"cutDem":5,"cut":{"terms":[{"col":2,"val":-5}],"rhs":-5}}`,
+			},
+			// Lot-sizing colliding columns prodCol==invOutCol==binCol (adv_cuts.jsonl line 6 + with metadata).
+			{
+				"lotsizing-check",
+				`{"numVars":1,"isInt":[true],"lb":[0],"ub":[1],"baseRows":[{"terms":[{"col":0,"val":0}],"sense":"eq","rhs":5}],"invInCol":null,"nodes":[{"prodCol":0,"invOutCol":0,"binCol":0,"demand":5,"vubCap":1,"vubRHS":0,"inS":true,"coeffY":5}],"cutDem":5,"cut":{"terms":[{"col":0,"val":-5}],"rhs":-5}}`,
+			},
+			// Structural VUB with under-reported effUB MUST be rejected.
+			{
+				"vub-check",
+				`{"numVars":3,"isInt":[false,false,true],"lb":[0,0,0],"ub":[6,6,1],"baseRows":[{"terms":[{"col":0,"val":1},{"col":1,"val":2},{"col":2,"val":-12}],"sense":"le","rhs":0}],"rowIdx":0,"binCol":2,"targetCol":0,"effUB":5,"scale":1,"cut":{"terms":[{"col":0,"val":1},{"col":2,"val":-5}],"rhs":0}}`,
+			},
+			// Structural VUB with non-binary binCol MUST be rejected.
+			{
+				"vub-check",
+				`{"numVars":3,"isInt":[false,false,false],"lb":[0,0,0],"ub":[6,6,1],"baseRows":[{"terms":[{"col":0,"val":1},{"col":1,"val":2},{"col":2,"val":-12}],"sense":"le","rhs":0}],"rowIdx":0,"binCol":2,"targetCol":0,"effUB":6,"scale":1,"cut":{"terms":[{"col":0,"val":1},{"col":2,"val":-6}],"rhs":0}}`,
+			},
+		}
+		for _, tc := range negCases {
+			runCutsCheckRawExpectFail(t, exe, []string{tc.subcmd}, tc.json)
+		}
+	})
+
+	t.Run("Track2CDoSAndOOBRejectWithoutPanicOrStderr", func(t *testing.T) {
+		t.Parallel()
+		// Exercise oversized numVars, truncated metadata or optional arrays, and
+		// out-of-bounds indices over cuts-check --jsonl. Every item must fail closed
+		// with ok=false, exit 0, and empty stderr.
+		cases := []struct {
+			name    string
+			wantErr string
+			line    string
+		}{
+			{
+				"cover_huge_numVars",
+				"must have length",
+				`{"op":"cover-check","numVars":1000000000000,"isInt":[],"lb":[],"ub":[],"baseRows":[{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"row":{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1"},"sign":"1","items":[{"col":0,"weight":"1","comp":false,"inCover":true,"alpha":1}],"knapRHS":"0","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"lotsizing_huge_numVars",
+				"must have length",
+				`{"op":"lotsizing-check","numVars":1000000000000,"isInt":[],"lb":[],"ub":[],"baseRows":[{"sense":"=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"invInCol":null,"nodes":[{"prodCol":0,"invOutCol":1,"binCol":2,"demand":"1","vubCap":"1","vubRHS":"0","inS":true,"coeffY":"1"}],"cutDem":"1","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"gmi_struct_huge_numVars",
+				"must have length",
+				`{"op":"gmi-check","numVars":1000000000000,"isInt":[],"lb":[],"ub":[],"baseRows":[{"sense":"=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"basicCol":0,"rho":[{"rowIdx":0,"val":"1"}],"colAtUpper":[],"scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"vub_struct_huge_numVars",
+				"must have length",
+				`{"op":"vub-check","numVars":1000000000000,"isInt":[],"lb":[],"ub":[],"baseRows":[{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"rowIdx":0,"binCol":0,"targetCol":1,"effUB":"1","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"agg_cmir_huge_numVars",
+				"must have length",
+				`{"op":"agg-cmir-check","numVars":1000000000000,"isInt":[],"lb":[],"ub":[],"rows":[{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1","mu":"1"}],"aggTerms":[{"col":0,"val":"1"}],"aggRHS":"1","delta":"1","useLower":[],"scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"drop_huge_numVars",
+				"must have length",
+				`{"op":"drop-check","numVars":1000000000000,"lb":[],"ub":[],"rawCut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"},"scale":"1","finalCut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"agg_cmir_short_optional",
+				"optional certificate array length mismatch",
+				`{"op":"agg-cmir-check","numVars":3,"isInt":[true,true,false],"lb":["0","0","0"],"ub":["1","1","1"],"rows":[{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1","mu":"1"}],"aggTerms":[{"col":0,"val":"1"}],"aggRHS":"1/2","delta":"1","useLower":[true,true,true],"alphaHat":["1"],"scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"gmi_struct_short_cStruct",
+				"optional coeff array length mismatch",
+				`{"op":"gmi-check","numVars":2,"isInt":[true,true],"lb":["0","0"],"ub":["1","1"],"baseRows":[{"sense":"=","terms":[{"col":0,"val":"1"},{"col":1,"val":"1/2"}],"rhs":"1/2"}],"basicCol":0,"rho":[{"rowIdx":0,"val":"1"}],"colAtUpper":[false,false],"cStruct":["1"],"scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"gmi_struct_short_cSlack",
+				"optional coeff array length mismatch",
+				`{"op":"gmi-check","numVars":2,"isInt":[true,true],"lb":["0","0"],"ub":["1","1"],"baseRows":[{"sense":"<=","terms":[{"col":0,"val":"1"},{"col":1,"val":"1/2"}],"rhs":"1/2"}],"basicCol":0,"rho":[{"rowIdx":0,"val":"1"},{"rowIdx":0,"val":"0"}],"colAtUpper":[false,false],"cSlack":["1"],"scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"lotsizing_oob_prodCol",
+				"failed domain",
+				`{"op":"lotsizing-check","numVars":3,"isInt":[false,false,true],"lb":["0","0","0"],"ub":["10","10","1"],"baseRows":[{"sense":"=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"invInCol":null,"nodes":[{"prodCol":99,"invOutCol":1,"binCol":2,"demand":"1","vubCap":"1","vubRHS":"0","inS":true,"coeffY":"1"}],"cutDem":"1","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"lotsizing_oob_invInCol",
+				"invInCol out of bounds",
+				`{"op":"lotsizing-check","numVars":3,"isInt":[false,false,true],"lb":["0","0","0"],"ub":["10","10","1"],"baseRows":[{"sense":"=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"invInCol":99,"nodes":[{"prodCol":0,"invOutCol":1,"binCol":2,"demand":"1","vubCap":"1","vubRHS":"0","inS":true,"coeffY":"1"}],"cutDem":"1","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"vub_struct_oob_binCol",
+				"out of bounds",
+				`{"op":"vub-check","numVars":2,"isInt":[true,false],"lb":["0","0"],"ub":["1","10"],"baseRows":[{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"rowIdx":0,"binCol":99,"targetCol":1,"effUB":"1","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"cover_oob_item_col",
+				"cover cert item",
+				`{"op":"cover-check","numVars":2,"isInt":[true,true],"lb":["0","0"],"ub":["1","1"],"baseRows":[{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1"}],"row":{"sense":"<=","terms":[{"col":0,"val":"1"}],"rhs":"1"},"sign":"1","items":[{"col":99,"weight":"1","comp":false,"inCover":true,"alpha":1}],"knapRHS":"0","scale":"1","cut":{"terms":[{"col":0,"val":"1"}],"rhs":"1"}}`,
+			},
+			{
+				"cmir_alg_short_lbI",
+				"integer dimension mismatch",
+				`{"op":"cmir-check","aI":["1","2"],"aC":["1"],"lbI":["0"],"ubI":["1","1"],"lbC":["0"],"ubC":["1"],"useLowerI":[true,true],"useLowerC":[true],"rhs":"3/2","delta":"1"}`,
+			},
+			{
+				"vub_alg_oob_targetIdx",
+				"out of bounds",
+				`{"op":"vub-check","a":["1","2"],"u":["5","5"],"cap":"10","rhsRow":"0","targetIdx":99,"effUB":"5","cutRHS":"0"}`,
+			},
+		}
+
+		var inBuf bytes.Buffer
+		for _, tc := range cases {
+			inBuf.WriteString(tc.line)
+			inBuf.WriteByte('\n')
+		}
+		cmd := exec.CommandContext(t.Context(), exe, "--jsonl")
+		cmd.Stdin = &inBuf
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("cuts-check --jsonl crashed on DoS/OOB stream: %v\nstderr:\n%s", err, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("cuts-check --jsonl emitted non-empty stderr on DoS/OOB stream:\n%s", stderr.String())
+		}
+		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		if len(lines) != len(cases) {
+			t.Fatalf("cuts-check --jsonl returned %d lines, want %d:\n%s", len(lines), len(cases), stdout.String())
+		}
+		type jsonlResp struct {
+			OK    bool   `json:"ok"`
+			Error string `json:"error"`
+		}
+		for i, tc := range cases {
+			var resp jsonlResp
+			if err := json.Unmarshal([]byte(lines[i]), &resp); err != nil {
+				t.Fatalf("%s: malformed JSONL response %q: %v", tc.name, lines[i], err)
+			}
+			if resp.OK {
+				t.Fatalf("%s: expected ok=false, got ok=true (%s)", tc.name, lines[i])
+			}
+			if !strings.Contains(resp.Error, tc.wantErr) {
+				t.Fatalf("%s: error %q missing substring %q", tc.name, resp.Error, tc.wantErr)
+			}
 		}
 	})
 }

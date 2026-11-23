@@ -28,18 +28,6 @@ type lpBridgeRowJSON struct {
 	Terms []lpBridgeTermJSON `json:"terms"`
 }
 
-type lpSafeZeroRowReqJSON struct {
-	Mode     string            `json:"mode"`
-	NumVars  int               `json:"numVars"`
-	NumRows  int               `json:"numRows"`
-	ObjConst fuzzRatJSON       `json:"objConst"`
-	Obj      []fuzzRatJSON     `json:"obj"`
-	LB       []*fuzzRatJSON    `json:"lb"`
-	UB       []*fuzzRatJSON    `json:"ub"`
-	Rows     []lpBridgeRowJSON `json:"rows"`
-	Y        []fuzzRatJSON     `json:"y"`
-}
-
 type lpFarkasReqJSON struct {
 	Mode     string            `json:"mode"`
 	NumVars  int               `json:"numVars"`
@@ -288,28 +276,6 @@ func encodeProblemHeaderForLPCheck(p *gb.CompiledProblem) (
 	return oc, obj, lb, ub, rows, nil
 }
 
-func buildZeroRowSafeBoundJSON(p *gb.CompiledProblem) ([]byte, error) {
-	if p == nil || p.NumConstraints() != 0 {
-		return nil, errors.New("buildZeroRowSafeBoundJSON requires 0-constraint problem")
-	}
-	oc, obj, lb, ub, rows, err := encodeProblemHeaderForLPCheck(p)
-	if err != nil {
-		return nil, err
-	}
-	req := lpSafeZeroRowReqJSON{
-		Mode:     "safe-bound",
-		NumVars:  p.NumVars(),
-		NumRows:  0,
-		ObjConst: oc,
-		Obj:      obj,
-		LB:       lb,
-		UB:       ub,
-		Rows:     rows,
-		Y:        []fuzzRatJSON{},
-	}
-	return json.Marshal(req)
-}
-
 func buildPhase1FarkasJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, error) {
 	if p == nil || p.NumConstraints() == 0 {
 		return nil, errors.New("Phase-I Farkas builder requires at least one row")
@@ -411,24 +377,6 @@ func buildExactFarkasCertJSON(tb testing.TB, p *gb.CompiledProblem, dualHint []f
 		}
 	}
 	return buildPhase1FarkasJSON(tb.Context(), p)
-}
-
-func hasExactBoundConflict(p *gb.CompiledProblem) bool {
-	if p == nil {
-		return false
-	}
-	loRat := new(big.Rat)
-	hiRat := new(big.Rat)
-	for j := range p.NumVars() {
-		lo, hi := p.VarBounds(j)
-		if math.IsInf(lo, -1) || math.IsInf(hi, 1) {
-			continue
-		}
-		if loRat.SetFloat64(lo) != nil && hiRat.SetFloat64(hi) != nil && loRat.Cmp(hiRat) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func zeroVarProblemFeasibleRat(p *gb.CompiledProblem) (bool, error) {
@@ -826,8 +774,6 @@ func checkFormalLPResult(
 		return nil
 	}
 
-	boundedDim := p.NumVars() <= 128 && p.NumConstraints() <= 128
-
 	switch res.Status {
 	case gb.StatusOptimal:
 		if err := checkLPPrimalAndDualKKT(label, p, res.Primal, res.Dual, p.NumConstraints() > 0); err != nil {
@@ -837,36 +783,17 @@ func checkFormalLPResult(
 		if math.Abs(evalObj-res.Objective) > 1e-5*max(1.0, math.Abs(res.Objective)) {
 			return fmt.Errorf("[%s] LP EvaluateObjective=%.8g != Objective=%.8g", label, evalObj, res.Objective)
 		}
-		var bnd *big.Rat
-		if p.NumConstraints() == 0 {
-			if !boundedDim {
-				return nil
-			}
-			payload, err := buildZeroRowSafeBoundJSON(p)
-			if err != nil {
-				return fmt.Errorf("[%s] buildZeroRowSafeBoundJSON: %w", label, err)
-			}
-			bnd, err = checkFormalLPJSONL(tb, payload)
-			if err != nil {
-				return fmt.Errorf("[%s] %w", label, err)
-			}
-		} else {
-			mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
-			if !ok {
-				if boundedDim {
-					return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusOptimal LP (vars=%d rows=%d)",
-						label, p.NumVars(), p.NumConstraints())
-				}
-				return nil
-			}
-			if mode != "safe-bound" {
-				return fmt.Errorf("[%s] expected safe-bound LP certificate, got mode=%q", label, mode)
-			}
-			var err error
-			bnd, err = checkFormalLPJSONL(tb, payload)
-			if err != nil {
-				return fmt.Errorf("[%s] %w", label, err)
-			}
+		mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
+		if !ok {
+			return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusOptimal LP (vars=%d rows=%d)",
+				label, p.NumVars(), p.NumConstraints())
+		}
+		if mode != "optimal" && mode != "safe-bound" {
+			return fmt.Errorf("[%s] expected optimal or safe-bound LP certificate, got mode=%q", label, mode)
+		}
+		bnd, err := checkFormalLPJSONL(tb, payload)
+		if err != nil {
+			return fmt.Errorf("[%s] %w", label, err)
 		}
 		if bnd == nil {
 			return fmt.Errorf("[%s] lp-check returned nil bound for StatusOptimal LP", label)
@@ -878,8 +805,8 @@ func checkFormalLPResult(
 		if tolRat := new(big.Rat).SetFloat64(1e-4 * max(1.0, linScale)); tolRat != nil {
 			limit := new(big.Rat).Add(evalMinRat, tolRat)
 			if bnd.Cmp(limit) > 0 {
-				return fmt.Errorf("[%s] safe-bound %s exceeds primal objective %s + tol",
-					label, bnd.RatString(), evalMinRat.RatString())
+				return fmt.Errorf("[%s] %s bound %s exceeds primal objective %s + tol",
+					label, mode, bnd.RatString(), evalMinRat.RatString())
 			}
 		}
 		if gapTolRat := lpDualGapTolRat(p, linScale, evalMinRat, bnd); gapTolRat != nil {
@@ -892,30 +819,24 @@ func checkFormalLPResult(
 		return nil
 
 	case gb.StatusInfeasible:
-		if p.NumConstraints() == 0 {
-			if !hasExactBoundConflict(p) {
-				return fmt.Errorf("[%s] 0-constraint LP without bound conflict declared StatusInfeasible", label)
-			}
-			return nil
-		}
 		mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
 		if !ok {
-			if lp != nil && res.Iterations > 0 && boundedDim {
+			if p.NumConstraints() == 0 {
+				return fmt.Errorf("[%s] 0-constraint LP without bound conflict declared StatusInfeasible", label)
+			}
+			if lp != nil && res.Iterations > 0 {
 				p1Pay, p1Err := buildPhase1FarkasJSON(tb.Context(), p)
 				if p1Err == nil {
 					mode, payload, ok = "farkas", p1Pay, true
 				}
 			}
 			if !ok {
-				if boundedDim {
-					return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusInfeasible LP (vars=%d rows=%d)",
-						label, p.NumVars(), p.NumConstraints())
-				}
-				return nil
+				return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusInfeasible LP (vars=%d rows=%d)",
+					label, p.NumVars(), p.NumConstraints())
 			}
 		}
-		if mode != "farkas" {
-			return fmt.Errorf("[%s] expected farkas LP certificate, got mode=%q", label, mode)
+		if mode != "farkas" && mode != "bound-conflict" {
+			return fmt.Errorf("[%s] expected farkas or bound-conflict LP certificate, got mode=%q", label, mode)
 		}
 		if _, err := checkFormalLPJSONL(tb, payload); err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
@@ -930,11 +851,8 @@ func checkFormalLPResult(
 		}
 		mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
 		if !ok {
-			if boundedDim {
-				return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusUnbounded LP (vars=%d rows=%d)",
-					label, p.NumVars(), p.NumConstraints())
-			}
-			return nil
+			return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusUnbounded LP (vars=%d rows=%d)",
+				label, p.NumVars(), p.NumConstraints())
 		}
 		if mode != "unbounded" && mode != "milp-unbounded" {
 			return fmt.Errorf("[%s] expected unbounded LP certificate, got mode=%q", label, mode)
@@ -983,11 +901,9 @@ func checkFormalPresolvedLPResult(
 		return nil
 	}
 
-	boundedDim := p.NumVars() <= 128 && p.NumConstraints() <= 128
-
 	switch resPre.Status {
 	case gb.StatusUnbounded:
-		if formalFuzzEnabled() && boundedDim {
+		if formalFuzzEnabled() {
 			uMode, uPayload, okU := gb.ExportUnboundedCheckPayload(p, nil, resPre.Values)
 			if !okU || (uMode != "unbounded" && uMode != "milp-unbounded") {
 				return fmt.Errorf("[%s] ExportUnboundedCheckPayload failed on presolved unbounded LP: ok=%v mode=%q",
@@ -1000,14 +916,18 @@ func checkFormalPresolvedLPResult(
 		return nil
 
 	case gb.StatusInfeasible:
-		if !formalFuzzEnabled() || !boundedDim {
+		if !formalFuzzEnabled() {
+			return nil
+		}
+		if mode, bcPayload, okBC := gb.ExportLPCheckPayload(p, nil, gb.LPResult{Status: gb.StatusInfeasible, Dual: resPre.Duals}); okBC &&
+			(mode == "bound-conflict" || mode == "farkas") {
+			if _, err := checkFormalLPJSONL(tb, bcPayload); err != nil {
+				return fmt.Errorf("[%s] %w", label, err)
+			}
 			return nil
 		}
 		if p.NumConstraints() == 0 {
-			if !hasExactBoundConflict(p) {
-				return fmt.Errorf("[%s] presolved 0-constraint LP without bound conflict declared StatusInfeasible", label)
-			}
-			return nil
+			return fmt.Errorf("[%s] presolved 0-constraint LP without bound conflict declared StatusInfeasible", label)
 		}
 		fPayload, err := buildExactFarkasCertJSON(tb, p, resPre.Duals)
 		if err != nil {
@@ -1019,7 +939,7 @@ func checkFormalPresolvedLPResult(
 		return nil
 
 	case gb.StatusOptimal:
-		reqDual := formalFuzzEnabled() && boundedDim && p.NumConstraints() > 0
+		reqDual := formalFuzzEnabled() && p.NumConstraints() > 0
 		if err := checkLPPrimalAndDualKKT(label, p, resPre.Values, resPre.Duals, reqDual); err != nil {
 			return err
 		}
@@ -1027,54 +947,48 @@ func checkFormalPresolvedLPResult(
 		if math.Abs(evalObj-resPre.Objective) > 1e-5*max(1.0, math.Abs(resPre.Objective)) {
 			return fmt.Errorf("[%s] presolved LP EvaluateObjective=%.8g != Objective=%.8g", label, evalObj, resPre.Objective)
 		}
-		if !formalFuzzEnabled() || !boundedDim {
+		if !formalFuzzEnabled() {
 			return nil
 		}
 
-		var bnd *big.Rat
-		if p.NumConstraints() == 0 {
-			payload, err := buildZeroRowSafeBoundJSON(p)
-			if err != nil {
-				return fmt.Errorf("[%s] buildZeroRowSafeBoundJSON: %w", label, err)
-			}
-			bnd, err = checkFormalLPJSONL(tb, payload)
-			if err != nil {
-				return fmt.Errorf("[%s] %w", label, err)
-			}
-		} else {
-			lpRes := gb.LPResult{
-				Status:    gb.StatusOptimal,
-				Objective: evalObj,
-				Primal:    resPre.Values,
-				Dual:      resPre.Duals,
-			}
-			mode, payload, ok := gb.ExportLPCheckPayload(p, nil, lpRes)
-			if !ok {
-				// Non-dyadic free/semi-bounded duals already passed KKT checks above; extract exact
-				// rational basis duals on original p and check the kernel safe bound.
-				ws := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
-				defer gb.ReleaseWorkspace(ws)
-				auxLP := gb.NewLPSolver(p, ws)
-				auxRes := auxLP.Solve()
-				if auxRes.Status != gb.StatusOptimal {
-					return fmt.Errorf("[%s] presolved StatusOptimal LP solved to %v on original model", label, auxRes.Status)
-				}
-				mode, payload, ok = gb.ExportLPCheckPayload(p, auxLP, auxRes)
-				if !ok {
-					return fmt.Errorf("[%s] failed to export exact safe-bound certificate for presolved LP", label)
-				}
-			}
-			if mode != "safe-bound" {
-				return fmt.Errorf("[%s] expected mode safe-bound for presolved LP, got %q", label, mode)
-			}
-			var err error
-			bnd, err = checkFormalLPJSONL(tb, payload)
-			if err != nil {
-				return fmt.Errorf("[%s] %w", label, err)
+		if lpPrePay, okPre := gb.ExportLPPresolveCheckPayload(p); okPre {
+			if _, err := checkFormalLPJSONL(tb, lpPrePay); err != nil {
+				return fmt.Errorf("[%s] lp-presolve chain rejected: %w", label, err)
 			}
 		}
+
+		lpRes := gb.LPResult{
+			Status:    gb.StatusOptimal,
+			Objective: evalObj,
+			Primal:    resPre.Values,
+			Dual:      resPre.Duals,
+		}
+		mode, payload, ok := gb.ExportLPCheckPayload(p, nil, lpRes)
+		if !ok || mode != "optimal" {
+			ws := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
+			defer gb.ReleaseWorkspace(ws)
+			auxLP := gb.NewLPSolver(p, ws)
+			auxRes := auxLP.Solve()
+			if auxRes.Status != gb.StatusOptimal {
+				return fmt.Errorf("[%s] presolved StatusOptimal LP solved to %v on original model", label, auxRes.Status)
+			}
+			auxMode, auxPayload, okAux := gb.ExportLPCheckPayload(p, auxLP, auxRes)
+			if okAux {
+				mode, payload, ok = auxMode, auxPayload, true
+			}
+		}
+		if !ok {
+			return fmt.Errorf("[%s] failed to export certificate for presolved LP", label)
+		}
+		if mode != "optimal" && mode != "safe-bound" {
+			return fmt.Errorf("[%s] expected mode optimal or safe-bound for presolved LP, got %q", label, mode)
+		}
+		bnd, err := checkFormalLPJSONL(tb, payload)
+		if err != nil {
+			return fmt.Errorf("[%s] %w", label, err)
+		}
 		if bnd == nil {
-			return fmt.Errorf("[%s] lp-check returned nil safe bound", label)
+			return fmt.Errorf("[%s] lp-check returned nil bound", label)
 		}
 		evalMinRat, linScale, okRat := exactEvalMinObjRat(p, resPre.Values)
 		if !okRat {
@@ -1488,11 +1402,8 @@ func evalSerializedVIPRIncumbentMinObj(p *gb.CompiledProblem, rawVIPR []byte) (*
 
 func checkFormalUnboundedMILP(tb testing.TB, label string, p *gb.CompiledProblem, values []float64) error {
 	tb.Helper()
-	if p.NumVars() == 0 || p.NumVars() > 128 || p.NumConstraints() > 128 {
-		if p.NumVars() == 0 {
-			return fmt.Errorf("[%s] 0-var problem cannot be StatusUnbounded", label)
-		}
-		return nil
+	if p.NumVars() == 0 {
+		return fmt.Errorf("[%s] 0-var problem cannot be StatusUnbounded", label)
 	}
 	for j, v := range values {
 		if math.IsNaN(v) {
@@ -1535,7 +1446,7 @@ func checkFormalVIPRResult(
 		return checkFormalUnboundedMILP(tb, label, p, res.Values)
 	}
 
-	boundedDim := p.NumVars() > 0 && p.NumVars() <= 128 && p.NumConstraints() <= 128
+	boundedDim := p.NumVars() > 0 && p.NumVars() <= 512 && p.NumConstraints() <= 512
 	if tr == nil || !tr.HasCertificate() {
 		if boundedDim && (res.Status == gb.StatusOptimal || res.Status == gb.StatusInfeasible) {
 			return fmt.Errorf("[%s] status=%v missing VIPRTrace certificate (vars=%d rows=%d)",

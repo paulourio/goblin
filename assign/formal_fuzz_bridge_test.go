@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -45,55 +46,17 @@ func (r formalAssignRat) bigRat() (*big.Rat, error) {
 	return new(big.Rat).SetFrac(n, d), nil
 }
 
-func ratToFormalAssignRat(r *big.Rat) formalAssignRat {
-	if r == nil {
-		return formalAssignRat{Num: "0", Den: "1"}
-	}
-	return formalAssignRat{Num: r.Num().String(), Den: r.Denom().String()}
-}
-
 type formalAssignOracleResp struct {
 	OK     bool             `json:"ok"`
 	Detail string           `json:"detail,omitzero"`
+	Mode   string           `json:"mode,omitzero"`
+	Tol    *formalAssignRat `json:"tol,omitzero"`
 	Error  string           `json:"error,omitzero"`
 	Bound  *formalAssignRat `json:"bound,omitzero"`
 }
 
 type lsapBitsVal struct {
 	Bits uint64 `json:"bits"`
-}
-
-type lsapBitsCertReq struct {
-	Rows      int             `json:"rows"`
-	Cols      int             `json:"cols"`
-	Sense     string          `json:"sense"`
-	Mode      string          `json:"mode"`
-	Cost      [][]lsapBitsVal `json:"cost"`
-	RowInd    []int           `json:"row_ind"`
-	ColInd    []int           `json:"col_ind"`
-	Objective lsapBitsVal     `json:"objective"`
-	U         []lsapBitsVal   `json:"u"`
-	V         []lsapBitsVal   `json:"v"`
-	Tol       *lsapBitsVal    `json:"tol,omitzero"`
-}
-
-type lsapHybridCell struct {
-	Bits *uint64 `json:"bits,omitzero"`
-	Num  string  `json:"num,omitzero"`
-	Den  string  `json:"den,omitzero"`
-}
-
-type lsapExactRatCertReq struct {
-	Rows      int                `json:"rows"`
-	Cols      int                `json:"cols"`
-	Sense     string             `json:"sense"`
-	Mode      string             `json:"mode"`
-	Cost      [][]lsapHybridCell `json:"cost"`
-	RowInd    []int              `json:"row_ind"`
-	ColInd    []int              `json:"col_ind"`
-	Objective formalAssignRat    `json:"objective"`
-	U         []formalAssignRat  `json:"u"`
-	V         []formalAssignRat  `json:"v"`
 }
 
 type hallWitness struct {
@@ -325,62 +288,165 @@ func formalAssignOracleCall(tb testing.TB, reqJSON []byte) (ok bool, boundRat [2
 	return true, boundRat, resp.Detail
 }
 
-// buildFormalLSAPJSON encodes a finite flat LSAP instance and Result using exact IEEE-754 bit patterns.
-func buildFormalLSAPJSON(rows, cols int, flatCost []float64, sense assign.Sense, res assign.Result, mode string, tol float64) ([]byte, bool) {
-	if len(flatCost) != rows*cols || math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) {
-		return nil, false
+func appendCompactBitsCostMatrix(buf []byte, rows, cols int, flatCost []float64, sense assign.Sense) ([]byte, error) {
+	if len(flatCost) < rows*cols {
+		return nil, fmt.Errorf("cost len %d < %d*%d", len(flatCost), rows, cols)
 	}
-	costBits := make([][]lsapBitsVal, rows)
+	buf = append(buf, `"cost_encoding":"bits","cost":[`...)
 	for r := range rows {
-		row := make([]lsapBitsVal, cols)
+		if r > 0 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, '[')
 		base := r * cols
 		for c := range cols {
-			v := flatCost[base+c]
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				return nil, false
+			if c > 0 {
+				buf = append(buf, ',')
 			}
-			row[c] = lsapBitsVal{Bits: math.Float64bits(v)}
+			v := flatCost[base+c]
+			if math.IsNaN(v) {
+				return nil, fmt.Errorf("NaN cost at (%d,%d)", r, c)
+			}
+			if math.IsInf(v, 0) {
+				if (sense == assign.Minimize && v < 0) || (sense == assign.Maximize && v > 0) {
+					return nil, fmt.Errorf("wrong-sign infinity %v at (%d,%d) for sense %s", v, r, c, sense)
+				}
+				buf = append(buf, "null"...)
+				continue
+			}
+			buf = strconv.AppendUint(buf, math.Float64bits(v), 10)
 		}
-		costBits[r] = row
+		buf = append(buf, ']')
 	}
-	uBits := make([]lsapBitsVal, len(res.U))
-	for i, v := range res.U {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, false
+	buf = append(buf, ']')
+	return buf, nil
+}
+
+func appendCompactBitsVec(buf []byte, vals []float64) ([]byte, error) {
+	buf = append(buf, '[')
+	for i, v := range vals {
+		if i > 0 {
+			buf = append(buf, ',')
 		}
-		uBits[i] = lsapBitsVal{Bits: math.Float64bits(v)}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("non-finite dual at %d: %v", i, v)
+		}
+		buf = strconv.AppendUint(buf, math.Float64bits(v), 10)
 	}
-	vBits := make([]lsapBitsVal, len(res.V))
-	for j, v := range res.V {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, false
+	buf = append(buf, ']')
+	return buf, nil
+}
+
+func appendIntVec(buf []byte, vals []int) []byte {
+	buf = append(buf, '[')
+	for i, v := range vals {
+		if i > 0 {
+			buf = append(buf, ',')
 		}
-		vBits[j] = lsapBitsVal{Bits: math.Float64bits(v)}
+		buf = strconv.AppendInt(buf, int64(v), 10)
+	}
+	buf = append(buf, ']')
+	return buf
+}
+
+func appendRatObj(buf []byte, r *big.Rat) []byte {
+	if r == nil {
+		return append(buf, `{"num":"0","den":"1"}`...)
+	}
+	buf = append(buf, `{"num":"`...)
+	buf = append(buf, r.Num().String()...)
+	buf = append(buf, `","den":"`...)
+	buf = append(buf, r.Denom().String()...)
+	buf = append(buf, `"}`...)
+	return buf
+}
+
+func appendRatVec(buf []byte, vals []*big.Rat) []byte {
+	buf = append(buf, '[')
+	for i, r := range vals {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendRatObj(buf, r)
+	}
+	buf = append(buf, ']')
+	return buf
+}
+
+func buildCompactFormalLSAPJSON(
+	rows, cols int,
+	flatCost []float64,
+	sense assign.Sense,
+	res assign.Result,
+	mode string,
+	tol float64,
+	includeObjective bool,
+) ([]byte, error) {
+	if rows < 0 || cols < 0 || len(flatCost) < rows*cols {
+		return nil, fmt.Errorf("invalid matrix dimensions %dx%d (len=%d)", rows, cols, len(flatCost))
+	}
+	if includeObjective && (math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0)) {
+		return nil, fmt.Errorf("non-finite objective %v", res.Objective)
+	}
+	if mode == "safe" && (math.IsNaN(tol) || math.IsInf(tol, 0) || tol < 0) {
+		return nil, fmt.Errorf("invalid safe tol %v", tol)
 	}
 	senseStr := "min"
 	if sense == assign.Maximize {
 		senseStr = "max"
 	}
-	req := lsapBitsCertReq{
-		Rows:      rows,
-		Cols:      cols,
-		Sense:     senseStr,
-		Mode:      mode,
-		Cost:      costBits,
-		RowInd:    res.RowInd,
-		ColInd:    res.ColInd,
-		Objective: lsapBitsVal{Bits: math.Float64bits(res.Objective)},
-		U:         uBits,
-		V:         vBits,
+	estSize := rows*cols*20 + (rows+cols)*32 + 256
+	buf := make([]byte, 0, estSize)
+	buf = append(buf, `{"rows":`...)
+	buf = strconv.AppendInt(buf, int64(rows), 10)
+	buf = append(buf, `,"cols":`...)
+	buf = strconv.AppendInt(buf, int64(cols), 10)
+	buf = append(buf, `,"sense":"`...)
+	buf = append(buf, senseStr...)
+	buf = append(buf, `","mode":"`...)
+	buf = append(buf, mode...)
+	buf = append(buf, `","dual_encoding":"bits",`...)
+	var err error
+	buf, err = appendCompactBitsCostMatrix(buf, rows, cols, flatCost, sense)
+	if err != nil {
+		return nil, err
+	}
+	buf = append(buf, `,"row_ind":`...)
+	buf = appendIntVec(buf, res.RowInd)
+	buf = append(buf, `,"col_ind":`...)
+	buf = appendIntVec(buf, res.ColInd)
+	if includeObjective {
+		buf = append(buf, `,"objective":{"bits":`...)
+		buf = strconv.AppendUint(buf, math.Float64bits(res.Objective), 10)
+		buf = append(buf, '}')
+	}
+	buf = append(buf, `,"u":`...)
+	buf, err = appendCompactBitsVec(buf, res.U)
+	if err != nil {
+		return nil, err
+	}
+	buf = append(buf, `,"v":`...)
+	buf, err = appendCompactBitsVec(buf, res.V)
+	if err != nil {
+		return nil, err
 	}
 	if mode == "safe" {
-		if math.IsNaN(tol) || math.IsInf(tol, 0) || tol < 0 {
-			return nil, false
-		}
-		tVal := lsapBitsVal{Bits: math.Float64bits(tol)}
-		req.Tol = &tVal
+		buf = append(buf, `,"tol":{"bits":`...)
+		buf = strconv.AppendUint(buf, math.Float64bits(tol), 10)
+		buf = append(buf, '}')
 	}
-	raw, err := json.Marshal(req)
+	buf = append(buf, '}')
+	return buf, nil
+}
+
+// buildFormalLSAPJSON streams a compact bit-exact LSAP certificate payload for lsap-check.
+// Finite cells encode as raw IEEE-754 uint64 bit patterns under cost_encoding="bits";
+// forbidden cells (+Inf for Minimize, -Inf for Maximize) encode natively as null.
+func buildFormalLSAPJSON(rows, cols int, flatCost []float64, sense assign.Sense, res assign.Result, mode string, tol float64) ([]byte, bool) {
+	if len(flatCost) != rows*cols {
+		return nil, false
+	}
+	raw, err := buildCompactFormalLSAPJSON(rows, cols, flatCost, sense, res, mode, tol, true)
 	if err != nil {
 		return nil, false
 	}
@@ -419,89 +485,95 @@ func ceilRatToFloat64(r *big.Rat) float64 {
 	return f
 }
 
-// buildExactBigMLSAPJSON encodes a finite or forbidden-edge LSAP instance for lsap-check --jsonl
-// in exact mode (tol = 0). Finite entries retain exact IEEE-754 bit patterns; forbidden edges
-// receive a provably exact big-M threshold (encoded as float64 bits when lossless, or exact
-// rational strings when exceeding IEEE-754 significand/exponent range).
-func buildExactBigMLSAPJSON(
+// buildExactRatNativeLSAPJSON streams a compact bit-exact LSAP exact-mode certificate with
+// native null encoding for forbidden +/-Inf cells and arbitrary-precision rational duals.
+func buildExactRatNativeLSAPJSON(
 	rows, cols int,
 	flatCost []float64,
 	sense assign.Sense,
 	rowInd, colInd []int,
 	gotOrigRat *big.Rat,
 	uOrigRat, vOrigRat []*big.Rat,
-	bigMMinRat *big.Rat,
 ) ([]byte, error) {
-	var bigMOrigCell lsapHybridCell
-	if bigMMinRat != nil {
-		origMRat := new(big.Rat).Set(bigMMinRat)
-		if sense == assign.Maximize {
-			origMRat.Neg(origMRat)
-		}
-		if mf, exact := origMRat.Float64(); exact && !math.IsInf(mf, 0) && !math.IsNaN(mf) {
-			b := math.Float64bits(mf)
-			bigMOrigCell = lsapHybridCell{Bits: &b}
-		} else {
-			fr := ratToFormalAssignRat(origMRat)
-			bigMOrigCell = lsapHybridCell{Num: fr.Num, Den: fr.Den}
-		}
-	}
-
-	costCells := make([][]lsapHybridCell, rows)
-	for r := range rows {
-		row := make([]lsapHybridCell, cols)
-		base := r * cols
-		for c := range cols {
-			v := flatCost[base+c]
-			if math.IsInf(v, 0) {
-				if bigMMinRat == nil {
-					return nil, fmt.Errorf("unexpected Inf at (%d,%d) without bigM", r, c)
-				}
-				row[c] = bigMOrigCell
-				continue
-			}
-			b := math.Float64bits(v)
-			row[c] = lsapHybridCell{Bits: &b}
-		}
-		costCells[r] = row
-	}
-
-	uPay := make([]formalAssignRat, len(uOrigRat))
-	for i, r := range uOrigRat {
-		uPay[i] = ratToFormalAssignRat(r)
-	}
-	vPay := make([]formalAssignRat, len(vOrigRat))
-	for j, r := range vOrigRat {
-		vPay[j] = ratToFormalAssignRat(r)
-	}
 	senseStr := "min"
 	if sense == assign.Maximize {
 		senseStr = "max"
 	}
-	return json.Marshal(lsapExactRatCertReq{
-		Rows:      rows,
-		Cols:      cols,
-		Sense:     senseStr,
-		Mode:      "exact",
-		Cost:      costCells,
-		RowInd:    rowInd,
-		ColInd:    colInd,
-		Objective: ratToFormalAssignRat(gotOrigRat),
-		U:         uPay,
-		V:         vPay,
-	})
+	estSize := rows*cols*20 + (rows+cols)*64 + 256
+	buf := make([]byte, 0, estSize)
+	buf = append(buf, `{"rows":`...)
+	buf = strconv.AppendInt(buf, int64(rows), 10)
+	buf = append(buf, `,"cols":`...)
+	buf = strconv.AppendInt(buf, int64(cols), 10)
+	buf = append(buf, `,"sense":"`...)
+	buf = append(buf, senseStr...)
+	buf = append(buf, `","mode":"exact",`...)
+	var err error
+	buf, err = appendCompactBitsCostMatrix(buf, rows, cols, flatCost, sense)
+	if err != nil {
+		return nil, err
+	}
+	buf = append(buf, `,"row_ind":`...)
+	buf = appendIntVec(buf, rowInd)
+	buf = append(buf, `,"col_ind":`...)
+	buf = appendIntVec(buf, colInd)
+	buf = append(buf, `,"objective":`...)
+	buf = appendRatObj(buf, gotOrigRat)
+	buf = append(buf, `,"u":`...)
+	buf = appendRatVec(buf, uOrigRat)
+	buf = append(buf, `,"v":`...)
+	buf = appendRatVec(buf, vOrigRat)
+	buf = append(buf, '}')
+	return buf, nil
+}
+
+// buildHallLSAPJSON streams a compact Hall infeasibility certificate for lsap-check mode="hall".
+func buildHallLSAPJSON(
+	rows, cols int,
+	flatCost []float64,
+	sense assign.Sense,
+	hw hallWitness,
+) ([]byte, error) {
+	senseStr := "min"
+	if sense == assign.Maximize {
+		senseStr = "max"
+	}
+	sideStr := "rows"
+	if !hw.RowSide {
+		sideStr = "cols"
+	}
+	estSize := rows*cols*8 + len(hw.Subset)*8 + 128
+	buf := make([]byte, 0, estSize)
+	buf = append(buf, `{"rows":`...)
+	buf = strconv.AppendInt(buf, int64(rows), 10)
+	buf = append(buf, `,"cols":`...)
+	buf = strconv.AppendInt(buf, int64(cols), 10)
+	buf = append(buf, `,"sense":"`...)
+	buf = append(buf, senseStr...)
+	buf = append(buf, `","mode":"hall","side":"`...)
+	buf = append(buf, sideStr...)
+	buf = append(buf, `",`...)
+	var err error
+	buf, err = appendCompactBitsCostMatrix(buf, rows, cols, flatCost, sense)
+	if err != nil {
+		return nil, err
+	}
+	buf = append(buf, `,"subset":`...)
+	buf = appendIntVec(buf, hw.Subset)
+	buf = append(buf, '}')
+	return buf, nil
 }
 
 // checkFormalAssignResult verifies an LSAP solution with zero escape hatches across both
-// finite and +Inf/-Inf forbidden-edge matrices:
+// finite and +Inf/-Inf forbidden-edge matrices of any size:
 //  1. Validates bijection, finite matched edges, objective rounding, and tight ULP-proportional
 //     dual feasibility and complementary slackness on the solver's returned (U, V) (0-tolerance
 //     when exactMode is true).
 //  2. Proves 0-ULP global optimality over Q via Bellman-Ford negative-cycle detection and
-//     exact rational potential recovery on the finite-edge residual graph.
-//  3. Verifies the certificate via lsap-check --jsonl: mode="exact" (tol=0) whenever duals
-//     are exact dyadic/integer or via exact big-M / polished potentials, plus mode="safe"
-//     with tight ULP-proportional tolerance on finite matrices with fractional ULP drift.
+//     exact rational potential recovery on the finite-edge residual graph when needed.
+//  3. Verifies the certificate via lsap-check --jsonl using native null forbidden-edge encoding
+//     and compact bit-pattern streaming: mode="exact" (tol=0) on solver duals when exact, or
+//     both mode="safe" on the solver's Result.V/Result.U and mode="exact" on recovered exact duals.
 func checkFormalAssignResult(
 	tb testing.TB,
 	label string,
@@ -537,7 +609,6 @@ func checkFormalAssignResult(
 		return fmt.Errorf("[%s] NaN objective", label)
 	}
 
-	hasForbidden := false
 	maxFiniteAbs := 0.0
 	for idx := range rows * cols {
 		v := cost[idx]
@@ -548,7 +619,6 @@ func checkFormalAssignResult(
 			if (sense == assign.Minimize && v < 0) || (sense == assign.Maximize && v > 0) {
 				return fmt.Errorf("[%s] unbounded infinity %v for sense %s at index %d", label, v, sense, idx)
 			}
-			hasForbidden = true
 		} else {
 			maxFiniteAbs = max(maxFiniteAbs, math.Abs(v))
 		}
@@ -678,10 +748,8 @@ func checkFormalAssignResult(
 		}
 	}
 
-	finiteCols := make([][]int, m)
-	finiteCRat := make([][]*big.Rat, m)
 	matchedCost := make([]*big.Rat, m)
-	maxAbsCRat := new(big.Rat)
+	cRat := new(big.Rat)
 	sumRat := new(big.Rat)
 	diffRat := new(big.Rat)
 	var tightRowTolSum float64
@@ -691,8 +759,6 @@ func checkFormalAssignResult(
 
 	for i := range m {
 		rowMaxScale := math.Abs(rawUNorm[i])
-		fCols := make([]int, 0, n)
-		fVals := make([]*big.Rat, 0, n)
 		for j := range n {
 			var origV float64
 			if !transposed {
@@ -707,14 +773,9 @@ func checkFormalAssignResult(
 			if sense == assign.Maximize {
 				normV = -origV
 			}
-			cRat := new(big.Rat).SetFloat64(normV)
-			if absC := new(big.Rat).Abs(cRat); absC.Cmp(maxAbsCRat) > 0 {
-				maxAbsCRat.Set(absC)
-			}
-			fCols = append(fCols, j)
-			fVals = append(fVals, cRat)
+			cRat.SetFloat64(normV)
 			if j == pNorm[i] {
-				matchedCost[i] = cRat
+				matchedCost[i] = new(big.Rat).Set(cRat)
 			}
 
 			edgeScale := max(math.Abs(normV), max(math.Abs(rawUNorm[i]), math.Abs(rawVNorm[j])))
@@ -756,35 +817,55 @@ func checkFormalAssignResult(
 		if matchedCost[i] == nil {
 			return fmt.Errorf("[%s] missing matched finite edge for normalized row %d", label, i)
 		}
-		finiteCols[i] = fCols
-		finiteCRat[i] = fVals
 		tightRowTolSum += max(8.0*math.SmallestNonzeroFloat64, dimF*64.0*assignULPStep(rowMaxScale))
 	}
 
-	uExact := uSolverRat
-	vExact := vSolverRat
-	if !solverExact {
-		var bfErr error
-		uExact, vExact, bfErr = recoverExactRatPotentialsBellmanFord(label, m, n, pNorm, matchedN, matchedCost, finiteCols, finiteCRat, vSolverRat)
-		if bfErr != nil {
-			return bfErr
+	// Verify via lsap-check --jsonl with zero escape hatches (no size cap, native null forbidden cells).
+	if solverExact {
+		raw, rawErr := buildCompactFormalLSAPJSON(rows, cols, cost, sense, res, "exact", 0, !math.IsInf(res.Objective, 0))
+		if rawErr != nil {
+			return fmt.Errorf("[%s] buildCompactFormalLSAPJSON exact failed: %w", label, rawErr)
 		}
-	}
-
-	if rows*cols > 4096 {
-		return nil
-	}
-
-	// Verify via lsap-check --jsonl with zero escape hatches.
-	if !hasForbidden && solverExact {
-		raw, ok := buildFormalLSAPJSON(rows, cols, cost, sense, res, "exact", 0)
-		if !ok {
-			return fmt.Errorf("[%s] buildFormalLSAPJSON exact failed on finite matrix", label)
+		resp, callErr := callFormalAssignJSONL(tb, raw)
+		if callErr != nil {
+			return fmt.Errorf("[%s] lsap-check --jsonl exact call failed: %w", label, callErr)
 		}
-		if okCall, _, detail := formalAssignOracleCall(tb, raw); !okCall {
-			return fmt.Errorf("[%s] lsap-check --jsonl exact rejected: %s", label, detail)
+		if !resp.OK || resp.Mode != "exact" {
+			return fmt.Errorf("[%s] lsap-check --jsonl exact rejected (resp=%+v)", label, resp)
 		}
 		return nil
+	}
+
+	// Recover exact rational potentials on the finite-edge residual graph for exact verification.
+	finiteCols := make([][]int, m)
+	finiteCRat := make([][]*big.Rat, m)
+	for i := range m {
+		fCols := make([]int, 0, n)
+		fVals := make([]*big.Rat, 0, n)
+		for j := range n {
+			var origV float64
+			if !transposed {
+				origV = cost[i*cols+j]
+			} else {
+				origV = cost[j*cols+i]
+			}
+			if math.IsInf(origV, 0) {
+				continue
+			}
+			normV := origV
+			if sense == assign.Maximize {
+				normV = -origV
+			}
+			fCols = append(fCols, j)
+			fVals = append(fVals, new(big.Rat).SetFloat64(normV))
+		}
+		finiteCols[i] = fCols
+		finiteCRat[i] = fVals
+	}
+
+	uExact, vExact, bfErr := recoverExactRatPotentialsBellmanFord(label, m, n, pNorm, matchedN, matchedCost, finiteCols, finiteCRat, vSolverRat)
+	if bfErr != nil {
+		return bfErr
 	}
 
 	var uOrigExact, vOrigExact []*big.Rat
@@ -794,101 +875,72 @@ func checkFormalAssignResult(
 		uOrigExact, vOrigExact = vExact, uExact
 	}
 
-	if !hasForbidden {
-		safeTol := max(tightRowTolSum, max(objDiffFloat, float64(m)*compSlackGlobalTol))
-		if math.IsInf(safeTol, 0) {
-			safeTol = math.MaxFloat64
-		}
-		// In safe mode, lsap-check enforces v <= 0 strictly when m < n; clamp positive ULP dust to 0.
-		safeRes := res
-		if m < n {
-			if !transposed {
-				vc := make([]float64, len(res.V))
-				copy(vc, res.V)
-				for j, val := range vc {
-					if val > 0 {
-						vc[j] = 0
-					}
+	// 1. Check the solver's own Result.V (or Result.U when transposed) in lsap-check mode="safe"
+	// on both finite and forbidden-edge matrices.
+	safeTol := max(tightRowTolSum, float64(m)*compSlackGlobalTol) + objDiffFloat
+	if math.IsInf(safeTol, 0) {
+		safeTol = math.MaxFloat64
+	}
+	safeRes := res
+	if m < n {
+		if !transposed {
+			vc := make([]float64, len(res.V))
+			copy(vc, res.V)
+			for j, val := range vc {
+				if val > 0 {
+					vc[j] = 0
 				}
-				safeRes.V = vc
-			} else {
-				uc := make([]float64, len(res.U))
-				copy(uc, res.U)
-				for i, val := range uc {
-					if val > 0 {
-						uc[i] = 0
-					}
-				}
-				safeRes.U = uc
 			}
-		}
-		var rawSafe []byte
-		var okSafe bool
-		if math.IsInf(res.Objective, 0) {
-			rawSafe, okSafe = buildFormalLSAPNoObjJSON(rows, cols, cost, sense, safeRes, safeTol)
+			safeRes.V = vc
 		} else {
-			rawSafe, okSafe = buildFormalLSAPJSON(rows, cols, cost, sense, safeRes, "safe", safeTol)
-		}
-		if !okSafe {
-			return fmt.Errorf("[%s] failed to encode safe LSAP payload (tol=%g)", label, safeTol)
-		}
-		okCall, bndPair, detail := formalAssignOracleCall(tb, rawSafe)
-		if !okCall {
-			return fmt.Errorf("[%s] lsap-check --jsonl safe (tol=%g) rejected: %s", label, safeTol, detail)
-		}
-		if bndPair[0] != "" && bndPair[1] != "" {
-			bndRat, bErr := (formalAssignRat{Num: bndPair[0], Den: bndPair[1]}).bigRat()
-			if bErr != nil {
-				return fmt.Errorf("[%s] invalid safe bound %v: %w", label, bndPair, bErr)
+			uc := make([]float64, len(res.U))
+			copy(uc, res.U)
+			for i, val := range uc {
+				if val > 0 {
+					uc[i] = 0
+				}
 			}
-			if sense == assign.Minimize && bndRat.Cmp(gotOrigRat) > 0 {
-				return fmt.Errorf("[%s] safe lower bound %s > exact primal %s",
-					label, bndRat.RatString(), gotOrigRat.RatString())
-			}
-			if sense == assign.Maximize && bndRat.Cmp(gotOrigRat) < 0 {
-				return fmt.Errorf("[%s] safe upper bound %s < exact primal %s",
-					label, bndRat.RatString(), gotOrigRat.RatString())
-			}
+			safeRes.U = uc
 		}
+	}
+	rawSafe, errSafe := buildCompactFormalLSAPJSON(rows, cols, cost, sense, safeRes, "safe", safeTol, !math.IsInf(res.Objective, 0))
+	if errSafe != nil {
+		return fmt.Errorf("[%s] failed to encode safe LSAP payload (tol=%g): %w", label, safeTol, errSafe)
+	}
+	respSafe, callSafeErr := callFormalAssignJSONL(tb, rawSafe)
+	if callSafeErr != nil {
+		return fmt.Errorf("[%s] lsap-check --jsonl safe (tol=%g) call failed: %w", label, safeTol, callSafeErr)
+	}
+	if !respSafe.OK || respSafe.Mode != "safe" {
+		return fmt.Errorf("[%s] lsap-check --jsonl safe (tol=%g) rejected (resp=%+v)", label, safeTol, respSafe)
+	}
+	if respSafe.Bound != nil {
+		bndRat, bErr := respSafe.Bound.bigRat()
+		if bErr != nil {
+			return fmt.Errorf("[%s] invalid safe bound %+v: %w", label, respSafe.Bound, bErr)
+		}
+		if sense == assign.Minimize && bndRat.Cmp(gotOrigRat) > 0 {
+			return fmt.Errorf("[%s] safe lower bound %s > exact primal %s",
+				label, bndRat.RatString(), gotOrigRat.RatString())
+		}
+		if sense == assign.Maximize && bndRat.Cmp(gotOrigRat) < 0 {
+			return fmt.Errorf("[%s] safe upper bound %s < exact primal %s",
+				label, bndRat.RatString(), gotOrigRat.RatString())
+		}
+	}
 
-		// Also verify exact-polished potentials in mode="exact" (tol=0) on the original bit-exact matrix.
-		rawExactPol, errPol := buildExactBigMLSAPJSON(rows, cols, cost, sense, res.RowInd, res.ColInd, gotOrigRat, uOrigExact, vOrigExact, nil)
-		if errPol != nil {
-			return fmt.Errorf("[%s] buildExactBigMLSAPJSON finite failed: %w", label, errPol)
-		}
-		if okEx, _, detEx := formalAssignOracleCall(tb, rawExactPol); !okEx {
-			return fmt.Errorf("[%s] lsap-check --jsonl exact (polished) rejected: %s", label, detEx)
-		}
-		return nil
+	// 2. Also verify Bellman-Ford exact rational potentials in mode="exact" (tol=0) on the
+	// native bit-exact matrix (with null for forbidden cells, no big-M substitution).
+	rawExactPol, errPol := buildExactRatNativeLSAPJSON(rows, cols, cost, sense, res.RowInd, res.ColInd, gotOrigRat, uOrigExact, vOrigExact)
+	if errPol != nil {
+		return fmt.Errorf("[%s] buildExactRatNativeLSAPJSON failed: %w", label, errPol)
 	}
-
-	// Forbidden-edge matrix: construct provably exact rational big-M > (2m+2)*max(|C|, |u*|, |v*|) + 1
-	// and verify mode="exact" (tol=0) in lsap-check --jsonl.
-	maxDualRat := new(big.Rat)
-	absTmp := new(big.Rat)
-	for _, u := range uExact {
-		if absTmp.Abs(u).Cmp(maxDualRat) > 0 {
-			maxDualRat.Set(absTmp)
-		}
+	respEx, callExErr := callFormalAssignJSONL(tb, rawExactPol)
+	if callExErr != nil {
+		return fmt.Errorf("[%s] lsap-check --jsonl exact (polished) call failed: %w", label, callExErr)
 	}
-	for _, v := range vExact {
-		if absTmp.Abs(v).Cmp(maxDualRat) > 0 {
-			maxDualRat.Set(absTmp)
-		}
-	}
-	scaleBase := new(big.Rat).Set(maxAbsCRat)
-	if maxDualRat.Cmp(scaleBase) > 0 {
-		scaleBase.Set(maxDualRat)
-	}
-	bigMMinRat := new(big.Rat).Mul(big.NewRat(int64(2*m+4), 1), scaleBase)
-	bigMMinRat.Add(bigMMinRat, big.NewRat(1, 1))
-
-	rawBigM, errM := buildExactBigMLSAPJSON(rows, cols, cost, sense, res.RowInd, res.ColInd, gotOrigRat, uOrigExact, vOrigExact, bigMMinRat)
-	if errM != nil {
-		return fmt.Errorf("[%s] buildExactBigMLSAPJSON big-M failed: %w", label, errM)
-	}
-	if okM, _, detM := formalAssignOracleCall(tb, rawBigM); !okM {
-		return fmt.Errorf("[%s] lsap-check --jsonl exact big-M rejected: %s", label, detM)
+	if !respEx.OK || respEx.Mode != "exact" {
+		return fmt.Errorf("[%s] lsap-check --jsonl exact (polished) rejected (resp=%+v)", label, respEx)
 	}
 	return nil
 }
@@ -1008,9 +1060,9 @@ func recoverExactRatPotentialsBellmanFord(
 	return uExact, vExact, nil
 }
 
-// extractAndVerifyHallWitness computes a maximum finite bipartite matching and extracts
-// an explicit Hall's Marriage Theorem witness S on the smaller side satisfying |N_finite(S)| < |S|,
-// then independently verifies S from scratch directly on cost.
+// extractAndVerifyHallWitness computes a maximum finite bipartite matching via Hopcroft-Karp
+// and extracts an explicit Hall's Marriage Theorem witness S on the smaller side satisfying
+// |N_finite(S)| < |S|, then independently verifies S from scratch directly on cost.
 func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Sense) (hallWitness, error) {
 	if rows <= 0 || cols <= 0 {
 		return hallWitness{}, fmt.Errorf("empty %dx%d matrix cannot be infeasible", rows, cols)
@@ -1018,26 +1070,30 @@ func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Se
 	if len(cost) < rows*cols {
 		return hallWitness{}, fmt.Errorf("cost len=%d < %d*%d", len(cost), rows, cols)
 	}
-	for idx := range rows * cols {
-		v := cost[idx]
-		if math.IsNaN(v) {
-			return hallWitness{}, fmt.Errorf("NaN cost at %d", idx)
-		}
-		if math.IsInf(v, 0) {
-			if (sense == assign.Minimize && v < 0) || (sense == assign.Maximize && v > 0) {
-				return hallWitness{}, fmt.Errorf("wrong-sign infinity %v for %s at %d", v, sense, idx)
-			}
-		}
-	}
-
 	rowSide := rows <= cols
 	m := min(rows, cols)
 	n := max(rows, cols)
-	edgeFinite := func(u, v int) bool {
-		if rowSide {
-			return !math.IsInf(cost[u*cols+v], 0)
+
+	adj := make([][]int, m)
+	for r := range rows {
+		base := r * cols
+		for c := range cols {
+			v := cost[base+c]
+			if math.IsNaN(v) {
+				return hallWitness{}, fmt.Errorf("NaN cost at (%d,%d)", r, c)
+			}
+			if math.IsInf(v, 0) {
+				if (sense == assign.Minimize && v < 0) || (sense == assign.Maximize && v > 0) {
+					return hallWitness{}, fmt.Errorf("wrong-sign infinity %v for %s at (%d,%d)", v, sense, r, c)
+				}
+				continue
+			}
+			if rowSide {
+				adj[r] = append(adj[r], c)
+			} else {
+				adj[c] = append(adj[c], r)
+			}
 		}
-		return !math.IsInf(cost[v*cols+u], 0)
 	}
 
 	matchL := make([]int, m)
@@ -1048,27 +1104,61 @@ func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Se
 	for v := range n {
 		matchR[v] = -1
 	}
-	seen := make([]int, n)
-	var dfs func(u, token int) bool
-	dfs = func(u, token int) bool {
-		for v := range n {
-			if !edgeFinite(u, v) || seen[v] == token {
-				continue
+
+	dist := make([]int, m)
+	queue := make([]int, 0, m)
+	ptr := make([]int, m)
+	matched := 0
+
+	bfs := func() bool {
+		queue = queue[:0]
+		foundFree := false
+		for u := range m {
+			if matchL[u] < 0 {
+				dist[u] = 0
+				queue = append(queue, u)
+			} else {
+				dist[u] = -1
 			}
-			seen[v] = token
-			if matchR[v] == -1 || dfs(matchR[v], token) {
+		}
+		for head := 0; head < len(queue); head++ {
+			u := queue[head]
+			for _, v := range adj[u] {
+				u2 := matchR[v]
+				if u2 < 0 {
+					foundFree = true
+				} else if dist[u2] < 0 {
+					dist[u2] = dist[u] + 1
+					queue = append(queue, u2)
+				}
+			}
+		}
+		return foundFree
+	}
+
+	var dfs func(u int) bool
+	dfs = func(u int) bool {
+		edges := adj[u]
+		for ptr[u] < len(edges) {
+			v := edges[ptr[u]]
+			ptr[u]++
+			u2 := matchR[v]
+			if u2 < 0 || (dist[u2] == dist[u]+1 && dfs(u2)) {
 				matchL[u] = v
 				matchR[v] = u
 				return true
 			}
 		}
+		dist[u] = -1
 		return false
 	}
 
-	matched := 0
-	for u := range m {
-		if dfs(u, u+1) {
-			matched++
+	for bfs() {
+		clear(ptr)
+		for u := range m {
+			if matchL[u] < 0 && dfs(u) {
+				matched++
+			}
 		}
 	}
 	if matched == m {
@@ -1077,7 +1167,7 @@ func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Se
 
 	inS := make([]bool, m)
 	inN := make([]bool, n)
-	queue := make([]int, 0, m)
+	queue = queue[:0]
 	for u := range m {
 		if matchL[u] == -1 {
 			inS[u] = true
@@ -1086,8 +1176,8 @@ func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Se
 	}
 	for head := 0; head < len(queue); head++ {
 		u := queue[head]
-		for v := range n {
-			if !edgeFinite(u, v) || inN[v] {
+		for _, v := range adj[u] {
+			if inN[v] {
 				continue
 			}
 			inN[v] = true
@@ -1108,16 +1198,15 @@ func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Se
 			subset = append(subset, u)
 		}
 	}
-
-	// Independent verification of |N_finite(S)| < |S| directly against cost.
 	if len(subset) == 0 {
 		return hallWitness{}, errors.New("empty Hall witness subset")
 	}
+
 	hasNeigh := make([]bool, n)
 	neighbors := make([]int, 0, len(subset))
 	for _, u := range subset {
-		for v := range n {
-			if edgeFinite(u, v) && !hasNeigh[v] {
+		for _, v := range adj[u] {
+			if !hasNeigh[v] {
 				hasNeigh[v] = true
 				neighbors = append(neighbors, v)
 			}
@@ -1135,8 +1224,20 @@ func extractAndVerifyHallWitness(rows, cols int, cost []float64, sense assign.Se
 
 func verifyFormalAssignInfeasible(tb testing.TB, label string, rows, cols int, cost []float64, sense assign.Sense) {
 	tb.Helper()
-	if _, err := extractAndVerifyHallWitness(rows, cols, cost, sense); err != nil {
+	hw, err := extractAndVerifyHallWitness(rows, cols, cost, sense)
+	if err != nil {
 		tb.Fatalf("[%s] %v", label, err)
+	}
+	if !formalAssignOracleEnabled() {
+		return
+	}
+	rawHall, encErr := buildHallLSAPJSON(rows, cols, cost, sense, hw)
+	if encErr != nil {
+		tb.Fatalf("[%s] buildHallLSAPJSON failed: %v", label, encErr)
+	}
+	resp, callErr := callFormalAssignJSONL(tb, rawHall)
+	if callErr != nil || !resp.OK || resp.Mode != "hall" {
+		tb.Fatalf("[%s] lsap-check --jsonl hall rejected (err=%v resp=%+v)", label, callErr, resp)
 	}
 }
 
@@ -1159,8 +1260,16 @@ func TestFormalAssignBridgeOffline(t *testing.T) {
 			t.Fatal("expected formalAssignOracleCall to return false when GOBLIN_FORMAL!=1")
 		}
 	}
-	if _, okInf := buildFormalLSAPJSON(1, 1, []float64{math.Inf(1)}, assign.Minimize, res, "safe", 1e-9); okInf {
-		t.Fatal("expected buildFormalLSAPJSON to reject raw +Inf without big-M encoding")
+	// Forbidden +Inf on Minimize encodes natively as null; wrong-sign -Inf and NaN must be rejected.
+	rawForb, okForb := buildFormalLSAPJSON(1, 1, []float64{math.Inf(1)}, assign.Minimize, res, "safe", 1e-9)
+	if !okForb || !strings.Contains(string(rawForb), "null") {
+		t.Fatalf("expected buildFormalLSAPJSON to encode forbidden +Inf natively as null, got ok=%v raw=%s", okForb, rawForb)
+	}
+	if _, okWrongInf := buildFormalLSAPJSON(1, 1, []float64{math.Inf(-1)}, assign.Minimize, res, "safe", 1e-9); okWrongInf {
+		t.Fatal("expected buildFormalLSAPJSON to reject wrong-sign -Inf under Minimize")
+	}
+	if _, okNaN := buildFormalLSAPJSON(1, 1, []float64{math.NaN()}, assign.Minimize, res, "safe", 1e-9); okNaN {
+		t.Fatal("expected buildFormalLSAPJSON to reject NaN")
 	}
 }
 
@@ -1207,7 +1316,7 @@ func TestFormalAssignZeroEscapeControls(t *testing.T) {
 		1.0, 1.0 - eps, 5.0,
 		inf, 5.0, 2.0,
 	}
-	// Optimal matching is (0->1, 1->0? cost=2.0) vs (0->0, 1->1, 2->2) with cost = 4.0 - eps;
+	// Optimal matching is (0->0, 1->1, 2->2) with cost = 4.0 - eps;
 	// suboptimal matching (0->1, 1->0, 2->2) has cost = 4.0 (1 ULP worse) with spoofed duals u=[1,1,2], v=[0,0,0].
 	spoofSq := assign.Result{
 		RowInd:    []int{0, 1, 2},
@@ -1257,16 +1366,13 @@ func TestFormalAssignZeroEscapeControls(t *testing.T) {
 		t.Fatal("expected tightened ULP safe check to reject 1e-11 dual drift")
 	}
 
-	// 6. Positive & Negative control E: Hall's Marriage Theorem witness on infeasible vs feasible forbidden-edge matrices.
+	// 6. Positive & Negative control E: Hall's Marriage Theorem witness verified directly via lsap-check mode="hall".
 	infeasHall := []float64{
 		1.0, inf, inf,
 		2.0, inf, inf,
 		inf, 3.0, 4.0,
 	}
-	hw, hErr := extractAndVerifyHallWitness(3, 3, infeasHall, assign.Minimize)
-	if hErr != nil || len(hw.Neighbors) >= len(hw.Subset) {
-		t.Fatalf("expected valid Hall witness on infeasible matrix, got witness=%+v err=%v", hw, hErr)
-	}
+	verifyFormalAssignInfeasible(t, "pos_hall_sq", 3, 3, infeasHall, assign.Minimize)
 	if _, falseErr := extractAndVerifyHallWitness(3, 4, posCostMin, assign.Minimize); falseErr == nil {
 		t.Fatal("expected false ErrInfeasible on feasible forbidden-edge matrix to fail closed")
 	}

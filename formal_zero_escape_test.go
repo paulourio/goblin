@@ -2,6 +2,9 @@ package goblin_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"os"
 	"os/exec"
@@ -139,6 +142,17 @@ func TestFormalZeroEscapePositiveCorners(t *testing.T) {
 		resUnbPre := verifyFormalPresolvedLP(t, "zero_row_unb/pre", pUnb, true)
 		if resUnbPre.Status != gb.StatusUnbounded {
 			t.Fatalf("expected StatusUnbounded on 0-row unbounded LP, got %v", resUnbPre.Status)
+		}
+
+		mBC := gb.NewModel("zero_row_bc", gb.Minimize)
+		xbc0 := mBC.AddContVar("xbc0", 0, 4)
+		xbc1 := mBC.AddContVar("xbc1", 6, 2)
+		mBC.SetObjective(gb.NewExpr(gb.T(xbc0, 1), gb.T(xbc1, 3)))
+		pBC := mBC.Compile()
+		verifyFormalRootLP(t, "zero_row_bc/root", pBC)
+		resBCPre := verifyFormalPresolvedLP(t, "zero_row_bc/pre", pBC, true)
+		if resBCPre.Status != gb.StatusInfeasible {
+			t.Fatalf("expected StatusInfeasible on 0-row bound-conflict LP, got %v", resBCPre.Status)
 		}
 	})
 
@@ -562,6 +576,346 @@ func TestFormalZeroEscapeSoakLogAudit(t *testing.T) {
 		}
 		if !strings.Contains(out, tc.want) {
 			t.Fatalf("[%s] output %q missing %q", tc.name, out, tc.want)
+		}
+	}
+}
+
+func exprIsRowsTimesCols(e ast.Expr) bool {
+	bin, ok := e.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.MUL {
+		return false
+	}
+	idX, okX := bin.X.(*ast.Ident)
+	idY, okY := bin.Y.(*ast.Ident)
+	if !okX || !okY {
+		return false
+	}
+	pair := idX.Name + "*" + idY.Name
+	return pair == "rows*cols" || pair == "cols*rows" || pair == "m*n" || pair == "n*m"
+}
+
+func exprIsSizeCapBound(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.BasicLit:
+		return v.Kind == token.INT
+	case *ast.Ident:
+		low := strings.ToLower(v.Name)
+		return strings.Contains(low, "max") || strings.Contains(low, "cap") || strings.Contains(low, "limit")
+	default:
+		return false
+	}
+}
+
+func exprContainsMathIsInf(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if ok && pkg.Name == "math" && sel.Sel.Name == "IsInf" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func exprIsAllowedFormalEnvGate(e ast.Expr) bool {
+	un, ok := e.(*ast.UnaryExpr)
+	if !ok || un.Op != token.NOT {
+		return false
+	}
+	call, ok := un.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return fn.Name == "formalFuzzEnabled" || fn.Name == "formalAssignOracleEnabled"
+	case *ast.SelectorExpr:
+		return fn.Sel.Name == "FormalOracleEnabled"
+	default:
+		return false
+	}
+}
+
+func exprContainsBuilderFailCond(e ast.Expr) bool {
+	if exprIsAllowedFormalEnvGate(e) {
+		return false
+	}
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		switch v := n.(type) {
+		case *ast.UnaryExpr:
+			if v.Op == token.NOT {
+				if id, ok := v.X.(*ast.Ident); ok && strings.HasPrefix(id.Name, "ok") {
+					found = true
+					return false
+				}
+			}
+		case *ast.BinaryExpr:
+			if v.Op == token.NEQ {
+				idX, okX := v.X.(*ast.Ident)
+				idY, okY := v.Y.(*ast.Ident)
+				if okX && okY && idY.Name == "nil" && strings.Contains(strings.ToLower(idX.Name), "err") {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func blockHasSilentPassReturn(blk *ast.BlockStmt) bool {
+	if blk == nil {
+		return false
+	}
+	for _, st := range blk.List {
+		ret, ok := st.(*ast.ReturnStmt)
+		if !ok {
+			continue
+		}
+		if len(ret.Results) == 0 {
+			return true
+		}
+		if len(ret.Results) == 1 {
+			if id, ok := ret.Results[0].(*ast.Ident); ok && id.Name == "nil" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func funcIsVerifierHelper(fn *ast.FuncDecl) bool {
+	name := fn.Name.Name
+	if strings.HasPrefix(name, "Test") || strings.HasPrefix(name, "Benchmark") || strings.HasPrefix(name, "Fuzz") {
+		return false
+	}
+	if !strings.HasPrefix(name, "verify") && !strings.HasPrefix(name, "check") && !strings.HasPrefix(name, "assert") {
+		return false
+	}
+	if fn.Type.Results == nil || len(fn.Type.Results.List) == 0 {
+		return true
+	}
+	if len(fn.Type.Results.List) == 1 {
+		if id, ok := fn.Type.Results.List[0].Type.(*ast.Ident); ok && id.Name == "error" {
+			return true
+		}
+	}
+	return false
+}
+
+func auditFormalBridgeSource(filename string, src []byte, onlyFormalNamed bool) ([]string, error) {
+	fset := token.NewFileSet()
+	fileAST, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var violations []string
+	for _, decl := range fileAST.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		name := fn.Name.Name
+		if strings.HasPrefix(name, "Test") || strings.HasPrefix(name, "Benchmark") {
+			continue
+		}
+		if onlyFormalNamed && !strings.Contains(name, "Formal") {
+			continue
+		}
+		isVerifier := funcIsVerifierHelper(fn)
+
+		var walk func(n ast.Node)
+		walk = func(n ast.Node) {
+			if n == nil {
+				return
+			}
+			// Do not attribute returns inside nested closures (such as ForEachRowTerm callbacks)
+			// to the enclosing verifier function's return path, while still scanning them for Skip/size caps.
+			if lit, isLit := n.(*ast.FuncLit); isLit {
+				ast.Inspect(lit.Body, func(inner ast.Node) bool {
+					if call, ok := inner.(*ast.CallExpr); ok {
+						if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+							switch sel.Sel.Name {
+							case "Skip", "Skipf", "SkipNow":
+								pos := fset.Position(call.Pos())
+								violations = append(violations, fmt.Sprintf("%s:%d: forbidden %s inside %s", filename, pos.Line, sel.Sel.Name, name))
+							}
+						}
+					}
+					if bin, ok := inner.(*ast.BinaryExpr); ok {
+						switch bin.Op {
+						case token.GTR, token.GEQ, token.LSS, token.LEQ:
+							if (exprIsRowsTimesCols(bin.X) && exprIsSizeCapBound(bin.Y)) ||
+								(exprIsRowsTimesCols(bin.Y) && exprIsSizeCapBound(bin.X)) {
+								pos := fset.Position(bin.Pos())
+								violations = append(violations, fmt.Sprintf("%s:%d: forbidden rows*cols size-cap comparison inside %s", filename, pos.Line, name))
+							}
+						}
+					}
+					return true
+				})
+				return
+			}
+
+			switch node := n.(type) {
+			case *ast.CallExpr:
+				if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
+					switch sel.Sel.Name {
+					case "Skip", "Skipf", "SkipNow":
+						pos := fset.Position(node.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: forbidden %s inside formal helper %s", filename, pos.Line, sel.Sel.Name, name))
+					}
+				}
+			case *ast.BinaryExpr:
+				switch node.Op {
+				case token.GTR, token.GEQ, token.LSS, token.LEQ:
+					if (exprIsRowsTimesCols(node.X) && exprIsSizeCapBound(node.Y)) ||
+						(exprIsRowsTimesCols(node.Y) && exprIsSizeCapBound(node.X)) {
+						pos := fset.Position(node.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: forbidden rows*cols size-cap comparison inside %s", filename, pos.Line, name))
+					}
+				}
+			case *ast.IfStmt:
+				if isVerifier && blockHasSilentPassReturn(node.Body) {
+					if exprContainsMathIsInf(node.Cond) {
+						pos := fset.Position(node.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: forbidden math.IsInf silent return inside %s", filename, pos.Line, name))
+					}
+					if exprContainsBuilderFailCond(node.Cond) {
+						pos := fset.Position(node.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: forbidden silent error/!ok return inside %s", filename, pos.Line, name))
+					}
+				}
+			}
+
+			ast.Inspect(n, func(child ast.Node) bool {
+				if child == n || child == nil {
+					return true
+				}
+				walk(child)
+				return false
+			})
+		}
+		walk(fn.Body)
+	}
+	return violations, nil
+}
+
+func TestFormalNoSilentFuzzBridgeEscapes(t *testing.T) {
+	t.Parallel()
+
+	targets := []struct {
+		relPath         string
+		onlyFormalNamed bool
+	}{
+		{relPath: "formal_fuzz_bridge_test.go", onlyFormalNamed: false},
+		{relPath: filepath.Join("assign", "formal_fuzz_bridge_test.go"), onlyFormalNamed: false},
+		{relPath: filepath.Join("assign", "crafted_fuzz_test.go"), onlyFormalNamed: true},
+	}
+
+	for _, tgt := range targets {
+		src, err := os.ReadFile(tgt.relPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", tgt.relPath, err)
+		}
+		viols, err := auditFormalBridgeSource(tgt.relPath, src, tgt.onlyFormalNamed)
+		if err != nil {
+			t.Fatalf("parse %s: %v", tgt.relPath, err)
+		}
+		if len(viols) > 0 {
+			t.Fatalf("silent formal fuzz-bridge escape hatches detected in %s:\n%s",
+				tgt.relPath, strings.Join(viols, "\n"))
+		}
+	}
+
+	// Verify that the static AST gate rejects synthetic poisoned helpers.
+	poisonCases := []struct {
+		name            string
+		onlyFormalNamed bool
+		src             string
+		wantSubstr      string
+	}{
+		{
+			name: "rows_cols_cap_bailout",
+			src: `package p
+func checkFormalAssign(rows, cols int) error {
+	if rows*cols > 4096 {
+		return nil
+	}
+	return nil
+}`,
+			wantSubstr: "rows*cols size-cap",
+		},
+		{
+			name:            "math_is_inf_silent_return",
+			onlyFormalNamed: true,
+			src: `package p
+import "math"
+func verifyAdversarialFormalLSAP(x float64) {
+	if math.IsInf(x, 0) {
+		return
+	}
+}`,
+			wantSubstr: "math.IsInf silent return",
+		},
+		{
+			name:            "not_ok_silent_return",
+			onlyFormalNamed: true,
+			src: `package p
+func verifyAdversarialFormalLSAP() {
+	okFull := false
+	if !okFull {
+		return
+	}
+}`,
+			wantSubstr: "silent error/!ok return",
+		},
+		{
+			name: "helper_t_skip",
+			src: `package p
+import "testing"
+func verifyFormalHelper(tb testing.TB) {
+	tb.Skip("too large")
+}`,
+			wantSubstr: "forbidden Skip",
+		},
+	}
+
+	for _, pc := range poisonCases {
+		viols, err := auditFormalBridgeSource(pc.name+".go", []byte(pc.src), pc.onlyFormalNamed)
+		if err != nil {
+			t.Fatalf("[%s] parse error: %v", pc.name, err)
+		}
+		if len(viols) == 0 {
+			t.Fatalf("[%s] expected AST audit to reject poisoned snippet, got 0 violations", pc.name)
+		}
+		matched := false
+		for _, v := range viols {
+			if strings.Contains(v, pc.wantSubstr) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("[%s] violations %v missing substring %q", pc.name, viols, pc.wantSubstr)
 		}
 	}
 }

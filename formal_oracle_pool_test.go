@@ -48,6 +48,8 @@ func (r FormalRatJSON) BigRat() (*big.Rat, error) {
 type FormalOracleResp struct {
 	OK     bool           `json:"ok"`
 	Detail string         `json:"detail,omitzero"`
+	Mode   string         `json:"mode,omitzero"`
+	GapTol *FormalRatJSON `json:"gapTol,omitzero"`
 	Error  string         `json:"error,omitzero"`
 	Bound  *FormalRatJSON `json:"bound,omitzero"`
 	Result jsontext.Value `json:"result,omitzero"`
@@ -577,8 +579,8 @@ func TestOraclePoolConcurrentAndBatchAllCLIs(t *testing.T) {
 	}
 	lpBad := []byte(`{"mode":"farkas","numVars":1,"numRows":1,"obj":[{"num":"1","den":"1"}],"lb":[{"num":"0","den":"1"}],"ub":[null],"rows":[{"sense":"ge","rhs":{"num":"1","den":"1"},"terms":[{"col":0,"coeff":{"num":"1","den":"1"}}]}],"w":[{"num":"1","den":"1"}]}`)
 
-	cutsPos := []byte(`{"op":"gmi-check","cuts":[{"terms":[{"col":0,"val":"1/1"}],"rhs":"2/1"}],"solutions":[["1/1"],["2/1"]]}`)
-	cutsNeg := []byte(`{"op":"gmi-check","cuts":[{"terms":[{"col":0,"val":"1/1"}],"rhs":"1/1"}],"solutions":[["2/1"]]}`)
+	cutsPos := []byte(`{"op":"drop-check","numVars":2,"lb":["0/1",null],"ub":[null,"10/1"],"rawCut":{"terms":[{"col":0,"val":"1/1000"},{"col":1,"val":"1/1"}],"rhs":"5/1"},"scale":"1/1","finalCut":{"terms":[{"col":1,"val":"1/1"}],"rhs":"5/1"}}`)
+	cutsNeg := []byte(`{"op":"drop-check","numVars":2,"lb":["0/1",null],"ub":[null,"10/1"],"rawCut":{"terms":[{"col":0,"val":"-1/10"},{"col":1,"val":"1/1"}],"rhs":"5/1"},"scale":"1/1","finalCut":{"terms":[{"col":1,"val":"1/1"}],"rhs":"5/1"}}`)
 
 	rulesPos := []byte(`{"op":"gcd-infeas","coeffs":[6,10],"lo":5,"hi":5,"go_infeasible":true}`)
 	rulesActPos := []byte(`{"subcommand":"activity","op":"summary","rhs":"5/1","has_lo":false,"has_hi":true,"terms":[{"a":"2/1","l":"0/1","u":"10/1","is_int":true,"go_ub":"2/1"}]}`)
@@ -729,11 +731,11 @@ func TestFormalWave2SubcommandsAndExporters(t *testing.T) {
 		t.Fatalf("free LP status=%v, want StatusOptimal", resFree.Status)
 	}
 	modeFree, payFree, okFree := ExportLPCheckPayload(pFree, lpFree, resFree)
-	if !okFree || modeFree != "safe-bound" {
+	if !okFree || modeFree != "optimal" {
 		t.Fatalf("ExportLPCheckPayload on free non-dyadic LP failed: ok=%v mode=%q", okFree, modeFree)
 	}
 	respFree, err := FormalCheckLPJSONL(t, payFree)
-	if err != nil || !respFree.OK || respFree.Bound == nil {
+	if err != nil || !respFree.OK || respFree.Bound == nil || respFree.Mode != "optimal" {
 		t.Fatalf("lp-check rejected free non-dyadic LP: resp=%+v err=%v", respFree, err)
 	}
 
@@ -912,16 +914,24 @@ func TestFormalWave2SubcommandsAndExporters(t *testing.T) {
 	for _, raw := range cutItems {
 		var hdr struct {
 			Subcommand string `json:"subcommand"`
+			Op         string `json:"op"`
 		}
 		if uErr := json.Unmarshal(raw, &hdr); uErr != nil {
 			t.Fatalf("unmarshal cut item: %v", uErr)
 		}
-		seenCutOps[hdr.Subcommand]++
-		if rSub, subErr := CallFormalOracleSubcmdJSONL(t, "cuts-check", hdr.Subcommand, raw); subErr != nil || !rSub.OK {
-			t.Fatalf("cuts-check %s --jsonl failed: resp=%+v err=%v", hdr.Subcommand, rSub, subErr)
+		sub := hdr.Subcommand
+		if sub == "" {
+			sub = hdr.Op
+		}
+		if sub == "" {
+			t.Fatalf("cut item missing subcommand/op: %s", string(raw))
+		}
+		seenCutOps[sub]++
+		if rSub, subErr := CallFormalOracleSubcmdJSONL(t, "cuts-check", sub, raw); subErr != nil || !rSub.OK {
+			t.Fatalf("cuts-check %s --jsonl failed: resp=%+v err=%v", sub, rSub, subErr)
 		}
 		if r, rErr := FormalCheckCutsJSONL(t, raw); rErr != nil || !r.OK {
-			t.Fatalf("cuts-check --jsonl rejected %s: resp=%+v err=%v", hdr.Subcommand, r, rErr)
+			t.Fatalf("cuts-check --jsonl rejected %s: resp=%+v err=%v", sub, r, rErr)
 		}
 	}
 	for _, wantOp := range []string{"cover-check", "lotsizing-check", "agg-cmir-check", "drop-check"} {

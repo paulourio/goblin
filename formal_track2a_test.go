@@ -3,6 +3,7 @@ package goblin
 import (
 	"bytes"
 	"encoding/json/v2"
+	"fmt"
 	"math"
 	"math/big"
 	"math/rand/v2"
@@ -29,6 +30,25 @@ func runRulesCheck(tb testing.TB, exe, subcmd string, req any, dst any) {
 	}
 	if err := json.Unmarshal(stdout.Bytes(), dst); err != nil {
 		tb.Fatalf("unmarshal %s output: %v\nraw: %s", subcmd, err, stdout.String())
+	}
+}
+
+func runRulesCheckExpectFail(tb testing.TB, exe, subcmd string, req any) {
+	tb.Helper()
+	payload, err := json.Marshal(req)
+	if err != nil {
+		tb.Fatalf("marshal %s negative payload: %v", subcmd, err)
+	}
+	runRulesCheckRawExpectFail(tb, exe, []string{subcmd}, string(payload))
+}
+
+func runRulesCheckRawExpectFail(tb testing.TB, exe string, args []string, stdin string) {
+	tb.Helper()
+	cmd := exec.CommandContext(tb.Context(), exe, args...)
+	cmd.Stdin = bytes.NewBufferString(stdin)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		tb.Fatalf("rules-check %v accepted invalid input; output: %s", args, string(out))
 	}
 }
 
@@ -94,8 +114,10 @@ func senseToStr(s ConstraintSense) string {
 		return "le"
 	case GreaterEqual:
 		return "ge"
-	default:
+	case Equal:
 		return "eq"
+	default:
+		panic(fmt.Sprintf("unknown ConstraintSense: %d", s))
 	}
 }
 
@@ -171,16 +193,19 @@ type activitySkipResp struct {
 }
 
 type binStrengthenReq struct {
-	RHS      ratPayload  `json:"rhs"`
-	A        ratPayload  `json:"a"`
-	MaxOther ratPayload  `json:"max_other"`
-	Surplus  ratPayload  `json:"surplus"`
-	NewA     *ratPayload `json:"new_a"`
-	NewRHS   *ratPayload `json:"new_rhs"`
+	RHS       ratPayload        `json:"rhs"`
+	Terms     []activityTermReq `json:"terms"`
+	TargetIdx int               `json:"target_idx"`
+	A         *ratPayload       `json:"a,omitempty"`
+	MaxOther  *ratPayload       `json:"max_other,omitempty"`
+	Surplus   ratPayload        `json:"surplus"`
+	NewA      *ratPayload       `json:"new_a,omitempty"`
+	NewRHS    *ratPayload       `json:"new_rhs,omitempty"`
 }
 
 type binStrengthenResp struct {
 	Applicable    bool        `json:"applicable"`
+	ExactMaxOther *ratPayload `json:"exact_max_other"`
 	SpecNewA      *ratPayload `json:"spec_new_a"`
 	SpecNewRHS    *ratPayload `json:"spec_new_rhs"`
 	ProposedValid bool        `json:"proposed_valid"`
@@ -691,6 +716,18 @@ func TestFormalTrack2A(t *testing.T) {
 				t.Fatalf("skip case %d parity mismatch: go=%v lean=%v (%+v)", i, goSkip, skipGot[i].CanSkip, sc)
 			}
 		}
+
+		// Fail-closed negative controls: reject solver UB or LB tightenings whenever activity analysis derives no valid implied bound (or a looser bound).
+		activityNegControls := []string{
+			`{"op":"activity","activity_op":"summary","rhs":0,"has_lo":false,"has_hi":false,"terms":[{"a":1,"l":0,"u":10,"is_int":false,"go_ub":-5}]}`,
+			`{"op":"activity","activity_op":"summary","rhs":100,"has_lo":false,"has_hi":true,"terms":[{"a":0,"l":0,"u":10,"is_int":false,"go_ub":-5},{"a":1,"l":0,"u":1,"is_int":false}]}`,
+			`{"op":"activity","activity_op":"summary","rhs":1,"has_lo":false,"has_hi":true,"terms":[{"a":1,"l":0,"u":10,"is_int":false,"go_ub":-7},{"a":1,"l":null,"u":5,"is_int":false},{"a":1,"l":null,"u":5,"is_int":false}]}`,
+			`{"op":"activity","activity_op":"summary","rhs":1,"has_lo":false,"has_hi":true,"terms":[{"a":1,"l":0,"u":10,"is_int":false,"go_ub":0.5},{"a":1,"l":0,"u":5,"is_int":false}]}`,
+			`{"op":"activity","activity_op":"summary","rhs":0,"has_lo":false,"has_hi":false,"terms":[{"a":1,"l":0,"u":10,"is_int":false,"go_lb":3}]}`,
+		}
+		for _, bad := range activityNegControls {
+			runRulesCheckRawExpectFail(t, exe, []string{"activity"}, bad)
+		}
 	})
 
 	t.Run("BinaryCoeffStrengthening", func(t *testing.T) {
@@ -819,21 +856,46 @@ func TestFormalTrack2A(t *testing.T) {
 			t.Fatalf("expected at least 30 live strengthened binary rows, got %d", len(liveCases))
 		}
 
-		reqs := make([]binStrengthenReq, 0, len(liveCases)+40)
+		makeBinaryTerms := func(coeffs []float64) []activityTermReq {
+			terms := make([]activityTermReq, len(coeffs))
+			for j, c := range coeffs {
+				terms[j] = activityTermReq{
+					A:     mustFloat64Payload(t, c),
+					L:     int64ToPayload(0),
+					U:     int64ToPayload(1),
+					IsInt: true,
+				}
+			}
+			return terms
+		}
+		makeSyntheticTerms := func(a, maxOther float64) []activityTermReq {
+			return []activityTermReq{
+				{A: mustFloat64Payload(t, a), L: int64ToPayload(0), U: int64ToPayload(1), IsInt: true},
+				{A: mustFloat64Payload(t, maxOther), L: int64ToPayload(0), U: int64ToPayload(1), IsInt: false},
+			}
+		}
+
+		posReqs := make([]binStrengthenReq, 0, len(liveCases)+60)
+		var negReqs []binStrengthenReq
 		for _, lc := range liveCases {
+			aP := mustFloat64Payload(t, lc.coeffs[lc.k])
+			moP := mustFloat64Payload(t, lc.maxOther)
 			na := mustFloat64Payload(t, lc.newA)
 			nr := mustFloat64Payload(t, lc.newRHS)
-			reqs = append(reqs, binStrengthenReq{
-				RHS:      mustFloat64Payload(t, lc.rhs),
-				A:        mustFloat64Payload(t, lc.coeffs[lc.k]),
-				MaxOther: mustFloat64Payload(t, lc.maxOther),
-				Surplus:  mustFloat64Payload(t, lc.surplus),
-				NewA:     &na,
-				NewRHS:   &nr,
+			posReqs = append(posReqs, binStrengthenReq{
+				RHS:       mustFloat64Payload(t, lc.rhs),
+				Terms:     makeBinaryTerms(lc.coeffs),
+				TargetIdx: lc.k,
+				A:         &aP,
+				MaxOther:  &moP,
+				Surplus:   mustFloat64Payload(t, lc.surplus),
+				NewA:      &na,
+				NewRHS:    &nr,
 			})
 		}
 
-		// Randomized direct checks including exact_iff and invalid surplus >= |a| / surplus < maxAct - rhs.
+		// Randomized direct checks including exact_iff and fail-closed invalid controls.
+		randPosStart := len(posReqs)
 		for i := range 60 {
 			pos := i%2 == 0
 			absA := float64(5+rng.IntN(20)) * 0.5
@@ -841,124 +903,138 @@ func TestFormalTrack2A(t *testing.T) {
 			if pos {
 				surplus := float64(1+rng.IntN(int(absA*2)-1)) * 0.5
 				rhs := maxOther + absA - surplus
+				aP := mustFloat64Payload(t, absA)
+				moP := mustFloat64Payload(t, maxOther)
 				if i%5 == 0 {
-					// Negative control: surplus >= a.
 					badSurp := absA + 0.5
-					reqs = append(reqs, binStrengthenReq{
-						RHS:      mustFloat64Payload(t, rhs),
-						A:        mustFloat64Payload(t, absA),
-						MaxOther: mustFloat64Payload(t, maxOther),
-						Surplus:  mustFloat64Payload(t, badSurp),
+					negReqs = append(negReqs, binStrengthenReq{
+						RHS:       mustFloat64Payload(t, rhs),
+						Terms:     makeSyntheticTerms(absA, maxOther),
+						TargetIdx: 0,
+						A:         &aP,
+						MaxOther:  &moP,
+						Surplus:   mustFloat64Payload(t, badSurp),
 					})
 					continue
 				}
 				na := mustFloat64Payload(t, surplus)
 				nr := mustFloat64Payload(t, rhs-(absA-surplus))
-				reqs = append(reqs, binStrengthenReq{
-					RHS:      mustFloat64Payload(t, rhs),
-					A:        mustFloat64Payload(t, absA),
-					MaxOther: mustFloat64Payload(t, maxOther),
-					Surplus:  mustFloat64Payload(t, surplus),
-					NewA:     &na,
-					NewRHS:   &nr,
+				posReqs = append(posReqs, binStrengthenReq{
+					RHS:       mustFloat64Payload(t, rhs),
+					Terms:     makeSyntheticTerms(absA, maxOther),
+					TargetIdx: 0,
+					A:         &aP,
+					MaxOther:  &moP,
+					Surplus:   mustFloat64Payload(t, surplus),
+					NewA:      &na,
+					NewRHS:    &nr,
 				})
 			} else {
 				surplus := float64(1+rng.IntN(int(absA*2)-1)) * 0.5
 				rhs := maxOther - surplus
+				aP := mustFloat64Payload(t, -absA)
+				moP := mustFloat64Payload(t, maxOther)
 				if i%5 == 1 {
-					// Negative control: surplus < maxOther - rhs.
 					badSurp := surplus - 0.5
 					if badSurp <= 0 {
 						badSurp = 0
 					}
-					reqs = append(reqs, binStrengthenReq{
-						RHS:      mustFloat64Payload(t, rhs),
-						A:        mustFloat64Payload(t, -absA),
-						MaxOther: mustFloat64Payload(t, maxOther),
-						Surplus:  mustFloat64Payload(t, badSurp),
+					negReqs = append(negReqs, binStrengthenReq{
+						RHS:       mustFloat64Payload(t, rhs),
+						Terms:     makeSyntheticTerms(-absA, maxOther),
+						TargetIdx: 0,
+						A:         &aP,
+						MaxOther:  &moP,
+						Surplus:   mustFloat64Payload(t, badSurp),
 					})
 					continue
 				}
 				na := mustFloat64Payload(t, -surplus)
 				nr := mustFloat64Payload(t, rhs)
-				reqs = append(reqs, binStrengthenReq{
-					RHS:      mustFloat64Payload(t, rhs),
-					A:        mustFloat64Payload(t, -absA),
-					MaxOther: mustFloat64Payload(t, maxOther),
-					Surplus:  mustFloat64Payload(t, surplus),
-					NewA:     &na,
-					NewRHS:   &nr,
+				posReqs = append(posReqs, binStrengthenReq{
+					RHS:       mustFloat64Payload(t, rhs),
+					Terms:     makeSyntheticTerms(-absA, maxOther),
+					TargetIdx: 0,
+					A:         &aP,
+					MaxOther:  &moP,
+					Surplus:   mustFloat64Payload(t, surplus),
+					NewA:      &na,
+					NewRHS:    &nr,
 				})
 			}
 		}
 
-		// Negative controls: surplus >= a_k, surplus <= 0, surplus < maxOther + a_k - rhs, and too-small newRHS.
-		negStart := len(reqs)
-		negTests := []binStrengthenReq{
-			{
-				RHS:      int64ToPayload(4),
-				A:        int64ToPayload(5),
-				MaxOther: int64ToPayload(4),
-				Surplus:  int64ToPayload(5), // surplus >= a_k
-			},
-			{
-				RHS:      int64ToPayload(4),
-				A:        int64ToPayload(5),
-				MaxOther: int64ToPayload(2),
-				Surplus:  int64ToPayload(2), // surplus < maxOther + a_k - rhs (= 3)
-			},
-			{
-				RHS:      int64ToPayload(10),
-				A:        int64ToPayload(5),
-				MaxOther: int64ToPayload(3),
-				Surplus:  int64ToPayload(0), // surplus <= 0
-			},
-			{
-				RHS:      int64ToPayload(2),
-				A:        int64ToPayload(-5),
-				MaxOther: int64ToPayload(7),
-				Surplus:  int64ToPayload(5), // surplus >= -a_k
-			},
-		}
-		reqs = append(reqs, negTests...)
+		// Structured negative controls: bad surplus, bad newRHS, missing bound, spoofed max_other, non-binary target.
 		badNewA := int64ToPayload(3)
-		badNewRHS := int64ToPayload(1) // exact newRHS is 2
-		reqs = append(reqs, binStrengthenReq{
-			RHS:      int64ToPayload(4),
-			A:        int64ToPayload(5),
-			MaxOther: int64ToPayload(2),
-			Surplus:  int64ToPayload(3),
-			NewA:     &badNewA,
-			NewRHS:   &badNewRHS,
-		})
+		badNewRHS := int64ToPayload(1)
+		spoofMO := int64ToPayload(0)
+		negReqs = append(negReqs,
+			binStrengthenReq{
+				RHS: int64ToPayload(4), Terms: makeSyntheticTerms(5, 4), TargetIdx: 0, Surplus: int64ToPayload(5),
+			},
+			binStrengthenReq{
+				RHS: int64ToPayload(4), Terms: makeSyntheticTerms(5, 2), TargetIdx: 0, Surplus: int64ToPayload(2),
+			},
+			binStrengthenReq{
+				RHS: int64ToPayload(10), Terms: makeSyntheticTerms(5, 3), TargetIdx: 0, Surplus: int64ToPayload(0),
+			},
+			binStrengthenReq{
+				RHS: int64ToPayload(2), Terms: makeSyntheticTerms(-5, 7), TargetIdx: 0, Surplus: int64ToPayload(5),
+			},
+			binStrengthenReq{
+				RHS: int64ToPayload(4), Terms: makeSyntheticTerms(5, 2), TargetIdx: 0,
+				Surplus: int64ToPayload(3), NewA: &badNewA, NewRHS: &badNewRHS,
+			},
+			// Spoofed max_other=0 when row terms give max_other=10.
+			binStrengthenReq{
+				RHS: int64ToPayload(12), Terms: makeSyntheticTerms(5, 10), TargetIdx: 0,
+				MaxOther: &spoofMO, Surplus: int64ToPayload(3),
+			},
+			// Missing finite upper bound on a positive non-target term.
+			binStrengthenReq{
+				RHS: int64ToPayload(4),
+				Terms: []activityTermReq{
+					{A: int64ToPayload(5), L: int64ToPayload(0), U: int64ToPayload(1), IsInt: true},
+					{A: int64ToPayload(2), L: int64ToPayload(0), U: nil, IsInt: false},
+				},
+				TargetIdx: 0,
+				Surplus:   int64ToPayload(3),
+			},
+			// Continuous target.
+			binStrengthenReq{
+				RHS: int64ToPayload(4),
+				Terms: []activityTermReq{
+					{A: int64ToPayload(5), L: int64ToPayload(0), U: int64ToPayload(1), IsInt: false},
+					{A: int64ToPayload(2), L: int64ToPayload(0), U: int64ToPayload(1), IsInt: false},
+				},
+				TargetIdx: 0,
+				Surplus:   int64ToPayload(3),
+			},
+		)
 
 		var got []binStrengthenResp
-		runRulesCheck(t, exe, "bin-strengthen", reqs, &got)
-		if len(got) != len(reqs) {
-			t.Fatalf("len(got)=%d, want %d", len(got), len(reqs))
+		runRulesCheck(t, exe, "bin-strengthen", posReqs, &got)
+		if len(got) != len(posReqs) {
+			t.Fatalf("len(got)=%d, want %d", len(got), len(posReqs))
 		}
 		for i := range liveCases {
 			if !got[i].Applicable || !got[i].ProposedValid {
 				t.Fatalf("live binary strengthening %d (%+v) rejected by Lean: %+v", i, liveCases[i], got[i])
 			}
 		}
-		for i := range 60 {
-			idx := len(liveCases) + i
-			pos := i%2 == 0
-			expectInvalid := (pos && i%5 == 0) || (!pos && i%5 == 1)
-			if expectInvalid {
-				if got[idx].ProposedValid {
-					t.Fatalf("randomized negative control %d unexpectedly accepted: %+v", i, got[idx])
-				}
-			} else if !got[idx].Applicable || !got[idx].ProposedValid || !got[idx].ExactIff {
-				t.Fatalf("randomized binary strengthening %d failed: %+v", i, got[idx])
+		for i := randPosStart; i < len(got); i++ {
+			if !got[i].Applicable || !got[i].ProposedValid || !got[i].ExactIff {
+				t.Fatalf("randomized binary strengthening %d failed: %+v", i-randPosStart, got[i])
 			}
 		}
-		for i := negStart; i < len(got); i++ {
-			if got[i].ProposedValid {
-				t.Fatalf("negative control %d unexpectedly accepted by Lean: %+v", i-negStart, got[i])
-			}
+		for _, nr := range negReqs {
+			runRulesCheckExpectFail(t, exe, "bin-strengthen", nr)
 		}
+		// Reject legacy payloads omitting row terms.
+		runRulesCheckRawExpectFail(t, exe, []string{"bin-strengthen"},
+			`{"rhs":1,"a":1,"max_other":0,"surplus":"1/2","new_a":"1/2","new_rhs":"1/2","require_valid":true}`)
+		runRulesCheckRawExpectFail(t, exe, []string{"bin-strengthen"},
+			`{"rhs":1,"a":1,"max_other":1,"surplus":"1/2","new_a":"1/2","new_rhs":"1/2"}`)
 	})
 
 	t.Run("OrbitSymmetryVerification", func(t *testing.T) {
@@ -1023,8 +1099,8 @@ func TestFormalTrack2A(t *testing.T) {
 			return rows
 		}
 
-		var reqs []orbitCheckReq
-		var wantValid []bool
+		var posReqs []orbitCheckReq
+		var negReqs []orbitCheckReq
 		var wantExact []bool
 		var wantMono []bool
 
@@ -1102,31 +1178,27 @@ func TestFormalTrack2A(t *testing.T) {
 			if !verifyOrbitSymmetry(cp, rows, lb, ub, gOut, &sc) {
 				t.Fatalf("case %d verifyOrbitSymmetry returned false on valid symmetric model", idx)
 			}
-			reqs = append(reqs, buildOrbitPayload(cp, rows, lb, ub, gOut, &sc))
-			wantValid = append(wantValid, true)
+			posReqs = append(posReqs, buildOrbitPayload(cp, rows, lb, ub, gOut, &sc))
 			wantExact = append(wantExact, isExact)
 			wantMono = append(wantMono, true)
 
 			// Add negative controls perturbing one aspect of the verified symmetry.
 			switch idx % 5 {
 			case 0:
-				// Perturb a tuple row coefficient.
 				badRows := makeWorkRows(cp)
 				badRows[2].vals[0] += 0.5
 				if verifyOrbitSymmetry(cp, badRows, lb, ub, gOut, &sc) {
 					t.Fatalf("case %d negative control (coeff perturb) accepted by Go", idx)
 				}
-				reqs = append(reqs, buildOrbitPayload(cp, badRows, lb, ub, gOut, &sc))
+				negReqs = append(negReqs, buildOrbitPayload(cp, badRows, lb, ub, gOut, &sc))
 			case 1:
-				// Perturb an orbit variable upper bound.
 				badUB := slices.Clone(ub)
 				badUB[sc.orbits[1]]++
 				if verifyOrbitSymmetry(cp, rows, lb, badUB, gOut, &sc) {
 					t.Fatalf("case %d negative control (ub perturb) accepted by Go", idx)
 				}
-				reqs = append(reqs, buildOrbitPayload(cp, rows, lb, badUB, gOut, &sc))
+				negReqs = append(negReqs, buildOrbitPayload(cp, rows, lb, badUB, gOut, &sc))
 			case 2:
-				// Perturb an orbit variable category from integer/binary to continuous.
 				badCP := *cp
 				badCat := append([]VarCategory(nil), cp.varCat...)
 				badCat[sc.orbits[1]] = Continuous
@@ -1134,39 +1206,56 @@ func TestFormalTrack2A(t *testing.T) {
 				if verifyOrbitSymmetry(&badCP, rows, lb, ub, gOut, &sc) {
 					t.Fatalf("case %d negative control (varCat perturb) accepted by Go", idx)
 				}
-				reqs = append(reqs, buildOrbitPayload(&badCP, rows, lb, ub, gOut, &sc))
+				negReqs = append(negReqs, buildOrbitPayload(&badCP, rows, lb, ub, gOut, &sc))
 			case 3:
-				// Perturb a tuple row RHS.
 				badRows := makeWorkRows(cp)
 				badRows[2].rhs++
 				if verifyOrbitSymmetry(cp, badRows, lb, ub, gOut, &sc) {
 					t.Fatalf("case %d negative control (rhs perturb) accepted by Go", idx)
 				}
-				reqs = append(reqs, buildOrbitPayload(cp, badRows, lb, ub, gOut, &sc))
+				negReqs = append(negReqs, buildOrbitPayload(cp, badRows, lb, ub, gOut, &sc))
 			default:
-				// Perturb an invariant row coefficient.
 				badRows := makeWorkRows(cp)
 				badRows[2+gCount].vals[0] += 2
 				if verifyOrbitSymmetry(cp, badRows, lb, ub, gOut, &sc) {
 					t.Fatalf("case %d negative control (invariant row coeff) accepted by Go", idx)
 				}
-				reqs = append(reqs, buildOrbitPayload(cp, badRows, lb, ub, gOut, &sc))
+				negReqs = append(negReqs, buildOrbitPayload(cp, badRows, lb, ub, gOut, &sc))
 			}
-			wantValid = append(wantValid, false)
-			wantExact = append(wantExact, false)
-			wantMono = append(wantMono, false)
 		}
 
 		var got []orbitCheckResp
-		runRulesCheck(t, exe, "orbit-check", reqs, &got)
-		if len(got) != len(reqs) {
-			t.Fatalf("len(got)=%d, want %d", len(got), len(reqs))
+		runRulesCheck(t, exe, "orbit-check", posReqs, &got)
+		if len(got) != len(posReqs) {
+			t.Fatalf("len(got)=%d, want %d", len(got), len(posReqs))
 		}
-		for i := range reqs {
-			if got[i].Valid != wantValid[i] || got[i].ExactObj != wantExact[i] || got[i].MonotoneNonNeg != wantMono[i] {
-				t.Fatalf("orbit case %d mismatch: got=%+v want=(valid=%v exact=%v mono=%v)",
-					i, got[i], wantValid[i], wantExact[i], wantMono[i])
+		for i := range posReqs {
+			if !got[i].Valid || got[i].ExactObj != wantExact[i] || got[i].MonotoneNonNeg != wantMono[i] {
+				t.Fatalf("orbit case %d mismatch: got=%+v want=(valid=true exact=%v mono=%v)",
+					i, got[i], wantExact[i], wantMono[i])
 			}
 		}
+		for _, nr := range negReqs {
+			runRulesCheckExpectFail(t, exe, "orbit-check", nr)
+		}
+
+		// Adversarial orbit checks: reject out-of-range row_state, missing row_tuples entries, active -1 rows touching an orbit, g_count < 2, and duplicate orbit columns.
+		orbitAdvNegs := []string{
+			`{"num_vars":2,"is_int":[true,true],"lb":[0,0],"ub":[1,1],"obj":[1,1],"rows":[{"active":true,"cols":[0],"vals":[1],"sense":"le","rhs":0},{"active":true,"cols":[0,1],"vals":[1,1],"sense":"le","rhs":1}],"g_count":2,"orbits":[0,1],"row_tuples":[],"col_orbit":[0,0],"col_group":[0,1],"row_state":[0,-2],"require_valid":true,"require_exact_obj":true}`,
+			`{"num_vars":2,"is_int":[true,true],"lb":[0,0],"ub":[1,1],"obj":[1,1],"rows":[{"active":true,"cols":[0],"vals":[1],"sense":"le","rhs":0},{"active":true,"cols":[0,1],"vals":[1,1],"sense":"le","rhs":1}],"g_count":2,"orbits":[0,1],"row_tuples":[],"col_orbit":[0,0],"col_group":[0,1],"row_state":[-1,-2]}`,
+			`{"num_vars":2,"is_int":[true,true],"lb":[0,0],"ub":[1,1],"obj":[1,1],"rows":[{"active":true,"cols":[0],"vals":[1],"sense":"le","rhs":0},{"active":true,"cols":[0,1],"vals":[1,1],"sense":"le","rhs":1}],"g_count":2,"orbits":[0,1],"row_tuples":[],"col_orbit":[0,0],"col_group":[0,1],"row_state":[7,-2],"require_valid":true}`,
+			`{"num_vars":2,"is_int":[true,true],"lb":[0,0],"ub":[1,1],"obj":[1,1],"rows":[],"g_count":1,"orbits":[0],"row_tuples":[],"col_orbit":[0,-1],"col_group":[0,-1],"row_state":[]}`,
+			`{"num_vars":2,"is_int":[true,true],"lb":[0,0],"ub":[1,1],"obj":[1,1],"rows":[],"g_count":2,"orbits":[0,0],"row_tuples":[],"col_orbit":[0,-1],"col_group":[0,-1],"row_state":[]}`,
+		}
+		for _, bad := range orbitAdvNegs {
+			runRulesCheckRawExpectFail(t, exe, []string{"orbit-check"}, bad)
+		}
+	})
+
+	t.Run("StrictJsonAndEmptyBatchRejected", func(t *testing.T) {
+		t.Parallel()
+		runRulesCheckRawExpectFail(t, exe, []string{"--batch", "-"}, `[]`)
+		runRulesCheckRawExpectFail(t, exe, []string{"divceil"}, `[]`)
+		runRulesCheckRawExpectFail(t, exe, []string{"divceil"}, `{"a":7,"a":8,"d":2}`)
 	})
 }

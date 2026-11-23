@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -371,31 +372,16 @@ func TestFormalAdversarialBug4CMIRUnderflowAndVUBRounding(t *testing.T) {
 		}
 
 		if FormalOracleEnabled() && len(cuts) > 0 {
-			mipPay, err := exportCompiledToMIPPayload(p)
+			x1HugeF, _ := x1Huge.Float64()
+			cutItems, err := ExportSeparatedCutsItems(p, [][]float64{{0, 0}, {1, x1HugeF}})
 			if err != nil {
-				t.Fatalf("exportCompiledToMIPPayload: %v", err)
+				t.Fatalf("ExportSeparatedCutsItems: %v", err)
 			}
-			cutPays, err := exportCutsToPayloads(cuts)
-			if err != nil {
-				t.Fatalf("exportCutsToPayloads: %v", err)
-			}
-			solPay := [][]ratPayload{
-				{bigRatToPayload(big.NewRat(0, 1)), bigRatToPayload(big.NewRat(0, 1))},
-				{bigRatToPayload(big.NewRat(1, 1)), bigRatToPayload(x1Huge)},
-			}
-			raw, err := json.Marshal(exportCutCheckItem{
-				Subcommand: "cmir-check",
-				Op:         "cmir-check",
-				MIP:        mipPay,
-				Cuts:       cutPays,
-				Solutions:  solPay,
-			})
-			if err != nil {
-				t.Fatalf("marshal cmir-check: %v", err)
-			}
-			resp, callErr := FormalCheckCutsJSONL(t, raw)
-			if callErr != nil || !resp.OK {
-				t.Fatalf("cuts-check cmir-check rejected cuts: resp=%+v err=%v", resp, callErr)
+			for _, item := range cutItems {
+				resp, callErr := FormalCheckCutsJSONL(t, item)
+				if callErr != nil || !resp.OK {
+					t.Fatalf("cuts-check rejected cut certificate: resp=%+v err=%v", resp, callErr)
+				}
 			}
 		}
 	})
@@ -437,31 +423,16 @@ func TestFormalAdversarialBug4CMIRUnderflowAndVUBRounding(t *testing.T) {
 			}
 		}
 		if FormalOracleEnabled() && len(cuts) > 0 {
-			mipPay, err := exportCompiledToMIPPayload(p)
+			x1FeasF, _ := x1Feas.Float64()
+			cutItems, err := ExportSeparatedCutsItems(p, [][]float64{{0, 0}, {1, x1FeasF}})
 			if err != nil {
-				t.Fatalf("exportCompiledToMIPPayload: %v", err)
+				t.Fatalf("ExportSeparatedCutsItems: %v", err)
 			}
-			cutPays, err := exportCutsToPayloads(cuts)
-			if err != nil {
-				t.Fatalf("exportCutsToPayloads: %v", err)
-			}
-			solPay := [][]ratPayload{
-				{bigRatToPayload(big.NewRat(0, 1)), bigRatToPayload(big.NewRat(0, 1))},
-				{bigRatToPayload(big.NewRat(1, 1)), bigRatToPayload(x1Feas)},
-			}
-			raw, err := json.Marshal(exportCutCheckItem{
-				Subcommand: "cmir-check",
-				Op:         "cmir-check",
-				MIP:        mipPay,
-				Cuts:       cutPays,
-				Solutions:  solPay,
-			})
-			if err != nil {
-				t.Fatalf("marshal cmir-check: %v", err)
-			}
-			resp, callErr := FormalCheckCutsJSONL(t, raw)
-			if callErr != nil || !resp.OK {
-				t.Fatalf("cuts-check cmir-check rejected cuts: resp=%+v err=%v", resp, callErr)
+			for _, item := range cutItems {
+				resp, callErr := FormalCheckCutsJSONL(t, item)
+				if callErr != nil || !resp.OK {
+					t.Fatalf("cuts-check rejected cut certificate: resp=%+v err=%v", resp, callErr)
+				}
 			}
 		}
 	})
@@ -1519,6 +1490,130 @@ func TestFastCertifyUnboundedRayFastPathAndNegativeControls(t *testing.T) {
 		fCol := []float64{-1.0}
 		if lp.fastCertifyUnboundedRay(0, 1.0, fCol) {
 			t.Fatal("fastCertifyUnboundedRay falsely certified blocked direction (1, 1) with +2^-52 residual")
+		}
+	})
+}
+
+func TestFormalAdversarialExactIntGcdDivisionNoRelaxation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("exact_int_coeffs_sub_inttol_rhs_divides_exact_floor_ceil", func(t *testing.T) {
+		t.Parallel()
+		// 2*x + 2*y <= 3.99999995 has exact integer coefficients (maxRoundErr == 0),
+		// so GCD division by 2 must tighten to x + y <= 1 (not x + y <= 2).
+		mLE := NewModel("gcd_exact_le_sub_inttol", Maximize)
+		x := mLE.AddBinaryVar("x")
+		y := mLE.AddBinaryVar("y")
+		mLE.SetObjective(NewExpr(x.T(1), y.T(1)))
+		mLE.AddConstraint("le", NewExpr(x.T(2), y.T(2)).Le(3.99999995))
+		pLE := mLE.Compile()
+
+		itemsLE, preLE := ExportPresolveRulesItems(pLE)
+		if preLE.Infeasible || preLE.Reduced == nil || preLE.Reduced.numConstraints != 1 {
+			t.Fatalf("unexpected Presolve result on pLE: %+v", preLE)
+		}
+		if preLE.Reduced.rowRHS[0] != 1.0 {
+			t.Fatalf("GCD division relaxed exact integer row to RHS=%g, want 1.0", preLE.Reduced.rowRHS[0])
+		}
+		foundRawRHS := false
+		for _, raw := range itemsLE {
+			if strings.Contains(string(raw), `"gcd-div-check"`) {
+				var dec exportGcdDivCheckItem
+				if err := json.Unmarshal(raw, &dec); err != nil {
+					t.Fatalf("unmarshal gcd-div-check: %v", err)
+				}
+				wantRHS, _ := float64ToPayload(3.99999995)
+				if dec.RHS != wantRHS || dec.DivRHS == nil || *dec.DivRHS != 1 {
+					t.Fatalf("exported gcd-div-check rewrote RHS or DivRHS: got rhs=%+v div_rhs=%v, want %+v and 1",
+						dec.RHS, dec.DivRHS, wantRHS)
+				}
+				foundRawRHS = true
+			}
+			if FormalOracleEnabled() {
+				resp, err := FormalCheckRulesJSONL(t, raw)
+				if err != nil || !resp.OK {
+					t.Fatalf("rules-check rejected live item %s: resp=%+v err=%v", raw, resp, err)
+				}
+			}
+		}
+		if !foundRawRHS {
+			t.Fatal("expected live gcd-div-check item from ExportPresolveRulesItems")
+		}
+
+		for _, preOn := range []bool{true, false} {
+			res, err := SolveCompiled(t.Context(), pLE, WithPresolve(preOn))
+			if err != nil || res.Status != StatusOptimal || math.Abs(res.Objective-1.0) > 1e-9 {
+				t.Fatalf("pLE pre=%v: status=%v obj=%.12g err=%v, want Optimal 1",
+					preOn, res.Status, res.Objective, err)
+			}
+		}
+		resCert, errCert := SolveCompiled(t.Context(), pLE, WithCertified(true))
+		if errCert != nil || resCert.Status != StatusOptimal || resCert.Objective != 1.0 {
+			t.Fatalf("pLE certified: status=%v obj=%.12g err=%v, want Optimal 1",
+				resCert.Status, resCert.Objective, errCert)
+		}
+
+		// Companion GreaterEqual row: 2*x + 2*y >= 2.00000005 on {0, 1, 2} must divide to x + y >= 2 (obj = 2).
+		mGE := NewModel("gcd_exact_ge_sub_inttol", Minimize)
+		gx := mGE.AddIntVar("x", 0, 2)
+		gy := mGE.AddIntVar("y", 0, 2)
+		mGE.SetObjective(NewExpr(gx.T(1), gy.T(1)))
+		mGE.AddConstraint("ge", NewExpr(gx.T(2), gy.T(2)).Ge(2.00000005))
+		pGE := mGE.Compile()
+
+		itemsGE, preGE := ExportPresolveRulesItems(pGE)
+		if preGE.Infeasible || preGE.Reduced == nil || preGE.Reduced.numConstraints != 1 || preGE.Reduced.rowRHS[0] != 2.0 {
+			t.Fatalf("expected GreaterEqual GCD division RHS=2.0, got %+v", preGE)
+		}
+		if FormalOracleEnabled() {
+			for _, raw := range itemsGE {
+				resp, err := FormalCheckRulesJSONL(t, raw)
+				if err != nil || !resp.OK {
+					t.Fatalf("rules-check rejected GE live item %s: resp=%+v err=%v", raw, resp, err)
+				}
+			}
+		}
+	})
+
+	t.Run("rounded_near_int_coeffs_compensate_domain_error_soundly", func(t *testing.T) {
+		t.Parallel()
+		// (2 - 1e-10)*x + 2*y <= 3.99999999985 on x, y in {0, 1, 2} is satisfied over Q at (x=2, y=0)
+		// since 2*(2 - 1e-10) = 3.9999999998 <= 3.99999999985. Coefficient rounding compensation
+		// (maxRoundErr > 0) must keep x + y <= 2 while tightening to x + y <= 1 when RHS = 3.99999995.
+		mFeas := NewModel("gcd_rounded_feas", Maximize)
+		fx := mFeas.AddIntVar("x", 0, 2)
+		fy := mFeas.AddIntVar("y", 0, 2)
+		mFeas.SetObjective(NewExpr(fx.T(1), fy.T(1)))
+		mFeas.AddConstraint("le", NewExpr(fx.T(2.0-1e-10), fy.T(2.0)).Le(3.99999999985))
+		pFeas := mFeas.Compile()
+
+		itemsFeas, preFeas := ExportPresolveRulesItems(pFeas)
+		if preFeas.Infeasible || preFeas.Reduced == nil || preFeas.Reduced.numConstraints != 1 || preFeas.Reduced.rowRHS[0] != 2.0 {
+			t.Fatalf("rounded feasible GCD row failed to preserve (2,0): pre=%+v", preFeas)
+		}
+		if FormalOracleEnabled() {
+			for _, raw := range itemsFeas {
+				resp, err := FormalCheckRulesJSONL(t, raw)
+				if err != nil || !resp.OK {
+					t.Fatalf("rules-check rejected rounded item %s: resp=%+v err=%v", raw, resp, err)
+				}
+			}
+		}
+		resF, errF := SolveCompiled(t.Context(), pFeas, WithPresolve(true))
+		if errF != nil || resF.Status != StatusOptimal || math.Abs(resF.Objective-2.0) > 1e-9 {
+			t.Fatalf("rounded feasible solve: status=%v obj=%g err=%v, want Optimal 2", resF.Status, resF.Objective, errF)
+		}
+
+		mTight := NewModel("gcd_rounded_tight", Maximize)
+		tx := mTight.AddIntVar("x", 0, 2)
+		ty := mTight.AddIntVar("y", 0, 2)
+		mTight.SetObjective(NewExpr(tx.T(1), ty.T(1)))
+		mTight.AddConstraint("le", NewExpr(tx.T(2.0-1e-10), ty.T(2.0)).Le(3.99999995))
+		pTight := mTight.Compile()
+
+		_, preTight := ExportPresolveRulesItems(pTight)
+		if preTight.Infeasible || preTight.Reduced == nil || preTight.Reduced.numConstraints != 1 || preTight.Reduced.rowRHS[0] != 1.0 {
+			t.Fatalf("rounded tight GCD row over-relaxed: pre=%+v", preTight)
 		}
 	})
 }

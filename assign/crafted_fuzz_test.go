@@ -1,7 +1,6 @@
 package assign_test
 
 import (
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -913,6 +912,7 @@ func FuzzAssignSparseCoreTraps(f *testing.F) {
 			if !errors.Is(errSIMD, assign.ErrInfeasible) || !errors.Is(errScalar, assign.ErrInfeasible) {
 				t.Fatalf("[%s] expected ErrInfeasible on both paths, got simd=%v scalar=%v", label, errSIMD, errScalar)
 			}
+			verifyFormalAssignInfeasible(t, label, n, n, cost, sense)
 			return
 		}
 		if errSIMD != nil || errScalar != nil {
@@ -920,6 +920,8 @@ func FuzzAssignSparseCoreTraps(f *testing.F) {
 		}
 		verifyPlantedBigRat(t, label+"/simd", n, n, cost, sense, resSIMD, pRow, pCol, false, false)
 		verifyPlantedBigRat(t, label+"/scalar", n, n, cost, sense, resScalar, pRow, pCol, false, false)
+		verifyFormalAssignResult(t, label+"/simd", n, n, cost, sense, resSIMD, false)
+		verifyFormalAssignResult(t, label+"/scalar", n, n, cost, sense, resScalar, false)
 	})
 }
 
@@ -1389,9 +1391,7 @@ func FuzzAssignHallAndTopology(f *testing.F) {
 			if !errors.Is(errSIMD, assign.ErrInfeasible) || !errors.Is(errScalar, assign.ErrInfeasible) {
 				t.Fatalf("[%s] expected ErrInfeasible, got simd=%v scalar=%v", label, errSIMD, errScalar)
 			}
-			if rows*cols <= 10000 && hasCompleteFiniteMatching(rows, cols, cost) {
-				t.Fatalf("[%s] Hall-infeasible generator unexpectedly had finite matching", label)
-			}
+			verifyFormalAssignInfeasible(t, label, rows, cols, cost, sense)
 			return
 		}
 		if errSIMD != nil || errScalar != nil {
@@ -1656,67 +1656,11 @@ func checkReuseObj(wantRat *big.Rat, rows, cols int, cost []float64, rBuf, cBuf 
 // 7. Near-Rank-1 ULP Drift & Extreme Exponent Spread Formal Fuzzer
 // =============================================================================
 
-type lsapBitsNoObjReq struct {
-	Rows   int             `json:"rows"`
-	Cols   int             `json:"cols"`
-	Sense  string          `json:"sense"`
-	Mode   string          `json:"mode"`
-	Cost   [][]lsapBitsVal `json:"cost"`
-	RowInd []int           `json:"row_ind"`
-	ColInd []int           `json:"col_ind"`
-	U      []lsapBitsVal   `json:"u"`
-	V      []lsapBitsVal   `json:"v"`
-	Tol    *lsapBitsVal    `json:"tol,omitzero"`
-}
-
 func buildFormalLSAPNoObjJSON(rows, cols int, flatCost []float64, sense assign.Sense, res assign.Result, tol float64) ([]byte, bool) {
-	if len(flatCost) != rows*cols || math.IsNaN(tol) || math.IsInf(tol, 0) || tol < 0 {
+	if len(flatCost) != rows*cols {
 		return nil, false
 	}
-	costBits := make([][]lsapBitsVal, rows)
-	for r := range rows {
-		row := make([]lsapBitsVal, cols)
-		base := r * cols
-		for c := range cols {
-			v := flatCost[base+c]
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				return nil, false
-			}
-			row[c] = lsapBitsVal{Bits: math.Float64bits(v)}
-		}
-		costBits[r] = row
-	}
-	uBits := make([]lsapBitsVal, len(res.U))
-	for i, v := range res.U {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, false
-		}
-		uBits[i] = lsapBitsVal{Bits: math.Float64bits(v)}
-	}
-	vBits := make([]lsapBitsVal, len(res.V))
-	for j, v := range res.V {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, false
-		}
-		vBits[j] = lsapBitsVal{Bits: math.Float64bits(v)}
-	}
-	senseStr := "min"
-	if sense == assign.Maximize {
-		senseStr = "max"
-	}
-	tVal := lsapBitsVal{Bits: math.Float64bits(tol)}
-	raw, err := json.Marshal(lsapBitsNoObjReq{
-		Rows:   rows,
-		Cols:   cols,
-		Sense:  senseStr,
-		Mode:   "safe",
-		Cost:   costBits,
-		RowInd: res.RowInd,
-		ColInd: res.ColInd,
-		U:      uBits,
-		V:      vBits,
-		Tol:    &tVal,
-	})
+	raw, err := buildCompactFormalLSAPJSON(rows, cols, flatCost, sense, res, "safe", tol, false)
 	if err != nil {
 		return nil, false
 	}
@@ -1828,11 +1772,6 @@ func verifyAdversarialFormalLSAP(
 	if !formalAssignOracleEnabled() {
 		return
 	}
-	for _, v := range cost[:rows*cols] {
-		if math.IsInf(v, 0) || math.IsNaN(v) {
-			return
-		}
-	}
 
 	if requireZeroSafeGap {
 		rawZero, okZ := buildFormalLSAPNoObjJSON(rows, cols, cost, sense, res, 0)
@@ -1857,25 +1796,24 @@ func verifyAdversarialFormalLSAP(
 		if !exact || new(big.Rat).SetFloat64(df).Cmp(diffRat) < 0 {
 			df = math.Nextafter(df, math.Inf(1))
 		}
-		if df > objTol {
-			objTol = df
-		}
+		objTol = safeTol + df
 	}
 	if math.IsInf(objTol, 0) {
 		objTol = math.MaxFloat64
 	}
-	rawFull, okFull := buildFormalLSAPJSON(rows, cols, cost, sense, res, "safe", objTol)
-	if !okFull {
-		return
+	includeObj := !math.IsInf(res.Objective, 0) && !math.IsNaN(res.Objective)
+	rawFull, errFull := buildCompactFormalLSAPJSON(rows, cols, cost, sense, res, "safe", objTol, includeObj)
+	if errFull != nil {
+		tb.Fatalf("[%s] buildCompactFormalLSAPJSON safe (tol=%g) failed: %v", label, objTol, errFull)
 	}
-	okCall, bndPair, detail := formalAssignOracleCall(tb, rawFull)
-	if !okCall {
-		tb.Fatalf("[%s] lsap-check --jsonl safe (tol=%g) rejected: %s", label, objTol, detail)
+	respFull, callErr := callFormalAssignJSONL(tb, rawFull)
+	if callErr != nil || !respFull.OK || respFull.Mode != "safe" {
+		tb.Fatalf("[%s] lsap-check --jsonl safe (tol=%g) rejected (err=%v resp=%+v)", label, objTol, callErr, respFull)
 	}
-	if bndPair[0] != "" && bndPair[1] != "" {
-		bndRat, bErr := (formalAssignRat{Num: bndPair[0], Den: bndPair[1]}).bigRat()
+	if respFull.Bound != nil {
+		bndRat, bErr := respFull.Bound.bigRat()
 		if bErr != nil {
-			tb.Fatalf("[%s] invalid bound %v: %v", label, bndPair, bErr)
+			tb.Fatalf("[%s] invalid bound %+v: %v", label, respFull.Bound, bErr)
 		}
 		if sense == assign.Minimize && bndRat.Cmp(gotRat) > 0 {
 			tb.Fatalf("[%s] safe lower bound %s > primal %s", label, bndRat.RatString(), gotRat.RatString())
@@ -1982,6 +1920,7 @@ func FuzzAssignAdversarialFormal(f *testing.F) {
 				if !errors.Is(errSIMD, assign.ErrInfeasible) || !errors.Is(errScalar, assign.ErrInfeasible) {
 					t.Fatalf("[%s] expected ErrInfeasible, got simd=%v scalar=%v", label, errSIMD, errScalar)
 				}
+				verifyFormalAssignInfeasible(t, label, rows, cols, cost, sense)
 				return
 			}
 			if errSIMD != nil || errScalar != nil {

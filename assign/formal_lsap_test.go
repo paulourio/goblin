@@ -116,8 +116,29 @@ func assertLSAPAccepted(tb testing.TB, exe, dir, name string, payload lsapCertPa
 	if err != nil {
 		tb.Fatalf("%s: expected VERIFIED, got err=%v\noutput:\n%s", name, err, out)
 	}
-	if out != "VERIFIED" {
-		tb.Fatalf("%s: expected stdout VERIFIED, got %q", name, out)
+	wantMode := payload.Mode
+	for _, arg := range extraArgs {
+		switch arg {
+		case "--safe":
+			wantMode = "safe"
+		case "--exact":
+			wantMode = "exact"
+		case "--hall", "--infeasible":
+			wantMode = "hall"
+		}
+	}
+	if wantMode == "" {
+		wantMode = "exact"
+	}
+	wantPrefix := "VERIFIED mode=" + wantMode
+	if !strings.HasPrefix(out, wantPrefix) {
+		tb.Fatalf("%s: expected stdout prefix %q, got %q", name, wantPrefix, out)
+	}
+	if wantMode == "exact" && out != "VERIFIED mode=exact tol=0/1" {
+		tb.Fatalf("%s: expected exact output %q, got %q", name, "VERIFIED mode=exact tol=0/1", out)
+	}
+	if wantMode == "safe" && !strings.Contains(out, " tol=") {
+		tb.Fatalf("%s: expected safe output to echo tol, got %q", name, out)
 	}
 }
 
@@ -144,8 +165,8 @@ func TestFormalLSAPVerification(t *testing.T) {
 		if errOk != nil {
 			t.Fatalf("lsap_sample.json failed: %v\n%s", errOk, outOk)
 		}
-		if strings.TrimSpace(string(outOk)) != "VERIFIED" {
-			t.Fatalf("lsap_sample.json output = %q, want VERIFIED", outOk)
+		if strings.TrimSpace(string(outOk)) != "VERIFIED mode=exact tol=0/1" {
+			t.Fatalf("lsap_sample.json output = %q, want %q", outOk, "VERIFIED mode=exact tol=0/1")
 		}
 
 		negPath := filepath.Join("..", "testdata", "formal", "lsap_negative.json")
@@ -361,7 +382,7 @@ func TestFormalLSAPVerification(t *testing.T) {
 			if maxAbs == 0 {
 				maxAbs = 1.0
 			}
-			tol := 1e-11 * maxAbs * float64(max(rows, cols))
+			tol := 64.0 * 0x1p-52 * maxAbs * float64(max(rows, cols))
 
 			for _, sense := range []Sense{Minimize, Maximize} {
 				for _, mode := range []struct {

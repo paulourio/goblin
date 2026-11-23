@@ -31,6 +31,52 @@ func runTrack5ECmd(tb testing.TB, dir string, extraEnv []string, name string, ar
 	return -1, ""
 }
 
+func runTrack5ELeanStdin(tb testing.TB, formalDir, lakePath, pathEnv, script string) string {
+	tb.Helper()
+	var cmd *exec.Cmd
+	if flockPath, err := exec.LookPath("flock"); err == nil {
+		cmd = exec.CommandContext(tb.Context(), flockPath, "-s", "/tmp/goblin-formal-lake.lock", lakePath, "env", "lean", "--stdin")
+	} else {
+		cmd = exec.CommandContext(tb.Context(), lakePath, "env", "lean", "--stdin")
+	}
+	cmd.Dir = formalDir
+	cmd.Env = append(os.Environ(), pathEnv)
+	cmd.Stdin = bytes.NewBufferString(script)
+	outBytes, err := cmd.CombinedOutput()
+	out := string(outBytes)
+	if err != nil {
+		tb.Fatalf("lake env lean --stdin failed: %v\n%s", err, out)
+	}
+	return out
+}
+
+func ensureTrack5EBuilt(tb testing.TB, formalDir, lakePath, pathEnv string) {
+	tb.Helper()
+	oleanPath := filepath.Join(formalDir, ".lake", "build", "lib", "lean", "GoblinFormal", "Track5E.olean")
+	leanSrcPath := filepath.Join(formalDir, "GoblinFormal", "Track5E.lean")
+	if oleanInfo, err := os.Stat(oleanPath); err == nil {
+		if srcInfo, srcErr := os.Stat(leanSrcPath); srcErr == nil && !oleanInfo.ModTime().Before(srcInfo.ModTime()) {
+			return
+		}
+	}
+	var code int
+	var out string
+	if flockPath, err := exec.LookPath("flock"); err == nil {
+		code, out = runTrack5ECmd(
+			tb, formalDir, []string{pathEnv},
+			flockPath, "/tmp/goblin-formal-lake.lock", lakePath, "build", "GoblinFormal.Track5E",
+		)
+	} else {
+		code, out = runTrack5ECmd(
+			tb, formalDir, []string{pathEnv},
+			lakePath, "build", "GoblinFormal.Track5E",
+		)
+	}
+	if code != 0 {
+		tb.Fatalf("lake build GoblinFormal.Track5E failed (exit=%d):\n%s", code, out)
+	}
+}
+
 func TestFormalTrack5E_ExtractorAndLeanVerify(t *testing.T) {
 	requireFormalEnv(t)
 	t.Parallel()
@@ -64,33 +110,7 @@ func TestFormalTrack5E_ExtractorAndLeanVerify(t *testing.T) {
 		t.Parallel()
 		lakePath := locateLakeBinary(t)
 		pathEnv := "PATH=" + filepath.Dir(lakePath) + string(os.PathListSeparator) + os.Getenv("PATH")
-
-		oleanPath := filepath.Join(formalDir, ".lake", "build", "lib", "lean", "GoblinFormal", "Track5E.olean")
-		leanSrcPath := filepath.Join(formalDir, "GoblinFormal", "Track5E.lean")
-		needBuild := true
-		if oleanInfo, err := os.Stat(oleanPath); err == nil {
-			if srcInfo, srcErr := os.Stat(leanSrcPath); srcErr == nil && !oleanInfo.ModTime().Before(srcInfo.ModTime()) {
-				needBuild = false
-			}
-		}
-		if needBuild {
-			var code int
-			var out string
-			if flockPath, err := exec.LookPath("flock"); err == nil {
-				code, out = runTrack5ECmd(
-					t, formalDir, []string{pathEnv},
-					flockPath, "/tmp/goblin-formal-lake.lock", lakePath, "build", "GoblinFormal.Track5E",
-				)
-			} else {
-				code, out = runTrack5ECmd(
-					t, formalDir, []string{pathEnv},
-					lakePath, "build", "GoblinFormal.Track5E",
-				)
-			}
-			if code != 0 {
-				t.Fatalf("lake build GoblinFormal.Track5E failed (exit=%d):\n%s", code, out)
-			}
-		}
+		ensureTrack5EBuilt(t, formalDir, lakePath, pathEnv)
 
 		theorems := []string{
 			"allAbsLE64AVX2_decodes",
@@ -106,6 +126,12 @@ func TestFormalTrack5E_ExtractorAndLeanVerify(t *testing.T) {
 			"minNoNaN64AVX512_abi_and_zeroGC_safe",
 			"initReducedRow64AVX2_abi_and_zeroGC_safe",
 			"initReducedRow64AVX512_abi_and_zeroGC_safe",
+			"allAbsLE64AVX2_abi_reg_preserved",
+			"allAbsLE64AVX512_abi_reg_preserved",
+			"minNoNaN64AVX2_abi_reg_preserved",
+			"minNoNaN64AVX512_abi_reg_preserved",
+			"initReducedRow64AVX2_abi_reg_preserved",
+			"initReducedRow64AVX512_abi_reg_preserved",
 			"stripped_vzeroupper_rejected",
 			"vminpd_track5d_canon_bridge",
 			"minsd_por_eq_f64Min",
@@ -127,16 +153,8 @@ func TestFormalTrack5E_ExtractorAndLeanVerify(t *testing.T) {
 			script.WriteByte('\n')
 		}
 
-		cmd := exec.CommandContext(t.Context(), lakePath, "env", "lean", "--stdin")
-		cmd.Dir = formalDir
-		cmd.Env = append(os.Environ(), pathEnv)
-		cmd.Stdin = bytes.NewBufferString(script.String())
-		outBytes, err := cmd.CombinedOutput()
-		out := string(outBytes)
-		if err != nil {
-			t.Fatalf("axiom audit failed: %v\n%s", err, out)
-		}
-		for _, forbidden := range []string{"sorryAx", "Lean.trustCompiler", "Lean.ofReduceBool"} {
+		out := runTrack5ELeanStdin(t, formalDir, lakePath, pathEnv, script.String())
+		for _, forbidden := range []string{"sorryAx", "Lean.trustCompiler", "Lean.ofReduceBool", "bv_decide"} {
 			if strings.Contains(out, forbidden) {
 				t.Fatalf("forbidden axiom %q found in Track5E audit:\n%s", forbidden, out)
 			}
@@ -395,5 +413,94 @@ func TestFormalTrack5E_ZeroAllocContracts(t *testing.T) {
 		_ = simd.InitReducedRow64With(dst, row, v, 0.25, false)
 	}); allocs != 0 {
 		t.Fatalf("InitReducedRow64With allocated %.1f times/op, want 0", allocs)
+	}
+}
+
+func TestFormalTrack5E_HardwareNaNParity(t *testing.T) {
+	t.Parallel()
+
+	const (
+		qNaNPayloadBits uint64 = 0x7ff8000000000123
+		indefNaNBits    uint64 = 0xfff8000000000000
+		sentinelNaNBits uint64 = 0x7ff8000000000001
+	)
+	posInf := math.Inf(1)
+	qNaNPayload := math.Float64frombits(qNaNPayloadBits)
+
+	// Verify 4-element probe and 32-element SIMD-dispatched probe on live hardware.
+	for _, n := range []int{4, 32} {
+		c := make([]float64, n)
+		v := make([]float64, n)
+		for i := range n {
+			c[i] = 5.0
+			v[i] = 1.0
+		}
+		c[0], c[1], c[2], c[3] = posInf, 1.0, 5.0, 7.0
+		v[0], v[1], v[2], v[3] = posInf, qNaNPayload, 1.0, 2.0
+
+		dstSIMD := make([]float64, n)
+		dstScalar := make([]float64, n)
+		gotSIMD := simd.InitReducedRow64(dstSIMD, c, v, 0.0)
+		gotScalar := simd.InitReducedRow64Scalar(dstScalar, c, v, 0.0)
+
+		for label, dst := range map[string][]float64{"SIMD": dstSIMD, "Scalar": dstScalar} {
+			if bits := math.Float64bits(dst[0]); bits != indefNaNBits {
+				t.Fatalf("n=%d %s dst[0] = 0x%016x, want 0x%016x", n, label, bits, indefNaNBits)
+			}
+			if bits := math.Float64bits(dst[1]); bits != qNaNPayloadBits {
+				t.Fatalf("n=%d %s dst[1] = 0x%016x, want 0x%016x", n, label, bits, qNaNPayloadBits)
+			}
+			if bits := math.Float64bits(dst[2]); bits != math.Float64bits(4.0) {
+				t.Fatalf("n=%d %s dst[2] = 0x%016x, want 4.0", n, label, bits)
+			}
+			if bits := math.Float64bits(dst[3]); bits != math.Float64bits(5.0) {
+				t.Fatalf("n=%d %s dst[3] = 0x%016x, want 5.0", n, label, bits)
+			}
+		}
+		if !math.IsNaN(gotSIMD) || !math.IsNaN(gotScalar) {
+			t.Fatalf("n=%d expected NaN return: simd=%v scalar=%v", n, gotSIMD, gotScalar)
+		}
+		if n == 32 && simd.ActiveSIMDTier() != simd.TierScalar {
+			if bits := math.Float64bits(gotSIMD); bits != sentinelNaNBits {
+				t.Fatalf("n=32 SIMD min sentinel = 0x%016x, want 0x%016x", bits, sentinelNaNBits)
+			}
+		}
+	}
+
+	if os.Getenv("GOBLIN_FORMAL") == "" {
+		return
+	}
+
+	formalDir := findFormalDir(t)
+	lakePath := locateLakeBinary(t)
+	pathEnv := "PATH=" + filepath.Dir(lakePath) + string(os.PathListSeparator) + os.Getenv("PATH")
+	ensureTrack5EBuilt(t, formalDir, lakePath, pathEnv)
+
+	leanProbe := `import GoblinFormal.Track5E
+open GoblinFormal.Track5E
+def hx64 (b : BitVec 64) : String := String.ofList (Nat.toDigits 16 b.toNat)
+def dstB : BitVec 64 := 0x100000#64
+def cB : BitVec 64 := 0x200000#64
+def vB : BitVec 64 := 0x300000#64
+def cVals : List (BitVec 64) :=
+  [0x7ff0000000000000#64, 0x3ff0000000000000#64, 0x4014000000000000#64, 0x401c000000000000#64]
+def vVals : List (BitVec 64) :=
+  [0x7ff0000000000000#64, 0x7ff8000000000123#64, 0x3ff0000000000000#64, 0x4000000000000000#64]
+def mem0 (a : BitVec 64) : BitVec 64 :=
+  if a.toNat ≥ cB.toNat ∧ a.toNat < cB.toNat + 32 then cVals.getD ((a.toNat - cB.toNat) / 8) 0#64
+  else if a.toNat ≥ vB.toNat ∧ a.toNat < vB.toNat + 32 then vVals.getD ((a.toNat - vB.toNat) / 8) 0#64
+  else 0#64
+def gpr0 (r : BitVec 4) : BitVec 64 :=
+  match r.toNat with
+  | 0 => dstB | 3 => 4#64 | 7 => cB | 6 => 4#64 | 9 => vB | 10 => 4#64
+  | 4 => 0x7fff0000#64 | 5 => 0x7fff1234#64 | 14 => 0x900000#64 | _ => 0#64
+def s0 : Amd64VecState := { gpr := gpr0, zmm := fun _ => {}, kmask := fun _ => 0#8, mem := mem0 }
+def sf2 := runAmd64Vec (initReducedRow64AVX2FuelBound 4) initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s0
+#eval s!"AVX2 dst0={hx64 (sf2.mem (elemAddr dstB 0))} dst1={hx64 (sf2.mem (elemAddr dstB 1))} dst2={hx64 (sf2.mem (elemAddr dstB 2))} dst3={hx64 (sf2.mem (elemAddr dstB 3))} ret={hx64 (sf2.zmm 0#5).l0} rsp={hx64 (sf2.gpr 4#4)} rbp={hx64 (sf2.gpr 5#4)}"
+`
+	out := runTrack5ELeanStdin(t, formalDir, lakePath, pathEnv, leanProbe)
+	wantLine := "AVX2 dst0=fff8000000000000 dst1=7ff8000000000123 dst2=4010000000000000 dst3=4014000000000000 ret=7ff8000000000001 rsp=7fff0008 rbp=7fff1234"
+	if !strings.Contains(out, wantLine) {
+		t.Fatalf("Lean Track5E output mismatch:\ngot:\n%s\nwant substring:\n%s", out, wantLine)
 	}
 }

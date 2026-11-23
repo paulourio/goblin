@@ -1,6 +1,7 @@
 package goblin
 
 import (
+	"encoding/json/v2"
 	"math"
 	"os"
 	"os/exec"
@@ -560,5 +561,316 @@ func TestFormalTrack5D_SIMDParityAndEdgeAudit(t *testing.T) {
 			}
 			assertFloat64SliceBitsEq(t, "ColReduceRows64.v", v2S, v2R)
 		})
+	}
+}
+
+func TestFormalTrack5D_BinCheckRoutinesAndNegativeControls(t *testing.T) {
+	requireFormalEnv(t)
+	t.Parallel()
+
+	binCheckExe := formalExe(t, "bin-check")
+	tmp := t.TempDir()
+	arm64Env := []string{"CGO_ENABLED=0", "GOOS=linux", "GOARCH=arm64"}
+
+	assignNoinlineELF := filepath.Join(tmp, "assign_noinline.elf")
+	assignOptELF := filepath.Join(tmp, "assign_opt.elf")
+	buildTestBinary(t, assignNoinlineELF, "./assign", arm64Env, []string{"-gcflags=-l"})
+	buildTestBinary(t, assignOptELF, "./assign", arm64Env, nil)
+
+	noinlineRoutines := extractArm64Routines(t, assignNoinlineELF, []string{
+		"assign.twoSumAssign",
+		"assign.clampFinite",
+		"assign.exactReducedCost",
+	})
+	optRoutines := extractArm64Routines(t, assignOptELF, []string{
+		"assign.exactReducedCost",
+		"assign.hasPotentialCancellation",
+	})
+
+	positiveCases := []struct {
+		name    string
+		symbol  string
+		mode    string
+		routine arm64ElfRoutine
+	}{
+		{"TwoSumAssign", "assign.twoSumAssign", "match-and-cfg", noinlineRoutines["assign.twoSumAssign"]},
+		{"ClampFinite", "assign.clampFinite", "match-and-cfg", noinlineRoutines["assign.clampFinite"]},
+		{"ExactReducedCostNoinline", "assign.exactReducedCostNoinline", "match-and-cfg", noinlineRoutines["assign.exactReducedCost"]},
+		{"ExactReducedCost", "assign.exactReducedCost", "match-and-cfg", optRoutines["assign.exactReducedCost"]},
+		{"HasPotentialCancellation", "assign.hasPotentialCancellation", "match-and-cfg", optRoutines["assign.hasPotentialCancellation"]},
+	}
+	for _, tc := range positiveCases {
+		t.Run("Track5D_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, out := runBinCheckJSON(t, binCheckExe, tc.name+".json", binCheckRequest{
+				Mode:    tc.mode,
+				Symbol:  tc.symbol,
+				Words:   tc.routine.words,
+				Targets: tc.routine.targets,
+			})
+			if code != 0 || !strings.Contains(out, "VERIFIED") {
+				t.Fatalf("bin-check rejected valid Track5D routine %s (exit=%d):\n%s", tc.symbol, code, out)
+			}
+		})
+	}
+
+	t.Run("Batch_ValidTwoItems", func(t *testing.T) {
+		t.Parallel()
+		batchReqs := []binCheckRequest{
+			{
+				Mode:    "match-and-cfg",
+				Symbol:  "assign.twoSumAssign",
+				Words:   noinlineRoutines["assign.twoSumAssign"].words,
+				Targets: noinlineRoutines["assign.twoSumAssign"].targets,
+			},
+			{
+				Mode:    "match-and-cfg",
+				Symbol:  "assign.clampFinite",
+				Words:   noinlineRoutines["assign.clampFinite"].words,
+				Targets: noinlineRoutines["assign.clampFinite"].targets,
+			},
+		}
+		payload, err := json.Marshal(batchReqs)
+		if err != nil {
+			t.Fatalf("marshal batch: %v", err)
+		}
+		batchPath := filepath.Join(t.TempDir(), "batch_ok.json")
+		if err := os.WriteFile(batchPath, payload, 0o600); err != nil {
+			t.Fatalf("write batch: %v", err)
+		}
+		code, out := runToolWithExitCode(t, binCheckExe, "--batch", batchPath)
+		if code != 0 || !strings.Contains(out, "VERIFIED (2 items)") {
+			t.Fatalf("expected VERIFIED (2 items) (exit=%d):\n%s", code, out)
+		}
+	})
+
+	const morestackSym = "runtime.morestack_noctxt.abi0"
+
+	// P1: non-allowlisted allocating/write-barrier runtime calls must fail closed.
+	for _, sym := range []string{"runtime.makemap", "runtime.convT64", "runtime.wbMove", "runtime.makechan"} {
+		t.Run("Neg_P1_"+strings.TrimPrefix(sym, "runtime."), func(t *testing.T) {
+			t.Parallel()
+			w := []uint32{
+				0xf9400b90, 0xeb3063ff, 0x540000a9, 0xf81e0ffe, 0x94100000,
+				0xf84207fe, 0xd65f03c0, 0xaa1e03e3, 0x94200000, 0x17fffff7,
+			}
+			code, out := runBinCheckJSON(t, binCheckExe, "p1.json", binCheckRequest{
+				Mode:  "cfg",
+				Words: w,
+				Targets: []binTargetEntry{
+					{Idx: 4, Symbol: sym},
+					{Idx: 8, Symbol: morestackSym},
+				},
+			})
+			if code == 0 || !strings.Contains(out, "ZeroGC violation") {
+				t.Fatalf("expected ZeroGC rejection for %s (exit=%d):\n%s", sym, code, out)
+			}
+		})
+	}
+
+	// P3: indirect call via RET X1 (rn != 30) must be rejected.
+	t.Run("Neg_P3_RetX1IndirectCall", func(t *testing.T) {
+		t.Parallel()
+		w3 := []uint32{
+			0xf9400b90, 0xeb3063ff, 0x540000e9, 0xf81e0ffe, 0xf9400001, 0x94000003,
+			0xf84207fe, 0xd65f03c0, 0xd65f0020, 0xaa1e03e3, 0x94200000, 0x17fffff5,
+		}
+		code, out := runBinCheckJSON(t, binCheckExe, "p3_ret_x1.json", binCheckRequest{
+			Mode:    "cfg",
+			Words:   w3,
+			Targets: []binTargetEntry{{Idx: 10, Symbol: morestackSym}},
+		})
+		if code == 0 || !strings.Contains(out, "REJECTED") {
+			t.Fatalf("expected REJECTED on RET X1 indirect call (exit=%d):\n%s", code, out)
+		}
+	})
+
+	// P4b: unbounded SP decrement inside small-frame body must be rejected.
+	t.Run("Neg_P4b_SubSP16MB", func(t *testing.T) {
+		t.Parallel()
+		w4 := []uint32{
+			0xf9400b90, 0xeb3063ff, 0x540000a9, 0xd17fffff, 0xf90003ff,
+			0x917fffff, 0xd65f03c0, 0xaa1e03e3, 0x94200000, 0x17fffff7,
+		}
+		code, out := runBinCheckJSON(t, binCheckExe, "p4b_sub_sp.json", binCheckRequest{
+			Mode:    "cfg",
+			Words:   w4,
+			Targets: []binTargetEntry{{Idx: 8, Symbol: morestackSym}},
+		})
+		if code == 0 || !strings.Contains(out, "REJECTED") {
+			t.Fatalf("expected REJECTED on unbounded body SUB SP (exit=%d):\n%s", code, out)
+		}
+	})
+
+	// P5: tautological CMP X0, X0 guard into runtime.panicBounds must be rejected.
+	t.Run("Neg_P5_AlwaysPanics", func(t *testing.T) {
+		t.Parallel()
+		w5 := []uint32{
+			0xf9400b90, 0xeb3063ff, 0x540000e9, 0xf81e0ffe, 0xeb00001f, 0x54000069,
+			0xf84207fe, 0xd65f03c0, 0x94300000, 0xaa1e03e3, 0x94200000, 0x17fffff5,
+		}
+		code, out := runBinCheckJSON(t, binCheckExe, "p5_always_panics.json", binCheckRequest{
+			Mode:  "cfg",
+			Words: w5,
+			Targets: []binTargetEntry{
+				{Idx: 8, Symbol: "runtime.panicBounds"},
+				{Idx: 10, Symbol: morestackSym},
+			},
+		})
+		if code == 0 || !strings.Contains(out, "REJECTED") {
+			t.Fatalf("expected REJECTED on tautological CMP X0, X0 panicBounds guard (exit=%d):\n%s", code, out)
+		}
+	})
+
+	// P6: UNALLOCATED SDIV encoding with bit 29 (S) set must be rejected while exact control passes.
+	t.Run("Neg_P6_SDIV_SBitUnalloc", func(t *testing.T) {
+		t.Parallel()
+		dc := []uint32{
+			0xf9400b90, 0xeb3063ff, 0x540001e9, 0xf81f0ffe, 0xf81f83fd, 0xd10023fd,
+			0xb4000121, 0x9ac10c02, 0x9ac10c1b, 0x9b018361, 0xf100003f, 0x9a82d440,
+			0xf85f83fd, 0xf84107fe, 0xd65f03c0, 0x97f80639, 0xd503201f, 0xa90087e0,
+			0xaa1e03e3, 0x97f90b75, 0xa94087e0, 0x17ffffeb,
+		}
+		tg := []binTargetEntry{
+			{Idx: 15, Symbol: "runtime.panicdivide"},
+			{Idx: 19, Symbol: morestackSym},
+		}
+		codeOk, outOk := runBinCheckJSON(t, binCheckExe, "p6_ok.json", binCheckRequest{
+			Mode:    "match",
+			Symbol:  "divCeilInt64",
+			Words:   dc,
+			Targets: tg,
+		})
+		if codeOk != 0 || !strings.Contains(outOk, "VERIFIED") {
+			t.Fatalf("expected exact divCeilInt64 control VERIFIED (exit=%d):\n%s", codeOk, outOk)
+		}
+
+		dm := slices.Clone(dc)
+		dm[7] |= 0x20000000
+		dm[8] |= 0x20000000
+		codeBad, outBad := runBinCheckJSON(t, binCheckExe, "p6_bad.json", binCheckRequest{
+			Mode:    "match",
+			Symbol:  "divCeilInt64",
+			Words:   dm,
+			Targets: tg,
+		})
+		if codeBad == 0 || !strings.Contains(outBad, "REJECTED") {
+			t.Fatalf("expected REJECTED on SDIV bit-29 UNALLOCATED encoding (exit=%d):\n%s", codeBad, outBad)
+		}
+	})
+
+	// Strict JSON parsing: duplicate keys, duplicate target idx, and empty --batch [] must fail closed.
+	t.Run("Neg_StrictJSONAndEmptyBatch", func(t *testing.T) {
+		t.Parallel()
+		td := t.TempDir()
+
+		dupKeyPath := filepath.Join(td, "dup_key.json")
+		if err := os.WriteFile(dupKeyPath, []byte(`{"mode":"cfg","mode":"match","words":[3596551104]}`), 0o600); err != nil {
+			t.Fatalf("write dup_key.json: %v", err)
+		}
+		if code, out := runToolWithExitCode(t, binCheckExe, dupKeyPath); code == 0 || !strings.Contains(out, "REJECTED") {
+			t.Fatalf("expected REJECTED on duplicate JSON key (exit=%d):\n%s", code, out)
+		}
+
+		dupTgtPath := filepath.Join(td, "dup_tgt.json")
+		if err := os.WriteFile(dupTgtPath, []byte(`{"mode":"cfg","words":[3596551104],"targets":[{"idx":0,"symbol":"math.IsInf"},{"idx":0,"symbol":"runtime.mallocgc"}]}`), 0o600); err != nil {
+			t.Fatalf("write dup_tgt.json: %v", err)
+		}
+		if code, out := runToolWithExitCode(t, binCheckExe, dupTgtPath); code == 0 || !strings.Contains(out, "REJECTED") {
+			t.Fatalf("expected REJECTED on duplicate target idx (exit=%d):\n%s", code, out)
+		}
+
+		emptyBatchPath := filepath.Join(td, "empty_batch.json")
+		if err := os.WriteFile(emptyBatchPath, []byte(`[]`), 0o600); err != nil {
+			t.Fatalf("write empty_batch.json: %v", err)
+		}
+		if code, out := runToolWithExitCode(t, binCheckExe, "--batch", emptyBatchPath); code == 0 || !strings.Contains(out, "REJECTED") {
+			t.Fatalf("expected REJECTED on empty --batch [] (exit=%d):\n%s", code, out)
+		}
+	})
+}
+
+func TestFormalTrack5D_Arm64SemanticsAndAxioms(t *testing.T) {
+	requireFormalEnv(t)
+	t.Parallel()
+
+	formalDir := findFormalDir(t)
+	lakePath := locateLakeBinary(t)
+	checkFile := filepath.Join(t.TempDir(), "arm64_sem_audit.lean")
+	src := `import Lean
+import GoblinFormal.Track5A
+import GoblinFormal.Track5B
+import GoblinFormal.Track5D
+
+open Lean
+open GoblinFormal.Track5A
+open GoblinFormal.Track5B
+open GoblinFormal.Track5D
+
+#eval show MetaM Unit from do
+  let env ← getEnv
+  let allowed : List Name := [` + "`propext, `Classical.choice, `Quot.sound" + `]
+  let mut bad : List (Name × List Name) := []
+  for (declName, _) in env.constants.map₁.toList do
+    let s := declName.toString
+    if s.startsWith "GoblinFormal.Track5A." ||
+       s.startsWith "GoblinFormal.Track5B." ||
+       s.startsWith "GoblinFormal.Track5D." then
+      let axs ← collectAxioms declName
+      let unallowed := axs.toList.filter (fun a => !allowed.contains a)
+      if !unallowed.isEmpty then
+        bad := (declName, unallowed) :: bad
+  if !bad.isEmpty then
+    throwError s!"Forbidden axioms found: {bad}"
+
+private def st0 : Arm64State := {
+  regs := fun _ => 0#64
+  sp := 0x80000#64
+  nzcv := { n := false, z := false, c := false, v := false }
+  fpRegs := fun _ => 0#64
+  gStackGuard0 := 0#64
+  mem := fun _ => 0#8
+  pcIdx := 0
+  baseAddr := 0#64
+  status := .running
+}
+
+#guard f64Mul 0x4000000000000000#64 0x4008000000000000#64 == 0x4018000000000000#64
+#guard f64Div 0x4018000000000000#64 0x4000000000000000#64 == 0x4008000000000000#64
+#guard f64NMul 0x4000000000000000#64 0x4008000000000000#64 == 0xc018000000000000#64
+#guard f64MaxNum 0x7ff8000000000001#64 0x3ff0000000000000#64 == 0x3ff0000000000000#64
+#guard f64MinNum 0x7ff8000000000001#64 0x3ff0000000000000#64 == 0x3ff0000000000000#64
+#guard (execArm64Insn 1 (fun _ => none) (.fpUnaryD 3 0#5 1#5) st0).status == .trapIllegal
+#guard (execArm64Insn 1 (fun _ => none) (.fpBinaryD 9 0#5 1#5 2#5) st0).status == .trapIllegal
+
+#guard (let s := { st0 with regs := fun r => if r == 0#5 then 0x80000001#64 else 0#64 }
+        let s' := execArm64Insn 1 (fun _ => none) (.addSubImm false true true 31#5 0#5 1#64) s
+        s'.nzcv.n && !s'.nzcv.z && s'.nzcv.c && !s'.nzcv.v)
+#guard (let s := { st0 with regs := fun r => if r == 0#5 then 0xffffffff#64 else 0#64 }
+        let s' := execArm64Insn 1 (fun _ => none) (.addSubImm false false true 31#5 0#5 1#64) s
+        !s'.nzcv.n && s'.nzcv.z && s'.nzcv.c && !s'.nzcv.v)
+#guard (let s := { st0 with regs := fun r => if r == 0#5 then 0x80000000#64 else 0#64 }
+        let s' := execArm64Insn 1 (fun _ => none) (.logicalImm false 3 31#5 0#5 0x80000000#64) s
+        s'.nzcv.n && !s'.nzcv.z)
+#guard (let s := { st0 with regs := fun r => if r == 0#5 then 0xfffffffc#64 else if r == 1#5 then 2#64 else 0#64 }
+        let s' := execArm64Insn 1 (fun _ => none) (.div false true 2#5 0#5 1#5) s
+        s'.regs 2#5 == 0x00000000fffffffe#64)
+
+#guard (execArm64Insn 1 (fun _ => none) (.ret 1#5) st0).status == .trapIllegal
+#guard (runArm64 2 #[.nop] (fun _ => none) st0).status == .trapIllegal
+#guard match decodeArm64Word 0x3ac10c00 with | .unknown _ => true | _ => false
+#guard f64Add 0x7ff0000000000001#64 0x3ff0000000000000#64 == 0x7ff8000000000001#64
+#guard f64Max 0x7ff8000000000002#64 0x7ff0000000000001#64 == 0x7ff8000000000001#64
+#guard f64MulAdd false false 0x0000000000000000#64 0x7ff0000000000000#64 0x7ff8000000000005#64 == 0x7ff8000000000000#64
+#guard match decodeArm64WordD 0x1f600000 with | .fmaddD true false _ _ _ _ => true | _ => false
+`
+	if err := os.WriteFile(checkFile, []byte(src), 0o600); err != nil {
+		t.Fatalf("write lean check file: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), lakePath, "env", "lean", checkFile)
+	cmd.Dir = formalDir
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(lakePath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("arm64 semantics/axiom audit failed: %v\n%s", err, out)
 	}
 }

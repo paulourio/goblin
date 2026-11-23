@@ -68,14 +68,61 @@ func runCutsCheck(tb testing.TB, exe, subcmd string, payload any, wantOK bool) s
 	return outStr
 }
 
+func runCutsCheckJSONLItems(tb testing.TB, exe string, items [][]byte) {
+	tb.Helper()
+	if len(items) == 0 {
+		tb.Fatal("expected at least one cuts-check JSONL item")
+	}
+	var stdin bytes.Buffer
+	for _, it := range items {
+		stdin.Write(it)
+		stdin.WriteByte('\n')
+	}
+	cmd := exec.CommandContext(tb.Context(), exe, "--jsonl")
+	cmd.Stdin = &stdin
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		tb.Fatalf("cuts-check --jsonl failed: %v\noutput: %s", err, string(out))
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != len(items) {
+		tb.Fatalf("cuts-check --jsonl returned %d lines, want %d\noutput: %s", len(lines), len(items), string(out))
+	}
+	type resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	for i, line := range lines {
+		var r resp
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			tb.Fatalf("unmarshal cuts-check --jsonl line %d: %v (raw: %s)", i, err, line)
+		}
+		if !r.OK {
+			tb.Fatalf("cuts-check --jsonl item %d failed: %s\nitem: %s", i, r.Error, string(items[i]))
+		}
+	}
+}
+
+func runCutsCheckRawExpectFail(tb testing.TB, exe string, args []string, stdin string) {
+	tb.Helper()
+	cmd := exec.CommandContext(tb.Context(), exe, args...)
+	cmd.Stdin = bytes.NewBufferString(stdin)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		tb.Fatalf("cuts-check %v accepted invalid input; output: %s", args, string(out))
+	}
+}
+
 func senseName(s ConstraintSense) string {
 	switch s {
 	case LessEqual:
 		return "le"
 	case GreaterEqual:
 		return "ge"
-	default:
+	case Equal:
 		return "eq"
+	default:
+		panic(fmt.Sprintf("unknown ConstraintSense: %d", s))
 	}
 }
 
@@ -688,7 +735,8 @@ func TestFormalTrack2B(t *testing.T) {
 		if lpRes.Status != StatusOptimal {
 			t.Fatalf("gmi_exact_tab LP status=%v", lpRes.Status)
 		}
-		var cutWS cutGenWorkspace
+		obsGMI := &cutCertObserver{srcRowIdx: -1}
+		cutWS := cutGenWorkspace{certObs: obsGMI}
 		gmiCuts := separateGMICutsEx(lpGMI, lpRes.Primal, &cutWS, false)
 		if len(gmiCuts) == 0 {
 			t.Fatal("expected GMI cuts on gmi_exact_tab")
@@ -793,28 +841,24 @@ func TestFormalTrack2B(t *testing.T) {
 			t.Fatal("expected fractional basic integer row in gmi_exact_tab")
 		}
 
-		// Check real structural cuts from separateGMICutsEx on crafted & corpus MIPs.
+		// Check live universal structural GMI derivations from separateGMICutsEx on crafted & corpus MIPs.
+		gmiItems, err := exportObserverItems(pGMI, obsGMI, exactFeas)
+		if err != nil {
+			t.Fatalf("exportObserverItems(pGMI): %v", err)
+		}
+		if len(obsGMI.gmis) == 0 {
+			t.Fatal("expected live structural GMI observer records on gmi_exact_tab")
+		}
+		runCutsCheckJSONLItems(t, exe, gmiItems)
+
+		// Negative control: witness-only structural gmi-check payload MUST fail closed (T2-C1).
 		runCutsCheck(t, exe, "gmi-check", map[string]any{
 			"mip":       compiledToMIPPayload(t, pGMI),
 			"cuts":      cutsToPayloads(t, gmiCuts),
 			"solutions": solutionsToPayloads(t, exactFeas),
-		}, true)
-
-		// Negative control: invalid structural cut cutting off feasible integer points (2, 0, 0) and (1, 1, 0).
-		runCutsCheck(t, exe, "gmi-check", map[string]any{
-			"mip": compiledToMIPPayload(t, pGMI),
-			"cuts": []track2BCutPayload{{
-				Terms: []track2BTermPayload{
-					{Col: 0, Val: int64ToPayload(1)},
-					{Col: 1, Val: int64ToPayload(1)},
-					{Col: 2, Val: int64ToPayload(1)},
-				},
-				RHS: int64ToPayload(1),
-			}},
-			"solutions": solutionsToPayloads(t, exactFeas),
 		}, false)
 
-		// In-tree globalOnly=true GMI cuts must preserve all globally feasible points.
+		// In-tree globalOnly=true GMI cuts must certify universally over the global MIP.
 		mTree := NewModel("intree_global_gmi_formal", Minimize)
 		ty := mTree.AddBinaryVar("y")
 		tk := mTree.AddIntVar("k", 0, 5)
@@ -842,15 +886,17 @@ func TestFormalTrack2B(t *testing.T) {
 		if resTree.Status != StatusOptimal {
 			t.Fatalf("intree node LP status=%v", resTree.Status)
 		}
-		treeCuts := separateGMICutsEx(lpTree, resTree.Primal, &cutWS, true)
-		if len(treeCuts) == 0 {
-			t.Fatal("expected globally valid in-tree GMI cut")
+		obsTree := &cutCertObserver{srcRowIdx: -1}
+		treeWS := cutGenWorkspace{certObs: obsTree}
+		treeCuts := separateGMICutsEx(lpTree, resTree.Primal, &treeWS, true)
+		if len(treeCuts) == 0 || len(obsTree.gmis) == 0 {
+			t.Fatal("expected globally valid in-tree GMI cut with live observer witness")
 		}
-		runCutsCheck(t, exe, "gmi-check", map[string]any{
-			"mip":       compiledToMIPPayload(t, pTree),
-			"cuts":      cutsToPayloads(t, treeCuts),
-			"solutions": solutionsToPayloads(t, globalFeas),
-		}, true)
+		treeItems, err := exportObserverItems(pTree, obsTree, globalFeas)
+		if err != nil {
+			t.Fatalf("exportObserverItems(pTree): %v", err)
+		}
+		runCutsCheckJSONLItems(t, exe, treeItems)
 
 		// Corpus & public MIPs: t1_std_mip, t1_furniture, t1_knapsack_12, miplib_p0033.
 		type corpusGMI struct {
@@ -879,20 +925,24 @@ func TestFormalTrack2B(t *testing.T) {
 			lpC := NewLPSolver(pC, nil)
 			rootC := lpC.Solve()
 			if rootC.Status == StatusOptimal {
-				cutsC := separateGMICutsEx(lpC, rootC.Primal, nil, false)
+				obsC := &cutCertObserver{srcRowIdx: -1}
+				wsC := cutGenWorkspace{certObs: obsC}
+				cutsC := separateGMICutsEx(lpC, rootC.Primal, &wsC, false)
 				if len(cutsC) > 0 {
-					checkedCorpus++
-					runCutsCheck(t, exe, "gmi-check", map[string]any{
-						"mip":       compiledToMIPPayload(t, pC),
-						"cuts":      cutsToPayloads(t, cutsC),
-						"solutions": solutionsToPayloads(t, it.sols),
-					}, true)
+					liveItems, err := exportObserverItems(pC, obsC, it.sols)
+					if err != nil {
+						t.Fatalf("exportObserverItems(%s): %v", it.path, err)
+					}
+					if len(obsC.gmis) > 0 {
+						checkedCorpus++
+						runCutsCheckJSONLItems(t, exe, liveItems)
+					}
 				}
 			}
 			lpC.Close()
 		}
 		if checkedCorpus < 2 {
-			t.Fatalf("expected GMI cuts on >= 2 corpus MIPs, got %d", checkedCorpus)
+			t.Fatalf("expected live universal GMI certificates on >= 2 corpus MIPs, got %d", checkedCorpus)
 		}
 	})
 
@@ -1034,35 +1084,33 @@ func TestFormalTrack2B(t *testing.T) {
 		badCertBeta["betaHat"] = mustRatPayload(t, betaHat-1.0)
 		runCutsCheck(t, exe, "cmir-check", badCertBeta, false)
 
-		// 2. Real separateCMIRFromSparseRow cuts on crafted and corpus MIPs.
+		// 2. Real separateCMIRFromSparseRow cuts verified via universal live agg-cmir-check + drop-check.
 		mMIR := NewModel("mir_direct_formal", Maximize)
 		mx0 := mMIR.AddBinaryVar("x0")
 		mx1 := mMIR.AddIntVar("x1", 0, u1)
 		mx2 := mMIR.AddIntVar("x2", 0, u2)
 		mMIR.AddConstraint("r", NewExpr(mx0.T(delta), mx1.T(a1), mx2.T(a2)).Le(rhs))
 		pMIR := mMIR.Compile()
-		var mirWS cutGenWorkspace
+		obsMIR := &cutCertObserver{srcRowIdx: 0, srcRowSign: 1.0}
+		mirWS := cutGenWorkspace{certObs: obsMIR}
 		mirCuts := separateCMIRFromSparseRow(pMIR, []int{0, 1, 2}, []float64{delta, a1, a2}, rhs, 1.0, lpPrimalI, 0, maxMIRDivisors, &mirWS, nil)
-		if len(mirCuts) == 0 {
-			t.Fatal("expected cMIR cut from separateCMIRFromSparseRow")
+		if len(mirCuts) == 0 || len(obsMIR.cmirs) == 0 {
+			t.Fatal("expected cMIR cut and live observer record from separateCMIRFromSparseRow")
 		}
+		mirItems, err := exportObserverItems(pMIR, obsMIR, [][]float64{{1, u1, u2}, {0, 0, 0}, {1, 1, 2}})
+		if err != nil {
+			t.Fatalf("exportObserverItems(pMIR): %v", err)
+		}
+		runCutsCheckJSONLItems(t, exe, mirItems)
+
+		// Negative control: witness-only cmir-check payload MUST fail closed (T2-C1).
 		runCutsCheck(t, exe, "cmir-check", map[string]any{
 			"mip":       compiledToMIPPayload(t, pMIR),
 			"cuts":      cutsToPayloads(t, mirCuts),
-			"solutions": solutionsToPayloads(t, [][]float64{{1, u1, u2}, {0, 0, 0}, {1, 1, 2}}),
-		}, true)
-
-		// Negative control: violated structural cut on feasible integer witness.
-		runCutsCheck(t, exe, "cmir-check", map[string]any{
-			"mip": compiledToMIPPayload(t, pMIR),
-			"cuts": []track2BCutPayload{{
-				Terms: []track2BTermPayload{{Col: 0, Val: int64ToPayload(1)}},
-				RHS:   int64ToPayload(0),
-			}},
-			"solutions": solutionsToPayloads(t, [][]float64{{1, u1, u2}}),
+			"solutions": solutionsToPayloads(t, [][]float64{{1, u1, u2}, {0, 0, 0}}),
 		}, false)
 
-		// Corpus MIPs with separateRowMIRCuts.
+		// Corpus MIPs with separateRowMIRCutsWithWS certified via live universal agg-cmir-check.
 		var mirCorpusChecked int
 		for _, relPath := range []string{
 			"testdata/corpus/t1_knapsack_12.json",
@@ -1079,20 +1127,22 @@ func TestFormalTrack2B(t *testing.T) {
 			lpC := NewLPSolver(pC, nil)
 			rootC := lpC.Solve()
 			if rootC.Status == StatusOptimal {
-				cutsC := separateRowMIRCuts(pC, rootC.Primal)
-				if len(cutsC) > 0 {
+				obsC := &cutCertObserver{srcRowIdx: -1}
+				wsC := cutGenWorkspace{certObs: obsC}
+				cutsC := separateRowMIRCutsWithWS(pC, rootC.Primal, &wsC)
+				if len(cutsC) > 0 && len(obsC.cmirs) > 0 {
+					liveItems, err := exportObserverItems(pC, obsC, [][]float64{sol})
+					if err != nil {
+						t.Fatalf("exportObserverItems(%s): %v", relPath, err)
+					}
 					mirCorpusChecked++
-					runCutsCheck(t, exe, "cmir-check", map[string]any{
-						"mip":       compiledToMIPPayload(t, pC),
-						"cuts":      cutsToPayloads(t, cutsC),
-						"solutions": solutionsToPayloads(t, [][]float64{sol}),
-					}, true)
+					runCutsCheckJSONLItems(t, exe, liveItems)
 				}
 			}
 			lpC.Close()
 		}
 		if mirCorpusChecked < 2 {
-			t.Fatalf("expected cMIR cuts on >= 2 corpus MIPs, got %d", mirCorpusChecked)
+			t.Fatalf("expected live cMIR certificates on >= 2 corpus MIPs, got %d", mirCorpusChecked)
 		}
 	})
 
@@ -1187,9 +1237,12 @@ func TestFormalTrack2B(t *testing.T) {
 		}
 		lpPt[zBin.Index()] = 0.4
 		lpPt[z1.Index()] = 4.0
-		vubCuts := separateFlowAndVUBCuts(pVUB, lpPt, nil)
-		if len(vubCuts) == 0 {
-			t.Fatal("expected flow/VUB cuts on vub_flow_formal")
+		obsVUB := &cutCertObserver{srcRowIdx: -1}
+		vubWS := cutGenWorkspace{certObs: obsVUB}
+		vubCuts := separateFlowAndVUBCuts(pVUB, lpPt, &vubWS)
+		if len(vubCuts) == 0 || len(obsVUB.vubs) == 0 || len(obsVUB.lotSizings) == 0 {
+			t.Fatalf("expected both VUB and lot-sizing live observer records, got cuts=%d vubs=%d ls=%d",
+				len(vubCuts), len(obsVUB.vubs), len(obsVUB.lotSizings))
 		}
 		// Exact feasible mixed-integer schedules for vub_flow_formal.
 		pt1 := make([]float64, pVUB.numVars)
@@ -1209,22 +1262,20 @@ func TestFormalTrack2B(t *testing.T) {
 		pt2[sCont[2].Index()] = 10
 		pt2[zBin.Index()] = 1
 		pt2[z2.Index()] = 4
+		vubItems, err := exportObserverItems(pVUB, obsVUB, [][]float64{pt1, pt2})
+		if err != nil {
+			t.Fatalf("exportObserverItems(pVUB): %v", err)
+		}
+		runCutsCheckJSONLItems(t, exe, vubItems)
+
+		// Negative control: witness-only vub-check payload MUST fail closed (T2-C1).
 		runCutsCheck(t, exe, "vub-check", map[string]any{
 			"mip":       compiledToMIPPayload(t, pVUB),
 			"cuts":      cutsToPayloads(t, vubCuts),
 			"solutions": solutionsToPayloads(t, [][]float64{pt1, pt2}),
-		}, true)
-
-		// Negative control: structural VUB cut evaluated on invalid point violating cut.
-		badPt := make([]float64, pVUB.numVars)
-		copy(badPt, pt1)
-		badPt[zBin.Index()] = 0
-		runCutsCheck(t, exe, "vub-check", map[string]any{
-			"cuts":      cutsToPayloads(t, vubCuts),
-			"solutions": solutionsToPayloads(t, [][]float64{badPt}),
 		}, false)
 
-		// Corpus VUB/lot-sizing/CFLP instances with separateFlowAndVUBCuts.
+		// Corpus VUB/lot-sizing/CFLP instances certified universally via live observer hooks.
 		var vubCorpusChecked int
 		for _, relPath := range []string{
 			"testdata/corpus/t2_cflp_36.json",
@@ -1239,21 +1290,35 @@ func TestFormalTrack2B(t *testing.T) {
 			lpC := NewLPSolver(pC, nil)
 			rootC := lpC.Solve()
 			if rootC.Status == StatusOptimal {
-				cutsC := separateFlowAndVUBCuts(pC, rootC.Primal, nil)
-				if len(cutsC) > 0 {
+				obsC := &cutCertObserver{srcRowIdx: -1}
+				wsC := cutGenWorkspace{certObs: obsC}
+				cutsC := separateFlowAndVUBCuts(pC, rootC.Primal, &wsC)
+				if len(cutsC) > 0 && (len(obsC.vubs) > 0 || len(obsC.lotSizings) > 0) {
+					liveItems, err := exportObserverItems(pC, obsC, [][]float64{sol})
+					if err != nil {
+						t.Fatalf("exportObserverItems(%s): %v", relPath, err)
+					}
 					vubCorpusChecked++
-					runCutsCheck(t, exe, "vub-check", map[string]any{
-						"mip":       compiledToMIPPayload(t, pC),
-						"cuts":      cutsToPayloads(t, cutsC),
-						"solutions": solutionsToPayloads(t, [][]float64{sol}),
-					}, true)
+					runCutsCheckJSONLItems(t, exe, liveItems)
 				}
 			}
 			lpC.Close()
 		}
 		if vubCorpusChecked == 0 {
-			t.Fatal("expected flow/VUB cuts on at least one corpus instance")
+			t.Fatal("expected live flow/VUB certificates on at least one corpus instance")
 		}
+	})
+
+	t.Run("StrictJsonEmptyBatchAndWitnessOnlyRejected", func(t *testing.T) {
+		t.Parallel()
+		runCutsCheckRawExpectFail(t, exe, []string{"--batch", "-"}, `[]`)
+		runCutsCheckRawExpectFail(t, exe, []string{"row-legal-mu"}, `{"sense":"le","mu":1,"mu":-1}`)
+		runCutsCheckRawExpectFail(t, exe, []string{"gmi-check"},
+			`{"cuts":[{"terms":[{"col":0,"val":1}],"rhs":0}],"mip":{"numVars":1,"isInt":[true],"lb":[0],"ub":[1],"rows":[]},"solutions":[[0]]}`)
+		runCutsCheckRawExpectFail(t, exe, []string{"cmir-check"},
+			`{"cuts":[{"terms":[{"col":0,"val":1},{"col":1,"val":1}],"rhs":0}],"solutions":[[0,0]]}`)
+		runCutsCheckRawExpectFail(t, exe, []string{"vub-check"},
+			`{"cuts":[{"terms":[{"col":0,"val":1}],"rhs":-100}],"structuralSolutions":[[-100]],"solutions":[[5]]}`)
 	})
 }
 

@@ -22,7 +22,7 @@ const (
 
 var (
 	reTrack5ObjdumpFunc = regexp.MustCompile(`^([0-9a-f]+)\s+<([^>]+)>:$`)
-	reTrack5ObjdumpInsn = regexp.MustCompile(`^\s*([0-9a-f]+):\s+([a-z0-9]+)(?:\s+(.*))?$`)
+	reTrack5ObjdumpInsn = regexp.MustCompile(`^\s*([0-9a-f]+):\s+([A-Za-z0-9.]+)(?:\s+(.*))?$`)
 )
 
 type binTargetEntry struct {
@@ -438,6 +438,15 @@ func runSimdCfgCheckJSON(tb testing.TB, exe, fileName string, req simdCfgRequest
 	return runToolWithExitCode(tb, exe, reqPath)
 }
 
+func runSimdCfgCheckRaw(tb testing.TB, exe, fileName, raw string) (int, string) {
+	tb.Helper()
+	reqPath := filepath.Join(tb.TempDir(), fileName)
+	if err := os.WriteFile(reqPath, []byte(raw), 0o600); err != nil {
+		tb.Fatalf("write %s: %v", reqPath, err)
+	}
+	return runToolWithExitCode(tb, exe, reqPath)
+}
+
 func TestFormalTrack5_SimdCfgCheck(t *testing.T) {
 	requireFormalEnv(t)
 	t.Parallel()
@@ -542,6 +551,268 @@ func TestFormalTrack5_SimdCfgCheck(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:     "Neg_LenGuardEVEX",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.sumFast",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "cmp", Args: "$0x8,%rbx"},
+					{Addr: "14", Op: "jl", Args: "30 <pkg.sumFast+0x20>"},
+					{Addr: "16", Op: "vmovdqu64", Args: "(%rax),%zmm0"},
+					{Addr: "1c", Op: "vzeroupper", Args: ""},
+					{Addr: "30", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_GoPrologueGuardEVEX",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "internal/simd.sumZ",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "4a0000", Op: "cmp", Args: "0x10(%r14),%rsp"},
+					{Addr: "4a0004", Op: "jbe", Args: "4a0030 <internal/simd.sumZ+0x30>"},
+					{Addr: "4a0006", Op: "push", Args: "%rbp"},
+					{Addr: "4a0007", Op: "vmovdqu64", Args: "(%rax),%zmm0"},
+					{Addr: "4a000d", Op: "vzeroupper", Args: ""},
+					{Addr: "4a0010", Op: "pop", Args: "%rbp"},
+					{Addr: "4a0011", Op: "ret", Args: ""},
+					{Addr: "4a0030", Op: "call", Args: "460000 <runtime.morestack_noctxt.abi0>", Raw: "call 460000 <runtime.morestack_noctxt.abi0>"},
+					{Addr: "4a0035", Op: "jmp", Args: "4a0000 <internal/simd.sumZ>"},
+				},
+			},
+		},
+		{
+			name:     "Neg_DirtyIndirectJmp",
+			wantText: "INDIRECT_OR_UNRESOLVED_JMP",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.f",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "jmp", Args: "*%rcx"},
+				},
+			},
+		},
+		{
+			name:     "Neg_JumptableHidden",
+			wantText: "INDIRECT_OR_UNRESOLVED_JMP",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.sw",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "lea", Args: "0x100(%rip),%rdx"},
+					{Addr: "1b", Op: "jmp", Args: "*(%rdx,%rcx,8)"},
+					{Addr: "20", Op: "movups", Args: "%xmm0,(%rbx)"},
+					{Addr: "23", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_DirtyCondExtJmp",
+			wantText: "DIRTY_COND_EXT_JMP",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.g",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "test", Args: "%rbx,%rbx"},
+					{Addr: "17", Op: "je", Args: "9999 <other.func>"},
+					{Addr: "19", Op: "vzeroupper", Args: ""},
+					{Addr: "1c", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_RepzRet",
+			wantText: "DIRTY_RET",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.h",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "repz", Args: "ret"},
+				},
+			},
+		},
+		{
+			name:     "Neg_Plan9Syntax",
+			wantText: "Plan 9",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.k",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "VMOVDQU", Args: "(AX), Y0"},
+					{Addr: "14", Op: "MOVUPS", Args: "X0, (BX)"},
+					{Addr: "18", Op: "RET", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_Ymm16EVEX",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.m",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu64", Args: "(%rax),%ymm16"},
+					{Addr: "16", Op: "vzeroupper", Args: ""},
+					{Addr: "19", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_Ymm17EVEX",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.m17",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vaddpd", Args: "%ymm17,%ymm0,%ymm0"},
+					{Addr: "16", Op: "vzeroupper", Args: ""},
+					{Addr: "19", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_Xmm20EVEX",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.m20",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vaddpd", Args: "%xmm20,%xmm0,%xmm0"},
+					{Addr: "16", Op: "vzeroupper", Args: ""},
+					{Addr: "19", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_VPTERNLOGQ",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.tern",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "VPTERNLOGQ", Args: "$0xff,%ymm0,%ymm1,%ymm2"},
+					{Addr: "16", Op: "vzeroupper", Args: ""},
+					{Addr: "19", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_RawSpoofPanicComment",
+			wantText: "DIRTY_CALL",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.n",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "call", Args: "4000 <pkg.helper>", Raw: "call 4000 <pkg.helper> // runtime.panicIndex"},
+					{Addr: "19", Op: "vzeroupper", Args: ""},
+					{Addr: "1c", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_DuplicateAddr",
+			wantText: "duplicate instruction address",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.p",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "jmp", Args: "20"},
+					{Addr: "20", Op: "vzeroupper", Args: ""},
+					{Addr: "20", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "24", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_FallOffEndDirty",
+			wantText: "DIRTY_FALL_OFF_END",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.r",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "nop", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_JmpHexPrefix",
+			wantText: "DIRTY_RET",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.u",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "jmp", Args: "0x4000"},
+				},
+			},
+		},
+		{
+			name:     "Neg_ZeroInsns",
+			wantText: "0 instructions",
+			fn: simdCfgFuncPayload{
+				Name:  "pkg.empty",
+				Insns: []simdCfgInsnPayload{},
+			},
+		},
+		{
+			name:     "Neg_NotrackIndirectJmp",
+			wantText: "INDIRECT_OR_UNRESOLVED_JMP",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.ntj",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "notrack", Args: "jmp *%rcx"},
+					{Addr: "18", Op: "vzeroupper", Args: ""},
+					{Addr: "1b", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_BndDirtyCall",
+			wantText: "DIRTY_CALL",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.bc",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "bnd", Args: "call 4000 <pkg.helper>"},
+					{Addr: "19", Op: "vzeroupper", Args: ""},
+					{Addr: "1c", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_ChainedPrefixDirtyJmp",
+			wantText: "DIRTY_RET",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.cpj",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "data16", Args: "cs notrack jmp 0x4000 <pkg.ext>"},
+					{Addr: "1a", Op: "vzeroupper", Args: ""},
+					{Addr: "1d", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_PrefixEVEXUnguarded",
+			wantText: "UNGUARDED_EVEX",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.pev",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "cs", Args: "vpternlogq $0xff,%xmm0,%xmm1,%xmm2"},
+					{Addr: "18", Op: "vzeroupper", Args: ""},
+					{Addr: "1b", Op: "ret", Args: ""},
+				},
+			},
+		},
+		{
+			name:     "Neg_RexPrefixDirtyRet",
+			wantText: "DIRTY_RET",
+			fn: simdCfgFuncPayload{
+				Name: "pkg.rexret",
+				Insns: []simdCfgInsnPayload{
+					{Addr: "10", Op: "vmovdqu", Args: "(%rax),%ymm0"},
+					{Addr: "14", Op: "rex.W", Args: "retq"},
+					{Addr: "16", Op: "vzeroupper", Args: ""},
+					{Addr: "19", Op: "ret", Args: ""},
+				},
+			},
+		},
 	}
 
 	for _, tc := range negCases {
@@ -555,4 +826,38 @@ func TestFormalTrack5_SimdCfgCheck(t *testing.T) {
 			}
 		})
 	}
+
+	rawNegCases := []struct {
+		name     string
+		wantText string
+		raw      string
+	}{
+		{
+			name:     "Neg_DuplicateFunctionsKey",
+			wantText: "duplicate JSON object key",
+			raw:      `{"functions":[{"name":"pkg.q","insns":[{"addr":"10","op":"vmovdqu","args":"(%rax),%ymm0"},{"addr":"14","op":"ret","args":""}]}],"functions":[]}`,
+		},
+		{
+			name:     "Neg_EmptyFunctions",
+			wantText: "non-empty",
+			raw:      `{"functions":[]}`,
+		},
+	}
+	for _, tc := range rawNegCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, out := runSimdCfgCheckRaw(t, simdExe, tc.name+".json", tc.raw)
+			if code == 0 || !strings.Contains(out, tc.wantText) {
+				t.Fatalf("expected REJECTED with %s (exit=%d):\n%s", tc.wantText, code, out)
+			}
+		})
+	}
+
+	t.Run("Neg_EmptyBatch", func(t *testing.T) {
+		t.Parallel()
+		code, out := runToolWithExitCode(t, simdExe, "--batch", "[]")
+		if code == 0 || !strings.Contains(out, "non-empty") {
+			t.Fatalf("expected REJECTED on empty --batch [] (exit=%d):\n%s", code, out)
+		}
+	})
 }
