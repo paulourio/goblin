@@ -765,88 +765,48 @@ func (f *LUFactorization) compactNucRows(nNuc int, extraNeed int32) {
 		totalLive += l
 		total += l + max(int32(4), l>>1)
 	}
+
+	var srcCols []int32
+	var srcVals []float64
+	var dstCols []int32
+	var dstVals []float64
+	staged := false
+	tmpPos := int32(0)
 	if int(total+extraNeed) <= len(f.nucRowCol) {
 		if int(f.nucRowFree+totalLive) <= len(f.nucRowCol) {
-			tmpPos := f.nucRowFree
-			cols := f.nucRowCol
-			vals := f.nucRowVal
-			for r := range nNuc {
-				if f.nucRowDone[r] {
-					continue
-				}
-				l := f.nucRowLen[r]
-				s := f.nucRowStart[r]
-				copy(cols[tmpPos:tmpPos+l], cols[s:s+l])
-				copy(vals[tmpPos:tmpPos+l], vals[s:s+l])
-				f.nucRowStart[r] = tmpPos
-				tmpPos += l
-			}
-			pos := int32(0)
-			for r := range nNuc {
-				if f.nucRowDone[r] {
-					f.nucRowStart[r] = 0
-					f.nucRowLen[r] = 0
-					f.nucRowCap[r] = 0
-					continue
-				}
-				l := f.nucRowLen[r]
-				s := f.nucRowStart[r]
-				c := l + max(int32(4), l>>1)
-				copy(cols[pos:pos+l], cols[s:s+l])
-				copy(vals[pos:pos+l], vals[s:s+l])
-				f.nucRowStart[r] = pos
-				f.nucRowCap[r] = c
-				pos += c
-			}
-			f.nucRowFree = pos
-			return
-		}
-		if cap(f.lColIdx) >= int(totalLive) && cap(f.lRowVal) >= int(totalLive) {
-			tmpCols := f.lColIdx[:totalLive]
-			tmpVals := f.lRowVal[:totalLive]
-			cols := f.nucRowCol
-			vals := f.nucRowVal
-			tmpPos := int32(0)
-			for r := range nNuc {
-				if f.nucRowDone[r] {
-					continue
-				}
-				l := f.nucRowLen[r]
-				s := f.nucRowStart[r]
-				copy(tmpCols[tmpPos:tmpPos+l], cols[s:s+l])
-				copy(tmpVals[tmpPos:tmpPos+l], vals[s:s+l])
-				f.nucRowStart[r] = tmpPos
-				tmpPos += l
-			}
-			pos := int32(0)
-			for r := range nNuc {
-				if f.nucRowDone[r] {
-					f.nucRowStart[r] = 0
-					f.nucRowLen[r] = 0
-					f.nucRowCap[r] = 0
-					continue
-				}
-				l := f.nucRowLen[r]
-				s := f.nucRowStart[r]
-				c := l + max(int32(4), l>>1)
-				copy(cols[pos:pos+l], tmpCols[s:s+l])
-				copy(vals[pos:pos+l], tmpVals[s:s+l])
-				f.nucRowStart[r] = pos
-				f.nucRowCap[r] = c
-				pos += c
-			}
-			f.nucRowFree = pos
-			return
+			srcCols, srcVals = f.nucRowCol, f.nucRowVal
+			dstCols, dstVals = f.nucRowCol, f.nucRowVal
+			tmpPos = f.nucRowFree
+			staged = true
+		} else if cap(f.lColIdx) >= int(totalLive) && cap(f.lRowVal) >= int(totalLive) {
+			srcCols, srcVals = f.lColIdx[:totalLive], f.lRowVal[:totalLive]
+			dstCols, dstVals = f.nucRowCol, f.nucRowVal
+			staged = true
 		}
 	}
+	if staged {
+		cols := f.nucRowCol
+		vals := f.nucRowVal
+		for r := range nNuc {
+			if f.nucRowDone[r] {
+				continue
+			}
+			l := f.nucRowLen[r]
+			s := f.nucRowStart[r]
+			copy(srcCols[tmpPos:tmpPos+l], cols[s:s+l])
+			copy(srcVals[tmpPos:tmpPos+l], vals[s:s+l])
+			f.nucRowStart[r] = tmpPos
+			tmpPos += l
+		}
+	} else {
+		needCap := int(total + extraNeed + max(int32(64), total>>1))
+		newCap := max(needCap, len(f.nucRowCol)*2)
+		srcCols, srcVals = f.nucRowCol, f.nucRowVal
+		dstCols = make([]int32, newCap)
+		dstVals = make([]float64, newCap)
+	}
 
-	needCap := int(total + extraNeed + max(int32(64), total>>1))
-	newCap := max(needCap, len(f.nucRowCol)*2)
-	newCols := make([]int32, newCap)
-	newVals := make([]float64, newCap)
 	pos := int32(0)
-	oldCols := f.nucRowCol
-	oldVals := f.nucRowVal
 	for r := range nNuc {
 		if f.nucRowDone[r] {
 			f.nucRowStart[r] = 0
@@ -857,14 +817,14 @@ func (f *LUFactorization) compactNucRows(nNuc int, extraNeed int32) {
 		l := f.nucRowLen[r]
 		s := f.nucRowStart[r]
 		c := l + max(int32(4), l>>1)
-		copy(newCols[pos:pos+l], oldCols[s:s+l])
-		copy(newVals[pos:pos+l], oldVals[s:s+l])
+		copy(dstCols[pos:pos+l], srcCols[s:s+l])
+		copy(dstVals[pos:pos+l], srcVals[s:s+l])
 		f.nucRowStart[r] = pos
 		f.nucRowCap[r] = c
 		pos += c
 	}
-	f.nucRowCol = newCols
-	f.nucRowVal = newVals
+	f.nucRowCol = dstCols
+	f.nucRowVal = dstVals
 	f.nucRowFree = pos
 }
 
@@ -894,78 +854,39 @@ func (f *LUFactorization) compactNucCols(nNuc int, extraNeed int32) {
 		totalLive += l
 		total += l + max(int32(4), l>>1)
 	}
+
+	var srcRows, dstRows []int32
+	staged := false
+	tmpPos := int32(0)
 	if int(total+extraNeed) <= len(f.nucColRow) {
 		if int(f.nucColFree+totalLive) <= len(f.nucColRow) {
-			tmpPos := f.nucColFree
-			rows := f.nucColRow
-			for c := range nNuc {
-				if f.nucColDone[c] {
-					continue
-				}
-				l := f.nucColLen[c]
-				s := f.nucColStart[c]
-				copy(rows[tmpPos:tmpPos+l], rows[s:s+l])
-				f.nucColStart[c] = tmpPos
-				tmpPos += l
-			}
-			pos := int32(0)
-			for c := range nNuc {
-				if f.nucColDone[c] {
-					f.nucColStart[c] = 0
-					f.nucColLen[c] = 0
-					f.nucColCap[c] = 0
-					continue
-				}
-				l := f.nucColLen[c]
-				s := f.nucColStart[c]
-				capC := l + max(int32(4), l>>1)
-				copy(rows[pos:pos+l], rows[s:s+l])
-				f.nucColStart[c] = pos
-				f.nucColCap[c] = capC
-				pos += capC
-			}
-			f.nucColFree = pos
-			return
-		}
-		if cap(f.uRowIdx) >= int(totalLive) {
-			tmpRows := f.uRowIdx[:totalLive]
-			rows := f.nucColRow
-			tmpPos := int32(0)
-			for c := range nNuc {
-				if f.nucColDone[c] {
-					continue
-				}
-				l := f.nucColLen[c]
-				s := f.nucColStart[c]
-				copy(tmpRows[tmpPos:tmpPos+l], rows[s:s+l])
-				f.nucColStart[c] = tmpPos
-				tmpPos += l
-			}
-			pos := int32(0)
-			for c := range nNuc {
-				if f.nucColDone[c] {
-					f.nucColStart[c] = 0
-					f.nucColLen[c] = 0
-					f.nucColCap[c] = 0
-					continue
-				}
-				l := f.nucColLen[c]
-				s := f.nucColStart[c]
-				capC := l + max(int32(4), l>>1)
-				copy(rows[pos:pos+l], tmpRows[s:s+l])
-				f.nucColStart[c] = pos
-				f.nucColCap[c] = capC
-				pos += capC
-			}
-			f.nucColFree = pos
-			return
+			srcRows, dstRows = f.nucColRow, f.nucColRow
+			tmpPos = f.nucColFree
+			staged = true
+		} else if cap(f.uRowIdx) >= int(totalLive) {
+			srcRows, dstRows = f.uRowIdx[:totalLive], f.nucColRow
+			staged = true
 		}
 	}
+	if staged {
+		rows := f.nucColRow
+		for c := range nNuc {
+			if f.nucColDone[c] {
+				continue
+			}
+			l := f.nucColLen[c]
+			s := f.nucColStart[c]
+			copy(srcRows[tmpPos:tmpPos+l], rows[s:s+l])
+			f.nucColStart[c] = tmpPos
+			tmpPos += l
+		}
+	} else {
+		needCap := int(total + extraNeed + max(int32(64), total>>1))
+		newCap := max(needCap, len(f.nucColRow)*2)
+		srcRows = f.nucColRow
+		dstRows = make([]int32, newCap)
+	}
 
-	needCap := int(total + extraNeed + max(int32(64), total>>1))
-	newCap := max(needCap, len(f.nucColRow)*2)
-	newRows := make([]int32, newCap)
-	oldRows := f.nucColRow
 	pos := int32(0)
 	for c := range nNuc {
 		if f.nucColDone[c] {
@@ -977,12 +898,12 @@ func (f *LUFactorization) compactNucCols(nNuc int, extraNeed int32) {
 		l := f.nucColLen[c]
 		s := f.nucColStart[c]
 		capC := l + max(int32(4), l>>1)
-		copy(newRows[pos:pos+l], oldRows[s:s+l])
+		copy(dstRows[pos:pos+l], srcRows[s:s+l])
 		f.nucColStart[c] = pos
 		f.nucColCap[c] = capC
 		pos += capC
 	}
-	f.nucColRow = newRows
+	f.nucColRow = dstRows
 	f.nucColFree = pos
 }
 
@@ -1038,13 +959,24 @@ func (f *LUFactorization) popNucRowEntry(r, c int32) (float64, bool) {
 	return 0, false
 }
 
-func (f *LUFactorization) refreshNucColMax(c int32) float64 {
+type markowitzPivot struct {
+	pivNR  int32
+	pivNC  int32
+	merit  int32
+	pivVal float64
+	abs    float64
+}
+
+func (f *LUFactorization) refreshNucColMax(c, skipRow int32, seedMax float64) float64 {
 	cStart := f.nucColStart[c]
 	cEnd := cStart + f.nucColLen[c]
 	oldMax := f.nucColMax[c]
-	colMax := 0.0
+	colMax := seedMax
 	for p := cStart; p < cEnd; p++ {
 		r2 := f.nucColRow[p]
+		if r2 == skipRow {
+			continue
+		}
 		if rm := f.nucRowMax[r2]; rm >= 0 && rm <= colMax {
 			continue
 		}
@@ -1059,6 +991,63 @@ func (f *LUFactorization) refreshNucColMax(c int32) float64 {
 	f.nucColMax[c] = colMax
 	f.nucColMaxDirty[c] = false
 	return colMax
+}
+
+func (f *LUFactorization) scanMarkowitzRow(r, deg int32, best markowitzPivot) markowitzPivot {
+	s := f.nucRowStart[r]
+	end := s + deg
+	for p := s; p < end; p++ {
+		v := f.nucRowVal[p]
+		av := math.Abs(v)
+		if av < luPivotTol {
+			continue
+		}
+		c := f.nucRowCol[p]
+		merit := (deg - 1) * (f.nucColLen[c] - 1)
+		if best.pivNR >= 0 && (merit > best.merit || (merit == best.merit && av <= best.abs)) {
+			continue
+		}
+		if av < luMarkowitzTol*f.nucColMax[c] {
+			if !f.nucColMaxDirty[c] || av < luMarkowitzTol*f.refreshNucColMax(c, -1, 0) {
+				continue
+			}
+		}
+		best.merit = merit
+		best.abs = av
+		best.pivNR = r
+		best.pivNC = c
+		best.pivVal = v
+	}
+	return best
+}
+
+func (f *LUFactorization) probeMarkowitzColEntry(r, c, deg int32, colThresh *float64, best markowitzPivot) markowitzPivot {
+	merit := (f.nucRowLen[r] - 1) * (deg - 1)
+	if best.pivNR >= 0 && merit >= best.merit {
+		return best
+	}
+	v := f.findRowVal(r, c)
+	av := math.Abs(v)
+	if av < luPivotTol {
+		return best
+	}
+	if av < *colThresh {
+		if !f.nucColMaxDirty[c] {
+			return best
+		}
+		*colThresh = max(luPivotTol, luMarkowitzTol*f.refreshNucColMax(c, -1, 0))
+		if av < *colThresh {
+			return best
+		}
+	}
+	if merit < best.merit || (merit == best.merit && av > best.abs) {
+		best.merit = merit
+		best.abs = av
+		best.pivNR = r
+		best.pivNC = c
+		best.pivVal = v
+	}
+	return best
 }
 
 func (f *LUFactorization) findRowVal(r, c int32) float64 {
@@ -1229,31 +1218,8 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 				if !f.nucColMaxDirty[candC] {
 					continue
 				}
-				// Recompute exact column max only when the monotonic upper bound is dirty,
-				// skipping rows whose cached rowMax cannot improve colMax and stopping early
-				// once the monotonic upper bound oldMax is attained.
-				cStart := f.nucColStart[candC]
-				cEnd := cStart + f.nucColLen[candC]
-				oldMax := f.nucColMax[candC]
-				colMax := av
-				for p := cStart; p < cEnd; p++ {
-					r2 := f.nucColRow[p]
-					if r2 == candR {
-						continue
-					}
-					if rm := f.nucRowMax[r2]; rm >= 0 && rm <= colMax {
-						continue
-					}
-					cv := f.findRowVal(r2, candC)
-					if ac := math.Abs(cv); ac > colMax {
-						colMax = ac
-						if colMax >= oldMax {
-							break
-						}
-					}
-				}
-				f.nucColMax[candC] = colMax
-				f.nucColMaxDirty[candC] = false
+				// Recompute exact column max only when the monotonic upper bound is dirty.
+				colMax := f.refreshNucColMax(candC, candR, av)
 				if av >= luMarkowitzTol*colMax {
 					pivNR = candR
 					pivNC = candC
@@ -1278,95 +1244,48 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 				f.minColDeg++
 			}
 
-			bestMerit := int32(maxMeritInit)
-			bestAbs := 0.0
+			best := markowitzPivot{pivNR: -1, pivNC: -1, merit: int32(maxMeritInit)}
 			searched := 0
 
-			// Seed bestMerit from sparsest rows first when minRowDeg is small so column search
-			// immediately prunes dense rows via merit >= bestMerit without scanning them.
+			// Seed best.merit from sparsest rows first when minRowDeg is small so column search
+			// immediately prunes dense rows via merit >= best.merit without scanning them.
 			if f.minColDeg < f.minRowDeg && f.minRowDeg <= 8 && f.rowHead[f.minRowDeg] >= 0 {
 				dRow := f.minRowDeg
 				probed := 0
 				for r := f.rowHead[dRow]; r >= 0 && probed < 2; r = f.rowNext[r] {
-					s := f.nucRowStart[r]
-					end := s + dRow
-					for p := s; p < end; p++ {
-						v := f.nucRowVal[p]
-						av := math.Abs(v)
-						if av < luPivotTol {
-							continue
-						}
-						c := f.nucRowCol[p]
-						merit := (dRow - 1) * (f.nucColLen[c] - 1)
-						if pivNR >= 0 && (merit > bestMerit || (merit == bestMerit && av <= bestAbs)) {
-							continue
-						}
-						if av < luMarkowitzTol*f.nucColMax[c] {
-							if !f.nucColMaxDirty[c] || av < luMarkowitzTol*f.refreshNucColMax(c) {
-								continue
-							}
-						}
-						bestMerit = merit
-						bestAbs = av
-						pivNR = r
-						pivNC = c
-						pivVal = v
-					}
+					best = f.scanMarkowitzRow(r, dRow, best)
 					probed++
 				}
 			}
 
 			startDeg := min(f.minRowDeg, f.minColDeg)
 			for d := startDeg; d <= nNuc32; d++ {
-				if pivNR >= 0 && (d-1)*(min(f.minRowDeg, f.minColDeg)-1) >= bestMerit {
+				if best.pivNR >= 0 && (d-1)*(min(f.minRowDeg, f.minColDeg)-1) >= best.merit {
 					break
 				}
 
 				// Inspect rows of degree d (values are contiguous in L1 cache, exact column-threshold guarded).
-				if f.rowHead[d] >= 0 && (pivNR < 0 || (d-1)*(f.minColDeg-1) < bestMerit) {
+				if f.rowHead[d] >= 0 && (best.pivNR < 0 || (d-1)*(f.minColDeg-1) < best.merit) {
 					for r := f.rowHead[d]; r >= 0; r = f.rowNext[r] {
-						s := f.nucRowStart[r]
-						end := s + d
-						for p := s; p < end; p++ {
-							v := f.nucRowVal[p]
-							av := math.Abs(v)
-							if av < luPivotTol {
-								continue
-							}
-							c := f.nucRowCol[p]
-							merit := (d - 1) * (f.nucColLen[c] - 1)
-							if pivNR >= 0 && (merit > bestMerit || (merit == bestMerit && av <= bestAbs)) {
-								continue
-							}
-							if av < luMarkowitzTol*f.nucColMax[c] {
-								if !f.nucColMaxDirty[c] || av < luMarkowitzTol*f.refreshNucColMax(c) {
-									continue
-								}
-							}
-							bestMerit = merit
-							bestAbs = av
-							pivNR = r
-							pivNC = c
-							pivVal = v
-						}
+						best = f.scanMarkowitzRow(r, d, best)
 						searched++
-						if pivNR >= 0 && (bestMerit <= (d-1)*(d-1) || searched >= 4) {
+						if best.pivNR >= 0 && (best.merit <= (d-1)*(d-1) || searched >= 4) {
 							break
 						}
 					}
-					if pivNR >= 0 && searched >= 4 {
+					if best.pivNR >= 0 && searched >= 4 {
 						break
 					}
 				}
 
 				// Inspect columns of degree d only when strictly sparser than minRowDeg.
-				if f.colHead[d] >= 0 && d < f.minRowDeg && (pivNR < 0 || (d-1)*(f.minRowDeg-1) < bestMerit) {
+				if f.colHead[d] >= 0 && d < f.minRowDeg && (best.pivNR < 0 || (d-1)*(f.minRowDeg-1) < best.merit) {
 					for c := f.colHead[d]; c >= 0; c = f.colNext[c] {
 						colThresh := max(luPivotTol, luMarkowitzTol*f.nucColMax[c])
 						cStart := f.nucColStart[c]
 						cEnd := cStart + d
 						// Probe the sparsest row in column c first so a valid pivot tightens
-						// bestMerit before calling findRowVal on denser rows in the same column.
+						// best.merit before calling findRowVal on denser rows in the same column.
 						minP := cStart
 						minRLen := f.nucRowLen[f.nucColRow[cStart]]
 						for p := cStart + 1; p < cEnd; p++ {
@@ -1375,61 +1294,36 @@ func (f *LUFactorization) factorizeNucleusSparse(m, nucStart, nNuc int) error {
 								minP = p
 							}
 						}
-						if pivNR >= 0 && (minRLen-1)*(d-1) >= bestMerit {
+						if best.pivNR >= 0 && (minRLen-1)*(d-1) >= best.merit {
 							searched++
 							if searched >= 4 {
 								break
 							}
 							continue
 						}
-						probeColEntry := func(r int32) {
-							merit := (f.nucRowLen[r] - 1) * (d - 1)
-							if pivNR >= 0 && merit >= bestMerit {
-								return
-							}
-							v := f.findRowVal(r, c)
-							av := math.Abs(v)
-							if av < luPivotTol {
-								return
-							}
-							if av < colThresh {
-								if !f.nucColMaxDirty[c] {
-									return
-								}
-								colThresh = max(luPivotTol, luMarkowitzTol*f.refreshNucColMax(c))
-								if av < colThresh {
-									return
-								}
-							}
-							if merit < bestMerit || (merit == bestMerit && av > bestAbs) {
-								bestMerit = merit
-								bestAbs = av
-								pivNR = r
-								pivNC = c
-								pivVal = v
-							}
-						}
-						probeColEntry(f.nucColRow[minP])
+						best = f.probeMarkowitzColEntry(f.nucColRow[minP], c, d, &colThresh, best)
 						for p := cStart; p < cEnd; p++ {
 							if p == minP {
 								continue
 							}
-							probeColEntry(f.nucColRow[p])
+							best = f.probeMarkowitzColEntry(f.nucColRow[p], c, d, &colThresh, best)
 						}
 						searched++
-						if pivNR >= 0 && searched >= 4 {
+						if best.pivNR >= 0 && searched >= 4 {
 							break
 						}
 					}
-					if pivNR >= 0 && searched >= 4 {
+					if best.pivNR >= 0 && searched >= 4 {
 						break
 					}
 				}
 			}
 
+			pivNR, pivNC, pivVal = best.pivNR, best.pivNC, best.pivVal
+
 			// Fallback: global maximum absolute entry across all active rows.
 			if pivNR < 0 {
-				bestAbs = 0
+				bestAbs := 0.0
 				for r := range nNuc {
 					if f.nucRowDone[r] {
 						continue
@@ -3238,18 +3132,18 @@ func (f *LUFactorization) btranHypersparse(rhs, w []float64, seeds []int32, outB
 	return outW, true
 }
 
-func compactUArena(m int, starts, lens, caps []int32, idx *[]int32, val *[]float64, tmpIdx *[]int32, tmpVal *[]float64, extraNeed int32) int32 {
+func (f *LUFactorization) compactUArena(starts, lens, caps []int32, idx *[]int32, val *[]float64, extraNeed int32) int32 {
 	total := int32(0)
-	for k := range m {
+	for k := range f.m {
 		total += lens[k]
 	}
 	need := int(total + extraNeed)
 	newCap := max(need*2, max(cap(*idx), 256))
 	var newIdx []int32
 	var newVal []float64
-	if cap(*tmpIdx) >= newCap && cap(*tmpVal) >= newCap {
-		newIdx = (*tmpIdx)[:cap(*tmpIdx)]
-		newVal = (*tmpVal)[:cap(*tmpVal)]
+	if cap(f.uTmpIdx) >= newCap && cap(f.uTmpVal) >= newCap {
+		newIdx = f.uTmpIdx[:cap(f.uTmpIdx)]
+		newVal = f.uTmpVal[:cap(f.uTmpVal)]
 	} else {
 		newIdx = make([]int32, newCap)
 		newVal = make([]float64, newCap)
@@ -3257,7 +3151,7 @@ func compactUArena(m int, starts, lens, caps []int32, idx *[]int32, val *[]float
 	pos := int32(0)
 	oldIdx := *idx
 	oldVal := *val
-	for k := range m {
+	for k := range f.m {
 		l := lens[k]
 		if l > 0 {
 			st := starts[k]
@@ -3268,19 +3162,19 @@ func compactUArena(m int, starts, lens, caps []int32, idx *[]int32, val *[]float
 		caps[k] = l
 		pos += l
 	}
-	*tmpIdx = oldIdx
-	*tmpVal = oldVal
+	f.uTmpIdx = oldIdx
+	f.uTmpVal = oldVal
 	*idx = newIdx
 	*val = newVal
 	return pos
 }
 
 func (f *LUFactorization) compactUCols(extraNeed int32) {
-	f.uColFree = compactUArena(f.m, f.uColStart[:f.m], f.uColLen[:f.m], f.uColCap[:f.m], &f.uRowIdx, &f.uColVal, &f.uTmpIdx, &f.uTmpVal, extraNeed)
+	f.uColFree = f.compactUArena(f.uColStart[:f.m], f.uColLen[:f.m], f.uColCap[:f.m], &f.uRowIdx, &f.uColVal, extraNeed)
 }
 
 func (f *LUFactorization) compactURows(extraNeed int32) {
-	f.uRowFree = compactUArena(f.m, f.uRowStart[:f.m], f.uRowLen[:f.m], f.uRowCap[:f.m], &f.uColIdx, &f.uRowVal, &f.uTmpIdx, &f.uTmpVal, extraNeed)
+	f.uRowFree = f.compactUArena(f.uRowStart[:f.m], f.uRowLen[:f.m], f.uRowCap[:f.m], &f.uColIdx, &f.uRowVal, extraNeed)
 }
 
 // removeURowEntry stays within the Go inline budget (cost <= 80) for hot U-matrix updates.

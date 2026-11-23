@@ -47,10 +47,8 @@ type exactBackStep struct {
 type exactSolverSnapshot struct {
 	p          *CompiledProblem
 	n          int
-	baseM      int
 	m          int
 	objConstM  *big.Rat
-	objConstU  *big.Rat
 	objMin     []*big.Rat
 	lb         []*big.Rat
 	ub         []*big.Rat
@@ -446,18 +444,12 @@ func buildExactSolverSnapshot(stop exactStop, s *LPSolver) (*exactSolverSnapshot
 	if !ok {
 		return nil, false
 	}
-	objConstU, ok := exactRatFromFloat(p.objConstant)
-	if !ok {
-		return nil, false
-	}
 
 	snap := &exactSolverSnapshot{
 		p:          p,
 		n:          n,
-		baseM:      baseM,
 		m:          m,
 		objConstM:  objConstM,
-		objConstU:  objConstU,
 		objMin:     make([]*big.Rat, n),
 		lb:         make([]*big.Rat, n),
 		ub:         make([]*big.Rat, n),
@@ -1059,7 +1051,7 @@ func (snap *exactSolverSnapshot) computeReducedCostsMin(yMin []*big.Rat) []*big.
 	return rcMin
 }
 
-func (snap *exactSolverSnapshot) verifyDualConeAndInfiniteBounds(yMin, rcMin []*big.Rat) bool {
+func (snap *exactSolverSnapshot) verifyDualConeBounds(yMin, rcMin []*big.Rat) bool {
 	if len(yMin) < snap.m || len(rcMin) < snap.n {
 		return false
 	}
@@ -1133,17 +1125,7 @@ func ExactBasisDuals(ctx context.Context, s *LPSolver) (dualMin, dualUser []*big
 	return yMin, dualUser, true
 }
 
-func (snap *exactSolverSnapshot) extractExactDuals(stop exactStop) (yMin, rcMin, dualUser, rcUser []*big.Rat, ok bool) {
-	if snap.m == 0 {
-		yMin = []*big.Rat{}
-		rcMin = cloneRatSlice(snap.objMin)
-		if !snap.verifyDualConeAndInfiniteBounds(yMin, rcMin) {
-			return nil, nil, nil, nil, false
-		}
-		dualUser, rcUser = snap.userDualsAndRC(yMin, rcMin)
-		return yMin, rcMin, dualUser, rcUser, true
-	}
-
+func (snap *exactSolverSnapshot) basicObjMinRHS() []*big.Rat {
 	rhsB := make([]*big.Rat, snap.m)
 	for q, bVar := range snap.basis {
 		if bVar < snap.n {
@@ -1152,12 +1134,26 @@ func (snap *exactSolverSnapshot) extractExactDuals(stop exactStop) (yMin, rcMin,
 			rhsB[q] = new(big.Rat)
 		}
 	}
-	yMin, ok = snap.solveBasisTranspose(stop, rhsB)
+	return rhsB
+}
+
+func (snap *exactSolverSnapshot) extractExactDuals(stop exactStop) (yMin, rcMin, dualUser, rcUser []*big.Rat, ok bool) {
+	if snap.m == 0 {
+		yMin = []*big.Rat{}
+		rcMin = cloneRatSlice(snap.objMin)
+		if !snap.verifyDualConeBounds(yMin, rcMin) {
+			return nil, nil, nil, nil, false
+		}
+		dualUser, rcUser = snap.userDualsAndRC(yMin, rcMin)
+		return yMin, rcMin, dualUser, rcUser, true
+	}
+
+	yMin, ok = snap.solveBasisTranspose(stop, snap.basicObjMinRHS())
 	if !ok {
 		return nil, nil, nil, nil, false
 	}
 	rcMin = snap.computeReducedCostsMin(yMin)
-	if !snap.verifyDualConeAndInfiniteBounds(yMin, rcMin) {
+	if !snap.verifyDualConeBounds(yMin, rcMin) {
 		return nil, nil, nil, nil, false
 	}
 	dualUser, rcUser = snap.userDualsAndRC(yMin, rcMin)
@@ -1170,15 +1166,10 @@ func ExactBasisSolution(ctx context.Context, s *LPSolver) (ExactLPSolution, bool
 	return exactBasisSolutionStop(exactStopFromCtx(ctx), s)
 }
 
-func exactBasisSolutionStop(stop exactStop, s *LPSolver) (ExactLPSolution, bool) {
-	snap, ok := buildExactSolverSnapshot(stop, s)
-	if !ok {
-		return ExactLPSolution{}, false
-	}
-	yMin, rcMin, dualUser, rcUser, ok := snap.extractExactDuals(stop)
-	if !ok {
-		return ExactLPSolution{}, false
-	}
+func (snap *exactSolverSnapshot) extractExactSolutionFromDuals(
+	stop exactStop,
+	yMin, rcMin, dualUser, rcUser []*big.Rat,
+) (ExactLPSolution, bool) {
 	primal, ok := snap.extractExactPrimal(stop)
 	if !ok {
 		return ExactLPSolution{}, false
@@ -1214,6 +1205,18 @@ func exactBasisSolutionStop(stop exactStop, s *LPSolver) (ExactLPSolution, bool)
 		ObjectiveMin:   objMin,
 		ObjectiveUser:  objUser,
 	}, true
+}
+
+func exactBasisSolutionStop(stop exactStop, s *LPSolver) (ExactLPSolution, bool) {
+	snap, ok := buildExactSolverSnapshot(stop, s)
+	if !ok {
+		return ExactLPSolution{}, false
+	}
+	yMin, rcMin, dualUser, rcUser, ok := snap.extractExactDuals(stop)
+	if !ok {
+		return ExactLPSolution{}, false
+	}
+	return snap.extractExactSolutionFromDuals(stop, yMin, rcMin, dualUser, rcUser)
 }
 
 func (snap *exactSolverSnapshot) extractExactPrimal(stop exactStop) ([]*big.Rat, bool) {
@@ -1518,54 +1521,38 @@ func PolishExactBasisDuals(ctx context.Context, s *LPSolver, res *LPResult) bool
 	return polishExactBasisDuals(exactStopFromCtx(ctx), s, res)
 }
 
+func copyRatSliceToFloat(dst *[]float64, src []*big.Rat) {
+	if len(*dst) != len(src) {
+		*dst = make([]float64, len(src))
+	}
+	out := *dst
+	for i, r := range src {
+		out[i] = exactRatToFloat(r)
+	}
+}
+
 func polishExactBasisDuals(stop exactStop, s *LPSolver, res *LPResult) bool {
 	if res == nil || res.Status != StatusOptimal {
 		return false
 	}
-	if sol, ok := exactBasisSolutionStop(stop, s); ok {
-		if len(res.Primal) != len(sol.Primal) {
-			res.Primal = make([]float64, len(sol.Primal))
-		}
-		for j, r := range sol.Primal {
-			res.Primal[j] = exactRatToFloat(r)
-		}
-		if len(res.Dual) != len(sol.DualUser) {
-			res.Dual = make([]float64, len(sol.DualUser))
-		}
-		for i, r := range sol.DualUser {
-			res.Dual[i] = exactRatToFloat(r)
-		}
-		if len(res.ReducedCosts) != len(sol.ReducedCost) {
-			res.ReducedCosts = make([]float64, len(sol.ReducedCost))
-		}
-		for j, r := range sol.ReducedCost {
-			res.ReducedCosts[j] = exactRatToFloat(r)
-		}
-		res.ObjectiveMin = exactRatToFloat(sol.ObjectiveMin)
-		res.Objective = exactRatToFloat(sol.ObjectiveUser)
-		return true
-	}
-
 	snap, ok := buildExactSolverSnapshot(stop, s)
 	if !ok {
 		return false
 	}
-	_, _, dualUser, rcUser, ok := snap.extractExactDuals(stop)
+	yMin, rcMin, dualUser, rcUser, ok := snap.extractExactDuals(stop)
 	if !ok {
 		return false
 	}
-	if len(res.Dual) != len(dualUser) {
-		res.Dual = make([]float64, len(dualUser))
+	if sol, okSol := snap.extractExactSolutionFromDuals(stop, yMin, rcMin, dualUser, rcUser); okSol {
+		copyRatSliceToFloat(&res.Primal, sol.Primal)
+		copyRatSliceToFloat(&res.Dual, sol.DualUser)
+		copyRatSliceToFloat(&res.ReducedCosts, sol.ReducedCost)
+		res.ObjectiveMin = exactRatToFloat(sol.ObjectiveMin)
+		res.Objective = exactRatToFloat(sol.ObjectiveUser)
+		return true
 	}
-	for i, r := range dualUser {
-		res.Dual[i] = exactRatToFloat(r)
-	}
-	if len(res.ReducedCosts) != len(rcUser) {
-		res.ReducedCosts = make([]float64, len(rcUser))
-	}
-	for j, r := range rcUser {
-		res.ReducedCosts[j] = exactRatToFloat(r)
-	}
+	copyRatSliceToFloat(&res.Dual, dualUser)
+	copyRatSliceToFloat(&res.ReducedCosts, rcUser)
 	return true
 }
 
@@ -1703,7 +1690,7 @@ func extractUnboundedCertificateStop(stop exactStop, p *CompiledProblem, s *LPSo
 	}
 
 	if p.numConstraints == 0 {
-		return extractUnconstrainedUnboundedCert(p, isMIP)
+		return extractFreeUnboundedCert(p, isMIP)
 	}
 
 	var x0LP, rayLP []*big.Rat
@@ -1741,7 +1728,7 @@ func extractUnboundedCertificateStop(stop exactStop, p *CompiledProblem, s *LPSo
 	if !isMIP {
 		if x0LP == nil {
 			if hint != nil {
-				if xH, okH := floatSliceToExactPrimalIfFeasible(p, hint, false); okH {
+				if xH, okH := exactPrimalIfFeasible(p, hint, false); okH {
 					x0LP = xH
 				}
 			}
@@ -1835,7 +1822,7 @@ func shallowContRelaxProblem(p *CompiledProblem) *CompiledProblem {
 	return &cp
 }
 
-func extractUnconstrainedUnboundedCert(p *CompiledProblem, isMIP bool) (UnboundedCertificate, bool) {
+func extractFreeUnboundedCert(p *CompiledProblem, isMIP bool) (UnboundedCertificate, bool) {
 	n := p.numVars
 	objMinVec, okObj := exactMinObjVecRat(p)
 	if !okObj {
@@ -1943,15 +1930,7 @@ func extractExactLPRayFromSolver(stop exactStop, p *CompiledProblem, s *LPSolver
 
 	// Compute exact basis multipliers yMin so candidate nonbasic edges with negative
 	// directional derivative are prioritized first.
-	rhsB := make([]*big.Rat, snap.m)
-	for q, bVar := range snap.basis {
-		if bVar < snap.n {
-			rhsB[q] = new(big.Rat).Set(snap.objMin[bVar])
-		} else {
-			rhsB[q] = new(big.Rat)
-		}
-	}
-	yMin, okY := snap.solveBasisTranspose(stop, rhsB)
+	yMin, okY := snap.solveBasisTranspose(stop, snap.basicObjMinRHS())
 	if !okY {
 		return x0, nil, nil
 	}
@@ -2332,15 +2311,8 @@ func solveExactLPFeasibleAnchor(stop exactStop, p *CompiledProblem) ([]*big.Rat,
 	if stop.canceled() {
 		return nil, false
 	}
-	fp := p.zeroObjCopy()
+	fp := shallowContRelaxProblem(p.zeroObjCopy())
 	fp.sense = Minimize
-	fp.isMIP = false
-	fp.intCols = nil
-	fp.exactOrig = fp.exactOrig.cloneForContRelax(false)
-	fp.varCat = make([]VarCategory, p.numVars)
-	for j := range p.numVars {
-		fp.varCat[j] = Continuous
-	}
 
 	lp := NewLPSolver(fp, nil)
 	defer lp.Close()
@@ -2399,14 +2371,72 @@ func isRatSliceIntegralOnCols(p *CompiledProblem, x []*big.Rat) bool {
 	return true
 }
 
-func floatSliceToExactPrimalIfFeasible(p *CompiledProblem, cand []float64, requireInt bool) ([]*big.Rat, bool) {
-	if len(cand) != p.numVars {
+func verifyExactPrimalRat(p *CompiledProblem, x []*big.Rat, requireInt bool) bool {
+	if p == nil || p.invalidErr != nil || len(x) != p.numVars || len(p.varCat) < len(x) || len(p.varLB) < len(x) || len(p.varUB) < len(x) {
+		return false
+	}
+	for j, xj := range x {
+		if xj == nil {
+			return false
+		}
+		if requireInt && p.varCat[j] != Continuous && !xj.IsInt() {
+			return false
+		}
+		lo, hi := p.varLB[j], p.varUB[j]
+		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+			return false
+		}
+		if !math.IsInf(lo, -1) {
+			lr, ok := exactRatFromFloat(lo)
+			if !ok || xj.Cmp(lr) < 0 {
+				return false
+			}
+		}
+		if !math.IsInf(hi, 1) {
+			ur, ok := exactRatFromFloat(hi)
+			if !ok || xj.Cmp(ur) > 0 {
+				return false
+			}
+		}
+	}
+	for i := range p.numConstraints {
+		rhs, ok := exactRowRHSRat(p, i)
+		if !ok {
+			return false
+		}
+		act, okAct := exactEvalRowActivityRat(p, i, x)
+		if !okAct {
+			return false
+		}
+		cmp := act.Cmp(rhs)
+		switch p.rowSense[i] {
+		case LessEqual:
+			if cmp > 0 {
+				return false
+			}
+		case GreaterEqual:
+			if cmp < 0 {
+				return false
+			}
+		case Equal:
+			if cmp != 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func floatSliceToExactPrimal(p *CompiledProblem, cand []float64, requireInt, roundInt bool) ([]*big.Rat, bool) {
+	if p == nil || p.invalidErr != nil || len(cand) != p.numVars || len(p.varCat) < p.numVars {
 		return nil, false
 	}
 	x := make([]*big.Rat, p.numVars)
 	for j := range p.numVars {
 		v := cand[j]
-		if requireInt && p.varCat[j] != Continuous {
+		if requireInt && roundInt && p.varCat[j] != Continuous {
 			v = math.Round(v)
 		}
 		r, ok := exactRatFromFloat(v)
@@ -2416,53 +2446,23 @@ func floatSliceToExactPrimalIfFeasible(p *CompiledProblem, cand []float64, requi
 		if requireInt && p.varCat[j] != Continuous && !r.IsInt() {
 			return nil, false
 		}
-		if !math.IsInf(p.varLB[j], -1) {
-			lb, okL := exactRatFromFloat(p.varLB[j])
-			if !okL || r.Cmp(lb) < 0 {
-				return nil, false
-			}
-		}
-		if !math.IsInf(p.varUB[j], 1) {
-			ub, okU := exactRatFromFloat(p.varUB[j])
-			if !okU || r.Cmp(ub) > 0 {
-				return nil, false
-			}
-		}
 		x[j] = r
 	}
-	for i := range p.numConstraints {
-		rhs, okR := exactRowRHSRat(p, i)
-		if !okR {
-			return nil, false
-		}
-		act, okAct := exactEvalRowActivityRat(p, i, x)
-		if !okAct {
-			return nil, false
-		}
-		cmp := act.Cmp(rhs)
-		switch p.rowSense[i] {
-		case LessEqual:
-			if cmp > 0 {
-				return nil, false
-			}
-		case GreaterEqual:
-			if cmp < 0 {
-				return nil, false
-			}
-		case Equal:
-			if cmp != 0 {
-				return nil, false
-			}
-		}
+	if !verifyExactPrimalRat(p, x, requireInt) {
+		return nil, false
 	}
 	return x, true
+}
+
+func exactPrimalIfFeasible(p *CompiledProblem, cand []float64, requireInt bool) ([]*big.Rat, bool) {
+	return floatSliceToExactPrimal(p, cand, requireInt, true)
 }
 
 func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([]*big.Rat, bool) {
 	if stop.canceled() || len(cand) != p.numVars {
 		return nil, false
 	}
-	if xDirect, ok := floatSliceToExactPrimalIfFeasible(p, cand, true); ok {
+	if xDirect, ok := exactPrimalIfFeasible(p, cand, true); ok {
 		return xDirect, true
 	}
 	if len(p.intCols) == p.numVars {
@@ -2472,23 +2472,18 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 	// Fix integer columns to rounded integers on a copy of p and solve continuous
 	// columns via exact basis factorization so non-dyadic rationals (such as 1/3)
 	// satisfy equality rows with zero residual over Q.
-	fp := p.zeroObjCopy()
+	fp := shallowContRelaxProblem(p.zeroObjCopy())
 	fp.sense = Minimize
-	fp.isMIP = false
-	fp.intCols = nil
-	if fp.exactOrig != nil {
-		fp.exactOrig = fp.exactOrig.cloneForContRelax(false)
+	if fp.exactOrig != nil && p.exactOrig != nil {
 		for i := range fp.exactOrig.rows {
-			if p.exactOrig != nil && i < len(p.exactOrig.rows) && p.exactOrig.rows[i].intTightened {
+			if i < len(p.exactOrig.rows) && p.exactOrig.rows[i].intTightened {
 				fp.exactOrig.rows[i].rhsInexact = false
 			}
 		}
 	}
 	fp.varLB = slices.Clone(p.varLB)
 	fp.varUB = slices.Clone(p.varUB)
-	fp.varCat = make([]VarCategory, p.numVars)
 	for j := range p.numVars {
-		fp.varCat[j] = Continuous
 		if p.varCat[j] != Continuous {
 			iv := math.Round(cand[j])
 			if math.IsNaN(iv) || math.IsInf(iv, 0) || iv < p.varLB[j] || iv > p.varUB[j] {
@@ -2545,89 +2540,55 @@ func exactMIPFeasibleRat(p *CompiledProblem, x []float64) bool {
 	if p == nil || len(x) < p.numVars {
 		return false
 	}
-	n := p.numVars
-	xr := make([]*big.Rat, n)
-	for j := range n {
-		v := x[j]
-		if isNonFinite(v) {
-			return false
+	_, ok := floatSliceToExactPrimal(p, x[:p.numVars], true, false)
+	return ok
+}
+
+type exactGCDScratch struct {
+	one       big.Int
+	g         big.Int
+	lcmDen    big.Int
+	tmpGCD    big.Int
+	scaledNum big.Int
+}
+
+func (sc *exactGCDScratch) rowScale(vals []*big.Rat, maxDenomBits int) (*big.Rat, bool) {
+	sc.one.SetInt64(1)
+	sc.lcmDen.SetInt64(1)
+	for _, vr := range vals {
+		if vr.Sign() == 0 {
+			continue
 		}
-		if p.varCat[j] != Continuous && math.Floor(v) != v {
-			return false
-		}
-		rv := new(big.Rat).SetFloat64(v)
-		if rv == nil {
-			return false
-		}
-		if !math.IsInf(p.varLB[j], -1) {
-			lb := new(big.Rat).SetFloat64(p.varLB[j])
-			if lb == nil || rv.Cmp(lb) < 0 {
-				return false
-			}
-		}
-		if !math.IsInf(p.varUB[j], 1) {
-			ub := new(big.Rat).SetFloat64(p.varUB[j])
-			if ub == nil || rv.Cmp(ub) > 0 {
-				return false
-			}
-		}
-		xr[j] = rv
-	}
-	if p.exactOrig != nil {
-		for i := range p.numConstraints {
-			rhs, okR := exactRowRHSRat(p, i)
-			if !okR {
-				return false
-			}
-			acc, okAct := exactEvalRowActivityRat(p, i, xr)
-			if !okAct {
-				return false
-			}
-			cmp := acc.Cmp(rhs)
-			switch p.rowSense[i] {
-			case LessEqual:
-				if cmp > 0 {
-					return false
-				}
-			case GreaterEqual:
-				if cmp < 0 {
-					return false
-				}
-			case Equal:
-				if cmp != 0 {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	acc := new(big.Rat)
-	term := new(big.Rat)
-	for i := range p.numConstraints {
-		acc.SetInt64(0)
-		s, e := p.rowPtr[i], p.rowPtr[i+1]
-		for k := s; k < e; k++ {
-			av := new(big.Rat).SetFloat64(p.rowVal[k])
-			if av == nil {
-				return false
-			}
-			term.Mul(av, xr[p.colIdx[k]])
-			acc.Add(acc, term)
-		}
-		if !math.IsInf(p.rowLB[i], -1) {
-			rlb := new(big.Rat).SetFloat64(p.rowLB[i])
-			if rlb == nil || acc.Cmp(rlb) < 0 {
-				return false
-			}
-		}
-		if !math.IsInf(p.rowUB[i], 1) {
-			rub := new(big.Rat).SetFloat64(p.rowUB[i])
-			if rub == nil || acc.Cmp(rub) > 0 {
-				return false
+		den := vr.Denom()
+		if den.Cmp(&sc.one) > 0 {
+			sc.tmpGCD.GCD(nil, nil, &sc.lcmDen, den)
+			sc.lcmDen.Quo(&sc.lcmDen, &sc.tmpGCD)
+			sc.lcmDen.Mul(&sc.lcmDen, den)
+			if sc.lcmDen.BitLen() > maxDenomBits {
+				return nil, false
 			}
 		}
 	}
-	return true
+	sc.g.SetInt64(0)
+	for _, vr := range vals {
+		if vr.Sign() == 0 {
+			continue
+		}
+		sc.scaledNum.Quo(&sc.lcmDen, vr.Denom())
+		sc.scaledNum.Mul(&sc.scaledNum, vr.Num())
+		sc.scaledNum.Abs(&sc.scaledNum)
+		if sc.scaledNum.Sign() > 0 {
+			if sc.g.Sign() == 0 {
+				sc.g.Set(&sc.scaledNum)
+			} else {
+				sc.g.GCD(nil, nil, &sc.g, &sc.scaledNum)
+			}
+		}
+	}
+	if sc.g.Sign() <= 0 {
+		return nil, false
+	}
+	return new(big.Rat).SetFrac(new(big.Int).Set(&sc.lcmDen), new(big.Int).Set(&sc.g)), true
 }
 
 func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
@@ -2664,11 +2625,7 @@ func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
 			}
 		}
 	}
-	bigOne := big.NewInt(1)
-	g := new(big.Int)
-	lcmDen := new(big.Int)
-	tmpGCD := new(big.Int)
-	scaledNum := new(big.Int)
+	var gcdSc exactGCDScratch
 	for i := range p.numConstraints {
 		rhsRat, ok := exactRowRHSRat(p, i)
 		if !ok {
@@ -2681,52 +2638,26 @@ func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
 		if p.rowSense[i] != Equal {
 			continue
 		}
-		nnz := len(cols)
-		if nnz == 0 {
+		if len(cols) == 0 {
 			if rhsRat.Sign() != 0 {
 				return true
 			}
 			continue
 		}
 		allInt := true
-		lcmDen.SetInt64(1)
-		for k, col := range cols {
+		for _, col := range cols {
 			if p.varCat[col] == Continuous {
 				allInt = false
 				break
-			}
-			vr := vals[k]
-			den := vr.Denom()
-			if den.Cmp(bigOne) > 0 {
-				tmpGCD.GCD(nil, nil, lcmDen, den)
-				lcmDen.Quo(lcmDen, tmpGCD)
-				lcmDen.Mul(lcmDen, den)
-				if lcmDen.BitLen() > maxRatDenomBits {
-					allInt = false
-					break
-				}
 			}
 		}
 		if !allInt {
 			continue
 		}
-		g.SetInt64(0)
-		for _, vr := range vals {
-			scaledNum.Quo(lcmDen, vr.Denom())
-			scaledNum.Mul(scaledNum, vr.Num())
-			scaledNum.Abs(scaledNum)
-			if scaledNum.Sign() > 0 {
-				if g.Sign() == 0 {
-					g.Set(scaledNum)
-				} else {
-					g.GCD(nil, nil, g, scaledNum)
-				}
-			}
-		}
-		if g.Sign() <= 0 {
+		scaleMult, okScale := gcdSc.rowScale(vals, maxRatDenomBits)
+		if !okScale {
 			continue
 		}
-		scaleMult := new(big.Rat).SetFrac(new(big.Int).Set(lcmDen), new(big.Int).Set(g))
 		rhsScaled := new(big.Rat).Mul(rhsRat, scaleMult)
 		if !rhsScaled.IsInt() {
 			return true

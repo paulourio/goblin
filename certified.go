@@ -442,7 +442,7 @@ func verifyLimitBestBoundAgainstCert(p *CompiledProblem, certMinLB *big.Rat, cla
 	return claimed <= bf+tol
 }
 
-func computeExactUserReducedCostsRat(p *CompiledProblem, yMin []*big.Rat) ([]*big.Rat, bool) {
+func exactUserReducedCosts(p *CompiledProblem, yMin []*big.Rat) ([]*big.Rat, bool) {
 	if p == nil || len(yMin) != p.numConstraints || len(p.objMin) < p.numVars {
 		return nil, false
 	}
@@ -597,64 +597,6 @@ func evalExactUserObjRat(p *CompiledProblem, x []*big.Rat) (*big.Rat, bool) {
 		return new(big.Rat).Neg(objMin), true
 	}
 	return objMin, true
-}
-
-func verifyExactPrimalRat(p *CompiledProblem, x []*big.Rat, requireInt bool) bool {
-	if p == nil || p.invalidErr != nil || len(x) != p.numVars || len(p.varCat) < len(x) || len(p.varLB) < len(x) || len(p.varUB) < len(x) {
-		return false
-	}
-	for j, xj := range x {
-		if xj == nil {
-			return false
-		}
-		if requireInt && p.varCat[j] != Continuous && !xj.IsInt() {
-			return false
-		}
-		lo, hi := p.varLB[j], p.varUB[j]
-		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
-			return false
-		}
-		if !math.IsInf(lo, -1) {
-			lr, ok := exactRatFromFloat(lo)
-			if !ok || xj.Cmp(lr) < 0 {
-				return false
-			}
-		}
-		if !math.IsInf(hi, 1) {
-			ur, ok := exactRatFromFloat(hi)
-			if !ok || xj.Cmp(ur) > 0 {
-				return false
-			}
-		}
-	}
-	for i := range p.numConstraints {
-		rhs, ok := exactRowRHSRat(p, i)
-		if !ok {
-			return false
-		}
-		act, okAct := exactEvalRowActivityRat(p, i, x)
-		if !okAct {
-			return false
-		}
-		cmp := act.Cmp(rhs)
-		switch p.rowSense[i] {
-		case LessEqual:
-			if cmp > 0 {
-				return false
-			}
-		case GreaterEqual:
-			if cmp < 0 {
-				return false
-			}
-		case Equal:
-			if cmp != 0 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func exactGapClosedRat(p *CompiledProblem, x []*big.Rat, safeMinBnd *big.Rat, relTol, absTol float64) bool {
@@ -925,7 +867,7 @@ func userDualsToCanonicalMinRat(p *CompiledProblem, duals []float64) ([]*big.Rat
 	return out, true
 }
 
-func verifyDirectBoundOrEmptyRowInfeas(p *CompiledProblem) bool {
+func verifyDirectInfeas(p *CompiledProblem) bool {
 	if p == nil {
 		return false
 	}
@@ -1117,7 +1059,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		if len(res.Values) != p.numVars || !approxLPPrimalFeasible(p, res.Values) {
 			return nil
 		}
-		if xDirect, okP := floatSliceToExactPrimalIfFeasible(p, res.Values, false); okP {
+		if xDirect, okP := exactPrimalIfFeasible(p, res.Values, false); okP {
 			if objU, okO := evalExactUserObjRat(p, xDirect); okO {
 				res.Objective = exactRatToFloat(objU)
 				return &lpCertWitness{primal: xDirect, polished: true}
@@ -1159,12 +1101,12 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		}
 
 		relTol, absTol := opt.effectiveGapTols()
-		xDirect, okP := floatSliceToExactPrimalIfFeasible(p, res.Values, false)
+		xDirect, okP := exactPrimalIfFeasible(p, res.Values, false)
 		yDirect, okY := userDualsToCanonicalMinRat(p, res.Duals)
 		if okP && okY {
 			if safeBnd, okS := ExactSafeDualBound(p, yDirect); okS && exactGapClosedRat(p, xDirect, safeBnd, relTol, absTol) {
 				objU, okO := evalExactUserObjRat(p, xDirect)
-				rcUser, okRC := computeExactUserReducedCostsRat(p, yDirect)
+				rcUser, okRC := exactUserReducedCosts(p, yDirect)
 				if okO && okRC {
 					res.Objective = exactRatToFloat(objU)
 					res.BestBound = exactRatToOutwardBound(p.sense, userBoundFromMinRat(p, safeBnd))
@@ -1240,7 +1182,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		return nil
 
 	case StatusInfeasible:
-		if verifyDirectBoundOrEmptyRowInfeas(p) {
+		if verifyDirectInfeas(p) {
 			return &lpCertWitness{hasDirectInfeas: true}
 		}
 		rp, okRP := buildVIPRRatProblem(p)
@@ -1319,7 +1261,7 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 			}
 		}
 		if len(res.ReducedCosts) == n && n > 0 {
-			rcUser, okRC := computeExactUserReducedCostsRat(p, wit.dualMin)
+			rcUser, okRC := exactUserReducedCosts(p, wit.dualMin)
 			if !okRC {
 				return ErrCertificationFailed
 			}
@@ -1354,7 +1296,7 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) {
 			return ErrCertificationFailed
 		}
-		if wit.hasDirectInfeas && verifyDirectBoundOrEmptyRowInfeas(p) {
+		if wit.hasDirectInfeas && verifyDirectInfeas(p) {
 			return nil
 		}
 		if verifyExactFarkasRayRat(p, wit.farkasW) {
@@ -1437,7 +1379,7 @@ func verifyCertifiedMIP(
 		if err != nil {
 			return ErrCertificationFailed
 		}
-		chk, errChk := verifyMiniVIPRBytesAgainstProblem(p, raw)
+		chk, errChk := verifyMiniVIPRProblem(p, raw)
 		if errChk != nil || chk.mode != "infeasible" {
 			return ErrCertificationFailed
 		}
@@ -1457,14 +1399,14 @@ func verifyCertifiedMIP(
 		if err != nil {
 			return ErrCertificationFailed
 		}
-		chk, errChk := verifyMiniVIPRBytesAgainstProblem(p, raw)
+		chk, errChk := verifyMiniVIPRProblem(p, raw)
 		if errChk != nil || (chk.mode != "optimal" && chk.mode != "bound") {
 			return ErrCertificationFailed
 		}
 		if len(chk.incumbent) != n || chk.certifiedMinLB == nil {
 			return ErrCertificationFailed
 		}
-		if !verifyValuesMatchExactIncumbent(p, res.Values, chk.incumbent, strictPolished) {
+		if !verifyExactIncumbent(p, res.Values, chk.incumbent, strictPolished) {
 			return ErrCertificationFailed
 		}
 		relTol, absTol := opt.effectiveGapTols()
@@ -1517,7 +1459,7 @@ func verifyCertifiedMIP(
 			if err != nil {
 				return ErrCertificationFailed
 			}
-			chk, errChk := verifyMiniVIPRBytesAgainstProblem(p, raw)
+			chk, errChk := verifyMiniVIPRProblem(p, raw)
 			if errChk != nil {
 				return ErrCertificationFailed
 			}
@@ -1553,21 +1495,13 @@ func verifyCertifiedMIP(
 			}
 		}
 		var xVerified []*big.Rat
-		if len(traceInc) == n && verifyValuesMatchExactIncumbent(p, res.Values, traceInc, strictPolished) && verifyExactPrimalRat(p, traceInc, true) {
+		if len(traceInc) == n && verifyExactIncumbent(p, res.Values, traceInc, strictPolished) && verifyExactPrimalRat(p, traceInc, true) {
 			xVerified = traceInc
-		} else if exactMIPFeasibleRat(p, res.Values) {
-			xCand := make([]*big.Rat, n)
-			for j := range n {
-				r, ok := exactRatFromFloat(res.Values[j])
-				if !ok {
-					return ErrCertificationFailed
-				}
-				xCand[j] = r
-			}
+		} else if xCand, okCand := floatSliceToExactPrimal(p, res.Values, true, false); okCand {
 			xVerified = xCand
 		} else if !strictPolished && approxLPPrimalFeasible(p, res.Values) {
 			if xRef, okRef := refineExactMIPAnchor(stop, p, res.Values); okRef &&
-				verifyValuesMatchExactIncumbent(p, res.Values, xRef, false) &&
+				verifyExactIncumbent(p, res.Values, xRef, false) &&
 				verifyExactPrimalRat(p, xRef, true) {
 				xVerified = xRef
 			}
@@ -1594,7 +1528,7 @@ func verifyCertifiedMIP(
 	}
 }
 
-func verifyValuesMatchExactIncumbent(p *CompiledProblem, vals []float64, xExact []*big.Rat, strictPolished bool) bool {
+func verifyExactIncumbent(p *CompiledProblem, vals []float64, xExact []*big.Rat, strictPolished bool) bool {
 	if len(vals) != p.numVars || len(xExact) != p.numVars {
 		return false
 	}
@@ -1740,7 +1674,6 @@ type certSparseVecJSON struct {
 
 type certLinConJSON struct {
 	Coeffs viprRawJSON `json:"coeffs"`
-	Terms  viprRawJSON `json:"terms"`
 	Sense  string      `json:"sense"`
 	RHS    viprRawJSON `json:"rhs"`
 }
@@ -1836,12 +1769,8 @@ func parseVIPRSense(s string) (ConstraintSense, bool) {
 }
 
 func parseVIPRNatSlice(raw viprRawJSON, allowMissing bool) ([]int, bool) {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" {
-		if allowMissing {
-			return nil, true
-		}
-		return nil, false
+	if !certHasNonNullJSON(raw) {
+		return nil, allowMissing
 	}
 	items, isNull, okA := viprUnmarshalRawArray(raw, false)
 	if !okA || isNull {
@@ -1849,34 +1778,24 @@ func parseVIPRNatSlice(raw viprRawJSON, allowMissing bool) ([]int, bool) {
 	}
 	out := make([]int, len(items))
 	for i, it := range items {
-		z, ok := parseVIPRBigInt(it)
-		if !ok || z.Sign() < 0 || !z.IsInt64() {
+		v, ok := parseVIPRReqNat(it)
+		if !ok {
 			return nil, false
 		}
-		v := z.Int64()
-		if v > int64(math.MaxInt32) {
-			return nil, false
-		}
-		out[i] = int(v)
+		out[i] = v
 	}
 	return out, true
 }
 
 func parseVIPROptNat(raw viprRawJSON) (*int, bool) {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" {
+	if !certHasNonNullJSON(raw) {
 		return nil, true
 	}
-	z, ok := parseVIPRBigInt(raw)
-	if !ok || z.Sign() < 0 || !z.IsInt64() {
+	v, ok := parseVIPRReqNat(raw)
+	if !ok {
 		return nil, false
 	}
-	v := z.Int64()
-	if v > int64(math.MaxInt32) {
-		return nil, false
-	}
-	iv := int(v)
-	return &iv, true
+	return &v, true
 }
 
 func canonicalCertTerms(raw []certRatTerm) []certRatTerm {
@@ -1982,7 +1901,7 @@ func decodeVIPRLinCon(n int, raw viprRawJSON) (certLinCon, bool) {
 	return certLinCon{terms: terms, sense: sense, rhs: rhs}, true
 }
 
-func buildCertVIPRInstanceFromProblem(p *CompiledProblem) (*certVIPRInstance, bool) {
+func buildCertVIPRInstance(p *CompiledProblem) (*certVIPRInstance, bool) {
 	if p == nil || p.invalidErr != nil {
 		return nil, false
 	}
@@ -2072,8 +1991,22 @@ func certOptRatEqual(a, b *big.Rat) bool {
 	return a.Cmp(b) == 0
 }
 
+func isRatInt64(r *big.Rat, v int64) bool {
+	return r != nil && r.IsInt() && r.Num().IsInt64() && r.Num().Int64() == v
+}
+
 func certIsUnitTerms(terms []certRatTerm, col int) bool {
-	return len(terms) == 1 && terms[0].col == col && terms[0].val.IsInt() && terms[0].val.Cmp(big.NewRat(1, 1)) == 0
+	return len(terms) == 1 && terms[0].col == col && isRatInt64(terms[0].val, 1)
+}
+
+func certMatchesUnitBound(con certLinCon, col int, wantUpper bool) bool {
+	var okSense bool
+	if wantUpper {
+		okSense = con.sense == LessEqual || con.sense == Equal
+	} else {
+		okSense = con.sense == GreaterEqual || con.sense == Equal
+	}
+	return okSense && certIsUnitTerms(con.terms, col)
 }
 
 func certIsUnsatCon(con certLinCon) bool {
@@ -2377,13 +2310,7 @@ func certFindTightestBound(
 			continue
 		}
 		ent := entries[id]
-		var okSense bool
-		if wantUpper {
-			okSense = ent.con.sense == LessEqual || ent.con.sense == Equal
-		} else {
-			okSense = ent.con.sense == GreaterEqual || ent.con.sense == Equal
-		}
-		if !okSense || !certIsUnitTerms(ent.con.terms, col) {
+		if !certMatchesUnitBound(ent.con, col, wantUpper) {
 			continue
 		}
 		cand := ent.con.rhs
@@ -2483,30 +2410,10 @@ func certGetBoundRef(
 		return nil, nil, false
 	}
 	ent := entries[id]
-	var okSense bool
-	if wantUpper {
-		okSense = ent.con.sense == LessEqual || ent.con.sense == Equal
-	} else {
-		okSense = ent.con.sense == GreaterEqual || ent.con.sense == Equal
-	}
-	if !okSense || !certIsUnitTerms(ent.con.terms, col) {
+	if !certMatchesUnitBound(ent.con, col, wantUpper) {
 		return nil, nil, false
 	}
 	return ent.con.rhs, ent.assumptions, true
-}
-
-func certCheckPermBijection(n int, perm []int) bool {
-	if len(perm) != n {
-		return false
-	}
-	seen := make([]bool, n)
-	for _, p := range perm {
-		if p < 0 || p >= n || seen[p] {
-			return false
-		}
-		seen[p] = true
-	}
-	return true
 }
 
 func certTermAt(n int, terms []certRatTerm, col int) *big.Rat {
@@ -2576,7 +2483,7 @@ func certConPermImplies(n int, src, dst certLinCon, perm []int) bool {
 }
 
 func certBaseBoundImpliesPerm(inst *certVIPRInstance, dst certLinCon, perm []int) bool {
-	if len(dst.terms) != 1 || dst.terms[0].val.Cmp(big.NewRat(1, 1)) != 0 {
+	if len(dst.terms) != 1 || !isRatInt64(dst.terms[0].val, 1) {
 		return false
 	}
 	k := dst.terms[0].col
@@ -2608,7 +2515,7 @@ func certCheckOrbitAutomorphism(
 	rightCon certLinCon,
 	colPerm, rowPerm, supportEntries []int,
 ) bool {
-	if !certCheckPermBijection(inst.n, colPerm) {
+	if !viprIsBijection(inst.n, colPerm) {
 		return false
 	}
 	if br < 0 || br >= len(colPerm) || colPerm[br] != comp {
@@ -2685,6 +2592,78 @@ func certCheckOrbitAutomorphism(
 	return true
 }
 
+func certEvalRoundStep(inst *certVIPRInstance, entries []certDerivedEntry, ref *int, isDown bool) (certDerivedEntry, bool) {
+	if ref == nil || *ref < 0 || *ref >= len(entries) {
+		return certDerivedEntry{}, false
+	}
+	ent := entries[*ref]
+	wantSense := GreaterEqual
+	if isDown {
+		wantSense = LessEqual
+	}
+	if (ent.con.sense != wantSense && ent.con.sense != Equal) || !certIsIntegralLinVec(inst, ent.con.terms) {
+		return certDerivedEntry{}, false
+	}
+	var rhs *big.Rat
+	if isDown {
+		rhs = viprRatFloor(ent.con.rhs)
+	} else {
+		rhs = viprRatCeil(ent.con.rhs)
+	}
+	return certDerivedEntry{
+		con: certLinCon{
+			terms: ent.con.terms,
+			sense: wantSense,
+			rhs:   rhs,
+		},
+		assumptions: slices.Clone(ent.assumptions),
+	}, true
+}
+
+func certCheckBranchPair(
+	inst *certVIPRInstance,
+	entries []certDerivedEntry,
+	step certStepDoc,
+	splitInt *big.Int,
+) (col, la, ra, lIdx, rIdx int, cOut certLinCon, ok bool) {
+	if step.Col == nil || step.LeftAsm == nil || step.RightAsm == nil || step.Left == nil || step.Right == nil {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	col = *step.Col
+	la, ra, lIdx, rIdx = *step.LeftAsm, *step.RightAsm, *step.Left, *step.Right
+	if col < 0 || col >= inst.n || !inst.isInt[col] {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	if la < 0 || la >= len(entries) || ra < 0 || ra >= len(entries) || lIdx < 0 || lIdx >= len(entries) || rIdx < 0 || rIdx >= len(entries) {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	wantLA := certLinCon{
+		terms: []certRatTerm{{col: col, val: big.NewRat(1, 1)}},
+		sense: LessEqual,
+		rhs:   new(big.Rat).SetInt(splitInt),
+	}
+	splitPlus := new(big.Int).Add(splitInt, big.NewInt(1))
+	wantRA := certLinCon{
+		terms: []certRatTerm{{col: col, val: big.NewRat(1, 1)}},
+		sense: GreaterEqual,
+		rhs:   new(big.Rat).SetInt(splitPlus),
+	}
+	if !certConEqual(entries[la].con, wantLA) || !certConEqual(entries[ra].con, wantRA) {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	if len(entries[la].assumptions) != 1 || entries[la].assumptions[0] != la {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	if len(entries[ra].assumptions) != 1 || entries[ra].assumptions[0] != ra {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	cOut, okM := certMergeBranchCon(entries[lIdx].con, entries[rIdx].con)
+	if !okM {
+		return 0, 0, 0, 0, 0, certLinCon{}, false
+	}
+	return col, la, ra, lIdx, rIdx, cOut, true
+}
+
 func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step certStepDoc) (certDerivedEntry, bool) {
 	var derived certDerivedEntry
 	var ok bool
@@ -2747,79 +2726,18 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		derived, ok = certEvalLinComb(inst, entries, sense, *step.Refs, bnds)
 
 	case "roundDown":
-		if step.Ref == nil || *step.Ref < 0 || *step.Ref >= len(entries) {
-			return certDerivedEntry{}, false
-		}
-		ent := entries[*step.Ref]
-		if (ent.con.sense != LessEqual && ent.con.sense != Equal) || !certIsIntegralLinVec(inst, ent.con.terms) {
-			return certDerivedEntry{}, false
-		}
-		derived = certDerivedEntry{
-			con: certLinCon{
-				terms: ent.con.terms,
-				sense: LessEqual,
-				rhs:   viprRatFloor(ent.con.rhs),
-			},
-			assumptions: slices.Clone(ent.assumptions),
-		}
-		ok = true
+		derived, ok = certEvalRoundStep(inst, entries, step.Ref, true)
 
 	case "roundUp":
-		if step.Ref == nil || *step.Ref < 0 || *step.Ref >= len(entries) {
-			return certDerivedEntry{}, false
-		}
-		ent := entries[*step.Ref]
-		if (ent.con.sense != GreaterEqual && ent.con.sense != Equal) || !certIsIntegralLinVec(inst, ent.con.terms) {
-			return certDerivedEntry{}, false
-		}
-		derived = certDerivedEntry{
-			con: certLinCon{
-				terms: ent.con.terms,
-				sense: GreaterEqual,
-				rhs:   viprRatCeil(ent.con.rhs),
-			},
-			assumptions: slices.Clone(ent.assumptions),
-		}
-		ok = true
+		derived, ok = certEvalRoundStep(inst, entries, step.Ref, false)
 
 	case "branch":
-		if step.Col == nil || step.LeftAsm == nil || step.RightAsm == nil || step.Left == nil || step.Right == nil {
-			return certDerivedEntry{}, false
-		}
-		col := *step.Col
-		la, ra, lIdx, rIdx := *step.LeftAsm, *step.RightAsm, *step.Left, *step.Right
-		if col < 0 || col >= inst.n || !inst.isInt[col] {
-			return certDerivedEntry{}, false
-		}
-		if la < 0 || la >= len(entries) || ra < 0 || ra >= len(entries) || lIdx < 0 || lIdx >= len(entries) || rIdx < 0 || rIdx >= len(entries) {
-			return certDerivedEntry{}, false
-		}
 		splitInt, okS := parseVIPRBigInt(step.SplitVal)
 		if !okS {
 			return certDerivedEntry{}, false
 		}
-		wantLA := certLinCon{
-			terms: []certRatTerm{{col: col, val: big.NewRat(1, 1)}},
-			sense: LessEqual,
-			rhs:   new(big.Rat).SetInt(splitInt),
-		}
-		splitPlus := new(big.Int).Add(splitInt, big.NewInt(1))
-		wantRA := certLinCon{
-			terms: []certRatTerm{{col: col, val: big.NewRat(1, 1)}},
-			sense: GreaterEqual,
-			rhs:   new(big.Rat).SetInt(splitPlus),
-		}
-		if !certConEqual(entries[la].con, wantLA) || !certConEqual(entries[ra].con, wantRA) {
-			return certDerivedEntry{}, false
-		}
-		if len(entries[la].assumptions) != 1 || entries[la].assumptions[0] != la {
-			return certDerivedEntry{}, false
-		}
-		if len(entries[ra].assumptions) != 1 || entries[ra].assumptions[0] != ra {
-			return certDerivedEntry{}, false
-		}
-		cOut, okM := certMergeBranchCon(entries[lIdx].con, entries[rIdx].con)
-		if !okM {
+		_, la, ra, lIdx, rIdx, cOut, okP := certCheckBranchPair(inst, entries, step, splitInt)
+		if !okP {
 			return certDerivedEntry{}, false
 		}
 		asms := certMergeAsms(certFilterAsm(entries[lIdx].assumptions, la), certFilterAsm(entries[rIdx].assumptions, ra))
@@ -2827,15 +2745,11 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		ok = true
 
 	case "orbitBranch":
-		if step.Col == nil || step.LeftAsm == nil || step.RightAsm == nil || step.Left == nil || step.Right == nil || step.Witnesses == nil {
+		if step.Witnesses == nil {
 			return certDerivedEntry{}, false
 		}
-		col := *step.Col
-		la, ra, lIdx, rIdx := *step.LeftAsm, *step.RightAsm, *step.Left, *step.Right
-		if col < 0 || col >= inst.n || !inst.isInt[col] {
-			return certDerivedEntry{}, false
-		}
-		if la < 0 || la >= len(entries) || ra < 0 || ra >= len(entries) || lIdx < 0 || lIdx >= len(entries) || rIdx < 0 || rIdx >= len(entries) {
+		col, la, ra, lIdx, rIdx, cOut, okP := certCheckBranchPair(inst, entries, step, big.NewInt(0))
+		if !okP {
 			return certDerivedEntry{}, false
 		}
 		orbitAsms, okOA := parseVIPRNatSlice(step.OrbitAsms, false)
@@ -2847,29 +2761,6 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 			if ea < 0 || ea >= len(entries) {
 				return certDerivedEntry{}, false
 			}
-		}
-		wantLA := certLinCon{
-			terms: []certRatTerm{{col: col, val: big.NewRat(1, 1)}},
-			sense: LessEqual,
-			rhs:   new(big.Rat),
-		}
-		wantRA := certLinCon{
-			terms: []certRatTerm{{col: col, val: big.NewRat(1, 1)}},
-			sense: GreaterEqual,
-			rhs:   big.NewRat(1, 1),
-		}
-		if !certConEqual(entries[la].con, wantLA) || !certConEqual(entries[ra].con, wantRA) {
-			return certDerivedEntry{}, false
-		}
-		if len(entries[la].assumptions) != 1 || entries[la].assumptions[0] != la {
-			return certDerivedEntry{}, false
-		}
-		if len(entries[ra].assumptions) != 1 || entries[ra].assumptions[0] != ra {
-			return certDerivedEntry{}, false
-		}
-		cOut, okM := certMergeBranchCon(entries[lIdx].con, entries[rIdx].con)
-		if !okM {
-			return certDerivedEntry{}, false
 		}
 		var leftRem []int
 		for _, a := range entries[lIdx].assumptions {
@@ -2981,13 +2872,13 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		return certDerivedEntry{}, false
 	}
 
-	if cs := strings.TrimSpace(string(step.Con)); cs != "" && cs != "null" {
+	if certHasNonNullJSON(step.Con) {
 		claimedCon, okC := decodeVIPRLinCon(inst.n, step.Con)
 		if !okC || !certConEqual(derived.con, claimedCon) {
 			return certDerivedEntry{}, false
 		}
 	}
-	if as := strings.TrimSpace(string(step.Assumptions)); as != "" && as != "null" {
+	if certHasNonNullJSON(step.Assumptions) {
 		claimedAsms, okA := parseVIPRNatSlice(step.Assumptions, false)
 		if !okA || !certAssumptionsMatch(derived.assumptions, claimedAsms) {
 			return certDerivedEntry{}, false
@@ -3002,7 +2893,7 @@ func decodeMiniVIPRInstanceDoc(doc certVIPRDoc) (*certVIPRInstance, bool) {
 	}
 	n := *doc.N
 	objConst := new(big.Rat)
-	if s := strings.TrimSpace(string(doc.ObjConst)); s != "" && s != "null" {
+	if certHasNonNullJSON(doc.ObjConst) {
 		r, ok := parseVIPRRatValue(doc.ObjConst)
 		if !ok {
 			return nil, false
@@ -3016,14 +2907,14 @@ func decodeMiniVIPRInstanceDoc(doc certVIPRDoc) (*certVIPRInstance, bool) {
 	lb := make([]*big.Rat, n)
 	ub := make([]*big.Rat, n)
 	for j := range n {
-		if s := strings.TrimSpace(string(doc.LB[j])); s != "" && s != "null" {
+		if certHasNonNullJSON(doc.LB[j]) {
 			r, ok := parseVIPRRatValue(doc.LB[j])
 			if !ok {
 				return nil, false
 			}
 			lb[j] = r
 		}
-		if s := strings.TrimSpace(string(doc.UB[j])); s != "" && s != "null" {
+		if certHasNonNullJSON(doc.UB[j]) {
 			r, ok := parseVIPRRatValue(doc.UB[j])
 			if !ok {
 				return nil, false
@@ -3329,47 +3220,23 @@ func (st *certPresolveState) toInstance() *certVIPRInstance {
 	return inst
 }
 
-func certSumMinAct(st *certPresolveState, terms []certRatTerm, skipCol int) (*big.Rat, bool) {
+func certSumRowAct(st *certPresolveState, terms []certRatTerm, skipCol int, wantMax bool) (*big.Rat, bool) {
 	acc := new(big.Rat)
 	var prod big.Rat
 	for _, t := range terms {
 		if t.col == skipCol || t.val.Sign() == 0 {
 			continue
 		}
-		if t.val.Sign() > 0 {
-			if st.lb[t.col] == nil {
-				return nil, false
-			}
-			prod.Mul(t.val, st.lb[t.col])
+		var bnd *big.Rat
+		if (t.val.Sign() > 0) == wantMax {
+			bnd = st.ub[t.col]
 		} else {
-			if st.ub[t.col] == nil {
-				return nil, false
-			}
-			prod.Mul(t.val, st.ub[t.col])
+			bnd = st.lb[t.col]
 		}
-		acc.Add(acc, &prod)
-	}
-	return acc, true
-}
-
-func certSumMaxAct(st *certPresolveState, terms []certRatTerm, skipCol int) (*big.Rat, bool) {
-	acc := new(big.Rat)
-	var prod big.Rat
-	for _, t := range terms {
-		if t.col == skipCol || t.val.Sign() == 0 {
-			continue
+		if bnd == nil {
+			return nil, false
 		}
-		if t.val.Sign() > 0 {
-			if st.ub[t.col] == nil {
-				return nil, false
-			}
-			prod.Mul(t.val, st.ub[t.col])
-		} else {
-			if st.lb[t.col] == nil {
-				return nil, false
-			}
-			prod.Mul(t.val, st.lb[t.col])
-		}
+		prod.Mul(t.val, bnd)
 		acc.Add(acc, &prod)
 	}
 	return acc, true
@@ -3405,14 +3272,12 @@ func certCheckSymChainRow(n int, row certLinCon, v int, colPerm []int) bool {
 	if len(colPerm) != n || row.rhs.Sign() != 0 || len(row.terms) != 2 {
 		return false
 	}
-	one := big.NewRat(1, 1)
-	negOne := big.NewRat(-1, 1)
 	posCol, negCol := -1, -1
 	for _, t := range row.terms {
 		switch {
-		case t.val.Cmp(one) == 0:
+		case isRatInt64(t.val, 1):
 			posCol = t.col
-		case t.val.Cmp(negOne) == 0:
+		case isRatInt64(t.val, -1):
 			negCol = t.col
 		default:
 			return false
@@ -3429,6 +3294,160 @@ func certCheckSymChainRow(n int, row certLinCon, v int, colPerm []int) bool {
 	default:
 		return false
 	}
+}
+
+func certPresolveActivityBound(st *certPresolveState, step certPresolveStep) bool {
+	if step.row < 0 || step.row >= len(st.rows) || st.rows[step.row] == nil || step.col < 0 || step.col >= st.n {
+		return false
+	}
+	con := st.rows[step.row]
+	a := certTermAt(st.n, con.terms, step.col)
+	if a.Sign() == 0 {
+		return false
+	}
+	needLE := (a.Sign() > 0) == step.isUpper
+	if needLE {
+		if con.sense != LessEqual && con.sense != Equal {
+			return false
+		}
+	} else {
+		if con.sense != GreaterEqual && con.sense != Equal {
+			return false
+		}
+	}
+	boundSum, okSum := certSumRowAct(st, con.terms, step.col, !needLE)
+	if !okSum {
+		return false
+	}
+	imp := new(big.Rat).Sub(con.rhs, boundSum)
+	imp.Quo(imp, a)
+	effImp := imp
+	if step.roundInt {
+		if !st.isInt[step.col] {
+			return false
+		}
+		if step.isUpper {
+			effImp = viprRatFloor(imp)
+		} else {
+			effImp = viprRatCeil(imp)
+		}
+	}
+	if step.isUpper {
+		if effImp.Cmp(step.ratVal) > 0 || !viprOptRatUbLe(step.ratVal, st.ub[step.col]) {
+			return false
+		}
+		st.ub[step.col] = new(big.Rat).Set(step.ratVal)
+		return true
+	}
+	if step.ratVal.Cmp(effImp) > 0 || !viprOptRatLbLe(st.lb[step.col], step.ratVal) {
+		return false
+	}
+	st.lb[step.col] = new(big.Rat).Set(step.ratVal)
+	return true
+}
+
+func certPresolveBinStrengthen(st *certPresolveState, step certPresolveStep) bool {
+	if step.row < 0 || step.row >= len(st.rows) || st.rows[step.row] == nil || step.col < 0 || step.col >= st.n {
+		return false
+	}
+	if !st.isInt[step.col] || st.lb[step.col] == nil || st.lb[step.col].Sign() != 0 ||
+		!isRatInt64(st.ub[step.col], 1) || step.ratVal.Sign() < 0 {
+		return false
+	}
+	con := st.rows[step.row]
+	if con.sense != LessEqual {
+		return false
+	}
+	a := certTermAt(st.n, con.terms, step.col)
+	if a.Sign() == 0 {
+		return false
+	}
+	maxExcl, ok := certSumRowAct(st, con.terms, step.col, true)
+	if !ok {
+		return false
+	}
+	var newA, newRHS *big.Rat
+	if a.Sign() > 0 {
+		rhsMinusDelta := new(big.Rat).Sub(con.rhs, step.ratVal)
+		if maxExcl.Cmp(rhsMinusDelta) > 0 {
+			return false
+		}
+		newA = new(big.Rat).Sub(a, step.ratVal)
+		newRHS = rhsMinusDelta
+	} else {
+		aPlusDelta := new(big.Rat).Add(a, step.ratVal)
+		lhsMax := new(big.Rat).Add(maxExcl, aPlusDelta)
+		if lhsMax.Cmp(con.rhs) > 0 {
+			return false
+		}
+		newA = aPlusDelta
+		newRHS = new(big.Rat).Set(con.rhs)
+	}
+	newTerms := make([]certRatTerm, 0, len(con.terms))
+	for _, t := range con.terms {
+		if t.col == step.col {
+			if newA.Sign() != 0 {
+				newTerms = append(newTerms, certRatTerm{col: step.col, val: newA})
+			}
+		} else {
+			newTerms = append(newTerms, certRatTerm{col: t.col, val: new(big.Rat).Set(t.val)})
+		}
+	}
+	st.rows[step.row] = &certLinCon{
+		terms: canonicalCertTerms(newTerms),
+		sense: LessEqual,
+		rhs:   newRHS,
+	}
+	return true
+}
+
+func certPresolveSymBreakLe(st *certPresolveState, step certPresolveStep) bool {
+	n := st.n
+	if step.u < 0 || step.u >= n || step.v < 0 || step.v >= n || step.u == step.v {
+		return false
+	}
+	if !certCheckPermInvolution(n, step.colPerm) || step.colPerm[step.u] != step.v {
+		return false
+	}
+	if len(step.rowPerm) != len(st.rows) {
+		return false
+	}
+	if st.obj[step.v].Cmp(st.obj[step.u]) > 0 {
+		return false
+	}
+	for i := range n {
+		pi := step.colPerm[i]
+		if st.isInt[i] && !st.isInt[pi] {
+			return false
+		}
+		if !viprOptRatLbLe(st.lb[i], st.lb[pi]) || !viprOptRatUbLe(st.ub[pi], st.ub[i]) {
+			return false
+		}
+		if i != step.u && i != step.v && st.obj[i].Cmp(st.obj[pi]) != 0 {
+			return false
+		}
+	}
+	for i, rowI := range st.rows {
+		if rowI == nil {
+			continue
+		}
+		rIdx := step.rowPerm[i]
+		directOK := rIdx >= 0 && rIdx < len(st.rows) && st.rows[rIdx] != nil &&
+			certConPermImplies(n, *st.rows[rIdx], *rowI, step.colPerm)
+		if !directOK && !certCheckSymChainRow(n, *rowI, step.v, step.colPerm) {
+			return false
+		}
+	}
+	newCon := &certLinCon{
+		terms: canonicalCertTerms([]certRatTerm{
+			{col: step.u, val: big.NewRat(1, 1)},
+			{col: step.v, val: big.NewRat(-1, 1)},
+		}),
+		sense: LessEqual,
+		rhs:   new(big.Rat),
+	}
+	st.rows = append(st.rows, newCon)
+	return true
 }
 
 func certApplyPresolveStep(st *certPresolveState, step certPresolveStep) bool {
@@ -3462,76 +3481,7 @@ func certApplyPresolveStep(st *certPresolveState, step certPresolveStep) bool {
 		return true
 
 	case "activityBound":
-		if step.row < 0 || step.row >= len(st.rows) || st.rows[step.row] == nil || step.col < 0 || step.col >= n {
-			return false
-		}
-		con := st.rows[step.row]
-		a := certTermAt(n, con.terms, step.col)
-		if a.Sign() == 0 {
-			return false
-		}
-		if step.isUpper {
-			var boundSum *big.Rat
-			var okSum bool
-			if a.Sign() > 0 {
-				if con.sense != LessEqual && con.sense != Equal {
-					return false
-				}
-				boundSum, okSum = certSumMinAct(st, con.terms, step.col)
-			} else {
-				if con.sense != GreaterEqual && con.sense != Equal {
-					return false
-				}
-				boundSum, okSum = certSumMaxAct(st, con.terms, step.col)
-			}
-			if !okSum {
-				return false
-			}
-			imp := new(big.Rat).Sub(con.rhs, boundSum)
-			imp.Quo(imp, a)
-			effImp := imp
-			if step.roundInt {
-				if !st.isInt[step.col] {
-					return false
-				}
-				effImp = viprRatFloor(imp)
-			}
-			if effImp.Cmp(step.ratVal) > 0 || !viprOptRatUbLe(step.ratVal, st.ub[step.col]) {
-				return false
-			}
-			st.ub[step.col] = new(big.Rat).Set(step.ratVal)
-			return true
-		}
-		var boundSum *big.Rat
-		var okSum bool
-		if a.Sign() > 0 {
-			if con.sense != GreaterEqual && con.sense != Equal {
-				return false
-			}
-			boundSum, okSum = certSumMaxAct(st, con.terms, step.col)
-		} else {
-			if con.sense != LessEqual && con.sense != Equal {
-				return false
-			}
-			boundSum, okSum = certSumMinAct(st, con.terms, step.col)
-		}
-		if !okSum {
-			return false
-		}
-		imp := new(big.Rat).Sub(con.rhs, boundSum)
-		imp.Quo(imp, a)
-		effImp := imp
-		if step.roundInt {
-			if !st.isInt[step.col] {
-				return false
-			}
-			effImp = viprRatCeil(imp)
-		}
-		if step.ratVal.Cmp(effImp) > 0 || !viprOptRatLbLe(st.lb[step.col], step.ratVal) {
-			return false
-		}
-		st.lb[step.col] = new(big.Rat).Set(step.ratVal)
-		return true
+		return certPresolveActivityBound(st, step)
 
 	case "gcdRowDiv":
 		if step.row < 0 || step.row >= len(st.rows) || st.rows[step.row] == nil || step.divisor == nil || step.divisor.Sign() <= 0 {
@@ -3627,58 +3577,29 @@ func certApplyPresolveStep(st *certPresolveState, step certPresolveStep) bool {
 			}
 			st.lb[step.col] = certTightenLBOpt(st.lb[step.col], b)
 			st.ub[step.col] = certTightenUBOpt(st.ub[step.col], b)
-			st.rows[step.row] = nil
-			return true
-
-		case LessEqual:
-			if a.Sign() > 0 {
-				uNew := b
-				if step.roundInt {
-					if !st.isInt[step.col] {
-						return false
-					}
-					uNew = viprRatFloor(b)
+		case LessEqual, GreaterEqual:
+			isUpper := (con.sense == LessEqual) == (a.Sign() > 0)
+			bnd := b
+			if step.roundInt {
+				if !st.isInt[step.col] {
+					return false
 				}
-				st.ub[step.col] = certTightenUBOpt(st.ub[step.col], uNew)
-			} else {
-				lNew := b
-				if step.roundInt {
-					if !st.isInt[step.col] {
-						return false
-					}
-					lNew = viprRatCeil(b)
+				if isUpper {
+					bnd = viprRatFloor(b)
+				} else {
+					bnd = viprRatCeil(b)
 				}
-				st.lb[step.col] = certTightenLBOpt(st.lb[step.col], lNew)
 			}
-			st.rows[step.row] = nil
-			return true
-
-		case GreaterEqual:
-			if a.Sign() > 0 {
-				lNew := b
-				if step.roundInt {
-					if !st.isInt[step.col] {
-						return false
-					}
-					lNew = viprRatCeil(b)
-				}
-				st.lb[step.col] = certTightenLBOpt(st.lb[step.col], lNew)
+			if isUpper {
+				st.ub[step.col] = certTightenUBOpt(st.ub[step.col], bnd)
 			} else {
-				uNew := b
-				if step.roundInt {
-					if !st.isInt[step.col] {
-						return false
-					}
-					uNew = viprRatFloor(b)
-				}
-				st.ub[step.col] = certTightenUBOpt(st.ub[step.col], uNew)
+				st.lb[step.col] = certTightenLBOpt(st.lb[step.col], bnd)
 			}
-			st.rows[step.row] = nil
-			return true
-
 		default:
 			return false
 		}
+		st.rows[step.row] = nil
+		return true
 
 	case "redundantRow":
 		if step.row < 0 || step.row >= len(st.rows) || st.rows[step.row] == nil {
@@ -3687,18 +3608,18 @@ func certApplyPresolveStep(st *certPresolveState, step certPresolveStep) bool {
 		con := st.rows[step.row]
 		switch con.sense {
 		case LessEqual:
-			M, ok := certSumMaxAct(st, con.terms, -1)
+			M, ok := certSumRowAct(st, con.terms, -1, true)
 			if !ok || M.Cmp(con.rhs) > 0 {
 				return false
 			}
 		case GreaterEqual:
-			m, ok := certSumMinAct(st, con.terms, -1)
+			m, ok := certSumRowAct(st, con.terms, -1, false)
 			if !ok || con.rhs.Cmp(m) > 0 {
 				return false
 			}
 		case Equal:
-			m, ok1 := certSumMinAct(st, con.terms, -1)
-			M, ok2 := certSumMaxAct(st, con.terms, -1)
+			m, ok1 := certSumRowAct(st, con.terms, -1, false)
+			M, ok2 := certSumRowAct(st, con.terms, -1, true)
 			if !ok1 || !ok2 || con.rhs.Cmp(m) > 0 || M.Cmp(con.rhs) > 0 {
 				return false
 			}
@@ -3709,106 +3630,10 @@ func certApplyPresolveStep(st *certPresolveState, step certPresolveStep) bool {
 		return true
 
 	case "binStrengthen":
-		if step.row < 0 || step.row >= len(st.rows) || st.rows[step.row] == nil || step.col < 0 || step.col >= n {
-			return false
-		}
-		one := big.NewRat(1, 1)
-		if !st.isInt[step.col] || st.lb[step.col] == nil || st.lb[step.col].Sign() != 0 ||
-			st.ub[step.col] == nil || st.ub[step.col].Cmp(one) != 0 || step.ratVal.Sign() < 0 {
-			return false
-		}
-		con := st.rows[step.row]
-		if con.sense != LessEqual {
-			return false
-		}
-		a := certTermAt(n, con.terms, step.col)
-		if a.Sign() == 0 {
-			return false
-		}
-		maxExcl, ok := certSumMaxAct(st, con.terms, step.col)
-		if !ok {
-			return false
-		}
-		var newA, newRHS *big.Rat
-		if a.Sign() > 0 {
-			rhsMinusDelta := new(big.Rat).Sub(con.rhs, step.ratVal)
-			if maxExcl.Cmp(rhsMinusDelta) > 0 {
-				return false
-			}
-			newA = new(big.Rat).Sub(a, step.ratVal)
-			newRHS = rhsMinusDelta
-		} else {
-			aPlusDelta := new(big.Rat).Add(a, step.ratVal)
-			lhsMax := new(big.Rat).Add(maxExcl, aPlusDelta)
-			if lhsMax.Cmp(con.rhs) > 0 {
-				return false
-			}
-			newA = aPlusDelta
-			newRHS = new(big.Rat).Set(con.rhs)
-		}
-		newTerms := make([]certRatTerm, 0, len(con.terms))
-		for _, t := range con.terms {
-			if t.col == step.col {
-				if newA.Sign() != 0 {
-					newTerms = append(newTerms, certRatTerm{col: step.col, val: newA})
-				}
-			} else {
-				newTerms = append(newTerms, certRatTerm{col: t.col, val: new(big.Rat).Set(t.val)})
-			}
-		}
-		st.rows[step.row] = &certLinCon{
-			terms: canonicalCertTerms(newTerms),
-			sense: LessEqual,
-			rhs:   newRHS,
-		}
-		return true
+		return certPresolveBinStrengthen(st, step)
 
 	case "symBreakLe":
-		if step.u < 0 || step.u >= n || step.v < 0 || step.v >= n || step.u == step.v {
-			return false
-		}
-		if !certCheckPermInvolution(n, step.colPerm) || step.colPerm[step.u] != step.v {
-			return false
-		}
-		if len(step.rowPerm) != len(st.rows) {
-			return false
-		}
-		if st.obj[step.v].Cmp(st.obj[step.u]) > 0 {
-			return false
-		}
-		for i := range n {
-			pi := step.colPerm[i]
-			if st.isInt[i] && !st.isInt[pi] {
-				return false
-			}
-			if !viprOptRatLbLe(st.lb[i], st.lb[pi]) || !viprOptRatUbLe(st.ub[pi], st.ub[i]) {
-				return false
-			}
-			if i != step.u && i != step.v && st.obj[i].Cmp(st.obj[pi]) != 0 {
-				return false
-			}
-		}
-		for i, rowI := range st.rows {
-			if rowI == nil {
-				continue
-			}
-			rIdx := step.rowPerm[i]
-			directOK := rIdx >= 0 && rIdx < len(st.rows) && st.rows[rIdx] != nil &&
-				certConPermImplies(n, *st.rows[rIdx], *rowI, step.colPerm)
-			if !directOK && !certCheckSymChainRow(n, *rowI, step.v, step.colPerm) {
-				return false
-			}
-		}
-		newCon := &certLinCon{
-			terms: canonicalCertTerms([]certRatTerm{
-				{col: step.u, val: big.NewRat(1, 1)},
-				{col: step.v, val: big.NewRat(-1, 1)},
-			}),
-			sense: LessEqual,
-			rhs:   new(big.Rat),
-		}
-		st.rows = append(st.rows, newCon)
-		return true
+		return certPresolveSymBreakLe(st, step)
 
 	default:
 		return false
@@ -3867,23 +3692,49 @@ func verifyMiniVIPRBytes(raw []byte, expectedInst *certVIPRInstance) (certVIPRVe
 	return verifyMiniVIPRCore(doc, inst, nil)
 }
 
-func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (certVIPRVerified, error) {
+func certParseRatSlice(raw []viprRawJSON, n int) ([]*big.Rat, bool) {
+	if len(raw) != n {
+		return nil, false
+	}
+	out := make([]*big.Rat, n)
+	for j := range n {
+		r, ok := parseVIPRRatValue(raw[j])
+		if !ok {
+			return nil, false
+		}
+		out[j] = r
+	}
+	return out, true
+}
 
+func certVerifyIncumbentAndObj(inst, origEnvInst *certVIPRInstance, incumbent []*big.Rat) (incLin, certMinObj *big.Rat, ok bool) {
+	if !certCheckIncumbentFeasible(inst, incumbent) {
+		return nil, nil, false
+	}
+	incLin = certDotTerms(inst.objTerms, incumbent)
+	certMinObj = new(big.Rat).Add(inst.objConst, incLin)
+	if origEnvInst != nil {
+		if !certCheckIncumbentFeasible(origEnvInst, incumbent) {
+			return nil, nil, false
+		}
+		origObj := new(big.Rat).Add(origEnvInst.objConst, certDotTerms(origEnvInst.objTerms, incumbent))
+		if origObj.Cmp(certMinObj) != 0 {
+			return nil, nil, false
+		}
+	}
+	return incLin, certMinObj, true
+}
+
+func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (certVIPRVerified, error) {
 	var incumbent []*big.Rat
 	var targetLB *big.Rat
 	switch doc.Mode {
 	case "infeasible":
 	case "optimal":
-		if len(doc.Incumbent) != inst.n {
+		var okInc bool
+		incumbent, okInc = certParseRatSlice(doc.Incumbent, inst.n)
+		if !okInc {
 			return certVIPRVerified{}, ErrCertificationFailed
-		}
-		incumbent = make([]*big.Rat, inst.n)
-		for j := range inst.n {
-			r, ok := parseVIPRRatValue(doc.Incumbent[j])
-			if !ok {
-				return certVIPRVerified{}, ErrCertificationFailed
-			}
-			incumbent[j] = r
 		}
 	case "bound":
 		rLB, okLB := parseVIPRRatValue(doc.TargetLB)
@@ -3892,16 +3743,10 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 		}
 		targetLB = rLB
 		if len(doc.Incumbent) > 0 {
-			if len(doc.Incumbent) != inst.n {
+			var okInc bool
+			incumbent, okInc = certParseRatSlice(doc.Incumbent, inst.n)
+			if !okInc {
 				return certVIPRVerified{}, ErrCertificationFailed
-			}
-			incumbent = make([]*big.Rat, inst.n)
-			for j := range inst.n {
-				r, ok := parseVIPRRatValue(doc.Incumbent[j])
-				if !ok {
-					return certVIPRVerified{}, ErrCertificationFailed
-				}
-				incumbent[j] = r
 			}
 		}
 	default:
@@ -3945,19 +3790,9 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 		return certVIPRVerified{mode: "infeasible"}, nil
 
 	case "optimal":
-		if !certCheckIncumbentFeasible(inst, incumbent) {
+		incLin, certMinLB, okInc := certVerifyIncumbentAndObj(inst, origEnvInst, incumbent)
+		if !okInc {
 			return certVIPRVerified{}, ErrCertificationFailed
-		}
-		incLin := certDotTerms(inst.objTerms, incumbent)
-		certMinLB := new(big.Rat).Add(inst.objConst, incLin)
-		if origEnvInst != nil {
-			if !certCheckIncumbentFeasible(origEnvInst, incumbent) {
-				return certVIPRVerified{}, ErrCertificationFailed
-			}
-			origObj := new(big.Rat).Add(origEnvInst.objConst, certDotTerms(origEnvInst.objTerms, incumbent))
-			if origObj.Cmp(certMinLB) != 0 {
-				return certVIPRVerified{}, ErrCertificationFailed
-			}
 		}
 		if !certIsUnsatCon(rootEnt.con) {
 			okObj := certTermsEqual(rootEnt.con.terms, inst.objTerms) &&
@@ -3975,18 +3810,8 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 
 	case "bound":
 		if incumbent != nil {
-			if !certCheckIncumbentFeasible(inst, incumbent) {
+			if _, _, okInc := certVerifyIncumbentAndObj(inst, origEnvInst, incumbent); !okInc {
 				return certVIPRVerified{}, ErrCertificationFailed
-			}
-			if origEnvInst != nil {
-				if !certCheckIncumbentFeasible(origEnvInst, incumbent) {
-					return certVIPRVerified{}, ErrCertificationFailed
-				}
-				redObj := new(big.Rat).Add(inst.objConst, certDotTerms(inst.objTerms, incumbent))
-				origObj := new(big.Rat).Add(origEnvInst.objConst, certDotTerms(origEnvInst.objTerms, incumbent))
-				if origObj.Cmp(redObj) != 0 {
-					return certVIPRVerified{}, ErrCertificationFailed
-				}
 			}
 		}
 		if !certIsUnsatCon(rootEnt.con) {
@@ -4007,8 +3832,8 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 	return certVIPRVerified{}, ErrCertificationFailed
 }
 
-func verifyMiniVIPRBytesAgainstProblem(p *CompiledProblem, raw []byte) (certVIPRVerified, error) {
-	origInst, ok := buildCertVIPRInstanceFromProblem(p)
+func verifyMiniVIPRProblem(p *CompiledProblem, raw []byte) (certVIPRVerified, error) {
+	origInst, ok := buildCertVIPRInstance(p)
 	if !ok {
 		return certVIPRVerified{}, ErrCertificationFailed
 	}

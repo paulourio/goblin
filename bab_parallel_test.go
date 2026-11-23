@@ -467,30 +467,30 @@ func TestReliabilityBranchingProbesUnreliableDeepVars(t *testing.T) {
 
 	// Depth 4 with unreliable pseudocosts and positive budget must probe candidates.
 	itersZeroBudget := 0
-	outZero := selectBranchVarCore(
-		p, lp, lpRes, p.varLB, p.varUB, makeCosts(0), 4,
-		&itersZeroBudget, func() int { return 1000 }, nil, false, sbConfig{sbBudgetLeft: 0},
-	)
+	outZero := selectBranchVar(&branchSelectReq{
+		p: p, lpSolver: lp, lpRes: lpRes, curLB: p.varLB, curUB: p.varUB, pCosts: makeCosts(0),
+		depth: 4, totalIters: &itersZeroBudget, iterLeft: func() int { return 1000 }, sbBudgetLeft: 0,
+	})
 	if outZero.probeIters != 0 || itersZeroBudget != 0 || outZero.bestCol == -1 {
 		t.Fatalf("expected 0 probe iters when sbBudgetLeft=0, got %+v iters=%d", outZero, itersZeroBudget)
 	}
 
 	pcUnrel := makeCosts(0)
 	itersWithBudget := 0
-	outWithBudget := selectBranchVarCore(
-		p, lp, lpRes, p.varLB, p.varUB, pcUnrel, 4,
-		&itersWithBudget, func() int { return 1000 }, nil, false, sbConfig{sbBudgetLeft: 100},
-	)
+	outWithBudget := selectBranchVar(&branchSelectReq{
+		p: p, lpSolver: lp, lpRes: lpRes, curLB: p.varLB, curUB: p.varUB, pCosts: pcUnrel,
+		depth: 4, totalIters: &itersWithBudget, iterLeft: func() int { return 1000 }, sbBudgetLeft: 100,
+	})
 	if outWithBudget.bestCol == -1 || outWithBudget.probeIters <= 0 || outWithBudget.probeIters != itersWithBudget {
 		t.Fatalf("expected unreliable depth-4 probing to run, got %+v iters=%d", outWithBudget, itersWithBudget)
 	}
 
 	// Once counts meet reliability threshold, depth 4 must skip probing.
 	itersRel := 0
-	outRel := selectBranchVarCore(
-		p, lp, lpRes, p.varLB, p.varUB, makeCosts(strongBranchReliableCnt), 4,
-		&itersRel, func() int { return 1000 }, nil, false, sbConfig{sbBudgetLeft: 100},
-	)
+	outRel := selectBranchVar(&branchSelectReq{
+		p: p, lpSolver: lp, lpRes: lpRes, curLB: p.varLB, curUB: p.varUB, pCosts: makeCosts(strongBranchReliableCnt),
+		depth: 4, totalIters: &itersRel, iterLeft: func() int { return 1000 }, sbBudgetLeft: 100,
+	})
 	if outRel.probeIters != 0 || itersRel != 0 || outRel.bestCol == -1 {
 		t.Fatalf("expected reliable depth-4 candidate to skip probing, got %+v iters=%d", outRel, itersRel)
 	}

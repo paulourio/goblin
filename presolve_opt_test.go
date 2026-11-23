@@ -319,7 +319,8 @@ func runActivityTighteningUnguarded(
 			}
 			hasUpper := r.sense == LessEqual || r.sense == Equal
 			hasLower := r.sense == GreaterEqual || r.sense == Equal
-			s, _ := evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, true, true)
+			var s rowActivitySummary
+			evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, true, true)
 			if s.extreme {
 				continue
 			}
@@ -419,7 +420,7 @@ func runActivityTighteningUnguarded(
 				}
 			}
 			if hasLower && upperTightenedRow {
-				s, _ = evalRowActivitySummary(r.cols, r.vals, lb, ub, r.rhs, false, false, true)
+				evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, false, false, true)
 				if s.extreme {
 					continue
 				}
@@ -701,16 +702,16 @@ func TestBuildCompiledDirectEquivalence(t *testing.T) {
 				shared: true,
 			}
 		}
-		_, _, infeas, _ := runActivityTightening(orig, rows, lb, ub, 2, time.Time{}, nil)
+		_, _, infeas, _ := runActivityTightening(orig, rows, lb, ub, nil, 2, time.Time{}, nil, nil)
 		if infeas {
 			continue
 		}
-		symTight, symRows, _ := applyOrbitSymmetryBreaking(orig, rows, lb, ub, time.Time{}, nil)
+		symTight, symRows, _ := applyOrbitSymmetryBreaking(orig, rows, lb, ub, time.Time{}, nil, nil)
 		if len(symRows) > 0 {
 			rows = slices.Concat(rows, symRows)
 		}
 		if symTight > 0 {
-			_, _, infeas, _ = runActivityTightening(orig, rows, lb, ub, 2, time.Time{}, nil)
+			_, _, infeas, _ = runActivityTightening(orig, rows, lb, ub, nil, 2, time.Time{}, nil, nil)
 			if infeas {
 				continue
 			}
@@ -796,7 +797,7 @@ func TestRunActivityTighteningFastGuardEquivalence(t *testing.T) {
 		}
 		lbG, ubG := slices.Clone(orig.varLB), slices.Clone(orig.varUB)
 		rowsG := makeRows()
-		tG, rG, infG, _ := runActivityTightening(orig, rowsG, lbG, ubG, defaultPresolveMaxPass, time.Time{}, nil)
+		tG, rG, infG, _ := runActivityTightening(orig, rowsG, lbG, ubG, nil, defaultPresolveMaxPass, time.Time{}, nil, nil)
 
 		lbU, ubU := slices.Clone(orig.varLB), slices.Clone(orig.varUB)
 		rowsU := makeRows()

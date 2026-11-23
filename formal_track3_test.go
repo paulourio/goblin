@@ -384,24 +384,15 @@ func solveExactBasisTranspose(p *CompiledProblem, basis []int, eqRHS []*big.Rat)
 		return nil, false
 	}
 
-	type ratEntry struct {
-		col int
-		val *big.Rat
-	}
-	eqEntries := make([][]ratEntry, m)
-	colEqs := make([][]int, m)
-	eqActive := make([]bool, m)
-	eqDeg := make([]int, m)
-	varDeg := make([]int, m)
-
+	eqEntries := make([][]ratEqEntry, m)
 	for q := range m {
 		bVar := basis[q]
 		if bVar < n {
-			var ents []ratEntry
+			var ents []ratEqEntry
 			for idx := p.colPtr[bVar]; idx < p.colPtr[bVar+1]; idx++ {
 				ri := p.rowIdx[idx]
 				if uint(ri) < uint(m) && p.colVal[idx] != 0 {
-					ents = append(ents, ratEntry{col: ri, val: new(big.Rat).SetFloat64(p.colVal[idx])})
+					ents = append(ents, ratEqEntry{col: ri, val: new(big.Rat).SetFloat64(p.colVal[idx])})
 				}
 			}
 			eqEntries[q] = ents
@@ -410,215 +401,13 @@ func solveExactBasisTranspose(p *CompiledProblem, basis []int, eqRHS []*big.Rat)
 			if uint(si) >= uint(m) {
 				return nil, false
 			}
-			eqEntries[q] = []ratEntry{{col: si, val: big.NewRat(1, 1)}}
+			eqEntries[q] = []ratEqEntry{{col: si, val: big.NewRat(1, 1)}}
 		}
 		if len(eqEntries[q]) == 0 {
 			return nil, false
 		}
-		eqActive[q] = true
-		eqDeg[q] = len(eqEntries[q])
-		for _, ent := range eqEntries[q] {
-			colEqs[ent.col] = append(colEqs[ent.col], q)
-			varDeg[ent.col]++
-		}
 	}
-
-	w := make([]*big.Rat, m)
-	for i := range m {
-		w[i] = new(big.Rat)
-	}
-	varKnown := make([]bool, m)
-	varDeferred := make([]bool, m)
-	type backStep struct {
-		eq  int
-		col int
-	}
-	var backStack []backStep
-	var rowQ, colQ []int
-	for q := range m {
-		if eqDeg[q] == 1 {
-			rowQ = append(rowQ, q)
-		}
-		if varDeg[q] == 0 {
-			return nil, false
-		}
-		if varDeg[q] == 1 {
-			colQ = append(colQ, q)
-		}
-	}
-
-	tmp := new(big.Rat)
-	acc := new(big.Rat)
-	for len(rowQ) > 0 || len(colQ) > 0 {
-		for len(rowQ) > 0 {
-			q := rowQ[len(rowQ)-1]
-			rowQ = rowQ[:len(rowQ)-1]
-			if !eqActive[q] || eqDeg[q] != 1 {
-				continue
-			}
-			targetCol := -1
-			var targetVal *big.Rat
-			acc.Set(eqRHS[q])
-			for _, ent := range eqEntries[q] {
-				if varKnown[ent.col] {
-					if w[ent.col].Sign() != 0 {
-						tmp.Mul(ent.val, w[ent.col])
-						acc.Sub(acc, tmp)
-					}
-				} else if !varDeferred[ent.col] {
-					targetCol = ent.col
-					targetVal = ent.val
-				}
-			}
-			if targetCol < 0 || targetVal.Sign() == 0 {
-				return nil, false
-			}
-			w[targetCol].Quo(acc, targetVal)
-			varKnown[targetCol] = true
-			eqActive[q] = false
-			for _, q2 := range colEqs[targetCol] {
-				if !eqActive[q2] {
-					continue
-				}
-				eqDeg[q2]--
-				if eqDeg[q2] == 1 {
-					rowQ = append(rowQ, q2)
-				}
-			}
-		}
-		for len(colQ) > 0 && len(rowQ) == 0 {
-			c := colQ[len(colQ)-1]
-			colQ = colQ[:len(colQ)-1]
-			if varKnown[c] || varDeferred[c] || varDeg[c] != 1 {
-				continue
-			}
-			actEq := -1
-			for _, q := range colEqs[c] {
-				if eqActive[q] {
-					actEq = q
-					break
-				}
-			}
-			if actEq < 0 {
-				return nil, false
-			}
-			backStack = append(backStack, backStep{eq: actEq, col: c})
-			varDeferred[c] = true
-			eqActive[actEq] = false
-			for _, ent := range eqEntries[actEq] {
-				if !varKnown[ent.col] && !varDeferred[ent.col] {
-					varDeg[ent.col]--
-					if varDeg[ent.col] == 1 {
-						colQ = append(colQ, ent.col)
-					}
-				}
-			}
-		}
-	}
-
-	var nucEqs, nucVars []int
-	nucVarPos := make([]int, m)
-	for i := range m {
-		nucVarPos[i] = -1
-		if eqActive[i] {
-			nucEqs = append(nucEqs, i)
-		}
-		if !varKnown[i] && !varDeferred[i] {
-			nucVarPos[i] = len(nucVars)
-			nucVars = append(nucVars, i)
-		}
-	}
-	nNuc := len(nucVars)
-	if len(nucEqs) != nNuc {
-		return nil, false
-	}
-	if nNuc > 0 {
-		mat := make([][]*big.Rat, nNuc)
-		for rowIdx, q := range nucEqs {
-			row := make([]*big.Rat, nNuc+1)
-			for k := range nNuc {
-				row[k] = new(big.Rat)
-			}
-			rhsR := new(big.Rat).Set(eqRHS[q])
-			for _, ent := range eqEntries[q] {
-				if varKnown[ent.col] {
-					if w[ent.col].Sign() != 0 {
-						tmp.Mul(ent.val, w[ent.col])
-						rhsR.Sub(rhsR, tmp)
-					}
-				} else if pos := nucVarPos[ent.col]; pos >= 0 {
-					row[pos].Set(ent.val)
-				} else {
-					return nil, false
-				}
-			}
-			row[nNuc] = rhsR
-			mat[rowIdx] = row
-		}
-		factor := new(big.Rat)
-		for col := range nNuc {
-			piv := -1
-			for r := col; r < nNuc; r++ {
-				if mat[r][col].Sign() != 0 {
-					piv = r
-					break
-				}
-			}
-			if piv == -1 {
-				return nil, false
-			}
-			if piv != col {
-				mat[col], mat[piv] = mat[piv], mat[col]
-			}
-			invPiv := new(big.Rat).Inv(mat[col][col])
-			for c := col; c <= nNuc; c++ {
-				if mat[col][c].Sign() != 0 {
-					mat[col][c].Mul(mat[col][c], invPiv)
-				}
-			}
-			for r := range nNuc {
-				if r == col || mat[r][col].Sign() == 0 {
-					continue
-				}
-				factor.Set(mat[r][col])
-				mat[r][col].SetInt64(0)
-				for c := col + 1; c <= nNuc; c++ {
-					if mat[col][c].Sign() != 0 {
-						tmp.Mul(factor, mat[col][c])
-						mat[r][c].Sub(mat[r][c], tmp)
-					}
-				}
-			}
-		}
-		for k, origCol := range nucVars {
-			w[origCol].Set(mat[k][nNuc])
-			varKnown[origCol] = true
-		}
-	}
-
-	for _, bs := range slices.Backward(backStack) {
-		acc.Set(eqRHS[bs.eq])
-		var pivVal *big.Rat
-		for _, ent := range eqEntries[bs.eq] {
-			if ent.col == bs.col {
-				pivVal = ent.val
-			} else if varKnown[ent.col] {
-				if w[ent.col].Sign() != 0 {
-					tmp.Mul(ent.val, w[ent.col])
-					acc.Sub(acc, tmp)
-				}
-			} else {
-				return nil, false
-			}
-		}
-		if pivVal == nil || pivVal.Sign() == 0 {
-			return nil, false
-		}
-		w[bs.col].Quo(acc, pivVal)
-		varKnown[bs.col] = true
-	}
-
-	return w, true
+	return solveSparseRationalSystem(eqEntries, eqRHS[:m], m)
 }
 
 func solveExactBasisTransposeRay(s *LPSolver, d []float64) ([]*big.Rat, bool) {

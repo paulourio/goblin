@@ -1110,7 +1110,7 @@ func TestFormalTrack2B(t *testing.T) {
 			"solutions": solutionsToPayloads(t, [][]float64{{1, u1, u2}, {0, 0, 0}}),
 		}, false)
 
-		// Corpus MIPs with separateRowMIRCutsWithWS certified via live universal agg-cmir-check.
+		// Corpus MIPs with separateRowMIRCuts certified via live universal agg-cmir-check.
 		var mirCorpusChecked int
 		for _, relPath := range []string{
 			"testdata/corpus/t1_knapsack_12.json",
@@ -1129,7 +1129,7 @@ func TestFormalTrack2B(t *testing.T) {
 			if rootC.Status == StatusOptimal {
 				obsC := &cutCertObserver{srcRowIdx: -1}
 				wsC := cutGenWorkspace{certObs: obsC}
-				cutsC := separateRowMIRCutsWithWS(pC, rootC.Primal, &wsC)
+				cutsC := separateRowMIRCuts(pC, rootC.Primal, &wsC)
 				if len(cutsC) > 0 && len(obsC.cmirs) > 0 {
 					liveItems, err := exportObserverItems(pC, obsC, [][]float64{sol})
 					if err != nil {

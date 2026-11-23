@@ -366,7 +366,7 @@ func ExportLPCheckPayload(p *CompiledProblem, lpSolver *LPSolver, res LPResult) 
 				if yi == 0 {
 					yi = 0
 				}
-				r, okR := viprRatFromFloat(yi)
+				r, okR := exactRatFromFloat(yi)
 				if !okR {
 					allFinite = false
 					break
@@ -383,7 +383,7 @@ func ExportLPCheckPayload(p *CompiledProblem, lpSolver *LPSolver, res LPResult) 
 			xRat := make([]*big.Rat, rp.n)
 			allXFinite := true
 			for j := range rp.n {
-				xr, okX := viprRatFromFloat(res.Primal[j])
+				xr, okX := exactRatFromFloat(res.Primal[j])
 				if !okX {
 					allXFinite = false
 					break
@@ -542,7 +542,7 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 
 	n := p.numVars
 	m := p.numConstraints
-	objConstRat, okOC := viprRatFromFloat(p.objConstMin())
+	objConstRat, okOC := exactRatFromFloat(p.objConstMin())
 	if !okOC {
 		return nil, false
 	}
@@ -550,20 +550,20 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 	curLB := make([]*big.Rat, n)
 	curUB := make([]*big.Rat, n)
 	for j := range n {
-		cj, okC := viprRatFromFloat(p.objMin[j])
+		cj, okC := exactRatFromFloat(p.objMin[j])
 		if !okC {
 			return nil, false
 		}
 		curObj[j] = cj
 		if !math.IsInf(p.varLB[j], -1) {
-			lr, okL := viprRatFromFloat(p.varLB[j])
+			lr, okL := exactRatFromFloat(p.varLB[j])
 			if !okL {
 				return nil, false
 			}
 			curLB[j] = lr
 		}
 		if !math.IsInf(p.varUB[j], 1) {
-			ur, okU := viprRatFromFloat(p.varUB[j])
+			ur, okU := exactRatFromFloat(p.varUB[j])
 			if !okU {
 				return nil, false
 			}
@@ -579,7 +579,7 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 	}
 	curRows := make([]ratLPWorkRow, m)
 	for i := range m {
-		rhsR, okR := viprRatFromFloat(p.rowRHS[i])
+		rhsR, okR := exactRatFromFloat(p.rowRHS[i])
 		if !okR {
 			return nil, false
 		}
@@ -589,7 +589,7 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 			if v == 0 {
 				continue
 			}
-			vr, okV := viprRatFromFloat(v)
+			vr, okV := exactRatFromFloat(v)
 			if !okV {
 				return nil, false
 			}
@@ -793,7 +793,7 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 			if uint(col) >= uint(n) || curObj[col].Sign() != 0 {
 				return nil, false
 			}
-			valR, okV := viprRatFromFloat(ev.val)
+			valR, okV := exactRatFromFloat(ev.val)
 			if !okV {
 				return nil, false
 			}
@@ -918,8 +918,8 @@ func isValidRoundedGcdRelaxationRat(
 	origRHS, rhsComp float64,
 	intCoeffs []int64,
 ) bool {
-	origRHSRat, okO := viprRatFromFloat(origRHS)
-	rhsCompRat, okC := viprRatFromFloat(rhsComp)
+	origRHSRat, okO := exactRatFromFloat(origRHS)
+	rhsCompRat, okC := exactRatFromFloat(rhsComp)
 	if !okO || !okC || len(cols) != len(origVals) || len(cols) != len(intCoeffs) {
 		return false
 	}
@@ -929,7 +929,7 @@ func isValidRoundedGcdRelaxationRat(
 	tLo := new(big.Rat)
 	tHi := new(big.Rat)
 	for k, col := range cols {
-		vRat, okV := viprRatFromFloat(origVals[k])
+		vRat, okV := exactRatFromFloat(origVals[k])
 		if !okV {
 			return false
 		}
@@ -938,8 +938,8 @@ func isValidRoundedGcdRelaxationRat(
 		if diff.Sign() == 0 {
 			continue
 		}
-		loR, okL := viprRatFromFloat(lb[col])
-		hiR, okU := viprRatFromFloat(ub[col])
+		loR, okL := exactRatFromFloat(lb[col])
+		hiR, okU := exactRatFromFloat(ub[col])
 		if !okL || !okU {
 			return false
 		}
@@ -1243,7 +1243,7 @@ func ExportPresolveRulesItems(p *CompiledProblem) (items [][]byte, preRes Presol
 				if jIdx == targetIdx {
 					continue
 				}
-				a2, okA2 := viprRatFromFloat(preVals[jIdx])
+				a2, okA2 := exactRatFromFloat(preVals[jIdx])
 				if !okA2 {
 					otherOK = false
 					break
@@ -1254,7 +1254,7 @@ func ExportPresolveRulesItems(p *CompiledProblem) (items [][]byte, preRes Presol
 				} else {
 					bd = lb[c2]
 				}
-				br, okB := viprRatFromFloat(bd)
+				br, okB := exactRatFromFloat(bd)
 				if !okB {
 					otherOK = false
 					break
@@ -1383,4 +1383,128 @@ func buildExportOrbitCheckItem(
 // and emits universal algebraic cut certificates for cuts-check --jsonl.
 func ExportSeparatedCutsItems(p *CompiledProblem, feasibleSols [][]float64) ([][]byte, error) {
 	return ExportLiveSeparatedCutsItems(p, feasibleSols)
+}
+
+func (rp *viprRatProblem) clampDualCone(y []*big.Rat) []*big.Rat {
+	out := make([]*big.Rat, rp.m)
+	for i := range rp.m {
+		val := new(big.Rat)
+		if i < len(y) && y[i] != nil {
+			val.Set(y[i])
+		}
+		if rp.rowSense[i] == LessEqual && val.Sign() > 0 {
+			val.SetInt64(0)
+		}
+		if rp.rowSense[i] == GreaterEqual && val.Sign() < 0 {
+			val.SetInt64(0)
+		}
+		out[i] = val
+	}
+	return out
+}
+
+func (rp *viprRatProblem) evalSafeDualRat(y []*big.Rat, nodeLB, nodeUB []*big.Rat) (*big.Rat, bool) {
+	colDots := make([]*big.Rat, rp.n)
+	for j := range rp.n {
+		colDots[j] = new(big.Rat)
+	}
+	rhs := new(big.Rat)
+	term := new(big.Rat)
+	for i := range rp.m {
+		if i >= len(y) || y[i] == nil || y[i].Sign() == 0 {
+			continue
+		}
+		yi := y[i]
+		if rp.rowSense[i] == LessEqual && yi.Sign() > 0 {
+			return nil, false
+		}
+		if rp.rowSense[i] == GreaterEqual && yi.Sign() < 0 {
+			return nil, false
+		}
+		term.Mul(yi, rp.rowRHS[i])
+		rhs.Add(rhs, term)
+		for k, col := range rp.rowCols[i] {
+			term.Mul(yi, rp.rowVals[i][k])
+			colDots[col].Add(colDots[col], term)
+		}
+	}
+	rc := new(big.Rat)
+	for j := range rp.n {
+		rc.Sub(rp.objMin[j], colDots[j])
+		if rc.Sign() > 0 {
+			if nodeLB[j] == nil {
+				return nil, false
+			}
+			term.Mul(rc, nodeLB[j])
+			rhs.Add(rhs, term)
+		} else if rc.Sign() < 0 {
+			if nodeUB[j] == nil {
+				return nil, false
+			}
+			term.Mul(rc, nodeUB[j])
+			rhs.Add(rhs, term)
+		}
+	}
+	return rhs, true
+}
+
+func (rp *viprRatProblem) extractNodeSafeDual(s *LPSolver, lpRes LPResult, nodeLB, nodeUB []*big.Rat) ([]*big.Rat, *big.Rat, bool) {
+	var bestY []*big.Rat
+	var bestRHS *big.Rat
+
+	tryCand := func(yRaw []*big.Rat) {
+		yClean := rp.clampDualCone(yRaw)
+		rhs, ok := rp.evalSafeDualRat(yClean, nodeLB, nodeUB)
+		if !ok {
+			return
+		}
+		if bestRHS == nil || rhs.Cmp(bestRHS) > 0 {
+			bestY = yClean
+			bestRHS = rhs
+		}
+	}
+
+	if s != nil && s.ws != nil && s.TotalRows() == rp.m && rp.m > 0 {
+		rhsB := make([]*big.Rat, rp.m)
+		for q := range rp.m {
+			bVar := s.ws.basis[q]
+			if bVar >= 0 && bVar < rp.n {
+				rhsB[q] = new(big.Rat).Set(rp.objMin[bVar])
+			} else {
+				rhsB[q] = new(big.Rat)
+			}
+		}
+		if yBasis, ok := solveVIPRBasisTranspose(rp, s.ws.basis[:rp.m], rhsB); ok {
+			tryCand(yBasis)
+		}
+	}
+
+	if len(lpRes.Dual) == rp.m {
+		senseSign := 1.0
+		if rp.p.sense == Maximize {
+			senseSign = -1.0
+		}
+		yFloat := make([]*big.Rat, rp.m)
+		allOK := true
+		for i := range rp.m {
+			r, ok := exactRatFromFloat(senseSign * lpRes.Dual[i])
+			if !ok {
+				allOK = false
+				break
+			}
+			yFloat[i] = r
+		}
+		if allOK {
+			tryCand(yFloat)
+		}
+	}
+
+	if bestRHS == nil {
+		zeroY := make([]*big.Rat, rp.m)
+		for i := range rp.m {
+			zeroY[i] = new(big.Rat)
+		}
+		tryCand(zeroY)
+	}
+	return bestY, bestRHS, bestRHS != nil
 }

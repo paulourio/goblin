@@ -439,9 +439,12 @@ func TestStrongBranchingBasisRestoreAndDomainReduction(t *testing.T) {
 
 		iters := 0
 		var buf []branchCand
-		col, _ := selectBranchVarWithBuf(p, lp, lpRes, curLB, curUB, pCosts, 0, &iters, func() int { return 1000 }, &buf)
-		if col < 0 || iters == 0 {
-			t.Fatalf("expected strong branching probes to run, got col=%d iters=%d", col, iters)
+		out := selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			totalIters: &iters, iterLeft: func() int { return 1000 }, candsBuf: &buf,
+		})
+		if out.bestCol < 0 || iters == 0 {
+			t.Fatalf("expected strong branching probes to run, got col=%d iters=%d", out.bestCol, iters)
 		}
 		if !slices.Equal(lp.ws.basis[:totM], origBasis) {
 			t.Fatalf("basis not restored after strong branching: got %v, want %v", lp.ws.basis[:totM], origBasis)
@@ -482,7 +485,10 @@ func TestStrongBranchingBasisRestoreAndDomainReduction(t *testing.T) {
 
 		iters := 0
 		var buf []branchCand
-		out := selectBranchVarDetailed(p, lp, lpRes, curLB, curUB, pCosts, 0, &iters, func() int { return 1000 }, &buf, true)
+		out := selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			totalIters: &iters, iterLeft: func() int { return 1000 }, candsBuf: &buf, allowDomainRed: true,
+		})
 		if out.pruned {
 			t.Fatal("expected domain reduction, not full node prune")
 		}
@@ -525,7 +531,10 @@ func TestStrongBranchingBasisRestoreAndDomainReduction(t *testing.T) {
 
 		iters := 0
 		var buf []branchCand
-		out := selectBranchVarDetailed(p, lp, lpRes, curLB, curUB, pCosts, 0, &iters, func() int { return 1000 }, &buf, true)
+		out := selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			totalIters: &iters, iterLeft: func() int { return 1000 }, candsBuf: &buf, allowDomainRed: true,
+		})
 		if !out.pruned {
 			t.Fatalf("expected pruned=true when both branches are LP-infeasible, got %+v", out)
 		}
@@ -556,7 +565,10 @@ func TestStrongBranchingBasisRestoreAndDomainReduction(t *testing.T) {
 		curUB := slices.Clone(p.varUB)
 		pCosts := make([]pseudoCost, p.numVars)
 		iters := 0
-		out := selectBranchVarDetailed(p, lp, lpRes, curLB, curUB, pCosts, 0, &iters, func() int { return 0 }, nil, true)
+		out := selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			totalIters: &iters, iterLeft: func() int { return 0 }, allowDomainRed: true,
+		})
 		if out.pruned || len(out.fixedDeltas) != 0 || curLB[0] != 0 || out.bestCol < 0 {
 			t.Fatalf("unexpected modification with zero iter budget: out=%+v curLB=%v", out, curLB)
 		}
@@ -609,7 +621,7 @@ func TestCutDensityCapAndStaticCache(t *testing.T) {
 		for j := range 70 {
 			lp[j] = 3.0 / 140.0
 		}
-		mirCuts := separateRowMIRCuts(p, lp)
+		mirCuts := separateRowMIRCuts(p, lp, nil)
 		limit := maxCutNNZ(nVars)
 		for _, c := range mirCuts {
 			if len(c.ColIdx) > limit {
@@ -775,10 +787,10 @@ func TestCutDensityCapAndStaticCache(t *testing.T) {
 			t.Fatalf("root LP status=%v, want Optimal", rootRes.Status)
 		}
 
-		// Verify separateGMICuts with shared cutGenWorkspace matches a fresh workspace.
+		// Verify separateGMICutsEx with shared cutGenWorkspace matches a fresh workspace.
 		var ws cutGenWorkspace
-		gmiA := separateGMICuts(lp, rootRes.Primal, &ws)
-		gmiB := separateGMICuts(lp, rootRes.Primal, nil)
+		gmiA := separateGMICutsEx(lp, rootRes.Primal, &ws, false)
+		gmiB := separateGMICutsEx(lp, rootRes.Primal, nil, false)
 		if len(gmiA) == 0 || len(gmiA) != len(gmiB) {
 			t.Fatalf("GMI cut count mismatch: ws=%d fresh=%d", len(gmiA), len(gmiB))
 		}
@@ -1072,7 +1084,7 @@ func TestMultiRowAggregatedCutsAndInTreeGMI(t *testing.T) {
 func TestStrongBranchingBoundCutoffDomainReduction(t *testing.T) {
 	ctx := context.Background()
 
-	// 1. Direct unit test of selectBranchVarCore bound-cutoff domain reduction with
+	// 1. Direct unit test of selectBranchVar bound-cutoff domain reduction with
 	// non-zero objConstant and non-zero RelGapTol:
 	//   Minimize x0 + 5*x1 + 0*x2 + 0.5*x3 + 100 (objConstant=100)
 	//   s.t. 2*x0 + x1 >= 1, 2*x2 + x3 >= 1, x0..x3 in {0, 1}
@@ -1081,7 +1093,7 @@ func TestStrongBranchingBoundCutoffDomainReduction(t *testing.T) {
 	//   - cands = [x0, x2]; x0 sorts first because |obj[x0]|=1 > |obj[x2]|=0.
 	//   - branching down (x0 = 0): forces x1 >= 1 -> downBound(unshifted) = 5.0 -> shifted = 105.0 >= 105.0 (cut off!)
 	//   - branching up   (x0 = 1): x1 = 0 -> upBound(unshifted) = 1.0 -> shifted = 101.0 (not cut off!)
-	// selectBranchVarCore should fix x0 = 1 and report prunedBound == 105.0 (the shifted down bound).
+	// selectBranchVar should fix x0 = 1 and report prunedBound == 105.0 (the shifted down bound).
 	m := NewModel("sb_bound_cutoff_unit", Minimize)
 	x0 := m.AddBinaryVar("x0")
 	x1 := m.AddBinaryVar("x1")
@@ -1103,18 +1115,23 @@ func TestStrongBranchingBoundCutoffDomainReduction(t *testing.T) {
 	pCosts := make([]pseudoCost, p.numVars)
 	totalIters := 0
 	var cands []branchCand
-	out := selectBranchVarCore(
-		p, lp, lpRes, curLB, curUB, pCosts, 0,
-		&totalIters, func() int { return 1000 }, &cands,
-		true,
-		sbConfig{
-			hasIncumbent: true,
-			bestObjMin:   105.0,
-			pruneRelTol:  0.02,
-			absGapTol:    1e-7,
-			objConstMin:  p.objConstMin(),
-		},
-	)
+	out := selectBranchVar(&branchSelectReq{
+		p:              p,
+		lpSolver:       lp,
+		lpRes:          lpRes,
+		curLB:          curLB,
+		curUB:          curUB,
+		pCosts:         pCosts,
+		totalIters:     &totalIters,
+		iterLeft:       func() int { return 1000 },
+		candsBuf:       &cands,
+		allowDomainRed: true,
+		hasIncumbent:   true,
+		bestObjMin:     105.0,
+		pruneRelTol:    0.02,
+		absGapTol:      1e-7,
+		objConstMin:    p.objConstMin(),
+	})
 	if out.pruned {
 		t.Fatalf("expected only down branch cut off and x0 fixed to 1, got pruned=true")
 	}
@@ -1209,4 +1226,133 @@ func TestNextUpDownBitExact(t *testing.T) {
 		bits := rng.Uint64()
 		checkVal(math.Float64frombits(bits))
 	}
+}
+
+func separateAggregatedMIRCuts(solver *LPSolver, lpPrimal []float64, ws *cutGenWorkspace) []cutPlane {
+	cuts, ctx := separateAggregatedCore(solver, lpPrimal, ws, true)
+	if ctx != nil && !solver.timeExpired() {
+		cuts = append(cuts, separatePairwiseSurrogateCuts(ctx)...)
+	}
+	return cuts
+}
+
+// finalizeCut is the independent dense reference oracle for finalizeSparseCut parity tests.
+func finalizeCut(p *CompiledProblem, dense []float64, rhs float64, lpPrimal []float64) (cutPlane, bool) {
+	if math.IsNaN(rhs) || math.IsInf(rhs, 0) {
+		return cutPlane{}, false
+	}
+	maxAbs := 0.0
+	minAbs := math.Inf(1)
+	nnz := 0
+
+	for j, v := range dense {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return cutPlane{}, false
+		}
+		av := math.Abs(v)
+		if av > cutDropTol {
+			maxAbs = max(maxAbs, av)
+			minAbs = min(minAbs, av)
+			nnz++
+		} else if v != 0 {
+			var bnd float64
+			if v > 0 {
+				bnd = p.varLB[j]
+			} else {
+				bnd = p.varUB[j]
+			}
+			if math.IsInf(bnd, 0) || math.IsNaN(bnd) {
+				return cutPlane{}, false
+			}
+			if bnd != 0 {
+				lo := nextDown(v * bnd)
+				if math.IsInf(lo, 0) || math.IsNaN(lo) {
+					return cutPlane{}, false
+				}
+				rhs = nextUp(rhs - lo)
+				if math.IsInf(rhs, 0) || math.IsNaN(rhs) {
+					return cutPlane{}, false
+				}
+			}
+		}
+	}
+	if nnz == 0 || maxAbs == 0 || maxAbs/minAbs > maxCutDynamism {
+		return cutPlane{}, false
+	}
+
+	scaledNorm2 := 0.0
+	for _, v := range dense {
+		if math.Abs(v) > cutDropTol {
+			r := v / maxAbs
+			scaledNorm2 += r * r
+		}
+	}
+	norm := maxAbs * math.Sqrt(scaledNorm2)
+	if norm == 0 || math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return cutPlane{}, false
+	}
+	_, rawExp := math.Frexp(norm)
+	normExp := rawExp - 1
+	scaledNorm := math.Ldexp(norm, -normExp)
+	if !(scaledNorm > 0) || math.IsNaN(scaledNorm) || math.IsInf(scaledNorm, 0) {
+		return cutPlane{}, false
+	}
+
+	colIdx := make([]int, 0, nnz)
+	val := make([]float64, 0, nnz)
+	act := 0.0
+	subScaleErr := 0.0
+	for j, v := range dense {
+		if math.Abs(v) > cutDropTol {
+			sv := math.Ldexp(v, -normExp)
+			if sv == 0 || math.IsNaN(sv) || math.IsInf(sv, 0) {
+				return cutPlane{}, false
+			}
+			if math.Ldexp(sv, normExp) != v {
+				maxB := max(math.Abs(p.varLB[j]), math.Abs(p.varUB[j]))
+				if math.IsInf(maxB, 0) || math.IsNaN(maxB) {
+					return cutPlane{}, false
+				}
+				subScaleErr += nextUp(math.SmallestNonzeroFloat64 * maxB)
+				if math.IsInf(subScaleErr, 0) || math.IsNaN(subScaleErr) {
+					return cutPlane{}, false
+				}
+				subScaleErr = nextUp(subScaleErr)
+			}
+			colIdx = append(colIdx, j)
+			val = append(val, sv)
+			act += sv * lpPrimal[j]
+		}
+	}
+	rawRHS := math.Ldexp(rhs, -normExp)
+	if math.IsInf(rawRHS, 0) || math.IsNaN(rawRHS) {
+		return cutPlane{}, false
+	}
+	if rhs != 0 && math.Ldexp(rawRHS, normExp) != rhs {
+		rawRHS = nextUp(rawRHS)
+	}
+	rhsWithErr := rawRHS
+	if subScaleErr > 0 {
+		rhsWithErr = rawRHS + subScaleErr
+		if math.IsInf(rhsWithErr, 0) || math.IsNaN(rhsWithErr) {
+			return cutPlane{}, false
+		}
+		rhsWithErr = nextUp(rhsWithErr)
+	}
+	scaledRHS := rhsWithErr + rhsSafetyMargin*scaledNorm
+	if math.IsNaN(scaledRHS) || math.IsInf(scaledRHS, 0) || math.IsNaN(act) || math.IsInf(act, 0) {
+		return cutPlane{}, false
+	}
+	efficacy := (act - scaledRHS) / scaledNorm
+	if math.IsNaN(efficacy) || math.IsInf(efficacy, 0) || !(efficacy >= minCutEfficacy) {
+		return cutPlane{}, false
+	}
+
+	return cutPlane{
+		ColIdx:   colIdx,
+		Val:      val,
+		RHS:      scaledRHS,
+		Efficacy: efficacy,
+		Norm:     scaledNorm,
+	}, true
 }

@@ -548,20 +548,52 @@ func unmarshalCertSparseVecJSON(raw viprRawJSON) (certSparseVecJSON, bool) {
 	return out, ok
 }
 
+func decodeVIPRIntPtrField(dst **int, val viprRawJSON) bool {
+	p, ok := viprUnmarshalIntPtr(val)
+	if !ok {
+		return false
+	}
+	*dst = p
+	return true
+}
+
+func decodeVIPRBoolPtrField(dst **bool, val viprRawJSON) bool {
+	p, ok := viprUnmarshalBoolPtr(val)
+	if !ok {
+		return false
+	}
+	*dst = p
+	return true
+}
+
+func decodeVIPROptStringField(dst *string, val viprRawJSON) bool {
+	s, ok := viprUnmarshalOptString(val)
+	if !ok {
+		return false
+	}
+	*dst = s
+	return true
+}
+
+func viprUnmarshalOptRawArray(dst *[]viprRawJSON, val viprRawJSON) bool {
+	elems, isNull, ok := viprUnmarshalRawArray(val, true)
+	if !ok {
+		return false
+	}
+	if !isNull {
+		*dst = elems
+	}
+	return true
+}
+
 func unmarshalCertLinConJSON(raw viprRawJSON) (certLinConJSON, bool) {
 	var out certLinConJSON
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		switch key {
 		case "coeffs":
 			out.Coeffs = val
-		case "terms":
-			out.Terms = val
 		case "sense":
-			s, okS := viprUnmarshalOptString(val)
-			if !okS {
-				return false
-			}
-			out.Sense = s
+			return decodeVIPROptStringField(&out.Sense, val)
 		case "rhs":
 			out.RHS = val
 		}
@@ -575,11 +607,7 @@ func unmarshalCertPresolveStepDoc(raw viprRawJSON) (certPresolveStepDoc, bool) {
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		switch key {
 		case "op":
-			s, okS := viprUnmarshalOptString(val)
-			if !okS {
-				return false
-			}
-			out.Op = s
+			return decodeVIPROptStringField(&out.Op, val)
 		case "row":
 			out.Row = val
 		case "col":
@@ -615,35 +643,15 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		switch key {
 		case "rule":
-			s, okS := viprUnmarshalOptString(val)
-			if !okS {
-				return false
-			}
-			st.Rule = s
+			return decodeVIPROptStringField(&st.Rule, val)
 		case "row":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.Row = p
+			return decodeVIPRIntPtrField(&st.Row, val)
 		case "col":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.Col = p
+			return decodeVIPRIntPtrField(&st.Col, val)
 		case "sense":
-			s, okS := viprUnmarshalOptString(val)
-			if !okS {
-				return false
-			}
-			st.Sense = s
+			return decodeVIPROptStringField(&st.Sense, val)
 		case "isUpper":
-			p, okB := viprUnmarshalBoolPtr(val)
-			if !okB {
-				return false
-			}
-			st.IsUpper = p
+			return decodeVIPRBoolPtrField(&st.IsUpper, val)
 		case "bound":
 			st.Bound = val
 		case "refs":
@@ -661,11 +669,7 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 				if !viprScanObject(el, func(rk string, rv viprRawJSON) bool {
 					switch rk {
 					case "id":
-						p, okI := viprUnmarshalIntPtr(rv)
-						if !okI {
-							return false
-						}
-						rf.ID = p
+						return decodeVIPRIntPtrField(&rf.ID, rv)
 					case "mult":
 						rf.Mult = rv
 					}
@@ -691,23 +695,11 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 				if !viprScanObject(el, func(bk string, bv viprRawJSON) bool {
 					switch bk {
 					case "col":
-						p, okI := viprUnmarshalIntPtr(bv)
-						if !okI {
-							return false
-						}
-						br.Col = p
+						return decodeVIPRIntPtrField(&br.Col, bv)
 					case "kind":
-						s, okS := viprUnmarshalOptString(bv)
-						if !okS {
-							return false
-						}
-						br.Kind = s
+						return decodeVIPROptStringField(&br.Kind, bv)
 					case "isUpper":
-						p, okB := viprUnmarshalBoolPtr(bv)
-						if !okB {
-							return false
-						}
-						br.IsUpper = p
+						return decodeVIPRBoolPtrField(&br.IsUpper, bv)
 					case "mult":
 						br.Mult = bv
 					}
@@ -721,37 +713,17 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 		case "boundAsms":
 			st.BoundAsms = val
 		case "ref":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.Ref = p
+			return decodeVIPRIntPtrField(&st.Ref, val)
 		case "splitVal":
 			st.SplitVal = val
 		case "leftAsm":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.LeftAsm = p
+			return decodeVIPRIntPtrField(&st.LeftAsm, val)
 		case "rightAsm":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.RightAsm = p
+			return decodeVIPRIntPtrField(&st.RightAsm, val)
 		case "left":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.Left = p
+			return decodeVIPRIntPtrField(&st.Left, val)
 		case "right":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			st.Right = p
+			return decodeVIPRIntPtrField(&st.Right, val)
 		case "orbitAsms":
 			st.OrbitAsms = val
 		case "witnesses":
@@ -769,11 +741,7 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 				if !viprScanObject(el, func(wk string, wv viprRawJSON) bool {
 					switch wk {
 					case "companion":
-						p, okI := viprUnmarshalIntPtr(wv)
-						if !okI {
-							return false
-						}
-						wd.Companion = p
+						return decodeVIPRIntPtrField(&wd.Companion, wv)
 					case "colPerm":
 						wd.ColPerm = wv
 					case "rowPerm":
@@ -813,11 +781,7 @@ func unmarshalCertVIPRDoc(raw viprRawJSON) (certVIPRDoc, bool) {
 		case "presolve":
 			doc.Presolve = val
 		case "n":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			doc.N = p
+			return decodeVIPRIntPtrField(&doc.N, val)
 		case "objConst":
 			doc.ObjConst = val
 		case "obj":
@@ -829,45 +793,17 @@ func unmarshalCertVIPRDoc(raw viprRawJSON) (certVIPRDoc, bool) {
 			}
 			doc.IsInt = bs
 		case "lb":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
-			if !okA {
-				return false
-			}
-			if !isNull {
-				doc.LB = elems
-			}
+			return viprUnmarshalOptRawArray(&doc.LB, val)
 		case "ub":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
-			if !okA {
-				return false
-			}
-			if !isNull {
-				doc.UB = elems
-			}
+			return viprUnmarshalOptRawArray(&doc.UB, val)
 		case "baseRows":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
-			if !okA {
-				return false
-			}
-			if !isNull {
-				doc.BaseRows = elems
-			}
+			return viprUnmarshalOptRawArray(&doc.BaseRows, val)
 		case "mode":
-			s, okS := viprUnmarshalOptString(val)
-			if !okS {
-				return false
-			}
-			doc.Mode = s
+			return decodeVIPROptStringField(&doc.Mode, val)
 		case "targetLB":
 			doc.TargetLB = val
 		case "incumbent":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
-			if !okA {
-				return false
-			}
-			if !isNull {
-				doc.Incumbent = elems
-			}
+			return viprUnmarshalOptRawArray(&doc.Incumbent, val)
 		case "steps":
 			elems, isNull, okA := viprUnmarshalRawArray(val, true)
 			if !okA {
@@ -887,11 +823,7 @@ func unmarshalCertVIPRDoc(raw viprRawJSON) (certVIPRDoc, bool) {
 			}
 			doc.Steps = steps
 		case "rootStep":
-			p, okI := viprUnmarshalIntPtr(val)
-			if !okI {
-				return false
-			}
-			doc.RootStep = p
+			return decodeVIPRIntPtrField(&doc.RootStep, val)
 		}
 		return true
 	})
@@ -1035,71 +967,64 @@ func appendVIPRInstanceJSON(dst []byte, inst viprInstanceJSON) []byte {
 	return append(dst, '}')
 }
 
+func appendVIPROptIntField(dst []byte, key string, v *int) []byte {
+	if v == nil {
+		return dst
+	}
+	dst = append(dst, key...)
+	return strconv.AppendInt(dst, int64(*v), 10)
+}
+
+func appendVIPROptBoolField(dst []byte, key string, v *bool) []byte {
+	if v == nil {
+		return dst
+	}
+	dst = append(dst, key...)
+	return strconv.AppendBool(dst, *v)
+}
+
+func appendVIPROptRatField(dst []byte, key string, v *viprRatPayload) []byte {
+	if v == nil {
+		return dst
+	}
+	dst = append(dst, key...)
+	return appendVIPRRatPayload(dst, *v)
+}
+
+func appendVIPROptIntSliceField(dst []byte, key string, xs []int) []byte {
+	if len(xs) == 0 {
+		return dst
+	}
+	dst = append(dst, key...)
+	return appendVIPRIntSlice(dst, xs)
+}
+
 func appendVIPRPresolveStepJSON(dst []byte, s viprPresolveStepJSON) []byte {
 	dst = append(dst, `{"op":`...)
 	dst = appendVIPRQuoted(dst, s.Op)
-	if s.Row != nil {
-		dst = append(dst, `,"row":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Row), 10)
-	}
-	if s.Col != nil {
-		dst = append(dst, `,"col":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Col), 10)
-	}
-	if s.U != nil {
-		dst = append(dst, `,"u":`...)
-		dst = strconv.AppendInt(dst, int64(*s.U), 10)
-	}
-	if s.V != nil {
-		dst = append(dst, `,"v":`...)
-		dst = strconv.AppendInt(dst, int64(*s.V), 10)
-	}
-	if s.IsUpper != nil {
-		dst = append(dst, `,"isUpper":`...)
-		dst = strconv.AppendBool(dst, *s.IsUpper)
-	}
-	if s.RoundInt != nil {
-		dst = append(dst, `,"roundInt":`...)
-		dst = strconv.AppendBool(dst, *s.RoundInt)
-	}
+	dst = appendVIPROptIntField(dst, `,"row":`, s.Row)
+	dst = appendVIPROptIntField(dst, `,"col":`, s.Col)
+	dst = appendVIPROptIntField(dst, `,"u":`, s.U)
+	dst = appendVIPROptIntField(dst, `,"v":`, s.V)
+	dst = appendVIPROptBoolField(dst, `,"isUpper":`, s.IsUpper)
+	dst = appendVIPROptBoolField(dst, `,"roundInt":`, s.RoundInt)
 	if s.Divisor != nil {
 		dst = append(dst, `,"divisor":`...)
 		dst = strconv.AppendInt(dst, *s.Divisor, 10)
 	}
-	if s.NewBound != nil {
-		dst = append(dst, `,"newBound":`...)
-		dst = appendVIPRRatPayload(dst, *s.NewBound)
-	}
-	if s.Val != nil {
-		dst = append(dst, `,"val":`...)
-		dst = appendVIPRRatPayload(dst, *s.Val)
-	}
-	if s.Delta != nil {
-		dst = append(dst, `,"delta":`...)
-		dst = appendVIPRRatPayload(dst, *s.Delta)
-	}
-	if len(s.ColPerm) > 0 {
-		dst = append(dst, `,"colPerm":`...)
-		dst = appendVIPRIntSlice(dst, s.ColPerm)
-	}
-	if len(s.RowPerm) > 0 {
-		dst = append(dst, `,"rowPerm":`...)
-		dst = appendVIPRIntSlice(dst, s.RowPerm)
-	}
+	dst = appendVIPROptRatField(dst, `,"newBound":`, s.NewBound)
+	dst = appendVIPROptRatField(dst, `,"val":`, s.Val)
+	dst = appendVIPROptRatField(dst, `,"delta":`, s.Delta)
+	dst = appendVIPROptIntSliceField(dst, `,"colPerm":`, s.ColPerm)
+	dst = appendVIPROptIntSliceField(dst, `,"rowPerm":`, s.RowPerm)
 	return append(dst, '}')
 }
 
 func appendVIPRStepJSON(dst []byte, s viprStepJSON) []byte {
 	dst = append(dst, `{"rule":`...)
 	dst = appendVIPRQuoted(dst, s.Rule)
-	if s.Row != nil {
-		dst = append(dst, `,"row":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Row), 10)
-	}
-	if s.Col != nil {
-		dst = append(dst, `,"col":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Col), 10)
-	}
+	dst = appendVIPROptIntField(dst, `,"row":`, s.Row)
+	dst = appendVIPROptIntField(dst, `,"col":`, s.Col)
 	if s.Sense != "" {
 		dst = append(dst, `,"sense":`...)
 		dst = appendVIPRQuoted(dst, s.Sense)
@@ -1138,38 +1063,17 @@ func appendVIPRStepJSON(dst []byte, s viprStepJSON) []byte {
 		}
 		dst = append(dst, ']')
 	}
-	if len(s.BoundAsms) > 0 {
-		dst = append(dst, `,"boundAsms":`...)
-		dst = appendVIPRIntSlice(dst, s.BoundAsms)
-	}
-	if s.Ref != nil {
-		dst = append(dst, `,"ref":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Ref), 10)
-	}
+	dst = appendVIPROptIntSliceField(dst, `,"boundAsms":`, s.BoundAsms)
+	dst = appendVIPROptIntField(dst, `,"ref":`, s.Ref)
 	if len(s.SplitVal) > 0 {
 		dst = append(dst, `,"splitVal":`...)
 		dst = append(dst, s.SplitVal...)
 	}
-	if s.LeftAsm != nil {
-		dst = append(dst, `,"leftAsm":`...)
-		dst = strconv.AppendInt(dst, int64(*s.LeftAsm), 10)
-	}
-	if s.RightAsm != nil {
-		dst = append(dst, `,"rightAsm":`...)
-		dst = strconv.AppendInt(dst, int64(*s.RightAsm), 10)
-	}
-	if s.Left != nil {
-		dst = append(dst, `,"left":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Left), 10)
-	}
-	if s.Right != nil {
-		dst = append(dst, `,"right":`...)
-		dst = strconv.AppendInt(dst, int64(*s.Right), 10)
-	}
-	if len(s.OrbitAsms) > 0 {
-		dst = append(dst, `,"orbitAsms":`...)
-		dst = appendVIPRIntSlice(dst, s.OrbitAsms)
-	}
+	dst = appendVIPROptIntField(dst, `,"leftAsm":`, s.LeftAsm)
+	dst = appendVIPROptIntField(dst, `,"rightAsm":`, s.RightAsm)
+	dst = appendVIPROptIntField(dst, `,"left":`, s.Left)
+	dst = appendVIPROptIntField(dst, `,"right":`, s.Right)
+	dst = appendVIPROptIntSliceField(dst, `,"orbitAsms":`, s.OrbitAsms)
 	if len(s.Witnesses) > 0 {
 		dst = append(dst, `,"witnesses":[`...)
 		for i, w := range s.Witnesses {
@@ -1182,30 +1086,15 @@ func appendVIPRStepJSON(dst []byte, s viprStepJSON) []byte {
 			dst = appendVIPRIntSlice(dst, w.ColPerm)
 			dst = append(dst, `,"rowPerm":`...)
 			dst = appendVIPRIntSlice(dst, w.RowPerm)
-			if len(w.SupportEntries) > 0 {
-				dst = append(dst, `,"supportEntries":`...)
-				dst = appendVIPRIntSlice(dst, w.SupportEntries)
-			}
+			dst = appendVIPROptIntSliceField(dst, `,"supportEntries":`, w.SupportEntries)
 			dst = append(dst, '}')
 		}
 		dst = append(dst, ']')
 	}
-	if len(s.ExtraAsms) > 0 {
-		dst = append(dst, `,"extraAsms":`...)
-		dst = appendVIPRIntSlice(dst, s.ExtraAsms)
-	}
-	if s.LBRef != nil {
-		dst = append(dst, `,"lbRef":`...)
-		dst = strconv.AppendInt(dst, int64(*s.LBRef), 10)
-	}
-	if s.UBRef != nil {
-		dst = append(dst, `,"ubRef":`...)
-		dst = strconv.AppendInt(dst, int64(*s.UBRef), 10)
-	}
-	if len(s.Assumptions) > 0 {
-		dst = append(dst, `,"assumptions":`...)
-		dst = appendVIPRIntSlice(dst, s.Assumptions)
-	}
+	dst = appendVIPROptIntSliceField(dst, `,"extraAsms":`, s.ExtraAsms)
+	dst = appendVIPROptIntField(dst, `,"lbRef":`, s.LBRef)
+	dst = appendVIPROptIntField(dst, `,"ubRef":`, s.UBRef)
+	dst = appendVIPROptIntSliceField(dst, `,"assumptions":`, s.Assumptions)
 	return append(dst, '}')
 }
 

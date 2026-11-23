@@ -75,6 +75,88 @@ func canSkipBoundTightening(slackLo, absA, l, u, targetBound float64, isInt bool
 	return slackLo > prod+propSlackGuardRelMargin*prod-propSlackGuardTolScale*absA*heurIntBoundTol
 }
 
+func propagateRowSide(
+	p *CompiledProblem,
+	sum *rowActivitySummary,
+	cols []int,
+	vals []float64,
+	rhs, slackLo, rowScale, rowFeasTol float64,
+	canGuard, upperSide bool,
+	lb, ub []float64,
+	pushCol func(col int),
+) (feasible, changed bool) {
+	for idx, col := range cols {
+		a := vals[idx]
+		l, u := lb[col], ub[col]
+		if l == u {
+			continue
+		}
+		absA := math.Abs(a)
+		if !(absA > heurCoeffZeroTol) {
+			continue
+		}
+		isInt := p.varCat[col] != Continuous
+		tightenUpper := (a > 0) == upperSide
+		target := l
+		if tightenUpper {
+			target = u
+		}
+		if canGuard && canSkipBoundTightening(slackLo, absA, l, u, target, isInt) {
+			continue
+		}
+		qVal, qEB, qOK := sum.residualQuotient(cols, vals, lb, ub, rhs, idx, upperSide)
+		if !qOK {
+			continue
+		}
+		if tightenUpper {
+			newUB := qVal + qEB
+			if isInt {
+				bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/absA)
+				newUB = math.Floor(newUB + bTol)
+			} else {
+				newUB += rowFeasTol / absA
+			}
+			if newUB < u-heurIntBoundTol {
+				feasCheck := max(intFeasTol, rowFeasTol/absA)
+				if newUB < l-feasCheck {
+					return false, false
+				}
+				clamped := max(l, newUB)
+				if clamped < u-heurIntBoundTol {
+					ub[col] = clamped
+					changed = true
+					if pushCol != nil {
+						pushCol(col)
+					}
+				}
+			}
+		} else {
+			newLB := qVal - qEB
+			if isInt {
+				bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/absA)
+				newLB = math.Ceil(newLB - bTol)
+			} else {
+				newLB -= rowFeasTol / absA
+			}
+			if newLB > l+heurIntBoundTol {
+				feasCheck := max(intFeasTol, rowFeasTol/absA)
+				if newLB > u+feasCheck {
+					return false, false
+				}
+				clamped := min(u, newLB)
+				if clamped > l+heurIntBoundTol {
+					lb[col] = clamped
+					changed = true
+					if pushCol != nil {
+						pushCol(col)
+					}
+				}
+			}
+		}
+	}
+	return true, changed
+}
+
 // propagateRow tightens variable bounds on row i from residual row activities and reports
 // whether the row remains feasible and whether any bound shrunk by more than heurIntBoundTol.
 func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col int)) (feasible, changed bool) {
@@ -106,77 +188,13 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 
 	upperChanged := false
 	if hasUB && sum.minInfCount == 0 {
-		ubSlackLo := sum.slackLo
-		canGuardUB := !sum.useWideSlack
-		for idx, col := range cols {
-			a := vals[idx]
-			l, u := lb[col], ub[col]
-			if l == u {
-				continue
-			}
-			isInt := p.varCat[col] != Continuous
-			if a > heurCoeffZeroTol {
-				if canGuardUB && canSkipBoundTightening(ubSlackLo, a, l, u, u, isInt) {
-					continue
-				}
-				qVal, qEB, qOK := sum.residualQuotient(cols, vals, lb, ub, rhs, idx, true)
-				if !qOK {
-					continue
-				}
-				newUB := qVal + qEB
-				if isInt {
-					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
-					newUB = math.Floor(newUB + bTol)
-				} else {
-					newUB += rowFeasTol / a
-				}
-				if newUB < u-heurIntBoundTol {
-					feasCheck := max(intFeasTol, rowFeasTol/a)
-					if newUB < l-feasCheck {
-						return false, false
-					}
-					clamped := max(l, newUB)
-					if clamped < u-heurIntBoundTol {
-						ub[col] = clamped
-						changed = true
-						upperChanged = true
-						if pushCol != nil {
-							pushCol(col)
-						}
-					}
-				}
-			} else if a < -heurCoeffZeroTol {
-				absA := -a
-				if canGuardUB && canSkipBoundTightening(ubSlackLo, absA, l, u, l, isInt) {
-					continue
-				}
-				qVal, qEB, qOK := sum.residualQuotient(cols, vals, lb, ub, rhs, idx, true)
-				if !qOK {
-					continue
-				}
-				newLB := qVal - qEB
-				if isInt {
-					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/absA)
-					newLB = math.Ceil(newLB - bTol)
-				} else {
-					newLB -= rowFeasTol / absA
-				}
-				if newLB > l+heurIntBoundTol {
-					feasCheck := max(intFeasTol, rowFeasTol/absA)
-					if newLB > u+feasCheck {
-						return false, false
-					}
-					clamped := min(u, newLB)
-					if clamped > l+heurIntBoundTol {
-						lb[col] = clamped
-						changed = true
-						upperChanged = true
-						if pushCol != nil {
-							pushCol(col)
-						}
-					}
-				}
-			}
+		feas, chg := propagateRowSide(p, &sum, cols, vals, rhs, sum.slackLo, rowScale, rowFeasTol, !sum.useWideSlack, true, lb, ub, pushCol)
+		if !feas {
+			return false, false
+		}
+		if chg {
+			changed = true
+			upperChanged = true
 		}
 	}
 
@@ -195,78 +213,28 @@ func propagateRow(p *CompiledProblem, i int, lb, ub []float64, pushCol func(col 
 	}
 
 	if hasLB && sum.maxInfCount == 0 {
-		lbSlackLo := -sum.deficitHi
-		canGuardLB := !sum.useWideDeficit
-		for idx, col := range cols {
-			a := vals[idx]
-			l, u := lb[col], ub[col]
-			if l == u {
-				continue
-			}
-			isInt := p.varCat[col] != Continuous
-			if a > heurCoeffZeroTol {
-				if canGuardLB && canSkipBoundTightening(lbSlackLo, a, l, u, l, isInt) {
-					continue
-				}
-				qVal, qEB, qOK := sum.residualQuotient(cols, vals, lb, ub, rhs, idx, false)
-				if !qOK {
-					continue
-				}
-				newLB := qVal - qEB
-				if isInt {
-					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/a)
-					newLB = math.Ceil(newLB - bTol)
-				} else {
-					newLB -= rowFeasTol / a
-				}
-				if newLB > l+heurIntBoundTol {
-					feasCheck := max(intFeasTol, rowFeasTol/a)
-					if newLB > u+feasCheck {
-						return false, false
-					}
-					clamped := min(u, newLB)
-					if clamped > l+heurIntBoundTol {
-						lb[col] = clamped
-						changed = true
-						if pushCol != nil {
-							pushCol(col)
-						}
-					}
-				}
-			} else if a < -heurCoeffZeroTol {
-				absA := -a
-				if canGuardLB && canSkipBoundTightening(lbSlackLo, absA, l, u, u, isInt) {
-					continue
-				}
-				qVal, qEB, qOK := sum.residualQuotient(cols, vals, lb, ub, rhs, idx, false)
-				if !qOK {
-					continue
-				}
-				newUB := qVal + qEB
-				if isInt {
-					bTol := max(heurIntBoundTol, presolveRelScaleTol*rowScale/absA)
-					newUB = math.Floor(newUB + bTol)
-				} else {
-					newUB += rowFeasTol / absA
-				}
-				if newUB < u-heurIntBoundTol {
-					feasCheck := max(intFeasTol, rowFeasTol/absA)
-					if newUB < l-feasCheck {
-						return false, false
-					}
-					clamped := max(l, newUB)
-					if clamped < u-heurIntBoundTol {
-						ub[col] = clamped
-						changed = true
-						if pushCol != nil {
-							pushCol(col)
-						}
-					}
-				}
-			}
+		feas, chg := propagateRowSide(p, &sum, cols, vals, rhs, -sum.deficitHi, rowScale, rowFeasTol, !sum.useWideDeficit, false, lb, ub, pushCol)
+		if !feas {
+			return false, false
+		}
+		if chg {
+			changed = true
 		}
 	}
 	return true, changed
+}
+
+func emptyRowResidualFeasible(sense ConstraintSense, remRHS, tol float64) bool {
+	switch sense {
+	case LessEqual:
+		return remRHS >= -tol
+	case GreaterEqual:
+		return remRHS <= tol
+	case Equal:
+		return math.Abs(remRHS) <= tol
+	default:
+		return true
+	}
 }
 
 func evalFixedRowResidual(cols []int, vals, x []float64, isFree []bool, rhs float64) (remRHS float64, ok bool) {
@@ -310,58 +278,13 @@ func evalFixedRowResidualExact(cols []int, vals, x []float64, isFree []bool, rhs
 }
 
 func propagateBounds(p *CompiledProblem, lb, ub []float64, maxPasses int) bool {
-	m := p.numConstraints
-	for range maxPasses {
-		anyChanged := false
-		for i := range m {
-			feas, chg := propagateRow(p, i, lb, ub, nil)
-			if !feas {
-				return false
-			}
-			if chg {
-				anyChanged = true
-			}
-		}
-		if !anyChanged {
-			break
-		}
-	}
-	return true
+	feas, _ := propagateBoundsChecked(p, lb, ub, maxPasses)
+	return feas
 }
 
 func propagateFromCol(p *CompiledProblem, lb, ub []float64, startCol int, queue *[]int, inQueue []bool) bool {
-	q := (*queue)[:0]
-	pushCol := func(col int) {
-		for k := p.colPtr[col]; k < p.colPtr[col+1]; k++ {
-			r := p.rowIdx[k]
-			if !inQueue[r] {
-				inQueue[r] = true
-				q = append(q, r)
-			}
-		}
-	}
-	pushCol(startCol)
-
-	head := 0
-	maxSteps := max(minPropSteps, propStepsPerRow*p.numConstraints)
-	for head < len(q) && head < maxSteps {
-		r := q[head]
-		head++
-		inQueue[r] = false
-		feas, _ := propagateRow(p, r, lb, ub, pushCol)
-		if !feas {
-			for ; head < len(q); head++ {
-				inQueue[q[head]] = false
-			}
-			*queue = q[:0]
-			return false
-		}
-	}
-	for ; head < len(q); head++ {
-		inQueue[q[head]] = false
-	}
-	*queue = q[:0]
-	return true
+	cols := [1]int{startCol}
+	return propagateFromCols(p, lb, ub, cols[:], queue, inQueue)
 }
 
 // findContLinkedIntCols marks general integer columns whose nonzeros appear only in mixed rows
@@ -535,7 +458,7 @@ func evalRowViolation(p *CompiledProblem, row int, x []float64) (float64, bool) 
 		}
 		return math.Abs(res), true
 	case !hasLB && !hasUB:
-		if math.IsNaN(evalSparseRowSum(cols, vals, x)) {
+		if math.IsNaN(evalSparseRowResidual(cols, vals, x, 0)) {
 			return 0, false
 		}
 		return 0, true
@@ -896,11 +819,9 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64, isContLin
 	// ownerPureEpigraph (-1) for epigraph columns with no partner variables, or contCol >= 0.
 	epiOwner := make([]int, n)
 	intOwner := make([]int, n)
-	contIntPartner := make([]int, n)
 	for j := range n {
 		epiOwner[j] = ownerUnassigned
 		intOwner[j] = ownerUnassigned
-		contIntPartner[j] = -1
 	}
 
 	compIdxByCont := make([]int, n)
@@ -956,19 +877,8 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64, isContLin
 		}
 		sense := p.rowSense[i]
 		if freeCount == 0 {
-			switch sense {
-			case LessEqual:
-				if remRHS < -intFeasTol {
-					return nil, 0, false
-				}
-			case GreaterEqual:
-				if remRHS > intFeasTol {
-					return nil, 0, false
-				}
-			case Equal:
-				if math.Abs(remRHS) > intFeasTol {
-					return nil, 0, false
-				}
+			if !emptyRowResidualFeasible(sense, remRHS, intFeasTol) {
+				return nil, 0, false
 			}
 			continue
 		}
@@ -1021,7 +931,6 @@ func solveEpigraphContinuousLP(p *CompiledProblem, hlb, hub []float64, isContLin
 			}
 			if comps[cIdx].intCol == -1 {
 				comps[cIdx].intCol = intCol
-				contIntPartner[contCol] = intCol
 			} else if comps[cIdx].intCol != intCol {
 				return nil, 0, false
 			}
@@ -1277,6 +1186,7 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 			}
 		}
 
+		copy(epiMax, baseEpi)
 		for _, nv := range nCands {
 			for _, ei := range mnEpiIdxs {
 				epiMax[ei] = baseEpi[ei]
@@ -1299,12 +1209,6 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 				continue
 			}
 
-			copy(epiMax, baseEpi)
-			for _, r := range mnRows {
-				if val := r.c + r.alpha*mv + r.beta*nv; val > epiMax[r.epiIdx] {
-					epiMax[r.epiIdx] = val
-				}
-			}
 			var acc dot2Acc
 			acc.addProd(objM, mv)
 			if nCol != -1 {
@@ -1335,8 +1239,8 @@ func solveEpigraphComponent(p *CompiledProblem, comp *epigraphComponent, hlb, hu
 	}
 }
 
-// trySingleRowContinuousCompletion solves separable single-row bounded continuous knapsacks in closed form when every free column appears in at most one row.
-func trySingleRowContinuousCompletion(p *CompiledProblem, hlb, hub []float64) ([]float64, float64, bool) {
+// trySingleRowCompletion solves separable single-row bounded continuous knapsacks in closed form when every free column appears in at most one row.
+func trySingleRowCompletion(p *CompiledProblem, hlb, hub []float64) ([]float64, float64, bool) {
 	n := p.numVars
 	cand := slices.Clone(hlb)
 	allSingleRow := true
@@ -1461,7 +1365,7 @@ func solveFixedIntContinuousLP(
 		}
 	}
 	if !hasUnfixedInt {
-		if cSol, cObj, cOk := trySingleRowContinuousCompletion(p, hlb, hub); cOk {
+		if cSol, cObj, cOk := trySingleRowCompletion(p, hlb, hub); cOk {
 			return cSol, cObj, true
 		}
 	}
@@ -1535,20 +1439,8 @@ func solveFixedIntContinuousLP(
 		}
 		sense := p.rowSense[i]
 		if len(terms) == 0 {
-			rowTol := incumbentRowTol(p, sc, i, primalTol)
-			switch sense {
-			case LessEqual:
-				if remRHS < -rowTol {
-					return nil, 0, false
-				}
-			case GreaterEqual:
-				if remRHS > rowTol {
-					return nil, 0, false
-				}
-			case Equal:
-				if math.Abs(remRHS) > rowTol {
-					return nil, 0, false
-				}
+			if !emptyRowResidualFeasible(sense, remRHS, incumbentRowTol(p, sc, i, primalTol)) {
+				return nil, 0, false
 			}
 			continue
 		}
@@ -1678,29 +1570,27 @@ func solveFixedIntContinuousLP(
 	return nil, 0, false
 }
 
-// tryFractionalDiving performs up to maxDiveStepsCap rounds of fixing fractional equality-supported
-// integer variables, propagating bounds, and warm-starting the LP relaxation.
-func tryFractionalDiving(
-	p *CompiledProblem,
-	rootPrimal []float64,
-	baseLB, baseUB []float64,
-	diveSolver *LPSolver,
-	bestObjMin float64,
-	onlyEqSupport bool,
-	isContLinked []bool,
-) (sol []float64, objMin float64, ok bool) {
-	return tryFractionalDivingWithShift(p, rootPrimal, baseLB, baseUB, diveSolver, bestObjMin, p.objConstMin(), onlyEqSupport, isContLinked)
+type divingReq struct {
+	p             *CompiledProblem
+	rootPrimal    []float64
+	baseLB        []float64
+	baseUB        []float64
+	diveSolver    *LPSolver
+	bestObjMin    float64
+	searchShift   float64
+	onlyEqSupport bool
+	isContLinked  []bool
 }
 
-func tryFractionalDivingWithShift(
-	p *CompiledProblem,
-	rootPrimal []float64,
-	baseLB, baseUB []float64,
-	diveSolver *LPSolver,
-	bestObjMin, searchShift float64,
-	onlyEqSupport bool,
-	isContLinked []bool,
-) (sol []float64, objMin float64, ok bool) {
+func tryFractionalDiving(req *divingReq) (sol []float64, objMin float64, ok bool) {
+	p := req.p
+	rootPrimal := req.rootPrimal
+	baseLB, baseUB := req.baseLB, req.baseUB
+	diveSolver := req.diveSolver
+	bestObjMin := req.bestObjMin
+	searchShift := req.searchShift
+	onlyEqSupport := req.onlyEqSupport
+	isContLinked := req.isContLinked
 	n := p.numVars
 	isRootFrac := make([]bool, n)
 	for _, col := range p.intCols {
@@ -1927,24 +1817,38 @@ func tryFractionalDivingWithShift(
 	return nil, 0, false
 }
 
+type rootSubMIPReq struct {
+	p            *CompiledProblem
+	lpSolver     *LPSolver
+	rootStatus   []varBasisStatus
+	lpPrimal     []float64
+	curLB, curUB []float64
+	bestObjMin   float64
+	searchShift  float64
+	deadline     time.Time
+	isSubMIP     bool
+	maxNodesCap  int
+	maxIterCap   int
+	isContLinked []bool
+	enableCuts   bool
+}
+
 // tryRootSubMIP fixes integer variables that are already integral at the root LP
 // relaxation and solves the compact reduced sub-MIP over the remaining fractional
 // integer variables and continuous variables, returning any explored sub-MIP nodes
 // and simplex pivots so the parent search accounts for shared budgets.
-func tryRootSubMIP(
-	p *CompiledProblem,
-	lpSolver *LPSolver,
-	rootStatus []varBasisStatus,
-	lpPrimal []float64,
-	curLB, curUB []float64,
-	bestObjMin, searchShift float64,
-	deadline time.Time,
-	isSubMIP bool,
-	maxNodesCap int,
-	maxIterCap int,
-	isContLinked []bool,
-	enableCuts bool,
-) (sol []float64, objMin float64, nodesUsed, itersUsed int, ok bool) {
+func tryRootSubMIP(req *rootSubMIPReq) (sol []float64, objMin float64, nodesUsed, itersUsed int, ok bool) {
+	p := req.p
+	lpSolver := req.lpSolver
+	rootStatus := req.rootStatus
+	lpPrimal := req.lpPrimal
+	curLB, curUB := req.curLB, req.curUB
+	bestObjMin, searchShift := req.bestObjMin, req.searchShift
+	deadline := req.deadline
+	isSubMIP := req.isSubMIP
+	maxNodesCap, maxIterCap := req.maxNodesCap, req.maxIterCap
+	isContLinked := req.isContLinked
+	enableCuts := req.enableCuts
 	if isSubMIP || len(p.intCols) == 0 || maxNodesCap <= 0 || maxIterCap <= 0 {
 		return nil, 0, 0, 0, false
 	}
@@ -2105,19 +2009,8 @@ func tryRootSubMIP(
 		}
 		sense := p.rowSense[i]
 		if len(terms) == 0 {
-			switch sense {
-			case LessEqual:
-				if rhs < -intFeasTol {
-					return nil, 0, 0, 0, false
-				}
-			case GreaterEqual:
-				if rhs > intFeasTol {
-					return nil, 0, 0, 0, false
-				}
-			case Equal:
-				if math.Abs(rhs) > intFeasTol {
-					return nil, 0, 0, 0, false
-				}
+			if !emptyRowResidualFeasible(sense, rhs, intFeasTol) {
+				return nil, 0, 0, 0, false
 			}
 			continue
 		}
@@ -2217,10 +2110,6 @@ func fpHashPrimaryInts(p *CompiledProblem, x []float64, isContLinked []bool) uin
 		h *= fpFnvPrime64
 	}
 	return h
-}
-
-func fpHasHash(hashes []uint64, target uint64) bool {
-	return slices.Contains(hashes, target)
 }
 
 // fpRoundCandidate propagates nearest-integer fixings for primary integer columns,
@@ -2381,7 +2270,7 @@ func fpPerturbOnCycle(
 			flipToAlt(fracCands[(start+k)%len(fracCands)].col)
 		}
 		h := fpHashPrimaryInts(p, xInt, isContLinked)
-		if !fpHasHash(seenHashes, h) {
+		if !slices.Contains(seenHashes, h) {
 			return h
 		}
 	}
@@ -2439,35 +2328,36 @@ func fpEvaluateCandidate(
 	return solveFixedIntContinuousLP(p, rlb, rub, nil, isContLinked)
 }
 
-// tryFeasibilityPump runs a budgeted Objective Feasibility Pump (OFP) alternating between
-// propagated rounding and warm Phase II primal simplex projections over primary integers.
-func tryFeasibilityPump(
-	p *CompiledProblem,
-	lpPrimal, curLB, curUB []float64,
-	heurSolver *LPSolver,
-	bestObjMin, lowerBoundMin, relGapTol, absGapTol float64,
-	deadline time.Time,
-	done <-chan struct{},
-	maxIterCap int,
-	isContLinked []bool,
-) (sol []float64, objMin float64, itersUsed int, ok bool) {
-	return tryFeasibilityPumpWithShift(
-		p, lpPrimal, curLB, curUB, heurSolver,
-		bestObjMin, lowerBoundMin, p.objConstMin(), relGapTol, absGapTol,
-		deadline, done, maxIterCap, isContLinked,
-	)
+type feasPumpReq struct {
+	p             *CompiledProblem
+	lpPrimal      []float64
+	curLB, curUB  []float64
+	heurSolver    *LPSolver
+	bestObjMin    float64
+	lowerBoundMin float64
+	searchShift   float64
+	relGapTol     float64
+	absGapTol     float64
+	deadline      time.Time
+	done          <-chan struct{}
+	maxIterCap    int
+	isContLinked  []bool
 }
 
-func tryFeasibilityPumpWithShift(
-	p *CompiledProblem,
-	lpPrimal, curLB, curUB []float64,
-	heurSolver *LPSolver,
-	bestObjMin, lowerBoundMin, searchShift, relGapTol, absGapTol float64,
-	deadline time.Time,
-	done <-chan struct{},
-	maxIterCap int,
-	isContLinked []bool,
-) (sol []float64, objMin float64, itersUsed int, ok bool) {
+// tryFeasibilityPump runs a budgeted Objective Feasibility Pump (OFP) alternating between
+// propagated rounding and warm Phase II primal simplex projections over primary integers.
+func tryFeasibilityPump(req *feasPumpReq) (sol []float64, objMin float64, itersUsed int, ok bool) {
+	p := req.p
+	lpPrimal := req.lpPrimal
+	curLB, curUB := req.curLB, req.curUB
+	heurSolver := req.heurSolver
+	bestObjMin := req.bestObjMin
+	lowerBoundMin := req.lowerBoundMin
+	searchShift := req.searchShift
+	relGapTol, absGapTol := req.relGapTol, req.absGapTol
+	deadline, done := req.deadline, req.done
+	maxIterCap := req.maxIterCap
+	isContLinked := req.isContLinked
 	if p == nil || heurSolver == nil || len(p.intCols) < 2 || p.numVars > fpMaxVars || maxIterCap <= 0 {
 		return nil, 0, 0, false
 	}
@@ -2554,7 +2444,7 @@ func tryFeasibilityPumpWithShift(
 	for pass := 0; pass < fpMaxPasses && itersUsed < iterBudget && !stopRequested(fpDeadline, done); pass++ {
 		_, propOK := fpRoundCandidate(p, xLP, curLB, curUB, xInt, rlb, rub, snapLB, snapUB, &rowQueue, inQueue, isContLinked)
 		h := fpHashPrimaryInts(p, xInt, isContLinked)
-		cycled := fpHasHash(seenHashes, h)
+		cycled := slices.Contains(seenHashes, h)
 		if cycled {
 			h = fpPerturbOnCycle(p, xLP, curLB, curUB, xInt, pass, seenHashes, isContLinked)
 			propOK = false
@@ -2562,7 +2452,7 @@ func tryFeasibilityPumpWithShift(
 		seenHashes = append(seenHashes, h)
 
 		improvedThisPass := false
-		if !fpHasHash(evalHashes, h) {
+		if !slices.Contains(evalHashes, h) {
 			evalHashes = append(evalHashes, h)
 			if cand, _, cOK := fpEvaluateCandidate(p, xInt, curLB, curUB, rlb, rub, propOK, isContLinked); cOK {
 				if cObj := evalLinearSum(searchShift, p.objMin, cand, n); !math.IsNaN(cObj) && !math.IsInf(cObj, 0) && cObj < curBestObjMin-heurIntBoundTol {

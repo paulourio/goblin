@@ -593,7 +593,7 @@ func TestFormalTrack2CAggregatedMIRAndPairwiseSurrogate(t *testing.T) {
 		p := m.Compile()
 
 		lpPrimal := []float64{0.4, 1.9}
-		cuts := separateRowMIRCuts(p, lpPrimal)
+		cuts := separateRowMIRCuts(p, lpPrimal, nil)
 		feasPts := [][]*big.Rat{
 			{big.NewRat(1, 1), big.NewRat(1, 1)},
 			{big.NewRat(2, 1), big.NewRat(0, 1)},
@@ -631,7 +631,7 @@ func TestFormalTrack2CAggregatedMIRAndPairwiseSurrogate(t *testing.T) {
 		p := m.Compile()
 
 		lpPrimal := []float64{0.0, 0.5, 0.52}
-		cuts := separateRowMIRCuts(p, lpPrimal)
+		cuts := separateRowMIRCuts(p, lpPrimal, nil)
 
 		// Exact feasible mixed-integer points including tight s = (a1*x1 - targetBeta).
 		a1Rat := mustTrack2CRat(t, a1)

@@ -102,6 +102,28 @@ func presolveWithDeadline(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	return presolveWithObserver(orig, maxPasses, deadline, done, nil)
 }
 
+func emitObsGcdDiv(
+	obs *presolveObserver,
+	rowIdx int,
+	cols []int,
+	preVals, lb, ub []float64,
+	sense ConstraintSense,
+	origRHS, rhsComp float64,
+	g int64,
+	vals []float64,
+	divRHS int64,
+	maxRoundErr float64,
+) {
+	if obs == nil || obs.onGcdDiv == nil {
+		return
+	}
+	divCoeffs := make([]int64, len(vals))
+	for k, v := range vals {
+		divCoeffs[k] = int64(v)
+	}
+	obs.onGcdDiv(rowIdx, cols, preVals, lb, ub, sense, origRHS, rhsComp, g, divCoeffs, divRHS, maxRoundErr)
+}
+
 func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Time, done <-chan struct{}, obs *presolveObserver) PresolveResult {
 	if maxPasses <= 0 {
 		maxPasses = defaultPresolveMaxPass
@@ -273,13 +295,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						}
 						r.rhs = float64(q)
 						strengthened++
-						if obs != nil && obs.onGcdDiv != nil {
-							divCoeffs := make([]int64, len(r.vals))
-							for k, v := range r.vals {
-								divCoeffs[k] = int64(v)
-							}
-							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, qgFloat, g, divCoeffs, q, maxRoundErr)
-						}
+						emitObsGcdDiv(obs, i, r.cols, preVals, lb, ub, r.sense, origRHS, qgFloat, g, r.vals, q, maxRoundErr)
 					} else {
 						var preVals []float64
 						origRHS := r.rhs
@@ -310,13 +326,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						}
 						r.rhs = float64(divRHS)
 						strengthened++
-						if obs != nil && obs.onGcdDiv != nil {
-							divCoeffs := make([]int64, len(r.vals))
-							for k, v := range r.vals {
-								divCoeffs[k] = int64(v)
-							}
-							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, rhsComp, g, divCoeffs, divRHS, maxRoundErr)
-						}
+						emitObsGcdDiv(obs, i, r.cols, preVals, lb, ub, r.sense, origRHS, rhsComp, g, r.vals, divRHS, maxRoundErr)
 					}
 				}
 			} else if allInt && g == 1 && math.Abs(r.rhs) <= 0x1p52 {
@@ -352,13 +362,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						}
 						r.rhs = intRHS
 						strengthened++
-						if obs != nil && obs.onGcdDiv != nil {
-							divCoeffs := make([]int64, len(r.vals))
-							for k, v := range r.vals {
-								divCoeffs[k] = int64(v)
-							}
-							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, rhsComp, 1, divCoeffs, int64(intRHS), maxRoundErr)
-						}
+						emitObsGcdDiv(obs, i, r.cols, preVals, lb, ub, r.sense, origRHS, rhsComp, 1, r.vals, int64(intRHS), maxRoundErr)
 					}
 				case Equal:
 					loF := r.rhs - presolveFeasTol
@@ -389,13 +393,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 						}
 						r.rhs = nearest
 						strengthened++
-						if obs != nil && obs.onGcdDiv != nil {
-							divCoeffs := make([]int64, len(r.vals))
-							for k, v := range r.vals {
-								divCoeffs[k] = int64(v)
-							}
-							obs.onGcdDiv(i, r.cols, preVals, lb, ub, r.sense, origRHS, nearest, 1, divCoeffs, int64(nearest), maxRoundErr)
-						}
+						emitObsGcdDiv(obs, i, r.cols, preVals, lb, ub, r.sense, origRHS, nearest, 1, r.vals, int64(nearest), maxRoundErr)
 					}
 				}
 			}
@@ -403,7 +401,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	}
 
 	// 2. Iterative Savelsbergh activity bound tightening and redundant row dropping
-	actTight, actRem, infeas, timedOut := runActivityTighteningDirtyObs(orig, rows, lb, ub, nil, maxPasses, deadline, done, obs)
+	actTight, actRem, infeas, timedOut := runActivityTightening(orig, rows, lb, ub, nil, maxPasses, deadline, done, obs)
 	if infeas {
 		return PresolveResult{Infeasible: true}
 	}
@@ -421,7 +419,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			prevLB = slices.Clone(lb)
 			prevUB = slices.Clone(ub)
 		}
-		symTight, symRows, symTimedOut := applyOrbitSymmetryBreakingObs(orig, rows, lb, ub, deadline, done, obs)
+		symTight, symRows, symTimedOut := applyOrbitSymmetryBreaking(orig, rows, lb, ub, deadline, done, obs)
 		if symTimedOut {
 			return PresolveResult{Reduced: orig, TimedOut: true}
 		}
@@ -446,7 +444,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 					postDirty[i] = true
 				}
 			}
-			postTight, postRem, postInfeas, postTimedOut := runActivityTighteningDirtyObs(orig, rows, lb, ub, postDirty, maxPasses, deadline, done, obs)
+			postTight, postRem, postInfeas, postTimedOut := runActivityTightening(orig, rows, lb, ub, postDirty, maxPasses, deadline, done, obs)
 			if postInfeas {
 				return PresolveResult{Infeasible: true}
 			}
@@ -1046,32 +1044,107 @@ func presolveCanSkipTerm(slackLo, absA, l, u, targetBound float64, isInt bool) b
 	return slackLo > prod+presolveSlackGuardRelMargin*prod
 }
 
-// runActivityTightening executes up to maxPasses rounds of Savelsbergh row-activity bound tightening and drops redundant rows.
+func tightenActivityRowSide(
+	orig *CompiledProblem,
+	rowIdx int,
+	r *presolveWorkRow,
+	s *rowActivitySummary,
+	lb, ub []float64,
+	infCount int,
+	slackLo, rowScale, rowFeasTol float64,
+	canGuard, upperSide bool,
+	obs *presolveObserver,
+	markColDirty func(col, curRow int),
+) (tightened int, infeas bool) {
+	for k, col := range r.cols {
+		a := r.vals[k]
+		absA := math.Abs(a)
+		if !(absA > presolveZeroTol) {
+			continue
+		}
+		l, u := lb[col], ub[col]
+		isInt := orig.varCat[col] != Continuous
+		tightenUpper := (a > 0) == upperSide
+		if tightenUpper {
+			if infCount == 1 && !math.IsInf(l, -1) {
+				continue
+			}
+		} else if infCount == 1 && !math.IsInf(u, 1) {
+			continue
+		}
+		target := l
+		if tightenUpper {
+			target = u
+		}
+		if canGuard {
+			skip := presolveCanSkipTerm(slackLo, absA, l, u, target, isInt)
+			if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && slackLo > 0 {
+				obs.onSkipTerm(slackLo, absA, l, u, target, isInt, skip)
+			}
+			if skip {
+				continue
+			}
+		}
+		qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, upperSide)
+		if !qOK {
+			continue
+		}
+		bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
+		feasCheck := max(presolveFeasTol, rowFeasTol/absA)
+		if tightenUpper {
+			newUB := qVal + qEB
+			if isInt {
+				newUB = math.Floor(newUB + bTol)
+			} else {
+				newUB += rowFeasTol / absA
+			}
+			if newUB < u-presolveIntTol {
+				if lb[col] > newUB+feasCheck {
+					return tightened, true
+				}
+				if lb[col] > newUB {
+					newUB = lb[col]
+				}
+				if newUB < u-presolveIntTol {
+					if obs != nil && obs.onActivityTight != nil {
+						obs.onActivityTight(rowIdx, k, r.cols, r.vals, r.rhs, !upperSide, upperSide, true, lb, ub, newUB)
+					}
+					ub[col] = newUB
+					tightened++
+					markColDirty(col, rowIdx)
+				}
+			}
+		} else {
+			newLB := qVal - qEB
+			if isInt {
+				newLB = math.Ceil(newLB - bTol)
+			} else {
+				newLB -= rowFeasTol / absA
+			}
+			if newLB > l+presolveIntTol {
+				if newLB > ub[col]+feasCheck {
+					return tightened, true
+				}
+				if newLB > ub[col] {
+					newLB = ub[col]
+				}
+				if newLB > l+presolveIntTol {
+					if obs != nil && obs.onActivityTight != nil {
+						obs.onActivityTight(rowIdx, k, r.cols, r.vals, r.rhs, !upperSide, upperSide, false, lb, ub, newLB)
+					}
+					lb[col] = newLB
+					tightened++
+					markColDirty(col, rowIdx)
+				}
+			}
+		}
+	}
+	return tightened, false
+}
+
+// runActivityTightening executes Savelsbergh row-activity bound tightening using an optional
+// initial dirty-row mask and formal verification observer.
 func runActivityTightening(
-	orig *CompiledProblem,
-	rows []presolveWorkRow,
-	lb, ub []float64,
-	maxPasses int,
-	deadline time.Time,
-	done <-chan struct{},
-) (tightened, removedRows int, infeas, timedOut bool) {
-	return runActivityTighteningDirty(orig, rows, lb, ub, nil, maxPasses, deadline, done)
-}
-
-// runActivityTighteningDirty executes Savelsbergh row-activity bound tightening using an optional initial dirty-row mask.
-func runActivityTighteningDirty(
-	orig *CompiledProblem,
-	rows []presolveWorkRow,
-	lb, ub []float64,
-	initDirty []bool,
-	maxPasses int,
-	deadline time.Time,
-	done <-chan struct{},
-) (tightened, removedRows int, infeas, timedOut bool) {
-	return runActivityTighteningDirtyObs(orig, rows, lb, ub, initDirty, maxPasses, deadline, done, nil)
-}
-
-func runActivityTighteningDirtyObs(
 	orig *CompiledProblem,
 	rows []presolveWorkRow,
 	lb, ub []float64,
@@ -1180,103 +1253,17 @@ func runActivityTighteningDirtyObs(
 			upperTightenedRow := false
 			lowerTightenedRow := false
 			if hasUpper && s.minInfCount <= 1 {
-				canGuardUB := s.minInfCount == 0 && !s.useWideSlack
-				ubSlackLo := s.slackLo
-				for k, col := range r.cols {
-					a := r.vals[k]
-					if math.Abs(a) <= presolveZeroTol {
-						continue
-					}
-					l, u := lb[col], ub[col]
-					isInt := orig.varCat[col] != Continuous
-					if a > 0 {
-						if s.minInfCount == 1 && !math.IsInf(l, -1) {
-							continue
-						}
-						if canGuardUB {
-							skip := presolveCanSkipTerm(ubSlackLo, a, l, u, u, isInt)
-							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && ubSlackLo > 0 {
-								obs.onSkipTerm(ubSlackLo, a, l, u, u, isInt, skip)
-							}
-							if skip {
-								continue
-							}
-						}
-						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
-						if !qOK {
-							continue
-						}
-						newUB := qVal + qEB
-						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
-						if isInt {
-							newUB = math.Floor(newUB + bTol)
-						} else {
-							newUB += rowFeasTol / a
-						}
-						if newUB < u-presolveIntTol {
-							feasCheck := max(presolveFeasTol, rowFeasTol/a)
-							if lb[col] > newUB+feasCheck {
-								return tightened, removedRows, true, false
-							}
-							if lb[col] > newUB {
-								newUB = lb[col]
-							}
-							if newUB < u-presolveIntTol {
-								if obs != nil && obs.onActivityTight != nil {
-									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, false, true, true, lb, ub, newUB)
-								}
-								ub[col] = newUB
-								tightened++
-								changedInPass = true
-								upperTightenedRow = true
-								markColDirty(col, i)
-							}
-						}
-					} else {
-						if s.minInfCount == 1 && !math.IsInf(u, 1) {
-							continue
-						}
-						absA := -a
-						if canGuardUB {
-							skip := presolveCanSkipTerm(ubSlackLo, absA, l, u, l, isInt)
-							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && ubSlackLo > 0 {
-								obs.onSkipTerm(ubSlackLo, absA, l, u, l, isInt, skip)
-							}
-							if skip {
-								continue
-							}
-						}
-						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, true)
-						if !qOK {
-							continue
-						}
-						newLB := qVal - qEB
-						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
-						if isInt {
-							newLB = math.Ceil(newLB - bTol)
-						} else {
-							newLB -= rowFeasTol / absA
-						}
-						if newLB > l+presolveIntTol {
-							feasCheck := max(presolveFeasTol, rowFeasTol/absA)
-							if newLB > ub[col]+feasCheck {
-								return tightened, removedRows, true, false
-							}
-							if newLB > ub[col] {
-								newLB = ub[col]
-							}
-							if newLB > l+presolveIntTol {
-								if obs != nil && obs.onActivityTight != nil {
-									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, false, true, false, lb, ub, newLB)
-								}
-								lb[col] = newLB
-								tightened++
-								changedInPass = true
-								upperTightenedRow = true
-								markColDirty(col, i)
-							}
-						}
-					}
+				tSide, infSide := tightenActivityRowSide(
+					orig, i, r, &s, lb, ub, s.minInfCount, s.slackLo, rowScale, rowFeasTol,
+					s.minInfCount == 0 && !s.useWideSlack, true, obs, markColDirty,
+				)
+				tightened += tSide
+				if infSide {
+					return tightened, removedRows, true, false
+				}
+				if tSide > 0 {
+					changedInPass = true
+					upperTightenedRow = true
 				}
 			}
 
@@ -1293,103 +1280,17 @@ func runActivityTighteningDirtyObs(
 			}
 
 			if hasLower && s.maxInfCount <= 1 {
-				canGuardLB := s.maxInfCount == 0 && !s.useWideDeficit
-				lbSlackLo := -s.deficitHi
-				for k, col := range r.cols {
-					a := r.vals[k]
-					if math.Abs(a) <= presolveZeroTol {
-						continue
-					}
-					l, u := lb[col], ub[col]
-					isInt := orig.varCat[col] != Continuous
-					if a > 0 {
-						if s.maxInfCount == 1 && !math.IsInf(u, 1) {
-							continue
-						}
-						if canGuardLB {
-							skip := presolveCanSkipTerm(lbSlackLo, a, l, u, l, isInt)
-							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && lbSlackLo > 0 {
-								obs.onSkipTerm(lbSlackLo, a, l, u, l, isInt, skip)
-							}
-							if skip {
-								continue
-							}
-						}
-						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
-						if !qOK {
-							continue
-						}
-						newLB := qVal - qEB
-						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/a)
-						if isInt {
-							newLB = math.Ceil(newLB - bTol)
-						} else {
-							newLB -= rowFeasTol / a
-						}
-						if newLB > l+presolveIntTol {
-							feasCheck := max(presolveFeasTol, rowFeasTol/a)
-							if newLB > ub[col]+feasCheck {
-								return tightened, removedRows, true, false
-							}
-							if newLB > ub[col] {
-								newLB = ub[col]
-							}
-							if newLB > l+presolveIntTol {
-								if obs != nil && obs.onActivityTight != nil {
-									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, true, false, false, lb, ub, newLB)
-								}
-								lb[col] = newLB
-								tightened++
-								changedInPass = true
-								lowerTightenedRow = true
-								markColDirty(col, i)
-							}
-						}
-					} else {
-						if s.maxInfCount == 1 && !math.IsInf(l, -1) {
-							continue
-						}
-						absA := -a
-						if canGuardLB {
-							skip := presolveCanSkipTerm(lbSlackLo, absA, l, u, u, isInt)
-							if obs != nil && obs.onSkipTerm != nil && !math.IsInf(l, 0) && !math.IsInf(u, 0) && lbSlackLo > 0 {
-								obs.onSkipTerm(lbSlackLo, absA, l, u, u, isInt, skip)
-							}
-							if skip {
-								continue
-							}
-						}
-						qVal, qEB, qOK := s.residualQuotient(r.cols, r.vals, lb, ub, r.rhs, k, false)
-						if !qOK {
-							continue
-						}
-						newUB := qVal + qEB
-						bTol := max(presolveIntTol, presolveRelScaleTol*rowScale/absA)
-						if isInt {
-							newUB = math.Floor(newUB + bTol)
-						} else {
-							newUB += rowFeasTol / absA
-						}
-						if newUB < u-presolveIntTol {
-							feasCheck := max(presolveFeasTol, rowFeasTol/absA)
-							if lb[col] > newUB+feasCheck {
-								return tightened, removedRows, true, false
-							}
-							if lb[col] > newUB {
-								newUB = lb[col]
-							}
-							if newUB < u-presolveIntTol {
-								if obs != nil && obs.onActivityTight != nil {
-									obs.onActivityTight(i, k, r.cols, r.vals, r.rhs, true, false, true, lb, ub, newUB)
-								}
-								ub[col] = newUB
-								tightened++
-								changedInPass = true
-								lowerTightenedRow = true
-								markColDirty(col, i)
-							}
-						}
-					}
+				tSide, infSide := tightenActivityRowSide(
+					orig, i, r, &s, lb, ub, s.maxInfCount, -s.deficitHi, rowScale, rowFeasTol,
+					s.maxInfCount == 0 && !s.useWideDeficit, false, obs, markColDirty,
+				)
+				tightened += tSide
+				if infSide {
+					return tightened, removedRows, true, false
+				}
+				if tSide > 0 {
+					changedInPass = true
+					lowerTightenedRow = true
 				}
 			}
 			if !upperTightenedRow && !lowerTightenedRow && obs != nil && obs.onActivityRow != nil {
@@ -1546,16 +1447,6 @@ func handleExtremeRowTightening(
 		return false, true
 	}
 	return false, false
-}
-
-func evalRowActivitySummary(
-	cols []int,
-	vals, lb, ub []float64,
-	rhs float64,
-	bailBothInf, hasUpper, hasLower bool,
-) (s rowActivitySummary, earlyBail bool) {
-	earlyBail = evalRowActivitySummaryInto(&s, cols, vals, lb, ub, rhs, bailBothInf, hasUpper, hasLower)
-	return s, earlyBail
 }
 
 func evalRowActivitySummaryInto(
@@ -1945,16 +1836,6 @@ func applyOrbitSymmetryBreaking(
 	lb, ub []float64,
 	deadline time.Time,
 	done <-chan struct{},
-) (tightened int, addedRows []presolveWorkRow, timedOut bool) {
-	return applyOrbitSymmetryBreakingObs(orig, rows, lb, ub, deadline, done, nil)
-}
-
-func applyOrbitSymmetryBreakingObs(
-	orig *CompiledProblem,
-	rows []presolveWorkRow,
-	lb, ub []float64,
-	deadline time.Time,
-	done <-chan struct{},
 	obs *presolveObserver,
 ) (tightened int, addedRows []presolveWorkRow, timedOut bool) {
 	n := orig.numVars
@@ -2023,6 +1904,11 @@ func applyOrbitSymmetryBreakingObs(
 	rowHash := computeOrbitRowHashes(orig, rows, lb, ub, colPtr)
 
 	sc := newOrbitTrialScratch(n, m)
+	orbitReq := orbitSearchReq{
+		orig: orig, rows: rows, lb: lb, ub: ub,
+		colPtr: colPtr, colRow: colRow, colVal: colVal,
+		rowHash: rowHash, sc: &sc, deadline: deadline, done: done,
+	}
 	maxTrials := min(len(seedRows), maxOrbitSeedTrials)
 	for sIdx := range maxTrials {
 		if stopRequested(deadline, done) {
@@ -2031,9 +1917,7 @@ func applyOrbitSymmetryBreakingObs(
 		if sIdx > 0 {
 			sc.reset()
 		}
-		gCount, ok, to := proposeAndVerifyOrbits(
-			orig, rows, lb, ub, colPtr, colRow, colVal, rowHash, seedRows[sIdx], &sc, deadline, done,
-		)
+		gCount, ok, to := proposeAndVerifyOrbits(&orbitReq, seedRows[sIdx])
 		if to {
 			return 0, nil, true
 		}
@@ -2343,14 +2227,17 @@ func (s *nodeSymmetry) initStaticSymGroup(p *CompiledProblem) {
 	dummyZero := make([]float64, n)
 	rowHash := computeOrbitRowHashes(p, rows, dummyZero, dummyZero, p.colPtr)
 	sc := newOrbitTrialScratch(n, m)
+	orbitReq := orbitSearchReq{
+		orig: p, rows: rows, lb: dummyZero, ub: dummyZero,
+		colPtr: p.colPtr, colRow: p.rowIdx, colVal: p.colVal,
+		rowHash: rowHash, sc: &sc,
+	}
 	maxTrials := min(len(seedRows), 16)
 	for sIdx := range maxTrials {
 		if sIdx > 0 {
 			sc.reset()
 		}
-		gCount, ok, _ := proposeAndVerifyOrbits(
-			p, rows, dummyZero, dummyZero, p.colPtr, p.rowIdx, p.colVal, rowHash, seedRows[sIdx], &sc, time.Time{}, nil,
-		)
+		gCount, ok, _ := proposeAndVerifyOrbits(&orbitReq, seedRows[sIdx])
 		if !ok || len(sc.orbits) == 0 || !hasStaticSymPair(p, sc.orbits, gCount) {
 			continue
 		}
@@ -2551,22 +2438,29 @@ func (s *nodeSymmetry) activeOrbitWithWitnesses(
 	}
 
 	if depth >= 1 && depth <= 6 && n <= 512 && m <= 512 {
-		return detectDynamicNodeOrbitWithWitnesses(p, curLB, curUB, bVar, deadline, done, &s.dynScratch)
+		return detectNodeOrbitWitnesses(p, curLB, curUB, bVar, deadline, done, &s.dynScratch)
 	}
 	return nil
 }
 
-func detectDynamicNodeOrbitWithWitnesses(
+type dynOrbitPrep struct {
+	resRows      []presolveWorkRow
+	resToOrigRow []int
+	seedRows     []int
+	colPtr       []int
+	colRow       []int
+	colVal       []float64
+	rowHash      []uint64
+	sc           *orbitTrialScratch
+}
+
+func prepareDynamicNodeOrbit(
 	p *CompiledProblem,
 	curLB, curUB []float64,
 	bVar int,
-	deadline time.Time,
-	done <-chan struct{},
+	recordOrigRows bool,
 	scratchPtr **orbitTrialScratch,
-) []orbitCandidateWitness {
-	if stopRequested(deadline, done) {
-		return nil
-	}
+) (dynOrbitPrep, bool) {
 	n := p.numVars
 	m := p.numConstraints
 
@@ -2578,7 +2472,10 @@ func detectDynamicNodeOrbitWithWitnesses(
 	}
 
 	resRows := make([]presolveWorkRow, 0, m)
-	resToOrigRow := make([]int, 0, m)
+	var resToOrigRow []int
+	if recordOrigRows {
+		resToOrigRow = make([]int, 0, m)
+	}
 	var seedRows []int
 	for i := range m {
 		rs, re := p.rowPtr[i], p.rowPtr[i+1]
@@ -2596,7 +2493,7 @@ func detectDynamicNodeOrbitWithWitnesses(
 		if !exact {
 			rat, ratOK := evalFixedRowResidualRat(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
 			if !ratOK {
-				return nil
+				return dynOrbitPrep{}, false
 			}
 			if f, fExact := rat.Float64(); fExact && !math.IsInf(f, 0) && !math.IsNaN(f) {
 				remRHS = f
@@ -2605,7 +2502,7 @@ func detectDynamicNodeOrbitWithWitnesses(
 				rhsRat = rat
 			}
 		} else if !ok {
-			return nil
+			return dynOrbitPrep{}, false
 		}
 		cols := make([]int, 0, freeCnt)
 		vals := make([]float64, 0, freeCnt)
@@ -2629,7 +2526,9 @@ func detectDynamicNodeOrbitWithWitnesses(
 			sense:  p.rowSense[i],
 			active: true,
 		})
-		resToOrigRow = append(resToOrigRow, i)
+		if recordOrigRows {
+			resToOrigRow = append(resToOrigRow, i)
+		}
 		if touchesBVar && freeCnt >= 2 && freeCnt <= maxOrbitGroupSize && (p.rowSense[i] == Equal || p.rowSense[i] == LessEqual) && rhsRat == nil && remRHS == 1.0 {
 			unitBin := true
 			for k, col := range cols {
@@ -2644,13 +2543,13 @@ func detectDynamicNodeOrbitWithWitnesses(
 		}
 	}
 	if len(seedRows) == 0 || len(resRows) < 2 {
-		return nil
+		return dynOrbitPrep{}, false
 	}
 
 	colPtr, colRow, colVal := buildPresolveCSC(n, resRows)
 	seedRows = filterAndSortOrbitSeeds(resRows, colPtr, seedRows)
 	if len(seedRows) == 0 {
-		return nil
+		return dynOrbitPrep{}, false
 	}
 	rowHash := computeOrbitRowHashes(p, resRows, curLB, curUB, colPtr)
 
@@ -2662,8 +2561,43 @@ func detectDynamicNodeOrbitWithWitnesses(
 	} else {
 		sc.reset()
 	}
+	return dynOrbitPrep{
+		resRows:      resRows,
+		resToOrigRow: resToOrigRow,
+		seedRows:     seedRows,
+		colPtr:       colPtr,
+		colRow:       colRow,
+		colVal:       colVal,
+		rowHash:      rowHash,
+		sc:           sc,
+	}, true
+}
 
-	maxTrials := min(len(seedRows), 4)
+func detectNodeOrbitWitnesses(
+	p *CompiledProblem,
+	curLB, curUB []float64,
+	bVar int,
+	deadline time.Time,
+	done <-chan struct{},
+	scratchPtr **orbitTrialScratch,
+) []orbitCandidateWitness {
+	if stopRequested(deadline, done) {
+		return nil
+	}
+	prep, ok := prepareDynamicNodeOrbit(p, curLB, curUB, bVar, true, scratchPtr)
+	if !ok {
+		return nil
+	}
+	n := p.numVars
+	m := p.numConstraints
+	sc := prep.sc
+	orbitReq := orbitSearchReq{
+		orig: p, rows: prep.resRows, lb: curLB, ub: curUB,
+		colPtr: prep.colPtr, colRow: prep.colRow, colVal: prep.colVal,
+		rowHash: prep.rowHash, sc: sc, deadline: deadline, done: done,
+	}
+
+	maxTrials := min(len(prep.seedRows), 4)
 	for sIdx := range maxTrials {
 		if stopRequested(deadline, done) {
 			return nil
@@ -2671,9 +2605,7 @@ func detectDynamicNodeOrbitWithWitnesses(
 		if sIdx > 0 {
 			sc.reset()
 		}
-		gCount, ok, to := proposeAndVerifyOrbits(
-			p, resRows, curLB, curUB, colPtr, colRow, colVal, rowHash, seedRows[sIdx], sc, deadline, done,
-		)
+		gCount, ok, to := proposeAndVerifyOrbits(&orbitReq, prep.seedRows[sIdx])
 		if to {
 			return nil
 		}
@@ -2711,8 +2643,8 @@ func detectDynamicNodeOrbitWithWitnesses(
 			}
 			rp := identityPerm(m)
 			for t := range numTuples {
-				ra := resToOrigRow[sc.rowTuples[t*gCount+g0]]
-				rb := resToOrigRow[sc.rowTuples[t*gCount+g]]
+				ra := prep.resToOrigRow[sc.rowTuples[t*gCount+g0]]
+				rb := prep.resToOrigRow[sc.rowTuples[t*gCount+g]]
 				rp[ra], rp[rb] = rb, ra
 			}
 			cands = append(cands, orbitCandidateWitness{
@@ -2740,8 +2672,6 @@ func detectDynamicNodeOrbit(
 	if stopRequested(deadline, done) {
 		return out
 	}
-	n := p.numVars
-	m := p.numConstraints
 
 	hasCandidateSeed := false
 	for ck := p.colPtr[bVar]; ck < p.colPtr[bVar+1]; ck++ {
@@ -2809,98 +2739,18 @@ func detectDynamicNodeOrbit(
 		return out
 	}
 
-	isFree := make([]bool, n)
-	for j := range n {
-		if curLB[j] < curUB[j] {
-			isFree[j] = true
-		}
-	}
-
-	resRows := make([]presolveWorkRow, 0, m)
-	var seedRows []int
-	for i := range m {
-		rs, re := p.rowPtr[i], p.rowPtr[i+1]
-		freeCnt := 0
-		for k := rs; k < re; k++ {
-			if isFree[p.colIdx[k]] {
-				freeCnt++
-			}
-		}
-		if freeCnt == 0 {
-			continue
-		}
-		remRHS, exact, ok := evalFixedRowResidualExact(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
-		var rhsRat *big.Rat
-		if !exact {
-			rat, ratOK := evalFixedRowResidualRat(p.colIdx[rs:re], p.rowVal[rs:re], curLB, isFree, p.rowRHS[i])
-			if !ratOK {
-				return out
-			}
-			if f, fExact := rat.Float64(); fExact && !math.IsInf(f, 0) && !math.IsNaN(f) {
-				remRHS = f
-			} else {
-				remRHS, _ = rat.Float64()
-				rhsRat = rat
-			}
-		} else if !ok {
-			return out
-		}
-		cols := make([]int, 0, freeCnt)
-		vals := make([]float64, 0, freeCnt)
-		touchesBVar := false
-		for k := rs; k < re; k++ {
-			col := p.colIdx[k]
-			if isFree[col] {
-				cols = append(cols, col)
-				vals = append(vals, p.rowVal[k])
-				if col == bVar {
-					touchesBVar = true
-				}
-			}
-		}
-		rowIdxOut := len(resRows)
-		resRows = append(resRows, presolveWorkRow{
-			cols:   cols,
-			vals:   vals,
-			rhs:    remRHS,
-			rhsRat: rhsRat,
-			sense:  p.rowSense[i],
-			active: true,
-		})
-		if touchesBVar && freeCnt >= 2 && freeCnt <= maxOrbitGroupSize && (p.rowSense[i] == Equal || p.rowSense[i] == LessEqual) && rhsRat == nil && remRHS == 1.0 {
-			unitBin := true
-			for k, col := range cols {
-				if vals[k] != 1.0 || p.varCat[col] != Binary || curLB[col] != 0 || curUB[col] != 1 {
-					unitBin = false
-					break
-				}
-			}
-			if unitBin {
-				seedRows = append(seedRows, rowIdxOut)
-			}
-		}
-	}
-	if len(seedRows) == 0 || len(resRows) < 2 {
+	prep, ok := prepareDynamicNodeOrbit(p, curLB, curUB, bVar, false, scratchPtr)
+	if !ok {
 		return out
 	}
+	sc := prep.sc
 
-	colPtr, colRow, colVal := buildPresolveCSC(n, resRows)
-	seedRows = filterAndSortOrbitSeeds(resRows, colPtr, seedRows)
-	if len(seedRows) == 0 {
-		return out
+	maxTrials := min(len(prep.seedRows), 4)
+	orbitReq := orbitSearchReq{
+		orig: p, rows: prep.resRows, lb: curLB, ub: curUB,
+		colPtr: prep.colPtr, colRow: prep.colRow, colVal: prep.colVal,
+		rowHash: prep.rowHash, sc: sc, deadline: deadline, done: done,
 	}
-	rowHash := computeOrbitRowHashes(p, resRows, curLB, curUB, colPtr)
-
-	sc := *scratchPtr
-	if sc == nil || len(sc.colOrbit) < n || len(sc.rowState) < len(resRows) {
-		tmp := newOrbitTrialScratch(n, len(resRows))
-		sc = &tmp
-		*scratchPtr = sc
-	} else {
-		sc.reset()
-	}
-
-	maxTrials := min(len(seedRows), 4)
 	for sIdx := range maxTrials {
 		if stopRequested(deadline, done) {
 			return out
@@ -2908,9 +2758,7 @@ func detectDynamicNodeOrbit(
 		if sIdx > 0 {
 			sc.reset()
 		}
-		gCount, ok, to := proposeAndVerifyOrbits(
-			p, resRows, curLB, curUB, colPtr, colRow, colVal, rowHash, seedRows[sIdx], sc, deadline, done,
-		)
+		gCount, ok, to := proposeAndVerifyOrbits(&orbitReq, prep.seedRows[sIdx])
 		if to {
 			return out
 		}
@@ -2945,23 +2793,32 @@ func detectDynamicNodeOrbit(
 	return out
 }
 
+type orbitSearchReq struct {
+	orig     *CompiledProblem
+	rows     []presolveWorkRow
+	lb, ub   []float64
+	colPtr   []int
+	colRow   []int
+	colVal   []float64
+	rowHash  []uint64
+	sc       *orbitTrialScratch
+	deadline time.Time
+	done     <-chan struct{}
+}
+
 // proposeAndVerifyOrbits expands a seed partitioning or packing row into G-way variable orbits
 // and row tuples by BFS over the row-column incidence graph, then verifies exact matrix invariance.
 // Sentinel encodings: colOrbit[j] and colGroup[j] hold orbitUnassigned (-1) until column j joins an orbit;
 // rowState[i] holds rowStateUnvisited (-1), rowStateInvariant (-2) for rows invariant across all groups,
 // or group index g in [0 .. G-1] when row i belongs to a G-row orbit tuple.
-func proposeAndVerifyOrbits(
-	orig *CompiledProblem,
-	rows []presolveWorkRow,
-	lb, ub []float64,
-	colPtr, colRow []int,
-	colVal []float64,
-	rowHash []uint64,
-	seedIdx int,
-	sc *orbitTrialScratch,
-	deadline time.Time,
-	done <-chan struct{},
-) (gCount int, ok, timedOut bool) {
+func proposeAndVerifyOrbits(req *orbitSearchReq, seedIdx int) (gCount int, ok, timedOut bool) {
+	orig := req.orig
+	rows := req.rows
+	lb, ub := req.lb, req.ub
+	colPtr, colRow, colVal := req.colPtr, req.colRow, req.colVal
+	rowHash := req.rowHash
+	sc := req.sc
+	deadline, done := req.deadline, req.done
 	sc.seedCols = append(sc.seedCols[:0], rows[seedIdx].cols...)
 	slices.Sort(sc.seedCols)
 	gCount = len(sc.seedCols)
@@ -4145,29 +4002,23 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 						obs.onLPStep(lpPresolveEvent{kind: lpStepDualColFix, col: j, toLower: false})
 					}
 				} else if cj == 0 {
-					if !math.IsInf(lb[j], -1) && !math.IsInf(ub[j], 1) {
-						val := lb[j]
+					var val float64
+					hasVal := false
+					switch {
+					case !math.IsInf(lb[j], -1) && !math.IsInf(ub[j], 1):
+						val = lb[j]
 						if lb[j] <= 0 && 0 <= ub[j] {
 							val = 0
 						}
-						lb[j] = val
-						ub[j] = val
-						tightened++
-						progress = true
-						if obs != nil && obs.onLPStep != nil {
-							obs.onLPStep(lpPresolveEvent{kind: lpStepZeroObjEmptyColFix, col: j, val: val})
-						}
-					} else if !math.IsInf(lb[j], -1) {
-						val := max(0.0, lb[j])
-						lb[j] = val
-						ub[j] = val
-						tightened++
-						progress = true
-						if obs != nil && obs.onLPStep != nil {
-							obs.onLPStep(lpPresolveEvent{kind: lpStepZeroObjEmptyColFix, col: j, val: val})
-						}
-					} else if !math.IsInf(ub[j], 1) {
-						val := min(0.0, ub[j])
+						hasVal = true
+					case !math.IsInf(lb[j], -1):
+						val = max(0.0, lb[j])
+						hasVal = true
+					case !math.IsInf(ub[j], 1):
+						val = min(0.0, ub[j])
+						hasVal = true
+					}
+					if hasVal {
 						lb[j] = val
 						ub[j] = val
 						tightened++
@@ -4484,22 +4335,6 @@ func PresolveForVIPR(orig *CompiledProblem, maxPasses int) VIPRPresolveResult {
 	return presolveForVIPRWithDeadline(orig, maxPasses, time.Time{}, nil)
 }
 
-func viprRatFloorRat(r *big.Rat) *big.Rat {
-	q, rem := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
-	if rem.Sign() < 0 {
-		q.Sub(q, big.NewInt(1))
-	}
-	return new(big.Rat).SetInt(q)
-}
-
-func viprRatCeilRat(r *big.Rat) *big.Rat {
-	q, rem := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
-	if rem.Sign() > 0 {
-		q.Add(q, big.NewInt(1))
-	}
-	return new(big.Rat).SetInt(q)
-}
-
 func viprRatExactFloat(r *big.Rat) (float64, bool) {
 	if r == nil {
 		return 0, false
@@ -4569,7 +4404,7 @@ func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
 	n := orig.numVars
 	m := orig.numConstraints
 	constMin := orig.objConstMin()
-	objConstRat, ok := viprRatFromFloat(constMin)
+	objConstRat, ok := exactRatFromFloat(constMin)
 	if !ok {
 		return nil, false
 	}
@@ -4588,21 +4423,21 @@ func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
 		rows:        make([]viprPresolveRow, m),
 	}
 	for j := range n {
-		c, okC := viprRatFromFloat(orig.objMin[j])
+		c, okC := exactRatFromFloat(orig.objMin[j])
 		if !okC {
 			return nil, false
 		}
 		st.objRat[j] = c
 		st.isInt[j] = orig.varCat[j] != Continuous
 		if !math.IsInf(st.lbF[j], -1) {
-			lr, okL := viprRatFromFloat(st.lbF[j])
+			lr, okL := exactRatFromFloat(st.lbF[j])
 			if !okL {
 				return nil, false
 			}
 			st.lbRat[j] = lr
 		}
 		if !math.IsInf(st.ubF[j], 1) {
-			ur, okU := viprRatFromFloat(st.ubF[j])
+			ur, okU := exactRatFromFloat(st.ubF[j])
 			if !okU {
 				return nil, false
 			}
@@ -4610,7 +4445,7 @@ func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
 		}
 	}
 	for i := range m {
-		rhs, okR := viprRatFromFloat(orig.rowRHS[i])
+		rhs, okR := exactRatFromFloat(orig.rowRHS[i])
 		if !okR {
 			return nil, false
 		}
@@ -4622,7 +4457,7 @@ func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
 			if v == 0 {
 				continue
 			}
-			vr, okV := viprRatFromFloat(v)
+			vr, okV := exactRatFromFloat(v)
 			if !okV {
 				return nil, false
 			}
@@ -4835,7 +4670,7 @@ func (st *viprPresolveState) roundInitialBounds() int {
 			continue
 		}
 		if st.lbRat[j] != nil && !st.lbRat[j].IsInt() {
-			cl := viprRatCeilRat(st.lbRat[j])
+			cl := viprRatCeil(st.lbRat[j])
 			if f, ok := viprRatExactFloat(cl); ok {
 				st.lbRat[j] = cl
 				st.lbF[j] = f
@@ -4849,7 +4684,7 @@ func (st *viprPresolveState) roundInitialBounds() int {
 			}
 		}
 		if st.ubRat[j] != nil && !st.ubRat[j].IsInt() {
-			fl := viprRatFloorRat(st.ubRat[j])
+			fl := viprRatFloor(st.ubRat[j])
 			if f, ok := viprRatExactFloat(fl); ok {
 				st.ubRat[j] = fl
 				st.ubF[j] = f
@@ -4915,9 +4750,9 @@ func (st *viprPresolveState) applyGCDRowDiv() (infeasRow int, gcdDiv int64) {
 			}
 			newRHS = qRat
 		case LessEqual:
-			newRHS = viprRatFloorRat(qRat)
+			newRHS = viprRatFloor(qRat)
 		case GreaterEqual:
-			newRHS = viprRatCeilRat(qRat)
+			newRHS = viprRatCeil(qRat)
 		}
 		if _, ok := viprRatExactFloat(newRHS); !ok {
 			continue
@@ -5073,7 +4908,7 @@ func (st *viprPresolveState) elimEmptyAndSingletonRows() (progress bool, conflic
 				return progress, col, -1
 			}
 			if st.isInt[col] && !st.lbRat[col].IsInt() {
-				cl := viprRatCeilRat(st.lbRat[col])
+				cl := viprRatCeil(st.lbRat[col])
 				if cf, okC := viprRatExactFloat(cl); okC {
 					st.lbRat[col] = cl
 					st.lbF[col] = cf
@@ -5097,9 +4932,9 @@ func (st *viprPresolveState) elimEmptyAndSingletonRows() (progress bool, conflic
 		effB := b
 		if roundInt {
 			if isUpper {
-				effB = viprRatFloorRat(b)
+				effB = viprRatFloor(b)
 			} else {
-				effB = viprRatCeilRat(b)
+				effB = viprRatCeil(b)
 			}
 		}
 		ef, ok := viprRatExactFloat(effB)
@@ -5187,9 +5022,9 @@ func (st *viprPresolveState) tryActivityTighten(rowIdx, col int, isUpper bool, i
 	var newF float64
 	if roundInt {
 		if isUpper {
-			newB = viprRatFloorRat(imp)
+			newB = viprRatFloor(imp)
 		} else {
-			newB = viprRatCeilRat(imp)
+			newB = viprRatCeil(imp)
 		}
 		var ok bool
 		newF, ok = viprRatExactFloat(newB)
@@ -5202,7 +5037,7 @@ func (st *viprPresolveState) tryActivityTighten(rowIdx, col int, isUpper bool, i
 			return false, false
 		}
 		var ok bool
-		newB, ok = viprRatFromFloat(newF)
+		newB, ok = exactRatFromFloat(newF)
 		if !ok {
 			return false, false
 		}
@@ -5278,73 +5113,57 @@ func (st *viprPresolveState) tightenAndDropActivityRows() (progress bool, confli
 			continue
 		}
 
+		tryBound := func(k, col int, a *big.Rat, isUpper, useMin bool) bool {
+			act, miss, missIdx := maxAct, maxMiss, maxMissIdx
+			if useMin {
+				act, miss, missIdx = minAct, minMiss, minMissIdx
+			}
+			if miss != 0 && (miss != 1 || missIdx != k) {
+				return false
+			}
+			mExcl := new(big.Rat).Set(act)
+			if miss == 0 {
+				bnd := st.ubRat[col]
+				if isUpper {
+					bnd = st.lbRat[col]
+				}
+				mExcl.Sub(mExcl, new(big.Rat).Mul(a, bnd))
+			}
+			imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
+			if ch, conf := st.tryActivityTighten(i, col, isUpper, imp); ch {
+				progress = true
+				if conf {
+					return true
+				}
+				minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
+			}
+			return false
+		}
+
 		for k, col := range r.cols {
 			a := r.vals[k]
-			if a.Sign() == 0 {
+			sgn := a.Sign()
+			if sgn == 0 {
 				continue
 			}
 			// Implied upper bound on col.
-			if a.Sign() > 0 && (r.sense == LessEqual || r.sense == Equal) {
-				if minMiss == 0 || (minMiss == 1 && minMissIdx == k) {
-					mExcl := new(big.Rat).Set(minAct)
-					if minMiss == 0 {
-						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.lbRat[col]))
-					}
-					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
-					if ch, conf := st.tryActivityTighten(i, col, true, imp); ch {
-						progress = true
-						if conf {
-							return progress, col, -1
-						}
-						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
-					}
+			if sgn > 0 && (r.sense == LessEqual || r.sense == Equal) {
+				if tryBound(k, col, a, true, true) {
+					return progress, col, -1
 				}
-			} else if a.Sign() < 0 && (r.sense == GreaterEqual || r.sense == Equal) {
-				if maxMiss == 0 || (maxMiss == 1 && maxMissIdx == k) {
-					mExcl := new(big.Rat).Set(maxAct)
-					if maxMiss == 0 {
-						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.lbRat[col]))
-					}
-					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
-					if ch, conf := st.tryActivityTighten(i, col, true, imp); ch {
-						progress = true
-						if conf {
-							return progress, col, -1
-						}
-						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
-					}
+			} else if sgn < 0 && (r.sense == GreaterEqual || r.sense == Equal) {
+				if tryBound(k, col, a, true, false) {
+					return progress, col, -1
 				}
 			}
 			// Implied lower bound on col.
-			if a.Sign() > 0 && (r.sense == GreaterEqual || r.sense == Equal) {
-				if maxMiss == 0 || (maxMiss == 1 && maxMissIdx == k) {
-					mExcl := new(big.Rat).Set(maxAct)
-					if maxMiss == 0 {
-						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.ubRat[col]))
-					}
-					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
-					if ch, conf := st.tryActivityTighten(i, col, false, imp); ch {
-						progress = true
-						if conf {
-							return progress, col, -1
-						}
-						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
-					}
+			if sgn > 0 && (r.sense == GreaterEqual || r.sense == Equal) {
+				if tryBound(k, col, a, false, false) {
+					return progress, col, -1
 				}
-			} else if a.Sign() < 0 && (r.sense == LessEqual || r.sense == Equal) {
-				if minMiss == 0 || (minMiss == 1 && minMissIdx == k) {
-					mExcl := new(big.Rat).Set(minAct)
-					if minMiss == 0 {
-						mExcl.Sub(mExcl, new(big.Rat).Mul(a, st.ubRat[col]))
-					}
-					imp := new(big.Rat).Quo(new(big.Rat).Sub(r.rhs, mExcl), a)
-					if ch, conf := st.tryActivityTighten(i, col, false, imp); ch {
-						progress = true
-						if conf {
-							return progress, col, -1
-						}
-						minAct, maxAct, minMiss, maxMiss, minMissIdx, maxMissIdx = st.rowActivities(r)
-					}
+			} else if sgn < 0 && (r.sense == LessEqual || r.sense == Equal) {
+				if tryBound(k, col, a, false, true) {
+					return progress, col, -1
 				}
 			}
 		}
@@ -5657,6 +5476,11 @@ func (st *viprPresolveState) applyStaticSymBreak(deadline time.Time, done <-chan
 			rowHash := computeOrbitRowHashes(st.orig, workRows, st.lbF, st.ubF, colPtr)
 			sc := newOrbitTrialScratch(st.n, m)
 			maxTrials := min(len(seedRows), 16)
+			orbitReq := orbitSearchReq{
+				orig: st.orig, rows: workRows, lb: st.lbF, ub: st.ubF,
+				colPtr: colPtr, colRow: colRow, colVal: colVal,
+				rowHash: rowHash, sc: &sc, deadline: deadline, done: done,
+			}
 			for sIdx := range maxTrials {
 				if stopRequested(deadline, done) {
 					return false
@@ -5664,9 +5488,7 @@ func (st *viprPresolveState) applyStaticSymBreak(deadline time.Time, done <-chan
 				if sIdx > 0 {
 					sc.reset()
 				}
-				gCount, ok, to := proposeAndVerifyOrbits(
-					st.orig, workRows, st.lbF, st.ubF, colPtr, colRow, colVal, rowHash, seedRows[sIdx], &sc, deadline, done,
-				)
+				gCount, ok, to := proposeAndVerifyOrbits(&orbitReq, seedRows[sIdx])
 				if to {
 					return false
 				}

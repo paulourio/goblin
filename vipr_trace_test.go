@@ -1211,7 +1211,9 @@ func TestVIPRTraceReducedCostFixingAndUnboundedInt(t *testing.T) {
 			{col: 0, lb: 0, ub: 0}, // uncertifiable: fixing b0 <= 0 does not close b0 >= 1 against obj=4
 			{col: 2, lb: 0, ub: 0}, // certifiable: z0 >= 1 has dual bound 3 + 20 = 23 >= 4
 		}
-		nextVN, applied, pruned := rec.certifyAndApplyRCF(rec.root, lp, lpRes, inc, 4.0, 0, false, p.varLB, p.varUB, cands)
+		nextVN, applied, pruned := rec.certifyAndApplyRCF(
+			rec.root, lp, lpRes, mipCutoffState{bestPrimal: inc, bestObjMin: 4.0}, p.varLB, p.varUB, cands,
+		)
 		if pruned || len(applied) != 1 || applied[0].col != 2 || rec.rcfFixingsCertified != 1 {
 			t.Fatalf("expected only col 2 certified, got pruned=%v applied=%+v count=%d", pruned, applied, rec.rcfFixingsCertified)
 		}

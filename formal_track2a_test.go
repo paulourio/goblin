@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"testing"
-	"time"
 )
 
 func runRulesCheck(tb testing.TB, exe, subcmd string, req any, dst any) {
@@ -518,7 +517,8 @@ func TestFormalTrack2A(t *testing.T) {
 			if i%4 == 0 {
 				rhs += 0.5
 			}
-			s, _ := evalRowActivitySummary(cols, vals, lb, ub, rhs, false, true, true)
+			var s rowActivitySummary
+			evalRowActivitySummaryInto(&s, cols, vals, lb, ub, rhs, false, true, true)
 			rowScale := max(1.0, max(s.l1Min, s.l1Max))
 			rowTol := max(presolveFeasTol, presolveRelScaleTol*rowScale)
 			qUVals := make([]float64, nTerms)
@@ -1171,7 +1171,11 @@ func TestFormalTrack2A(t *testing.T) {
 			rowHash := computeOrbitRowHashes(cp, rows, lb, ub, colPtr)
 			sc := newOrbitTrialScratch(cp.numVars, len(rows))
 
-			gOut, ok, to := proposeAndVerifyOrbits(cp, rows, lb, ub, colPtr, colRow, colVal, rowHash, 0, &sc, time.Time{}, nil)
+			gOut, ok, to := proposeAndVerifyOrbits(&orbitSearchReq{
+				orig: cp, rows: rows, lb: lb, ub: ub,
+				colPtr: colPtr, colRow: colRow, colVal: colVal,
+				rowHash: rowHash, sc: &sc,
+			}, 0)
 			if to || !ok || gOut != gCount {
 				t.Fatalf("case %d proposeAndVerifyOrbits failed: gOut=%d ok=%v to=%v", idx, gOut, ok, to)
 			}

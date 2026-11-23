@@ -424,7 +424,12 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 		return opt.certifyFn(ctx, p, opt, start, done)
 	}
 	var deadline time.Time
-	if opt.TimeLimit < 0 {
+	expired := opt.TimeLimit < 0
+	if opt.TimeLimit > 0 {
+		deadline = start.Add(opt.TimeLimit)
+		expired = !start.Before(deadline)
+	}
+	if expired {
 		return Result{
 			modelID:   p.modelID,
 			Backend:   opt.Backend,
@@ -433,29 +438,12 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			SolveTime: time.Since(start),
 		}, nil
 	}
-	if opt.TimeLimit > 0 {
-		deadline = start.Add(opt.TimeLimit)
-		if !start.Before(deadline) {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   opt.Backend,
-				Status:    StatusTimeLimit,
-				BestBound: trivialDualBound(p.sense),
-				SolveTime: time.Since(start),
-			}, nil
-		}
-	}
+	var res Result
 	if opt.Backend == BackendCBC {
-		res := solveCBC(ctx, p, opt, start, deadline, done)
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				return Result{}, err
-			}
-		}
-		return res, nil
+		res = solveCBC(ctx, p, opt, start, deadline, done)
+	} else {
+		res = solveCompensatedEngine(ctx, p, opt, BackendGo, start, deadline, done)
 	}
-
-	res := solveCompensatedEngine(ctx, p, opt, BackendGo, start, deadline, done)
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err

@@ -524,6 +524,118 @@ func (m *Model) IsMIP() bool {
 	return false
 }
 
+func (m *Model) accumulateTerms(
+	terms []Term,
+	isObj bool,
+	conName string,
+	abortOnErr bool,
+	firstErr *error,
+	inTouched []uint8,
+	touched []int,
+	dst []float64,
+) (newTouched []int, sorted, hasDupLoss bool, err error) {
+	sorted = true
+	prevCol := -1
+	hasDup := false
+	recordErr := func(e error) bool {
+		if *firstErr == nil {
+			*firstErr = e
+			if abortOnErr {
+				return true
+			}
+		}
+		return false
+	}
+	errPrefix := func() string {
+		if isObj {
+			return "objective"
+		}
+		return fmt.Sprintf("constraint %q", conName)
+	}
+
+	for _, t := range terms {
+		if t.Var == invalidDotVar {
+			if recordErr(errors.New("Dot: mismatched slice lengths")) {
+				return touched, sorted, false, *firstErr
+			}
+			continue
+		}
+		col, ok := m.validVar(t.Var)
+		if !ok {
+			if recordErr(fmt.Errorf("%s references invalid or foreign Var handle %v", errPrefix(), t.Var)) {
+				return touched, sorted, false, *firstErr
+			}
+			continue
+		}
+		if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+			if recordErr(fmt.Errorf("%s has non-finite coefficient %v", errPrefix(), t.Coeff)) {
+				return touched, sorted, false, *firstErr
+			}
+			continue
+		}
+		if t.Coeff == 0 {
+			continue
+		}
+		if inTouched[col] == 0 {
+			inTouched[col] = 1
+			if col < prevCol {
+				sorted = false
+			}
+			prevCol = col
+			touched = append(touched, col)
+			if dst != nil {
+				dst[col] = t.Coeff
+			}
+		} else {
+			inTouched[col] = 2
+			hasDup = true
+		}
+	}
+	if hasDup {
+		wideMap := make(map[int]*wideDotAcc)
+		for _, col := range touched {
+			if inTouched[col] > 1 {
+				wideMap[col] = &wideDotAcc{}
+			}
+		}
+		for _, t := range terms {
+			if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
+				if w, exists := wideMap[col]; exists {
+					w.addVal(t.Coeff)
+				}
+			}
+		}
+		for _, col := range touched {
+			w, exists := wideMap[col]
+			if !exists {
+				continue
+			}
+			var val float64
+			if dst != nil {
+				var exact bool
+				val, exact = w.finishWithExactCheck(math.NaN())
+				if !exact {
+					hasDupLoss = true
+				}
+			} else {
+				val = w.finish(math.NaN())
+			}
+			if math.IsNaN(val) || math.IsInf(val, 0) {
+				if recordErr(fmt.Errorf("%s has non-finite accumulated coefficient for variable %q", errPrefix(), m.vars[col].name)) {
+					return touched, sorted, hasDupLoss, *firstErr
+				}
+			}
+			if dst != nil {
+				if val == 0 {
+					val = 0
+				}
+				dst[col] = val
+			}
+		}
+	}
+	return touched, sorted, hasDupLoss, nil
+}
+
 // Validate checks that all variable bounds, objective terms, and constraint terms
 // belong to this Model and contain only finite coefficients and valid bounds.
 func (m *Model) Validate() error {
@@ -546,48 +658,10 @@ func (m *Model) Validate() error {
 	}
 	counts := make([]uint8, len(m.vars))
 	touched := make([]int, 0, min(len(m.vars), defaultModelCap))
-	objHasDup := false
-	for _, t := range m.objTerms {
-		if t.Var == invalidDotVar {
-			return errors.New("Dot: mismatched slice lengths")
-		}
-		col, ok := m.validVar(t.Var)
-		if !ok {
-			return fmt.Errorf("objective references invalid or foreign Var handle %v", t.Var)
-		}
-		if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
-			return fmt.Errorf("objective has non-finite coefficient %v", t.Coeff)
-		}
-		if counts[col] == 0 {
-			counts[col] = 1
-			touched = append(touched, col)
-		} else {
-			counts[col] = 2
-			objHasDup = true
-		}
-	}
-	if objHasDup {
-		wideMap := make(map[int]*wideDotAcc)
-		for _, col := range touched {
-			if counts[col] > 1 {
-				wideMap[col] = &wideDotAcc{}
-			}
-		}
-		for _, t := range m.objTerms {
-			if col, ok := m.validVar(t.Var); ok {
-				if w, exists := wideMap[col]; exists {
-					w.addVal(t.Coeff)
-				}
-			}
-		}
-		for _, col := range touched {
-			if w, exists := wideMap[col]; exists {
-				v := w.finish(math.NaN())
-				if math.IsNaN(v) || math.IsInf(v, 0) {
-					return fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
-				}
-			}
-		}
+	var firstErr error
+	touched, _, _, err := m.accumulateTerms(m.objTerms, true, "", true, &firstErr, counts, touched[:0], nil)
+	if err != nil {
+		return err
 	}
 	for _, col := range touched {
 		counts[col] = 0
@@ -602,50 +676,10 @@ func (m *Model) Validate() error {
 		if net := c.rhs - c.exprConst; math.IsNaN(net) || math.IsInf(net, 0) {
 			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, net)
 		}
-		touched = touched[:0]
-		rowHasDup := false
 		cTerms := m.conTerms[c.termStart:c.termEnd]
-		for _, t := range cTerms {
-			if t.Var == invalidDotVar {
-				return errors.New("Dot: mismatched slice lengths")
-			}
-			col, ok := m.validVar(t.Var)
-			if !ok {
-				return fmt.Errorf("constraint %q references invalid or foreign Var handle %v", c.name, t.Var)
-			}
-			if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
-				return fmt.Errorf("constraint %q has non-finite coefficient %v", c.name, t.Coeff)
-			}
-			if counts[col] == 0 {
-				counts[col] = 1
-				touched = append(touched, col)
-			} else {
-				counts[col] = 2
-				rowHasDup = true
-			}
-		}
-		if rowHasDup {
-			wideMap := make(map[int]*wideDotAcc)
-			for _, col := range touched {
-				if counts[col] > 1 {
-					wideMap[col] = &wideDotAcc{}
-				}
-			}
-			for _, t := range cTerms {
-				if col, ok := m.validVar(t.Var); ok {
-					if w, exists := wideMap[col]; exists {
-						w.addVal(t.Coeff)
-					}
-				}
-			}
-			for _, col := range touched {
-				if w, exists := wideMap[col]; exists {
-					v := w.finish(math.NaN())
-					if math.IsNaN(v) || math.IsInf(v, 0) {
-						return fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
-					}
-				}
-			}
+		touched, _, _, err = m.accumulateTerms(cTerms, false, c.name, true, &firstErr, counts, touched[:0], nil)
+		if err != nil {
+			return err
 		}
 		for _, col := range touched {
 			counts[col] = 0

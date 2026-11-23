@@ -73,7 +73,11 @@ func TestAddCutRowsMatchesCompiledRows(t *testing.T) {
 		snap := s.snapshot()
 		rows := make([]dynamicRow, len(cuts))
 		for k, c := range cuts {
-			rows[k] = s.newCutRow(c.cols, c.vals, c.rhs)
+			dr, st := s.buildCutRow(c.cols, c.vals, c.rhs)
+			if st != cutBuildOK {
+				t.Fatalf("seed %d cut %d: buildCutRow status = %v, want OK", seed, k, st)
+			}
+			rows[k] = dr
 		}
 		s.addCutRows(rows)
 		withCuts := s.Solve()
@@ -397,7 +401,7 @@ func TestRuizScaledCutsCrashRecoveryAndInternalGuards(t *testing.T) {
 		t.Fatalf("invalid rowScaleOf(0) = %v", rs)
 	}
 	_ = s.unscaledBasicVal(0)
-	_ = s.unscaledTabEntry(s.ws.basis[0], 0)
+	_, _ = s.unscaledTabEntryWithErr(s.ws.basis[0], 0)
 
 	snap := s.snapshot()
 	// Active cut: x <= 2 -> optimum shifts to x=2, y=1, obj=4.
@@ -484,7 +488,7 @@ func TestRuizScaledCutsCrashRecoveryAndInternalGuards(t *testing.T) {
 	mMIR.SetObjective(NewExpr(mx.T(1), my.T(1)))
 	mMIR.AddConstraint("r0", NewExpr(mx.T(1e-200), my.T(1)).Le(-1e200))
 	pMIR := mMIR.Compile()
-	for _, c := range separateRowMIRCuts(pMIR, []float64{0.5, 0.0}) {
+	for _, c := range separateRowMIRCuts(pMIR, []float64{0.5, 0.0}, nil) {
 		if math.IsNaN(c.RHS) || math.IsInf(c.RHS, 0) || math.IsNaN(c.Efficacy) || math.IsInf(c.Efficacy, 0) {
 			t.Fatalf("separateRowMIRCuts emitted non-finite cut: %+v", c)
 		}
@@ -527,7 +531,12 @@ func TestRuizScaledCutsCrashRecoveryAndInternalGuards(t *testing.T) {
 	primal[1] = -1e-5
 	pCosts := make([]pseudoCost, 20)
 	iters := 0
-	brCol, brVal := selectBranchVar(pBr, lpBr, LPResult{Status: StatusOptimal, Primal: primal}, curLB, curUB, pCosts, 1, &iters, func() int { return 100 })
+	out := selectBranchVar(&branchSelectReq{
+		p: pBr, lpSolver: lpBr, lpRes: LPResult{Status: StatusOptimal, Primal: primal},
+		curLB: curLB, curUB: curUB, pCosts: pCosts, depth: 1,
+		totalIters: &iters, iterLeft: func() int { return 100 },
+	})
+	brCol, brVal := out.bestCol, out.bestVal
 	if brCol <= 0 || brVal <= curLB[brCol] || brVal >= curUB[brCol] {
 		t.Fatalf("selectBranchVar returned invalid (%d, %v) for bounds [%v, %v]", brCol, brVal, curLB[max(0, brCol)], curUB[max(0, brCol)])
 	}
@@ -630,7 +639,7 @@ func TestRuizScaledCutsCrashRecoveryAndInternalGuards(t *testing.T) {
 	mMIRCuts.AddConstraint("r", NewExpr(mx0.T(mirDelta), mx1.T(mirA1), mx2.T(mirA2)).Le(4.9))
 	pMIRCuts := mMIRCuts.Compile()
 	mirWit := []float64{1.0, mirU1, mirU2}
-	for _, cut := range separateRowMIRCuts(pMIRCuts, []float64{4.9 / mirDelta, 0, 0}) {
+	for _, cut := range separateRowMIRCuts(pMIRCuts, []float64{4.9 / mirDelta, 0, 0}, nil) {
 		act := 0.0
 		for k, c := range cut.ColIdx {
 			act += cut.Val[k] * mirWit[c]
@@ -1005,7 +1014,7 @@ func TestDualPhase1NetlibNoPrimalFallback(t *testing.T) {
 			if bV > 1e-5 || rV > 1e-5 {
 				t.Fatalf("%s: primal violation bound=%.2e row=%.2e", inst.ID, bV, rV)
 			}
-			if !s.primalResidualsWithinTol(res.Primal) || !s.dualResidualsWithinTol(res.Primal, res.ObjectiveMin) {
+			if !s.primalResidualsWithinTol(res.Primal) || !s.dualResidualsWithinTolWithRowRes(res.Primal, res.ObjectiveMin, nil) {
 				t.Fatalf("%s: KKT residual verification failed", inst.ID)
 			}
 			if mustUseDualPhase1[inst.ID] {

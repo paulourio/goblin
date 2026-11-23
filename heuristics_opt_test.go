@@ -20,7 +20,8 @@ func propagateRowUnguarded(p *CompiledProblem, i int, lb, ub []float64) (feasibl
 	hasUB := sense == LessEqual || sense == Equal
 	hasLB := sense == GreaterEqual || sense == Equal
 
-	sum, earlyBail := evalRowActivitySummary(cols, vals, lb, ub, rhs, true, hasUB, hasLB)
+	var sum rowActivitySummary
+	earlyBail := evalRowActivitySummaryInto(&sum, cols, vals, lb, ub, rhs, true, hasUB, hasLB)
 	if earlyBail || sum.extreme {
 		return true, false
 	}
@@ -97,7 +98,7 @@ func propagateRowUnguarded(p *CompiledProblem, i int, lb, ub []float64) (feasibl
 	}
 
 	if hasLB && upperChanged {
-		sum, _ = evalRowActivitySummary(cols, vals, lb, ub, rhs, false, false, true)
+		evalRowActivitySummaryInto(&sum, cols, vals, lb, ub, rhs, false, false, true)
 		if sum.extreme {
 			return true, changed
 		}
@@ -423,16 +424,25 @@ func TestSubMIPNoIncumbentCapAndBufferReuse(t *testing.T) {
 	var buf []branchCand
 	for _, depth := range []int{0, 1, strongBranchMaxDepth + 1} {
 		itersA, itersB := 0, 0
-		colA, valA := selectBranchVar(p, lp, lpRes, curLB, curUB, pCosts, depth, &itersA, func() int { return 1000 })
-		colB, valB := selectBranchVarWithBuf(p, lp, lpRes, curLB, curUB, pCosts, depth, &itersB, func() int { return 1000 }, &buf)
-		if colA != colB || valA != valB || itersA != itersB {
-			t.Fatalf("depth %d mismatch: got (%d,%v,%d), want (%d,%v,%d)", depth, colB, valB, itersB, colA, valA, itersA)
+		outA := selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			depth: depth, totalIters: &itersA, iterLeft: func() int { return 1000 },
+		})
+		outB := selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			depth: depth, totalIters: &itersB, iterLeft: func() int { return 1000 }, candsBuf: &buf,
+		})
+		if outA.bestCol != outB.bestCol || outA.bestVal != outB.bestVal || itersA != itersB {
+			t.Fatalf("depth %d mismatch: got (%d,%v,%d), want (%d,%v,%d)", depth, outB.bestCol, outB.bestVal, itersB, outA.bestCol, outA.bestVal, itersA)
 		}
 	}
 	warmCap := cap(buf)
 	for range 10 {
 		iters := 0
-		selectBranchVarWithBuf(p, lp, lpRes, curLB, curUB, pCosts, 0, &iters, func() int { return 1000 }, &buf)
+		selectBranchVar(&branchSelectReq{
+			p: p, lpSolver: lp, lpRes: lpRes, curLB: curLB, curUB: curUB, pCosts: pCosts,
+			totalIters: &iters, iterLeft: func() int { return 1000 }, candsBuf: &buf,
+		})
 	}
 	if cap(buf) != warmCap {
 		t.Fatalf("sbCands buffer reallocated: cap grew from %d to %d", warmCap, cap(buf))
@@ -485,7 +495,11 @@ func TestTryFractionalDivingBranch1Reuse(t *testing.T) {
 	defer diveLP.Close()
 	diveLP.CopyRootBasisFrom(lp)
 
-	sol, objMin, ok := tryFractionalDiving(p, rootRes.Primal, p.varLB, p.varUB, diveLP, math.Inf(1), true, findContLinkedIntCols(p))
+	sol, objMin, ok := tryFractionalDiving(&divingReq{
+		p: p, rootPrimal: rootRes.Primal, baseLB: p.varLB, baseUB: p.varUB,
+		diveSolver: diveLP, bestObjMin: math.Inf(1), searchShift: p.objConstMin(),
+		onlyEqSupport: true, isContLinked: findContLinkedIntCols(p),
+	})
 	if !ok {
 		t.Fatalf("tryFractionalDiving returned ok=false on feasible equality-supported model")
 	}
@@ -527,10 +541,12 @@ func TestFeasibilityPumpSolvesRandomMADAndRestoresState(t *testing.T) {
 		hs := NewLPSolver(pMax, nil)
 		defer hs.Close()
 		hs.CopyRootBasisFrom(lp)
-		sol, objMin, usedIt, ok := tryFeasibilityPump(
-			pMax, root.Primal, pMax.varLB, pMax.varUB, hs, math.Inf(1), lpMinWithConst(pMax, root),
-			1e-6, 1e-6, time.Time{}, nil, 500, findContLinkedIntCols(pMax),
-		)
+		sol, objMin, usedIt, ok := tryFeasibilityPump(&feasPumpReq{
+			p: pMax, lpPrimal: root.Primal, curLB: pMax.varLB, curUB: pMax.varUB,
+			heurSolver: hs, bestObjMin: math.Inf(1), lowerBoundMin: lpMinWithConst(pMax, root),
+			searchShift: pMax.objConstMin(), relGapTol: 1e-6, absGapTol: 1e-6,
+			maxIterCap: 500, isContLinked: findContLinkedIntCols(pMax),
+		})
 		if !ok {
 			t.Fatalf("tryFeasibilityPump failed to find feasible point on Maximize MILP (iters=%d)", usedIt)
 		}

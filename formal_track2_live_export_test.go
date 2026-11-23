@@ -801,7 +801,7 @@ func ExportLiveSeparatedCutsItems(p *CompiledProblem, feasibleSols [][]float64) 
 	_ = separateGMICutsEx(lp, root.Primal, ws, false)
 	_ = separateKnapsackCoverCuts(p, root.Primal, ws)
 	_ = separateFlowAndVUBCuts(p, root.Primal, ws)
-	_ = separateRowMIRCutsWithWS(p, root.Primal, ws)
+	_ = separateRowMIRCuts(p, root.Primal, ws)
 	_ = separateAggregatedMIRCuts(lp, root.Primal, ws)
 
 	return exportObserverItems(p, obs, feasibleSols)

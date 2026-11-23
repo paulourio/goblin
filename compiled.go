@@ -1,7 +1,6 @@
 package goblin
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -469,83 +468,9 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	// Accumulate and validate objective terms in a single pass, routing duplicate columns through wideDotAcc.
 	inTouched := make([]uint8, n)
 	touched := make([]int, 0, min(n, defaultTouchedCap))
-	objHasDup := false
-	objHasDupLoss := false
-	for _, t := range m.objTerms {
-		if t.Var == invalidDotVar {
-			if firstErr == nil {
-				firstErr = errors.New("Dot: mismatched slice lengths")
-				if abortOnErr {
-					return nil, firstErr
-				}
-			}
-			continue
-		}
-		col, ok := m.validVar(t.Var)
-		if !ok {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("objective references invalid or foreign Var handle %v", t.Var)
-				if abortOnErr {
-					return nil, firstErr
-				}
-			}
-			continue
-		}
-		if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("objective has non-finite coefficient %v", t.Coeff)
-				if abortOnErr {
-					return nil, firstErr
-				}
-			}
-			continue
-		}
-		if t.Coeff == 0 {
-			continue
-		}
-		if inTouched[col] == 0 {
-			inTouched[col] = 1
-			touched = append(touched, col)
-			p.objCoeffs[col] = t.Coeff
-		} else {
-			inTouched[col] = 2
-			objHasDup = true
-		}
-	}
-	if objHasDup {
-		wideMap := make(map[int]*wideDotAcc)
-		for _, col := range touched {
-			if inTouched[col] > 1 {
-				wideMap[col] = &wideDotAcc{}
-			}
-		}
-		for _, t := range m.objTerms {
-			if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
-				if w, exists := wideMap[col]; exists {
-					w.addVal(t.Coeff)
-				}
-			}
-		}
-		for _, col := range touched {
-			if w, exists := wideMap[col]; exists {
-				val, exact := w.finishWithExactCheck(math.NaN())
-				if math.IsNaN(val) || math.IsInf(val, 0) {
-					if firstErr == nil {
-						firstErr = fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
-						if abortOnErr {
-							return nil, firstErr
-						}
-					}
-				}
-				if !exact {
-					objHasDupLoss = true
-				}
-				if val == 0 {
-					val = 0
-				}
-				p.objCoeffs[col] = val
-			}
-		}
+	touched, _, objHasDupLoss, err := m.accumulateTerms(m.objTerms, true, "", abortOnErr, &firstErr, inTouched, touched, p.objCoeffs)
+	if err != nil {
+		return nil, err
 	}
 	for _, col := range touched {
 		inTouched[col] = 0
@@ -611,88 +536,11 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			rhsLo = 0
 		}
 
-		touched = touched[:0]
-		rowHasDup := false
-		rowHasDupLoss := false
-		sorted := true
-		prevCol := -1
 		cTerms := m.conTerms[c.termStart:c.termEnd]
-		for _, t := range cTerms {
-			if t.Var == invalidDotVar {
-				if firstErr == nil {
-					firstErr = errors.New("Dot: mismatched slice lengths")
-					if abortOnErr {
-						return nil, firstErr
-					}
-				}
-				continue
-			}
-			col, ok := m.validVar(t.Var)
-			if !ok {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("constraint %q references invalid or foreign Var handle %v", c.name, t.Var)
-					if abortOnErr {
-						return nil, firstErr
-					}
-				}
-				continue
-			}
-			if math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("constraint %q has non-finite coefficient %v", c.name, t.Coeff)
-					if abortOnErr {
-						return nil, firstErr
-					}
-				}
-				continue
-			}
-			if t.Coeff == 0 {
-				continue
-			}
-			if inTouched[col] == 0 {
-				inTouched[col] = 1
-				if col < prevCol {
-					sorted = false
-				}
-				prevCol = col
-				touched = append(touched, col)
-				rowAcc[col] = t.Coeff
-			} else {
-				inTouched[col] = 2
-				rowHasDup = true
-			}
-		}
-		if rowHasDup {
-			wideMap := make(map[int]*wideDotAcc)
-			for _, col := range touched {
-				if inTouched[col] > 1 {
-					wideMap[col] = &wideDotAcc{}
-				}
-			}
-			for _, t := range cTerms {
-				if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
-					if w, exists := wideMap[col]; exists {
-						w.addVal(t.Coeff)
-					}
-				}
-			}
-			for _, col := range touched {
-				if w, exists := wideMap[col]; exists {
-					val, exact := w.finishWithExactCheck(math.NaN())
-					if math.IsNaN(val) || math.IsInf(val, 0) {
-						if firstErr == nil {
-							firstErr = fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
-							if abortOnErr {
-								return nil, firstErr
-							}
-						}
-					}
-					if !exact {
-						rowHasDupLoss = true
-					}
-					rowAcc[col] = val
-				}
-			}
+		var sorted, rowHasDupLoss bool
+		touched, sorted, rowHasDupLoss, err = m.accumulateTerms(cTerms, false, c.name, abortOnErr, &firstErr, inTouched, touched[:0], rowAcc)
+		if err != nil {
+			return nil, err
 		}
 		if !sorted {
 			slices.Sort(touched)
@@ -1385,61 +1233,6 @@ func evalLinearSum(constant float64, coeffs, x []float64, n int) float64 {
 	return w.finish(math.NaN())
 }
 
-func evalSparseRowSum(cols []int, vals, x []float64) float64 {
-	kLim := min(len(cols), len(vals))
-	var acc dot2Acc
-	for k := range kLim {
-		c := vals[k]
-		xj := x[cols[k]]
-		if c == 0 && math.Abs(xj) <= math.MaxFloat64 {
-			continue
-		}
-		if xj == 0 && math.Abs(c) <= math.MaxFloat64 {
-			continue
-		}
-		acc.addProd(c, xj)
-	}
-	if val, eb, ok := acc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
-		return val
-	}
-	hasPosInf := false
-	hasNegInf := false
-	for k := range kLim {
-		c := vals[k]
-		xj := x[cols[k]]
-		if math.IsNaN(c) || math.IsNaN(xj) {
-			return math.NaN()
-		}
-		if c == 0 || xj == 0 {
-			if (c == 0 && math.IsInf(xj, 0)) || (xj == 0 && math.IsInf(c, 0)) {
-				return math.NaN()
-			}
-			continue
-		}
-		if math.IsInf(c, 0) || math.IsInf(xj, 0) {
-			if (c > 0) == (xj > 0) {
-				hasPosInf = true
-			} else {
-				hasNegInf = true
-			}
-		}
-	}
-	if hasPosInf && hasNegInf {
-		return math.NaN()
-	}
-	if hasPosInf {
-		return math.Inf(1)
-	}
-	if hasNegInf {
-		return math.Inf(-1)
-	}
-	var w wideDotAcc
-	for k := range kLim {
-		w.addProd(vals[k], x[cols[k]])
-	}
-	return w.finish(math.NaN())
-}
-
 func evalSparseRowResidual(cols []int, vals, x []float64, rhs float64) float64 {
 	if math.IsNaN(rhs) {
 		return math.NaN()
@@ -1693,7 +1486,7 @@ func (p *CompiledProblem) MaxViolation(x []float64, checkIntegrality bool) (boun
 				rowViol = max(rowViol, math.Abs(res))
 			}
 		case !hasLB && !hasUB:
-			if math.IsNaN(evalSparseRowSum(cols, vals, x)) {
+			if math.IsNaN(evalSparseRowResidual(cols, vals, x, 0)) {
 				rowViol = math.Inf(1)
 			}
 		default:

@@ -827,7 +827,7 @@ func TestCertifiedNegativeControlsFailClosed(t *testing.T) {
 		}
 		doc["rootStep"] = jsontext.Value("999999")
 		badRaw, _ := json.Marshal(doc)
-		if _, errBad := verifyMiniVIPRBytesAgainstProblem(p, badRaw); !errors.Is(errBad, ErrCertificationFailed) {
+		if _, errBad := verifyMiniVIPRProblem(p, badRaw); !errors.Is(errBad, ErrCertificationFailed) {
 			t.Fatalf("expected out-of-range rootStep rejection, got %v", errBad)
 		}
 	}

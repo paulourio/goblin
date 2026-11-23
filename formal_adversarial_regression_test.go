@@ -40,7 +40,7 @@ func assertVIPRVerifiedIfFormal(tb testing.TB, tr *VIPRTrace, wantMode string) {
 	if trProb == nil {
 		tb.Fatal("VIPRTrace.TracedProblem() is nil")
 	}
-	if _, err := verifyMiniVIPRBytesAgainstProblem(trProb, raw); err != nil {
+	if _, err := verifyMiniVIPRProblem(trProb, raw); err != nil {
 		tb.Fatalf("serialized VIPR does not match TracedProblem: %v", err)
 	}
 	resp, err := FormalCheckVIPRJSONL(tb, raw)
@@ -358,7 +358,7 @@ func TestFormalAdversarialBug4CMIRUnderflowAndVUBRounding(t *testing.T) {
 			t.Fatalf("root LP status=%v", lpRes.Status)
 		}
 		var ws cutGenWorkspace
-		cuts := separateRowMIRCutsWithWS(p, lpRes.Primal, &ws)
+		cuts := separateRowMIRCuts(p, lpRes.Primal, &ws)
 		// Any valid cut must remain satisfied by integer-feasible (x0=1, x1=10^330).
 		x1Huge := new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(330), nil))
 		for ci, c := range cuts {
@@ -405,7 +405,7 @@ func TestFormalAdversarialBug4CMIRUnderflowAndVUBRounding(t *testing.T) {
 		p := m.Compile()
 
 		var ws cutGenWorkspace
-		cuts := separateRowMIRCutsWithWS(p, []float64{0.98, 0}, &ws)
+		cuts := separateRowMIRCuts(p, []float64{0.98, 0}, &ws)
 		// Integer feasible point: x0 = 1, x1 = ceil(0.02 / 2^-55) = 720575940379280.
 		x1Feas := new(big.Rat).SetInt64(720575940379280)
 		// Verify exact feasibility of (1, x1Feas): 1 + a1*x1Feas <= 0.98.
@@ -456,7 +456,7 @@ func TestFormalAdversarialBug4CMIRUnderflowAndVUBRounding(t *testing.T) {
 		pInt := mInt.Compile()
 
 		var ws cutGenWorkspace
-		cutsInt := separateRowMIRCutsWithWS(pInt, []float64{0.5, 0}, &ws)
+		cutsInt := separateRowMIRCuts(pInt, []float64{0.5, 0}, &ws)
 		if len(cutsInt) != 0 {
 			t.Fatalf("integer alpha=+Inf overflow emitted bogus cuts: %+v", cutsInt)
 		}
@@ -470,7 +470,7 @@ func TestFormalAdversarialBug4CMIRUnderflowAndVUBRounding(t *testing.T) {
 		mCont.AddConstraint("r0", NewExpr(y0.T(1e-8), c1.T(-1e305)).Le(0.5e-8))
 		pCont := mCont.Compile()
 
-		cutsCont := separateRowMIRCutsWithWS(pCont, []float64{0.5, 0}, &ws)
+		cutsCont := separateRowMIRCuts(pCont, []float64{0.5, 0}, &ws)
 		if len(cutsCont) != 0 {
 			t.Fatalf("continuous g=+Inf overflow emitted bogus cuts: %+v", cutsCont)
 		}
@@ -1117,11 +1117,11 @@ func TestFormalAdversarialBug13HeuristicIncumbentTol(t *testing.T) {
 		wantObj, _ := wantObjRat.Float64()
 
 		// Propagated continuous bounds pad x2 outward to 1.0011 (rV = 1e-6).
-		// trySingleRowContinuousCompletion must not accept this infeasible corner.
+		// trySingleRowCompletion must not accept this infeasible corner.
 		hlb := []float64{1, 0, 0, 0}
 		hub := []float64{1, 0, 1.0011, 0}
-		if sol, _, ok := trySingleRowContinuousCompletion(p, hlb, hub); ok {
-			t.Fatalf("trySingleRowContinuousCompletion accepted padded infeasible corner: sol=%v", sol)
+		if sol, _, ok := trySingleRowCompletion(p, hlb, hub); ok {
+			t.Fatalf("trySingleRowCompletion accepted padded infeasible corner: sol=%v", sol)
 		}
 
 		for _, preOn := range []bool{false, true} {
@@ -1237,7 +1237,10 @@ func TestFormalAdversarialBug13HeuristicIncumbentTol(t *testing.T) {
 		hs := NewLPSolver(pInf, nil)
 		defer hs.Close()
 		var fixLB, fixUB []float64
-		if cand, ok := polishIncumbentWith(pInf, time.Time{}, nil, []float64{0, 0}, nil, &fixLB, &fixUB, func() *LPSolver { return hs }); ok {
+		if cand, ok := polishIncumbentWith(&polishIncumbentReq{
+			p: pInf, exactIntRows: findExactIntRows(pInf), x: []float64{0, 0},
+			fixScratchLB: &fixLB, fixScratchUB: &fixUB, ensureHeur: func() *LPSolver { return hs },
+		}); ok {
 			t.Fatalf("polishIncumbentWith accepted LP-infeasible candidate: %v", cand)
 		}
 

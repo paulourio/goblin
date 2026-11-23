@@ -166,86 +166,47 @@ func (ws *Workspace) ensureSize(n, m int) {
 	ws.m = m
 	ws.totVar = tot
 
-	ws.lb = resizeFloat64(ws.lb, tot)
-	ws.ub = resizeFloat64(ws.ub, tot)
-	ws.cost = resizeFloat64(ws.cost, tot)
-	ws.workCost = resizeFloat64(ws.workCost, tot)
+	ws.lb = resizeZero(ws.lb, tot)
+	ws.ub = resizeZero(ws.ub, tot)
+	ws.cost = resizeZero(ws.cost, tot)
+	ws.workCost = resizeZero(ws.workCost, tot)
 
-	ws.basis = resizeInt(ws.basis, m)
-	ws.basicRow = resizeInt(ws.basicRow, tot)
-	ws.rowBasicDeg = resizeInt(ws.rowBasicDeg, m)
-	if cap(ws.status) < tot {
-		ws.status = make([]varBasisStatus, tot)
-	} else {
-		ws.status = ws.status[:tot]
-	}
-	ws.basicLB = resizeFloat64(ws.basicLB, m)
-	ws.basicUB = resizeFloat64(ws.basicUB, m)
-	ws.basicTol = resizeFloat64(ws.basicTol, m)
+	ws.basis = resizeZero(ws.basis, m)
+	ws.basicRow = resizeZero(ws.basicRow, tot)
+	ws.rowBasicDeg = resizeZero(ws.rowBasicDeg, m)
+	ensureBuf(&ws.status, tot, false)
+	ws.basicLB = resizeZero(ws.basicLB, m)
+	ws.basicUB = resizeZero(ws.basicUB, m)
+	ws.basicTol = resizeZero(ws.basicTol, m)
 
-	ws.x = resizeFloat64(ws.x, tot)
-	ws.xb = resizeFloat64(ws.xb, m)
-	ws.y = resizeFloat64(ws.y, m)
-	ws.dj = resizeFloat64(ws.dj, tot)
-	ws.dse = resizeFloat64(ws.dse, m)
+	ws.x = resizeZero(ws.x, tot)
+	ws.xb = resizeZero(ws.xb, m)
+	ws.y = resizeZero(ws.y, m)
+	ws.dj = resizeZero(ws.dj, tot)
+	ws.dse = resizeZero(ws.dse, m)
 
-	ws.rho = resizeFloat64(ws.rho, m)
+	ws.rho = resizeZero(ws.rho, m)
 	ws.rhoIdx = ws.rhoIdx[:0]
 	ws.rhoSparse = false
-	ws.fCol = resizeFloat64(ws.fCol, m)
+	ws.fCol = resizeZero(ws.fCol, m)
 	ws.fColIdx = ws.fColIdx[:0]
 	ws.fColSparse = false
-	ws.tau = resizeFloat64(ws.tau, m)
+	ws.tau = resizeZero(ws.tau, m)
 	ws.tauIdx = ws.tauIdx[:0]
 	ws.tauSparse = false
-	ws.tabRow = resizeFloat64(ws.tabRow, tot)
-	ws.tabRowErr = resizeFloat64(ws.tabRowErr, tot)
-	if cap(ws.tabRowMark) < tot {
-		ws.tabRowMark = make([]bool, tot)
-	} else {
-		ws.tabRowMark = ws.tabRowMark[:tot]
-		clear(ws.tabRowMark)
-	}
-	ws.tabRowIdx = ws.tabRowIdx[:0]
-	if cap(ws.tabRowIdx) < tot {
-		ws.tabRowIdx = make([]int, 0, tot)
-	}
+	ws.tabRow = resizeZero(ws.tabRow, tot)
+	ws.tabRowErr = resizeZero(ws.tabRowErr, tot)
+	ws.tabRowMark = resizeZero(ws.tabRowMark, tot)
+	ws.tabRowIdx = resetCap(ws.tabRowIdx, tot)
 	ws.tabRowSparse = false
 	numChunks := (n + tabRowChunkMask) >> tabRowChunkBits
-	if cap(ws.tabRowChunkMark) < numChunks {
-		ws.tabRowChunkMark = make([]bool, numChunks)
-		ws.tabRowChunks = make([]int, 0, numChunks)
-	} else {
-		ws.tabRowChunkMark = ws.tabRowChunkMark[:numChunks]
-		clear(ws.tabRowChunkMark)
-		if cap(ws.tabRowChunks) < numChunks {
-			ws.tabRowChunks = make([]int, 0, numChunks)
-		} else {
-			ws.tabRowChunks = ws.tabRowChunks[:0]
-		}
-	}
+	ws.tabRowChunkMark = resizeZero(ws.tabRowChunkMark, numChunks)
+	ws.tabRowChunks = resetCap(ws.tabRowChunks, numChunks)
 	ws.flipCols = ws.flipCols[:0]
-	if cap(ws.bfrtCands) < tot {
-		ws.bfrtCands = make([]bfrtCand, 0, tot)
-	} else {
-		ws.bfrtCands = ws.bfrtCands[:0]
-	}
+	ws.bfrtCands = resetCap(ws.bfrtCands, tot)
 	ws.dualShift = ws.dualShift[:0]
-	ws.rowMaxTerm = resizeFloat64(ws.rowMaxTerm, m)
-	if cap(ws.varTol) < tot {
-		ws.varTol = make([]float64, tot)
-	} else {
-		ws.varTol = ws.varTol[:tot]
-	}
-}
-
-func (ws *Workspace) ensureRowMaxTerm(m int) []float64 {
-	if cap(ws.rowMaxTerm) < m {
-		ws.rowMaxTerm = make([]float64, m)
-	} else {
-		ws.rowMaxTerm = ws.rowMaxTerm[:m]
-	}
-	return ws.rowMaxTerm
+	ws.rowMaxTerm = resizeZero(ws.rowMaxTerm, m)
+	ensureBuf(&ws.varTol, tot, false)
 }
 
 func (ws *Workspace) ensureDotAcc(size int) []dot2Acc {
@@ -258,9 +219,9 @@ func (ws *Workspace) ensureDotAcc(size int) []dot2Acc {
 	return buf
 }
 
-func ensureFloat64Slice(buf *[]float64, n int, zero bool) []float64 {
+func ensureBuf[T any](buf *[]T, n int, zero bool) []T {
 	if cap(*buf) < n {
-		*buf = make([]float64, n)
+		*buf = make([]T, n)
 		return *buf
 	}
 	s := (*buf)[:n]
@@ -270,32 +231,18 @@ func ensureFloat64Slice(buf *[]float64, n int, zero bool) []float64 {
 	return s
 }
 
-func ensureIntSlice(buf *[]int, n int, zero bool) []int {
-	if cap(*buf) < n {
-		*buf = make([]int, n)
-		return *buf
-	}
-	s := (*buf)[:n]
-	if zero {
-		clear(s)
-	}
-	return s
-}
-
-func resizeFloat64(s []float64, n int) []float64 {
+func resizeZero[T any](s []T, n int) []T {
 	if cap(s) < n {
-		return make([]float64, n)
+		return make([]T, n)
 	}
 	s = s[:n]
 	clear(s)
 	return s
 }
 
-func resizeInt(s []int, n int) []int {
-	if cap(s) < n {
-		return make([]int, n)
+func resetCap[T any](s []T, minCap int) []T {
+	if cap(s) < minCap {
+		return make([]T, 0, minCap)
 	}
-	s = s[:n]
-	clear(s)
-	return s
+	return s[:0]
 }
