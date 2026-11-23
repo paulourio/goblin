@@ -837,6 +837,85 @@ theorem gcd_row_div_sound {n : Nat} {sense : ConstraintSense} {a : Fin n → Int
       rfl
     exact hden_ne hden1
 
+/-- `evalGcdRowDiv` always returns a divisor and outcome that pass `checkGcdRowDiv`. -/
+theorem evalGcdRowDiv_checkGcdRowDiv {n : Nat} {sense : ConstraintSense} {a : Fin n → Int}
+    {rhs : Rat} {d : Int} {out : GcdRowDivOutcome n}
+    (heval : evalGcdRowDiv sense a rhs = some (d, out)) :
+    checkGcdRowDiv sense a rhs d out = true := by
+  unfold evalGcdRowDiv at heval
+  dsimp only at heval
+  split at heval
+  · next hd_pos =>
+    have hd_ne : rowCoeffsGcd n a ≠ 0 := Int.ne_of_gt hd_pos
+    have hdiv_props :
+        ∀ j : Fin n,
+          Int.tmod (a j) (rowCoeffsGcd n a) = 0 ∧
+          a j = rowCoeffsGcd n a * Int.tdiv (a j) (rowCoeffsGcd n a) := by
+      intro j
+      rcases rowCoeffsGcd_dvd n a j with ⟨k, hk⟩
+      have htdiv : Int.tdiv (a j) (rowCoeffsGcd n a) = k := by
+        rw [hk, Int.mul_tdiv_cancel_left k hd_ne]
+      have hmul : a j = rowCoeffsGcd n a * Int.tdiv (a j) (rowCoeffsGcd n a) := by
+        rw [htdiv, hk]
+      have hmod : Int.tmod (a j) (rowCoeffsGcd n a) = 0 :=
+        Int.tmod_eq_zero_of_dvd (rowCoeffsGcd_dvd n a j)
+      exact ⟨hmod, hmul⟩
+    cases sense with
+    | le =>
+      injection heval with hpair
+      injection hpair with hd_eq hout_eq
+      subst hd_eq; subst hout_eq
+      unfold checkGcdRowDiv
+      simp only [Bool.and_eq_true, decide_eq_true_eq, allFin3B_iff, beq_self_eq_true, and_true]
+      exact ⟨⟨hd_pos, fun j => (hdiv_props j).1⟩, fun j => (hdiv_props j).2⟩
+    | ge =>
+      injection heval with hpair
+      injection hpair with hd_eq hout_eq
+      subst hd_eq; subst hout_eq
+      unfold checkGcdRowDiv
+      simp only [Bool.and_eq_true, decide_eq_true_eq, allFin3B_iff, beq_self_eq_true, and_true]
+      exact ⟨⟨hd_pos, fun j => (hdiv_props j).1⟩, fun j => (hdiv_props j).2⟩
+    | eq =>
+      dsimp only at heval
+      cases hden : (rhs / (rowCoeffsGcd n a : Rat)).den == 1 with
+      | true =>
+        simp only [hden, ↓reduceIte] at heval
+        injection heval with hpair
+        injection hpair with hd_eq hout_eq
+        subst hd_eq; subst hout_eq
+        unfold checkGcdRowDiv
+        simp only [Bool.and_eq_true, decide_eq_true_eq, allFin3B_iff, beq_self_eq_true, and_true]
+        exact ⟨⟨hd_pos, fun j => (hdiv_props j).1⟩, fun j => (hdiv_props j).2, hden⟩
+      | false =>
+        simp only [hden, Bool.false_eq_true, ↓reduceIte] at heval
+        injection heval with hpair
+        injection hpair with hd_eq hout_eq
+        subst hd_eq; subst hout_eq
+        unfold checkGcdRowDiv
+        simp only [Bool.and_eq_true, decide_eq_true_eq, allFin3B_iff, bne_iff_ne]
+        refine ⟨⟨hd_pos, fun j => (hdiv_props j).1⟩, rfl, ?_⟩
+        intro h1
+        rw [h1] at hden
+        simp at hden
+  · cases heval
+
+/-- Soundness and exact solution-set equivalence of `evalGcdRowDiv`, derived from `gcd_row_div_sound`. -/
+theorem evalGcdRowDiv_sound {n : Nat} {sense : ConstraintSense} {a : Fin n → Int}
+    {rhs : Rat} {d : Int} {out : GcdRowDivOutcome n}
+    (heval : evalGcdRowDiv sense a rhs = some (d, out)) :
+    match out with
+    | .reduced a' rhs' =>
+      ∀ x : Fin n → Int,
+        SatisfiesRow sense ((intFinSum n (fun j => a j * x j) : Int) : Rat) rhs ↔
+        SatisfiesRow sense ((intFinSum n (fun j => a' j * x j) : Int) : Rat) (rhs' : Rat)
+    | .infeasible =>
+      ¬ ∃ x : Fin n → Int,
+        SatisfiesRow sense ((intFinSum n (fun j => a j * x j) : Int) : Rat) rhs := by
+  have hchk := evalGcdRowDiv_checkGcdRowDiv heval
+  cases out with
+  | reduced a' rhs' => exact gcd_row_div_sound hchk
+  | infeasible => exact gcd_row_div_sound hchk
+
 /-! ### Section 4: LP Presolve Step & Postsolve Dual Reconstruction (`checkLPPresolveStep`) -/
 
 /-- Verified LP presolve reduction step witnessing dual-exact transformation `LP ↦ LP'`. -/
@@ -3400,24 +3479,57 @@ def verifyLPUnboundedRootJson (root : JsonVal) : Except String Unit := do
   let lp ← parseLPInstanceJson root
   verifyLPUnboundedJson lp root
 
+private def parseIsIntMaskField (numVars : Nat) (v : JsonVal) (label : String) :
+    Except String (Array Bool) := do
+  let arr ← v.asArray
+  if arr.size != numVars then
+    throw s!"'{label}' length {arr.size} != numVars {numVars}"
+  arr.mapM JsonVal.asBool
+
+private def parseIntColsField (numVars : Nat) (v : JsonVal) : Except String (Array Bool) := do
+  let colsJson ← v.asArray
+  let cols ← colsJson.mapM JsonVal.asNat
+  for c in cols do
+    if c ≥ numVars then
+      throw s!"integer column index {c} >= numVars {numVars}"
+  return Array.ofFn (fun j : Fin numVars => cols.contains j.val)
+
 private def parseIsIntFlagsJson (numVars : Nat) (root : JsonVal) : Except String (Array Bool) := do
-  match getOptNonNullField root ["isInt", "intMask"] with
-  | some bv =>
-    let arr ← bv.asArray
-    if arr.size != numVars then
-      throw s!"'isInt' length {arr.size} != numVars {numVars}"
-    arr.mapM JsonVal.asBool
-  | none =>
-    match getOptNonNullField root ["intCols", "integerCols"] with
-    | some cv =>
-      let colsJson ← cv.asArray
-      let cols ← colsJson.mapM JsonVal.asNat
-      for c in cols do
-        if c ≥ numVars then
-          throw s!"integer column index {c} >= numVars {numVars}"
-      return Array.ofFn (fun j : Fin numVars => cols.contains j.val)
-    | none =>
+  let maskOpt? : Option (Array Bool) ←
+    match getOptNonNullField root ["isInt"], getOptNonNullField root ["intMask"] with
+    | some v1, some v2 =>
+      let m1 ← parseIsIntMaskField numVars v1 "isInt"
+      let m2 ← parseIsIntMaskField numVars v2 "intMask"
+      if m1 != m2 then
+        throw "conflicting integer-column specifications: 'isInt' and 'intMask' differ"
+      pure (some m1)
+    | some v1, none => some <$> parseIsIntMaskField numVars v1 "isInt"
+    | none, some v2 => some <$> parseIsIntMaskField numVars v2 "intMask"
+    | none, none => pure none
+  let colsOpt? : Option (Array Bool) ←
+    match getOptNonNullField root ["intCols"], getOptNonNullField root ["integerCols"] with
+    | some v1, some v2 =>
+      let c1 ← parseIntColsField numVars v1
+      let c2 ← parseIntColsField numVars v2
+      if c1 != c2 then
+        throw "conflicting integer-column specifications: 'intCols' and 'integerCols' differ"
+      pure (some c1)
+    | some v1, none => some <$> parseIntColsField numVars v1
+    | none, some v2 => some <$> parseIntColsField numVars v2
+    | none, none => pure none
+  let flags ←
+    match maskOpt?, colsOpt? with
+    | some m, some c =>
+      if m != c then
+        throw "conflicting integer-column specifications: 'isInt' and 'intCols' denote different column sets"
+      pure m
+    | some m, none => pure m
+    | none, some c => pure c
+    | none, none =>
       throw "missing required integer-column specification ('isInt' or 'intCols')"
+  if !flags.any id then
+    throw "milp-unbounded requires at least one integer column; use 'unbounded' mode for all-continuous LPs"
+  return flags
 
 /-- Verifies a MILP unboundedness certificate `(isInt, x0, d)` against `lp` from JSON fields. -/
 def verifyMILPUnboundedJson (lp : LPInstance) (root : JsonVal) : Except String Unit := do
@@ -3522,29 +3634,42 @@ def verifyLPPresolveJson (root : JsonVal) : Except String (Option Rat) := do
         pure []
   if !checkLPPresolveChain lpOrig chain lpRed then
     throw "LP presolve reduction certificate failed checkLPPresolveChain"
-  match getOptNonNullField root ["yReduced", "yRed", "y"] with
-  | none => return none
-  | some _ =>
-    let yArr ← parseRatVecJson root ["yReduced", "yRed", "y"]
-      ["yReducedBits", "yRedBits", "yBits"] lpRed.numRows "yReduced"
-    if hy : yArr.size = lpRed.numRows then
-      let yRed : Fin lpRed.numRows → Rat := fun i => yArr[i.val]'(by rw [hy]; exact i.isLt)
-      let yOrig := postsolveLPDualChain lpOrig chain lpRed yRed
-      match getOptNonNullField root ["xReduced", "xRed", "x"] with
-      | some _ =>
-        let xArr ← parseRatVecJson root ["xReduced", "xRed", "x"]
-          ["xReducedBits", "xRedBits", "xBits"] lpRed.numVars "xReduced"
-        if hx : xArr.size = lpRed.numVars then
-          let xRed : Fin lpRed.numVars → Rat := fun j => xArr[j.val]'(by rw [hx]; exact j.isLt)
-          if !checkLPOptimal lpRed xRed yRed then
-            throw "LP presolve certificate rejected: (xReduced, yReduced) is not optimal on reduced LP"
-          return safeDualBound lpOrig yOrig
-        else throw "internal xReduced size mismatch"
-      | none =>
-        match safeDualBound lpOrig yOrig with
-        | some b => return some b
-        | none => throw "postsolved dual vector failed safeDualBound on original LP"
-    else throw "internal yReduced size mismatch"
+  let hasX := (getOptNonNullField root ["xReduced", "xRed", "x", "xReducedBits", "xRedBits", "xBits"]).isSome
+  let hasY := (getOptNonNullField root ["yReduced", "yRed", "y", "yReducedBits", "yRedBits", "yBits"]).isSome
+  let xRedOpt : Option (Fin lpRed.numVars → Rat) ←
+    if hasX then
+      let xArr ← parseRatVecJson root ["xReduced", "xRed", "x"]
+        ["xReducedBits", "xRedBits", "xBits"] lpRed.numVars "xReduced"
+      if hx : xArr.size = lpRed.numVars then
+        let xRed : Fin lpRed.numVars → Rat := fun j => xArr[j.val]'(by rw [hx]; exact j.isLt)
+        if !checkPrimalFeasible lpRed xRed then
+          throw "LP presolve certificate rejected: xReduced is not primal-feasible on reduced LP"
+        let xOrig := liftLPPresolvePrimalChain lpOrig chain lpRed xRed
+        if !checkPrimalFeasible lpOrig xOrig then
+          throw "LP presolve certificate rejected: lifted primal vector is not primal-feasible on original LP"
+        pure (some xRed)
+      else throw "internal xReduced size mismatch"
+    else
+      pure none
+  if !hasY then
+    return none
+  let yArr ← parseRatVecJson root ["yReduced", "yRed", "y"]
+    ["yReducedBits", "yRedBits", "yBits"] lpRed.numRows "yReduced"
+  if hy : yArr.size = lpRed.numRows then
+    let yRed : Fin lpRed.numRows → Rat := fun i => yArr[i.val]'(by rw [hy]; exact i.isLt)
+    let yOrig := postsolveLPDualChain lpOrig chain lpRed yRed
+    match xRedOpt with
+    | some xRed =>
+      if !checkLPOptimal lpRed xRed yRed then
+        throw "LP presolve certificate rejected: (xReduced, yReduced) is not optimal on reduced LP"
+      match safeDualBound lpOrig yOrig with
+      | some b => return some b
+      | none => throw "postsolved dual vector failed safeDualBound on original LP"
+    | none =>
+      match safeDualBound lpOrig yOrig with
+      | some b => return some b
+      | none => throw "postsolved dual vector failed safeDualBound on original LP"
+  else throw "internal yReduced size mismatch"
 
 private def parseSignedIntFlexJson (v : JsonVal) : Except String Int :=
   match v with
@@ -3569,7 +3694,9 @@ def handleGcdRowDivJson (v : JsonVal) : Except String String := do
     match evalGcdRowDiv sense cFn rhs with
     | none =>
       throw "gcd-div-check requires at least one non-zero integer coefficient (gcd > 0)"
-    | some (_, out) =>
+    | some (gEval, out) =>
+      if !checkGcdRowDiv sense cFn rhs gEval out then
+        throw "internal gcd-div-check validation failed"
       let resInfeasible :=
         match out with
         | .infeasible => true
@@ -3582,10 +3709,22 @@ def handleGcdRowDivJson (v : JsonVal) : Except String String := do
         match out with
         | .infeasible => fun _ => 0
         | .reduced a' _ => a'
-      let divisor ←
+      let divisorOpt? : Option Int ←
         match getOptNonNullField v ["divisor", "d", "candidate_g"] with
-        | some dv => parseSignedIntFlexJson dv
-        | none => pure g
+        | some dv => some <$> parseSignedIntFlexJson dv
+        | none => pure none
+      let divisor := divisorOpt?.getD gEval
+      let validateProposedDiv := fun (dcVal drVal : JsonVal) => do
+        let dcJson ← dcVal.asArray
+        if dcJson.size != n then
+          throw s!"'div_coeffs' length {dcJson.size} != coeffs length {n}"
+        let dcArr ← dcJson.mapM parseSignedIntFlexJson
+        let dr ← parseSignedIntFlexJson drVal
+        if hdc : dcArr.size = n then
+          let dcFn : Fin n → Int := fun j => dcArr[j.val]'(by rw [hdc]; exact j.isLt)
+          if !checkGcdRowDiv sense cFn rhs divisor (.reduced dcFn dr) then
+            throw "unsound gcd-div-check: divided coefficients or tightened RHS mismatch"
+        else throw "internal div_coeffs size mismatch"
       match getOptNonNullField v ["expect_infeasible", "infeasible"] with
       | some iv =>
         let expInf ← iv.asBool
@@ -3594,34 +3733,24 @@ def handleGcdRowDivJson (v : JsonVal) : Except String String := do
             throw s!"unsound gcd-div-check: claimed infeasible on feasible equality rhs={rhs.num}/{rhs.den} (d={divisor})"
         else
           match getOptNonNullField v ["div_coeffs", "divCoeffs"], getOptNonNullField v ["div_rhs", "divRhs"] with
-          | some dcVal, some drVal =>
-            let dcJson ← dcVal.asArray
-            if dcJson.size != n then
-              throw s!"'div_coeffs' length {dcJson.size} != coeffs length {n}"
-            let dcArr ← dcJson.mapM parseSignedIntFlexJson
-            let dr ← parseSignedIntFlexJson drVal
-            if hdc : dcArr.size = n then
-              let dcFn : Fin n → Int := fun j => dcArr[j.val]'(by rw [hdc]; exact j.isLt)
-              if !checkGcdRowDiv sense cFn rhs divisor (.reduced dcFn dr) then
-                throw "unsound gcd-div-check: divided coefficients or tightened RHS mismatch"
-            else throw "internal div_coeffs size mismatch"
-          | _, _ =>
+          | some dcVal, some drVal => validateProposedDiv dcVal drVal
+          | some _, none => throw "gcd-div-check: 'div_coeffs' requires 'div_rhs'"
+          | none, some _ => throw "gcd-div-check: 'div_rhs' requires 'div_coeffs'"
+          | none, none =>
             if resInfeasible then
               throw s!"gcd-div-check mismatch: expected feasible, but equality rhs={rhs.num}/{rhs.den} is not divisible by gcd={g}"
+            if let some dCand := divisorOpt? then
+              if !(decide (0 < dCand) && allFin3B n (fun j => decide (Int.tmod (cFn j) dCand = 0))) then
+                throw s!"unsound gcd-div-check: divisor {dCand} does not divide all integer coefficients"
       | none =>
         match getOptNonNullField v ["div_coeffs", "divCoeffs"], getOptNonNullField v ["div_rhs", "divRhs"] with
-        | some dcVal, some drVal =>
-          let dcJson ← dcVal.asArray
-          if dcJson.size != n then
-            throw s!"'div_coeffs' length {dcJson.size} != coeffs length {n}"
-          let dcArr ← dcJson.mapM parseSignedIntFlexJson
-          let dr ← parseSignedIntFlexJson drVal
-          if hdc : dcArr.size = n then
-            let dcFn : Fin n → Int := fun j => dcArr[j.val]'(by rw [hdc]; exact j.isLt)
-            if !checkGcdRowDiv sense cFn rhs divisor (.reduced dcFn dr) then
-              throw "unsound gcd-div-check: divided coefficients or tightened RHS mismatch"
-          else throw "internal div_coeffs size mismatch"
-        | _, _ => pure ()
+        | some dcVal, some drVal => validateProposedDiv dcVal drVal
+        | some _, none => throw "gcd-div-check: 'div_coeffs' requires 'div_rhs'"
+        | none, some _ => throw "gcd-div-check: 'div_rhs' requires 'div_coeffs'"
+        | none, none =>
+          if let some dCand := divisorOpt? then
+            if !(decide (0 < dCand) && allFin3B n (fun j => decide (Int.tmod (cFn j) dCand = 0))) then
+              throw s!"unsound gcd-div-check: divisor {dCand} does not divide all integer coefficients"
       let divList := (List.range n).map fun j =>
         if hj : j < n then toString (resDivCoeffs ⟨j, hj⟩) else "0"
       let infeasStr := if resInfeasible then "true" else "false"

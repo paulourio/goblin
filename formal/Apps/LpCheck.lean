@@ -1,6 +1,7 @@
 /-
 Apps.LpCheck: standalone CLI verifier for LP primal-dual optimality,
 Neumaier-Shcherbina safe dual bounds, Farkas infeasibility certificates,
+direct bound-conflict infeasibility (`bound-conflict`),
 LP/MILP unboundedness rays (`unbounded`, `milp-unbounded`), and LP presolve
 dual postsolve reconstruction (`lp-presolve`).
 -/
@@ -227,26 +228,68 @@ private def formatBound (r : Rat) : String :=
 
 private def isKnownLPSubcmd (s : String) : Bool :=
   s == "optimal" || s == "safe" || s == "safe-bound" || s == "farkas" ||
-  s == "unbounded" || s == "milp-unbounded" || s == "lp-presolve"
+  s == "bound-conflict" || s == "unbounded" || s == "milp-unbounded" || s == "lp-presolve"
 
 private def normalizeLPMode (s : String) : String :=
-  if s == "safe" then "safe-bound" else s
+  if s == "safe" then "safe-bound"
+  else if s == "boundConflict" || s == "bound_conflict" then "bound-conflict"
+  else s
 
 private def parseLPMode (defaultMode : Option String) (root : JsonVal) : Except String String := do
-  if let some dm := defaultMode then
-    return normalizeLPMode dm
+  let mut jsonMode? : Option String := none
   for key in ["mode", "subcommand", "op"] do
     if let some mv := root.getField? key then
       if mv != .null then
         let s ← mv.asString
-        return normalizeLPMode s
+        let nm := normalizeLPMode s
+        match jsonMode? with
+        | none => jsonMode? := some nm
+        | some prev =>
+          if prev != nm then
+            throw s!"mode mismatch between JSON fields: '{prev}' vs '{key}'='{nm}'"
   if let some sv := root.getField? "safe" then
     if sv != .null then
       let b ← sv.asBool
-      return (if b then "safe-bound" else "optimal")
-  if (getOptionalField root ["reduced", "lpReduced", "presolved"]).isSome then
-    return "lp-presolve"
-  .error "missing required JSON field 'mode'"
+      let sm := if b then "safe-bound" else "optimal"
+      match jsonMode? with
+      | none => jsonMode? := some sm
+      | some prev =>
+        if prev != sm then
+          throw s!"mode mismatch between JSON mode '{prev}' and 'safe'={b} ('{sm}')"
+  match defaultMode, jsonMode? with
+  | some dm, some jm =>
+    let ndm := normalizeLPMode dm
+    if ndm != jm then
+      throw s!"mode mismatch: CLI subcommand '{ndm}' conflicts with JSON mode '{jm}'"
+    return jm
+  | some dm, none =>
+    return normalizeLPMode dm
+  | none, some jm =>
+    return jm
+  | none, none =>
+    if (getOptionalField root ["reduced", "lpReduced", "presolved"]).isSome then
+      return "lp-presolve"
+    .error "missing required JSON field 'mode'"
+
+private def parseOptionalRatPair (root : JsonVal) (k1 k2 : String) : Except String (Option Rat) := do
+  let v1? :=
+    match root.getField? k1 with
+    | none | some .null => none
+    | some v => some v
+  let v2? :=
+    match root.getField? k2 with
+    | none | some .null => none
+    | some v => some v
+  match v1?, v2? with
+  | some v1, some v2 =>
+    let r1 ← asRatOrBits v1
+    let r2 ← asRatOrBits v2
+    if r1 != r2 then
+      throw s!"conflicting values for '{k1}' ({formatBound r1}) and '{k2}' ({formatBound r2})"
+    return some r1
+  | some v1, none => some <$> asRatOrBits v1
+  | none, some v2 => some <$> asRatOrBits v2
+  | none, none => return none
 
 private def effectivePrintBound (root : JsonVal) (cliFlag : Bool) : Except String Bool := do
   if cliFlag then
@@ -255,20 +298,33 @@ private def effectivePrintBound (root : JsonVal) (cliFlag : Bool) : Except Strin
   | none | some .null => return false
   | some pv => pv.asBool
 
-/-- Returns `(mode, optionalCertifiedBound)` on success. -/
+/-- Returns `(mode, optionalCertifiedBound, optionalGapTol)` on success. -/
 private def verifyPayloadCore (defaultMode : Option String) (root : JsonVal) :
-    Except String (String × Option Rat) := do
+    Except String (String × Option Rat × Option Rat) := do
   let mode ← parseLPMode defaultMode root
   match mode with
   | "unbounded" =>
     Track3B.verifyLPUnboundedRootJson root
-    return ("unbounded", none)
+    return ("unbounded", none, none)
   | "milp-unbounded" =>
     Track3B.verifyMILPUnboundedRootJson root
-    return ("milp-unbounded", none)
+    return ("milp-unbounded", none, none)
   | "lp-presolve" =>
     let bnd? ← Track3B.verifyLPPresolveJson root
-    return ("lp-presolve", bnd?)
+    return ("lp-presolve", bnd?, none)
+  | "bound-conflict" =>
+    let lp ← parseLPInstance root
+    let colVal ←
+      match getOptionalField root ["col", "conflictCol"] with
+      | some cv => pure cv
+      | none => throw "missing required field 'col' for bound-conflict mode"
+    let col ← colVal.asNat
+    if checkBoundConflict lp col then
+      return ("bound-conflict", none, none)
+    else if col ≥ lp.numVars then
+      throw s!"bound-conflict column index {col} >= numVars {lp.numVars}"
+    else
+      throw s!"bound-conflict rejected: column {col} does not satisfy finite lb > ub"
   | "optimal" =>
     let lp ← parseLPInstance root
     let xArr ← parseRatVecWithBits root ["x", "primal"] ["xBits", "primalBits"] lp.numVars "x"
@@ -278,7 +334,7 @@ private def verifyPayloadCore (defaultMode : Option String) (root : JsonVal) :
         let xFn : Fin lp.numVars → Rat := fun j => xArr[j.val]'(by rw [hx]; exact j.isLt)
         let yFn : Fin lp.numRows → Rat := fun i => yArr[i.val]'(by rw [hy]; exact i.isLt)
         if checkLPOptimal lp xFn yFn then
-          return ("optimal", some (LPObjective lp xFn))
+          return ("optimal", some (LPObjective lp xFn), none)
         else if !checkPrimalFeasible lp xFn then
           throw "primal vector violates variable bounds or row constraints"
         else
@@ -302,15 +358,33 @@ private def verifyPayloadCore (defaultMode : Option String) (root : JsonVal) :
           let minB ← asRatOrBits minBVal
           if lbVal < minB then
             throw s!"safe dual bound {formatBound lbVal} < minBound {formatBound minB}"
-        if let some primalObjVal := getOptionalField root ["primalObj", "upperObj"] then
-          let upperObj ← asRatOrBits primalObjVal
-          if upperObj < lbVal then
-            throw s!"safe dual bound {formatBound lbVal} > primalObj {formatBound upperObj}"
-          if let some tolVal := getOptionalField root ["gapTol", "tol"] then
-            let tol ← asRatOrBits tolVal
-            if upperObj - lbVal > tol then
-              throw s!"duality gap {formatBound (upperObj - lbVal)} > gapTol {formatBound tol}"
-        return ("safe-bound", some lbVal)
+        let upperObj? ← parseOptionalRatPair root "primalObj" "upperObj"
+        let gapTol? ← parseOptionalRatPair root "gapTol" "tol"
+        if let some tol := gapTol? then
+          if tol < 0 then
+            throw s!"negative gapTol {formatBound tol}"
+        let hasX := (getOptionalField root ["x", "primal", "xBits", "primalBits"]).isSome
+        if upperObj?.isSome || gapTol?.isSome || hasX then
+          if !hasX then
+            throw "safe-bound with 'primalObj'/'upperObj' or 'gapTol'/'tol' requires a feasible primal vector 'x'"
+          let xArr ← parseRatVecWithBits root ["x", "primal"] ["xBits", "primalBits"] lp.numVars "x"
+          if hx : xArr.size = lp.numVars then
+            let xFn : Fin lp.numVars → Rat := fun j => xArr[j.val]'(by rw [hx]; exact j.isLt)
+            if !checkPrimalFeasible lp xFn then
+              throw "primal vector violates variable bounds or row constraints"
+            let xObj := LPObjective lp xFn
+            if let some upperObj := upperObj? then
+              if xObj != upperObj then
+                throw s!"primalObj {formatBound upperObj} does not match LPObjective(x) {formatBound xObj}"
+              if upperObj < lbVal then
+                throw s!"safe dual bound {formatBound lbVal} > primalObj {formatBound upperObj}"
+            if let some tol := gapTol? then
+              if xObj < lbVal then
+                throw s!"safe dual bound {formatBound lbVal} > LPObjective(x) {formatBound xObj}"
+              if xObj - lbVal > tol then
+                throw s!"duality gap {formatBound (xObj - lbVal)} > gapTol {formatBound tol}"
+          else throw "internal x vector size mismatch"
+        return ("safe-bound", some lbVal, gapTol?)
     else throw "internal y vector size mismatch"
   | "farkas" =>
     let lp ← parseLPInstance root
@@ -318,23 +392,24 @@ private def verifyPayloadCore (defaultMode : Option String) (root : JsonVal) :
     if hw : wArr.size = lp.numRows then
       let wFn : Fin lp.numRows → Rat := fun i => wArr[i.val]'(by rw [hw]; exact i.isLt)
       if checkFarkas lp wFn then
-        return ("farkas", none)
+        return ("farkas", none, none)
       else
         throw "Farkas certificate failed (unbounded column product or non-positive strict gap)"
     else throw "internal w vector size mismatch"
   | other =>
-    throw s!"unsupported mode '{other}' (expected 'optimal', 'safe-bound', 'farkas', 'unbounded', 'milp-unbounded', or 'lp-presolve')"
+    throw s!"unsupported mode '{other}' (expected 'optimal', 'safe-bound', 'farkas', 'bound-conflict', 'unbounded', 'milp-unbounded', or 'lp-presolve')"
 
 private def verifyPayload (defaultMode : Option String) (root : JsonVal) (cliPrintBound : Bool) :
     Except String (List String) := do
   let pb ← effectivePrintBound root cliPrintBound
-  let (_, bnd?) ← verifyPayloadCore defaultMode root
-  match bnd? with
-  | some b =>
-    if pb then return ["VERIFIED", s!"BOUND {formatBound b}"]
-    else return ["VERIFIED"]
-  | none =>
-    return ["VERIFIED"]
+  let (mode, bnd?, gapTol?) ← verifyPayloadCore defaultMode root
+  let mut lines : List String := ["VERIFIED", s!"MODE {mode}"]
+  if let some tol := gapTol? then
+    lines := lines ++ [s!"GAPTOL {formatBound tol}"]
+  if pb then
+    if let some b := bnd? then
+      lines := lines ++ [s!"BOUND {formatBound b}"]
+  return lines
 
 private def readInput (path : String) : IO String := do
   if path == "-" then
@@ -344,16 +419,18 @@ private def readInput (path : String) : IO String := do
 
 private def verifyJsonlObj (defaultMode : Option String) (root : JsonVal) (cliPrintBound : Bool) :
     Except String String := do
-  let pb ← effectivePrintBound root cliPrintBound
-  let (mode, bnd?) ← verifyPayloadCore defaultMode root
-  match bnd? with
-  | some b =>
-    if mode == "safe-bound" || pb then
-      return "{\"ok\":true,\"detail\":\"VERIFIED\",\"bound\":" ++ ratObjJson b ++ "}"
-    else
-      return "{\"ok\":true,\"detail\":\"VERIFIED\",\"bound\":" ++ ratObjJson b ++ "}"
-  | none =>
-    return "{\"ok\":true,\"detail\":\"VERIFIED\"}"
+  let _ ← effectivePrintBound root cliPrintBound
+  let (mode, bnd?, gapTol?) ← verifyPayloadCore defaultMode root
+  let base := "{\"ok\":true,\"detail\":\"VERIFIED\",\"mode\":" ++ jsonQuote mode
+  let withBound :=
+    match bnd? with
+    | some b => base ++ ",\"bound\":" ++ ratObjJson b
+    | none => base
+  let withTol :=
+    match gapTol? with
+    | some tol => withBound ++ ",\"gapTol\":" ++ ratObjJson tol
+    | none => withBound
+  return withTol ++ "}"
 
 private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultMode : Option String)
     (cliPrintBound : Bool) : IO UInt32 := do
@@ -363,7 +440,7 @@ private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultMode : Op
   let trimmed := line.trimAscii.toString
   if !trimmed.isEmpty then
     let resp :=
-      match parseJson trimmed >>= fun root => verifyJsonlObj defaultMode root cliPrintBound with
+      match parseJsonStrict trimmed >>= fun root => verifyJsonlObj defaultMode root cliPrintBound with
       | .ok okJson => okJson
       | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
     stdout.putStr resp
@@ -378,11 +455,14 @@ private def runBatch (defaultMode : Option String) (path : String) : IO UInt32 :
     catch err =>
       IO.eprintln s!"ERROR: read '{path}': {err}"
       return 1
-  match parseJson contents >>= JsonVal.asArray with
+  match parseJsonStrict contents >>= JsonVal.asArray with
   | .error msg =>
     IO.eprintln s!"ERROR: parse batch JSON '{path}': {msg}"
     return 1
   | .ok items =>
+    if items.isEmpty then
+      IO.eprintln s!"ERROR: empty batch JSON '{path}'"
+      return 1
     for i in [:items.size] do
       match verifyPayloadCore defaultMode items[i]! with
       | .ok _ => pure ()
@@ -394,7 +474,7 @@ private def runBatch (defaultMode : Option String) (path : String) : IO UInt32 :
 
 private def printUsage : IO Unit := do
   IO.println "usage: lp-check [<subcommand>] [--print-bound] [--jsonl | --batch <array.json | ->] [<certificate.json | ->]"
-  IO.println "  subcommands: optimal, safe-bound, farkas, unbounded, milp-unbounded, lp-presolve"
+  IO.println "  subcommands: optimal, safe-bound, farkas, bound-conflict, unbounded, milp-unbounded, lp-presolve"
 
 private structure CliArgs where
   subcmd : Option String := none
@@ -459,7 +539,7 @@ def main (args : List String) : IO UInt32 := do
         catch err =>
           IO.eprintln s!"ERROR: read '{path}': {err}"
           return 1
-      match parseJson contents with
+      match parseJsonStrict contents with
       | .error msg =>
         IO.eprintln s!"ERROR: parse JSON '{path}': {msg}"
         return 1

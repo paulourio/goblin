@@ -74,19 +74,6 @@ private def parseRowSpec (v : JsonVal) : Except String RowSpec := do
   let rhs ← v.getRat "rhs"
   pure { terms, sense, rhs }
 
-private def parseMIPSpec (v : JsonVal) : Except String MIPSpec := do
-  let numVars ← v.getNat "numVars"
-  let isInt ← v.getArray "isInt" >>= parseBoolArray
-  let lb ← v.getArray "lb" >>= parseOptRatArray
-  let ub ← v.getArray "ub" >>= parseOptRatArray
-  let rows ← (← v.getArray "rows").mapM parseRowSpec
-  pure { numVars, isInt, lb, ub, rows }
-
-private def parseOptionalMIP (v : JsonVal) : Except String (Option MIPSpec) :=
-  match v.getField? "mip" with
-  | none | some .null => .ok none
-  | some mv => some <$> parseMIPSpec mv
-
 private def handleRowLegalMu (v : JsonVal) : Except String String := do
   if let some casesVal := v.getField? "cases" then
     let cases ← casesVal.asArray
@@ -111,10 +98,11 @@ private def handleRowLegalMu (v : JsonVal) : Except String String := do
     let aggCutOpt ← match v.getField? "aggCut" with
       | none | some .null => pure none
       | some cv => some <$> parseCutSpec cv
-    let solsRaw ← v.getArray "solutions"
-    let solutions ← solsRaw.mapM (fun sv => sv.asArray >>= parseRatArray)
+    let solutions ← match v.getField? "solutions" with
+      | none | some .null => pure #[]
+      | some sv => (← sv.asArray).mapM (fun x => x.asArray >>= parseRatArray)
     checkRowAgg rows allowZero aggCutOpt solutions
-    pure s!"VERIFIED (row-agg, {rows.size} rows, {solutions.size} solutions)"
+    pure s!"VERIFIED (row-agg, {rows.size} rows, {solutions.size} witnesses)"
   else
     let sense ← v.getField "sense" >>= parseSense
     let mu ← v.getRat "mu"
@@ -177,7 +165,8 @@ private def handleMirUseLower (v : JsonVal) : Except String String := do
       pure (if got then "true" else "false")
 
 private def handleGmiCheck (v : JsonVal) : Except String String := do
-  let mut checked : Nat := 0
+  if (v.getField? "cuts").isSome then
+    throw "gmi-check rejects witness-only 'cuts' payloads; provide algebraic tableau ('beta') or structural derivation ('rho' + 'baseRows')"
   if let some betaVal := v.getField? "beta" then
     let beta ← betaVal.asRat
     let aI ← v.getArray "aI" >>= parseRatArray
@@ -188,31 +177,24 @@ private def handleGmiCheck (v : JsonVal) : Except String String := do
     let cCOpt ← match v.getField? "cC" with
       | none | some .null => pure none
       | some arr => some <$> (arr.asArray >>= parseRatArray)
-    let solsRaw ← v.getArray "solutions"
-    let solutions ← solsRaw.mapM fun sv => do
-      let xB ← sv.getRat "xB"
-      let xI ← sv.getArray "xI" >>= parseRatArray
-      let xC ← sv.getArray "xC" >>= parseRatArray
-      pure (xB, xI, xC)
+    let solutions ← match v.getField? "solutions" with
+      | none | some .null => pure #[]
+      | some sv =>
+        (← sv.asArray).mapM fun item => do
+          let xB ← item.getRat "xB"
+          let xI ← item.getArray "xI" >>= parseRatArray
+          let xC ← item.getArray "xC" >>= parseRatArray
+          pure (xB, xI, xC)
     checkTableauGMI aI aC beta cIOpt cCOpt solutions
-    checked := checked + solutions.size
-  if let some cutsVal := v.getField? "cuts" then
-    let cutsArr ← cutsVal.asArray
-    if cutsArr.isEmpty then
-      throw "structural gmi-check requires at least one cut"
-    let cuts ← cutsArr.mapM parseCutSpec
-    let mipOpt ← parseOptionalMIP v
-    let solsKey := if (v.getField? "structuralSolutions").isSome then "structuralSolutions" else "solutions"
-    let solsRaw ← v.getArray solsKey
-    let solutions ← solsRaw.mapM (fun sv => sv.asArray >>= parseRatArray)
-    checkStructuralCuts mipOpt cuts solutions
-    checked := checked + cuts.size * solutions.size
-  if checked == 0 then
-    throw "gmi-check requires 'beta' (tableau mode) or 'cuts' (structural mode)"
-  pure s!"VERIFIED ({checked} checks)"
+    pure s!"VERIFIED (tableau-gmi, {solutions.size} witnesses)"
+  else if (v.getField? "rho").isSome && (v.getField? "baseRows").isSome then
+    Track2C.checkStructuralGMIJson v
+  else
+    throw "gmi-check requires algebraic tableau ('beta') or structural derivation ('rho' + 'baseRows')"
 
 private def handleCmirCheck (v : JsonVal) : Except String String := do
-  let mut checked : Nat := 0
+  if (v.getField? "cuts").isSome then
+    throw "cmir-check rejects witness-only 'cuts' payloads; provide algebraic cMIR certificate ('delta')"
   if let some deltaVal := v.getField? "delta" then
     let delta ← deltaVal.asRat
     let aI ← v.getArray "aI" >>= parseRatArray
@@ -246,31 +228,22 @@ private def handleCmirCheck (v : JsonVal) : Except String String := do
         pure (some (lpi, lpc))
       | none, none => pure none
       | _, _ => throw "provide both lpPrimalI and lpPrimalC or neither"
-    let solsRaw ← v.getArray "solutions"
-    let solutions ← solsRaw.mapM fun sv => do
-      let xI ← sv.getArray "xI" >>= parseRatArray
-      let xC ← sv.getArray "xC" >>= parseRatArray
-      pure (xI, xC)
+    let solutions ← match v.getField? "solutions" with
+      | none | some .null => pure #[]
+      | some sv =>
+        (← sv.asArray).mapM fun item => do
+          let xI ← item.getArray "xI" >>= parseRatArray
+          let xC ← item.getArray "xC" >>= parseRatArray
+          pure (xI, xC)
     checkCMIRCertificate aI aC lbI ubI lbC ubC useLowerI useLowerC rhs delta
       betaHatOpt alphaHatOpt cIOpt cCOpt cutRHSOpt lpPrimalOpt solutions
-    checked := checked + solutions.size
-  if let some cutsVal := v.getField? "cuts" then
-    let cutsArr ← cutsVal.asArray
-    if cutsArr.isEmpty then
-      throw "structural cmir-check requires at least one cut"
-    let cuts ← cutsArr.mapM parseCutSpec
-    let mipOpt ← parseOptionalMIP v
-    let solsKey := if (v.getField? "structuralSolutions").isSome then "structuralSolutions" else "solutions"
-    let solsRaw ← v.getArray solsKey
-    let solutions ← solsRaw.mapM (fun sv => sv.asArray >>= parseRatArray)
-    checkStructuralCuts mipOpt cuts solutions
-    checked := checked + cuts.size * solutions.size
-  if checked == 0 then
-    throw "cmir-check requires 'delta' (certificate mode) or 'cuts' (structural mode)"
-  pure s!"VERIFIED ({checked} checks)"
+    pure s!"VERIFIED (cmir, {solutions.size} witnesses)"
+  else
+    throw "cmir-check requires algebraic cMIR certificate ('delta')"
 
 private def handleVubCheck (v : JsonVal) : Except String String := do
-  let mut checked : Nat := 0
+  if (v.getField? "cuts").isSome then
+    throw "vub-check rejects witness-only 'cuts' payloads; provide algebraic VUB certificate ('a') or structural derivation ('baseRows' + 'rowIdx')"
   if (v.getField? "a").isSome then
     let a ← v.getArray "a" >>= parseRatArray
     let u ← v.getArray "u" >>= parseOptRatArray
@@ -285,27 +258,19 @@ private def handleVubCheck (v : JsonVal) : Except String String := do
     let cutRHS ← match v.getField? "cutRHS" with
       | some rv => rv.asRat
       | none => pure 0
-    let solsRaw ← v.getArray "solutions"
-    let solutions ← solsRaw.mapM fun sv => do
-      let x ← sv.getArray "x" >>= parseRatArray
-      let y ← sv.getRat "y"
-      pure (x, y)
+    let solutions ← match v.getField? "solutions" with
+      | none | some .null => pure #[]
+      | some sv =>
+        (← sv.asArray).mapM fun item => do
+          let x ← item.getArray "x" >>= parseRatArray
+          let y ← item.getRat "y"
+          pure (x, y)
     checkVUBDisagg a u cap rhsRow targetIdx effUB cutRHS solutions
-    checked := checked + solutions.size
-  if let some cutsVal := v.getField? "cuts" then
-    let cutsArr ← cutsVal.asArray
-    if cutsArr.isEmpty then
-      throw "structural vub-check requires at least one cut"
-    let cuts ← cutsArr.mapM parseCutSpec
-    let mipOpt ← parseOptionalMIP v
-    let solsKey := if (v.getField? "structuralSolutions").isSome then "structuralSolutions" else "solutions"
-    let solsRaw ← v.getArray solsKey
-    let solutions ← solsRaw.mapM (fun sv => sv.asArray >>= parseRatArray)
-    checkStructuralCuts mipOpt cuts solutions
-    checked := checked + cuts.size * solutions.size
-  if checked == 0 then
-    throw "vub-check requires 'a' (disaggregation mode) or 'cuts' (structural mode)"
-  pure s!"VERIFIED ({checked} checks)"
+    pure s!"VERIFIED (vub, {solutions.size} witnesses)"
+  else if (v.getField? "baseRows").isSome && (v.getField? "rowIdx").isSome then
+    Track2C.checkStructuralVUBJson v
+  else
+    throw "vub-check requires algebraic VUB certificate ('a') or structural derivation ('baseRows' + 'rowIdx')"
 
 private def isKnownSubcmd (s : String) : Bool :=
   s == "row-legal-mu" || s == "mir-use-lower" || s == "gmi-check" ||
@@ -353,7 +318,7 @@ private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultSubcmd : 
   let trimmed := line.trimAscii.toString
   if !trimmed.isEmpty then
     let resp :=
-      match parseJson trimmed >>= dispatchItem defaultSubcmd with
+      match parseJsonStrict trimmed >>= dispatchItem defaultSubcmd with
       | .ok detail => "{\"ok\":true,\"detail\":" ++ jsonQuote detail ++ "}"
       | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
     stdout.putStr resp
@@ -364,11 +329,14 @@ private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultSubcmd : 
 private def runBatch (defaultSubcmd : Option String) (path : String) : IO UInt32 := do
   try
     let raw ← readInput path
-    match parseJson raw >>= JsonVal.asArray with
+    match parseJsonStrict raw >>= JsonVal.asArray with
     | .error err =>
       IO.eprintln s!"JSON parse error: {err}"
       pure 1
     | .ok items =>
+      if items.isEmpty then
+        IO.eprintln "FAIL: empty batch array"
+        return 1
       for i in [:items.size] do
         match dispatchItem defaultSubcmd items[i]! with
         | .ok _ => pure ()
@@ -414,7 +382,7 @@ def main (args : List String) : IO UInt32 := do
   | [subcmd, path] =>
     try
       let raw ← readInput path
-      match parseJson raw with
+      match parseJsonStrict raw with
       | .error err =>
         IO.eprintln s!"JSON parse error: {err}"
         pure 1
@@ -433,7 +401,7 @@ def main (args : List String) : IO UInt32 := do
     if isKnownSubcmd path then
       try
         let raw ← readInput "-"
-        match parseJson raw with
+        match parseJsonStrict raw with
         | .error err =>
           IO.eprintln s!"JSON parse error: {err}"
           pure 1
@@ -454,7 +422,7 @@ def main (args : List String) : IO UInt32 := do
         return 1
       try
         let raw ← readInput path
-        match parseJson raw with
+        match parseJsonStrict raw with
         | .error err =>
           IO.eprintln s!"JSON parse error: {err}"
           pure 1

@@ -721,4 +721,40 @@ theorem checkFarkas_sound {LP : LPInstance} {w : Fin LP.numRows → Rat}
     have hcontra := Rat.le_trans hrow hcolLe
     exact (Rat.not_lt.mpr hcontra) hok
 
+/-- Exact direct bound-conflict infeasibility checker:
+verifies that column `col < LP.numVars` has finite bounds `lb col = some l` and
+`ub col = some u` with `u < l` (`lb > ub`). -/
+def checkBoundConflict (LP : LPInstance) (col : Nat) : Bool :=
+  if hcol : col < LP.numVars then
+    let j : Fin LP.numVars := ⟨col, hcol⟩
+    match LP.lb j, LP.ub j with
+    | some l, some u => decide (u < l)
+    | _, _ => false
+  else
+    false
+
+/-- Soundness of direct bound-conflict infeasibility verification:
+a column with finite `lb > ub` certifies that no primal-feasible solution exists. -/
+theorem checkBoundConflict_sound {LP : LPInstance} {col : Nat}
+    (hok : checkBoundConflict LP col = true) :
+    ¬ ∃ x : Fin LP.numVars → Rat, PrimalFeasible LP x := by
+  intro ⟨x, hfeas⟩
+  unfold checkBoundConflict at hok
+  split at hok
+  · next hcol =>
+    let j : Fin LP.numVars := ⟨col, hcol⟩
+    have hj := hfeas.1 j
+    unfold SatisfiesVarBounds at hj
+    cases hlb : LP.lb j with
+    | none => simp [j, hlb] at hok
+    | some l =>
+      cases hub : LP.ub j with
+      | none => simp [j, hlb, hub] at hok
+      | some u =>
+        simp [j, hlb, hub] at hok
+        rw [hlb, hub] at hj
+        have hlu : l ≤ u := Rat.le_trans hj.1 hj.2
+        exact (Rat.not_lt.mpr hlu) hok
+  · cases hok
+
 end GoblinFormal.Track3

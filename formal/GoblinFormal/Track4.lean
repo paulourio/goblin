@@ -354,7 +354,13 @@ def LPObjective (P : VIPRInstance) (x : Fin P.n → Rat) : Rat :=
   P.objConst + finSum P.n (fun j => P.obj j * x j)
 
 
-/-! ## Section 2: Abstract `babEngine` Bound Monotonicity State Machine -/
+/-! ## Section 2: Abstract `babEngine` / `parCoordinator` Bound Monotonicity Design Model
+
+NOTE: This section formalizes an abstract design model of Goblin's sequential (`babEngine`,
+`bab.go:201`) and parallel (`parCoordinator`, `bab.go:2138`) Branch-and-Bound state machines
+over exact `Rat`. It is not mechanically linked to Go's floating-point solver loop; per-solve
+soundness of actual Go outputs is independently certified by the executable Mini-VIPR
+certificate verifier in Sections 3–5. -/
 
 private theorem rat_le_min_iff {x a b : Rat} : x ≤ min a b ↔ x ≤ a ∧ x ≤ b := by
   rw [Rat.min_def]
@@ -556,13 +562,16 @@ theorem BabNode.domain_tightenLB {n : Nat} (nd : BabNode n) (col : Fin n) (l : R
       · exact (hdom.1 j).1 l0 h0
   · exact (hdom.1 j).1 l' hl'
 
-/-- Abstract `babEngine` state matching `bab.go:196-241` and `bab.go:2624-2635`. -/
+/-- Abstract design model of `babEngine` (`bab.go:201`, `currentGlobalBound` at `bab.go:3106`)
+and `parCoordinator` (`bab.go:2138`, `currentGlobalBoundLocked` at `bab.go:2173`), including
+in-flight parallel worker bounds `activeBounds`. -/
 structure BabState (n : Nat) where
   openQueue : List (BabNode n)
   plungeNode : Option (BabNode n)
   bestObjMin : Option Rat
   prunedMinBound : Option Rat
   unsolvedMinBound : Option Rat
+  activeBounds : List Rat := []
   bestPrimal : Option (Fin n → Rat) := none
 
 /-- Minimum lower bound across a list of open nodes. -/
@@ -587,33 +596,113 @@ theorem listMinBound_le_mem {n : Nat} {qs : List (BabNode n)} {nd : BabNode n} {
     · obtain ⟨mr, hmr⟩ := listMinBound_isSome_of_mem hrest
       exact Rat.le_trans (minOpt_le_right hmr hm) (ih hrest hmr)
 
-/-- Global dual lower bound matching `babEngine.currentGlobalBound` (`bab.go:2624`). -/
+/-- Minimum lower bound across a list of active parallel-worker bounds (`parCoordinator.activeBounds`). -/
+def listMinRat : List Rat → Option Rat
+  | [] => none
+  | b :: rest => minOpt (some b) (listMinRat rest)
+
+theorem listMinRat_isSome_of_mem {bs : List Rat} {b : Rat} (hmem : b ∈ bs) :
+    ∃ m, listMinRat bs = some m := by
+  cases bs with
+  | nil => simp at hmem
+  | cons a rest => exact minOpt_isSome_of_left (listMinRat rest) rfl
+
+theorem listMinRat_le_mem {bs : List Rat} {b m : Rat}
+    (hmem : b ∈ bs) (hm : listMinRat bs = some m) : m ≤ b := by
+  induction bs generalizing m with
+  | nil => simp at hmem
+  | cons a rest ih =>
+    simp only [listMinRat] at hm
+    rcases List.mem_cons.mp hmem with rfl | hrest
+    · exact minOpt_le_left rfl hm
+    · obtain ⟨mr, hmr⟩ := listMinRat_isSome_of_mem hrest
+      exact Rat.le_trans (minOpt_le_right hmr hm) (ih hrest hmr)
+
+/-- Global dual lower bound matching `babEngine.currentGlobalBound` (`bab.go:3106`) and
+`parCoordinator.currentGlobalBoundLocked` (`bab.go:2173`), folding `activeBounds`. -/
 def currentGlobalBound {n : Nat} (s : BabState n) : Option Rat :=
   minOpt s.bestObjMin
     (minOpt s.unsolvedMinBound
       (minOpt s.prunedMinBound
-        (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))))
+        (minOpt (listMinRat s.activeBounds)
+          (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)))))
 
-/-- Exact optimality gap predicate matching `isGapClosed` (`bab.go:3435`). -/
-def isGapClosedSpec (lb ub relTol absTol : Rat) : Bool :=
-  let diff := ub - lb
-  if diff ≤ absTol then true
+/-- Exact rational optimality gap predicate using linear objective magnitude
+`max 1 |∑ obj_j * x_j|` (excluding `P.objConst`, removing Bug #3 objective-constant
+inflation), matching `exactGapClosedRat` (`certified.go:590-634`). -/
+def exactGapClosedSpec (P : VIPRInstance) (x : Fin P.n → Rat) (lb relTol absTol : Rat) : Bool :=
+  let linObj := finSum P.n (fun j => P.obj j * x j)
+  let diff := LPObjective P x - lb
+  if diff < 0 then false
+  else if diff == 0 then true
   else
-    let denom := max (1 : Rat) ub.abs
-    diff / denom ≤ relTol
+    let cleanAbs := max (0 : Rat) absTol
+    if diff ≤ cleanAbs then true
+    else
+      let cleanRel := max (0 : Rat) relTol
+      let denom := max (1 : Rat) linObj.abs
+      decide (diff ≤ cleanRel * denom)
 
-/-- Optional-bound gap closure predicate (`none` means `+∞` / `-∞`, so open). -/
-def isGapClosedOpt (lb ub : Option Rat) (relTol absTol : Rat) : Bool :=
-  match lb, ub with
-  | some l, some u => isGapClosedSpec l u relTol absTol
+/-- Exact optimality gap predicate on `(P, x, lb, relTol, absTol)` using linear objective
+magnitude `max 1 |∑ obj_j * x_j|` (matching `exactGapClosedRat` at `certified.go:590-634` and
+removing Bug #3 `objConst` inflation; cf. float search-loop `isGapClosed` at `bab.go:4157`). -/
+def isGapClosedSpec (P : VIPRInstance) (x : Fin P.n → Rat) (lb relTol absTol : Rat) : Bool :=
+  exactGapClosedSpec P x lb relTol absTol
+
+/-- Optional-bound gap closure predicate (`none` means `+∞` / `-∞` or no incumbent, so open). -/
+def isGapClosedOpt (P : VIPRInstance) (lb : Option Rat) (xInc : Option (Fin P.n → Rat))
+    (relTol absTol : Rat) : Bool :=
+  match lb, xInc with
+  | some l, some x => isGapClosedSpec P x l relTol absTol
   | _, _ => false
 
-/-- Global Branch-and-Bound coverage invariant. -/
+private theorem rat_le_max_left (a b : Rat) : a ≤ max a b := by
+  rw [Rat.max_def]
+  split
+  · assumption
+  · exact Rat.le_refl
+
+/-- Soundness of `exactGapClosedSpec`: implies `lb ≤ LPObjective P xInc` and either absolute
+or linear-magnitude relative gap closure. -/
+theorem exactGapClosedSpec_sound {P : VIPRInstance} {xInc : Fin P.n → Rat}
+    {lb relTol absTol : Rat}
+    (hgap : exactGapClosedSpec P xInc lb relTol absTol = true) :
+    lb ≤ LPObjective P xInc ∧
+    (LPObjective P xInc - lb ≤ max (0 : Rat) absTol ∨
+     LPObjective P xInc - lb ≤
+       max (0 : Rat) relTol * max (1 : Rat) (finSum P.n (fun j => P.obj j * xInc j)).abs) := by
+  unfold exactGapClosedSpec at hgap
+  dsimp only at hgap
+  by_cases hneg : LPObjective P xInc - lb < 0
+  · simp only [hneg, ↓reduceIte, Bool.false_eq_true] at hgap
+  · simp only [hneg, ↓reduceIte] at hgap
+    have hdiff_nonneg : 0 ≤ LPObjective P xInc - lb := Rat.not_lt.mp hneg
+    have hlb_le : lb ≤ LPObjective P xInc := by
+      rw [Rat.sub_eq_add_neg] at hdiff_nonneg
+      have h := (Rat.add_le_add_right (c := lb)).mpr hdiff_nonneg
+      simpa [Rat.zero_add, Rat.add_assoc, Rat.neg_add_cancel, Rat.add_zero] using h
+    refine ⟨hlb_le, ?_⟩
+    cases hzero : (LPObjective P xInc - lb == 0) with
+    | true =>
+      have h0 : LPObjective P xInc - lb = 0 := beq_iff_eq.mp hzero
+      left
+      rw [h0]
+      exact rat_le_max_left 0 absTol
+    | false =>
+      simp only [hzero, Bool.false_eq_true, ↓reduceIte] at hgap
+      by_cases habs : LPObjective P xInc - lb ≤ max (0 : Rat) absTol
+      · exact Or.inl habs
+      · simp only [habs, ↓reduceIte, decide_eq_true_eq] at hgap
+        exact Or.inr hgap
+
+/-- Global Branch-and-Bound coverage invariant for the abstract design model, including
+in-flight parallel worker active bounds (`activeBounds`). -/
 def ValidBabState (P : VIPRInstance) (s : BabState P.n) : Prop :=
   (∀ x : Fin P.n → Rat, MILPFeasible P x →
     (∃ z, s.bestObjMin = some z ∧ z ≤ LPObjective P x) ∨
     (∃ p, s.prunedMinBound = some p ∧ p ≤ LPObjective P x) ∨
     (∃ u, s.unsolvedMinBound = some u ∧ u ≤ LPObjective P x) ∨
+    (∃ ab ∈ s.activeBounds, ab ≤ LPObjective P x) ∨
     (∃ nd, s.plungeNode = some nd ∧ nd.domain x ∧ nd.lowerBound ≤ LPObjective P x) ∨
     (∃ nd ∈ s.openQueue, nd.domain x ∧ nd.lowerBound ≤ LPObjective P x)) ∧
   (∀ xInc, s.bestPrimal = some xInc →
@@ -627,7 +716,9 @@ theorem currentGlobalBound_le_unsolved {n : Nat} {s : BabState n} {u b : Rat}
     (hu : s.unsolvedMinBound = some u) (hb : currentGlobalBound s = some b) : b ≤ u := by
   unfold currentGlobalBound at hb
   obtain ⟨m3, hm3⟩ := minOpt_isSome_of_left
-    (minOpt s.prunedMinBound (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))) hu
+    (minOpt s.prunedMinBound
+      (minOpt (listMinRat s.activeBounds)
+        (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)))) hu
   exact Rat.le_trans (minOpt_le_right hm3 hb) (minOpt_le_left hu hm3)
 
 private theorem currentGlobalBound_unfold_le {n : Nat} {s : BabState n} {b : Rat}
@@ -635,39 +726,57 @@ private theorem currentGlobalBound_unfold_le {n : Nat} {s : BabState n} {b : Rat
     (∀ z, s.bestObjMin = some z → b ≤ z) ∧
     (∀ u, s.unsolvedMinBound = some u → b ≤ u) ∧
     (∀ p, s.prunedMinBound = some p → b ≤ p) ∧
+    (∀ ab ∈ s.activeBounds, b ≤ ab) ∧
     (∀ nd, s.plungeNode = some nd → b ≤ nd.lowerBound) ∧
     (∀ nd ∈ s.openQueue, b ≤ nd.lowerBound) := by
   unfold currentGlobalBound at hb
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro z hz
     exact minOpt_le_left hz hb
   · intro u hu
-    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_left
-      (minOpt s.prunedMinBound (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))) hu
-    exact Rat.le_trans (minOpt_le_right hm3 hb) (minOpt_le_left hu hm3)
+    obtain ⟨m4, hm4⟩ := minOpt_isSome_of_left
+      (minOpt s.prunedMinBound
+        (minOpt (listMinRat s.activeBounds)
+          (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)))) hu
+    exact Rat.le_trans (minOpt_le_right hm4 hb) (minOpt_le_left hu hm4)
   · intro p hp
-    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_left
-      (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)) hp
-    obtain ⟨m1, hm1⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
-    exact Rat.le_trans (minOpt_le_right hm1 hb)
-      (Rat.le_trans (minOpt_le_right hm2 hm1) (minOpt_le_left hp hm2))
-  · intro nd hnd
-    have hpl : s.plungeNode.map (·.lowerBound) = some nd.lowerBound := by simp [hnd]
-    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_left (listMinBound s.openQueue) hpl
-    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.prunedMinBound hm3
-    obtain ⟨m1, hm1⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
-    exact Rat.le_trans (minOpt_le_right hm1 hb)
-      (Rat.le_trans (minOpt_le_right hm2 hm1)
-        (Rat.le_trans (minOpt_le_right hm3 hm2) (minOpt_le_left hpl hm3)))
-  · intro nd hmem
-    obtain ⟨mq, hmq⟩ := listMinBound_isSome_of_mem hmem
-    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_right (s.plungeNode.map (·.lowerBound)) hmq
+    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_left
+      (minOpt (listMinRat s.activeBounds)
+        (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))) hp
+    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm3
+    exact Rat.le_trans (minOpt_le_right hm2 hb)
+      (Rat.le_trans (minOpt_le_right hm3 hm2) (minOpt_le_left hp hm3))
+  · intro ab hmem
+    obtain ⟨ma, hma⟩ := listMinRat_isSome_of_mem hmem
+    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_left
+      (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)) hma
     obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.prunedMinBound hm3
     obtain ⟨m1, hm1⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
     exact Rat.le_trans (minOpt_le_right hm1 hb)
       (Rat.le_trans (minOpt_le_right hm2 hm1)
         (Rat.le_trans (minOpt_le_right hm3 hm2)
-          (Rat.le_trans (minOpt_le_right hmq hm3) (listMinBound_le_mem hmem hmq))))
+          (Rat.le_trans (minOpt_le_left hma hm3) (listMinRat_le_mem hmem hma))))
+  · intro nd hnd
+    have hpl : s.plungeNode.map (·.lowerBound) = some nd.lowerBound := by simp [hnd]
+    obtain ⟨m4, hm4⟩ := minOpt_isSome_of_left (listMinBound s.openQueue) hpl
+    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_right (listMinRat s.activeBounds) hm4
+    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.prunedMinBound hm3
+    obtain ⟨m1, hm1⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
+    exact Rat.le_trans (minOpt_le_right hm1 hb)
+      (Rat.le_trans (minOpt_le_right hm2 hm1)
+        (Rat.le_trans (minOpt_le_right hm3 hm2)
+          (Rat.le_trans (minOpt_le_right hm4 hm3) (minOpt_le_left hpl hm4))))
+  · intro nd hmem
+    obtain ⟨mq, hmq⟩ := listMinBound_isSome_of_mem hmem
+    obtain ⟨m4, hm4⟩ := minOpt_isSome_of_right (s.plungeNode.map (·.lowerBound)) hmq
+    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_right (listMinRat s.activeBounds) hm4
+    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.prunedMinBound hm3
+    obtain ⟨m1, hm1⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
+    exact Rat.le_trans (minOpt_le_right hm1 hb)
+      (Rat.le_trans (minOpt_le_right hm2 hm1)
+        (Rat.le_trans (minOpt_le_right hm3 hm2)
+          (Rat.le_trans (minOpt_le_right hm4 hm3)
+            (Rat.le_trans (minOpt_le_right hmq hm4) (listMinBound_le_mem hmem hmq)))))
 
 /-- Soundness of `currentGlobalBound`: any finite global bound lower-bounds every MILP solution. -/
 theorem bestBound_global_valid {P : VIPRInstance} {s : BabState P.n} {b : Rat}
@@ -676,14 +785,16 @@ theorem bestBound_global_valid {P : VIPRInstance} {s : BabState P.n} {b : Rat}
   intro x hx
   have hle := currentGlobalBound_unfold_le hb
   rcases hvalid.1 x hx with
-    ⟨z, hz, hzx⟩ | ⟨p, hp, hpx⟩ | ⟨u, hu, hux⟩ | ⟨nd, hnd, _, hndx⟩ | ⟨nd, hmem, _, hndx⟩
+    ⟨z, hz, hzx⟩ | ⟨p, hp, hpx⟩ | ⟨u, hu, hux⟩ | ⟨ab, hab, habx⟩ | ⟨nd, hnd, _, hndx⟩ | ⟨nd, hmem, _, hndx⟩
   · exact Rat.le_trans (hle.1 z hz) hzx
   · exact Rat.le_trans (hle.2.2.1 p hp) hpx
   · exact Rat.le_trans (hle.2.1 u hu) hux
-  · exact Rat.le_trans (hle.2.2.2.1 nd hnd) hndx
-  · exact Rat.le_trans (hle.2.2.2.2 nd hmem) hndx
+  · exact Rat.le_trans (hle.2.2.2.1 ab hab) habx
+  · exact Rat.le_trans (hle.2.2.2.2.1 nd hnd) hndx
+  · exact Rat.le_trans (hle.2.2.2.2.2 nd hmem) hndx
 
-/-- When `currentGlobalBound s = none`, all queues and bounds are empty, certifying infeasibility. -/
+/-- When `currentGlobalBound s = none`, all queues, active bounds, and bounds are empty,
+certifying infeasibility in the abstract model. -/
 theorem infeasible_when_globalBound_none {P : VIPRInstance} {s : BabState P.n}
     (hvalid : ValidBabState P s) (hnone : currentGlobalBound s = none) :
     ¬ ∃ x : Fin P.n → Rat, MILPFeasible P x := by
@@ -692,12 +803,15 @@ theorem infeasible_when_globalBound_none {P : VIPRInstance} {s : BabState P.n}
   obtain ⟨hbest, h1⟩ := (minOpt_eq_none_iff _ _).mp hnone
   obtain ⟨huns, h2⟩ := (minOpt_eq_none_iff _ _).mp h1
   obtain ⟨hprun, h3⟩ := (minOpt_eq_none_iff _ _).mp h2
-  obtain ⟨hplunge, hq⟩ := (minOpt_eq_none_iff _ _).mp h3
+  obtain ⟨hact, h4⟩ := (minOpt_eq_none_iff _ _).mp h3
+  obtain ⟨hplunge, hq⟩ := (minOpt_eq_none_iff _ _).mp h4
   rcases hvalid.1 x hx with
-    ⟨z, hz, _⟩ | ⟨p, hp, _⟩ | ⟨u, hu, _⟩ | ⟨nd, hnd, _, _⟩ | ⟨nd, hmem, _, _⟩
+    ⟨z, hz, _⟩ | ⟨p, hp, _⟩ | ⟨u, hu, _⟩ | ⟨ab, hab, _⟩ | ⟨nd, hnd, _, _⟩ | ⟨nd, hmem, _, _⟩
   · rw [hz] at hbest; contradiction
   · rw [hp] at hprun; contradiction
   · rw [hu] at huns; contradiction
+  · obtain ⟨ma, hma⟩ := listMinRat_isSome_of_mem hab
+    rw [hma] at hact; contradiction
   · rw [hnd] at hplunge; contradiction
   · obtain ⟨m, hm⟩ := listMinBound_isSome_of_mem hmem
     rw [hm] at hq; contradiction
@@ -709,13 +823,14 @@ def stepRoot (P : VIPRInstance) (lb : Rat) : BabState P.n :=
     bestObjMin := none
     prunedMinBound := none
     unsolvedMinBound := none
+    activeBounds := []
     bestPrimal := none }
 
 theorem stepRoot_valid {P : VIPRInstance} {lb : Rat}
     (hlb : ∀ x, MILPFeasible P x → lb ≤ LPObjective P x) :
     ValidBabState P (stepRoot P lb) := by
   refine ⟨fun x hx => ?_, fun _ h => by contradiction⟩
-  right; right; right; right
+  right; right; right; right; right
   refine ⟨{ lb := P.lb, ub := P.ub, cuts := fun _ => True, lowerBound := lb }, ?_, ?_, hlb x hx⟩
   · simp [stepRoot]
   · exact ⟨hx.1, trivial⟩
@@ -772,6 +887,33 @@ private theorem listMinBound_removeAt {n : Nat} {xs rest : List (BabNode n)} {k 
       simp only [listMinBound, ih hrec]
       ac_rfl
 
+private theorem listMinRat_removeAt {xs rest : List Rat} {k : Nat} {x : Rat}
+    (h : removeAt xs k = some (x, rest)) :
+    listMinRat xs = minOpt (some x) (listMinRat rest) := by
+  induction xs generalizing k rest with
+  | nil => simp [removeAt] at h
+  | cons a tl ih =>
+    cases k with
+    | zero =>
+      simp [removeAt] at h
+      rcases h with ⟨rfl, rfl⟩
+      rfl
+    | succ k' =>
+      simp only [removeAt, Option.map_eq_some_iff] at h
+      rcases h with ⟨⟨y0, rs0⟩, hrec, hpair⟩
+      injection hpair with hx hrest
+      subst hx; subst hrest
+      simp only [listMinRat, ih hrec]
+      ac_rfl
+
+private theorem listMinBound_append {n : Nat} (xs ys : List (BabNode n)) :
+    listMinBound (xs ++ ys) = minOpt (listMinBound xs) (listMinBound ys) := by
+  induction xs with
+  | nil => simp [listMinBound]
+  | cons a rest ih =>
+    simp only [List.cons_append, listMinBound, ih]
+    exact (minOpt_assoc _ _ _).symm
+
 /-- Selects node at `idx` from `openQueue` into `plungeNode`, pushing any prior `plungeNode`. -/
 def stepSelectOpen {n : Nat} (s : BabState n) (idx : Nat) : BabState n :=
   match removeAt s.openQueue idx with
@@ -791,17 +933,18 @@ theorem stepSelectOpen_valid {P : VIPRInstance} {s : BabState P.n} (idx : Nat)
     rcases pair with ⟨nd, rest⟩
     obtain ⟨_, hiff⟩ := removeAt_mem hrem
     refine ⟨fun x hx => ?_, hvalid.2⟩
-    rcases hvalid.1 x hx with h | h | h | ⟨pnd, hpnd, hdom, hlb⟩ | ⟨qnd, hmem, hdom, hlb⟩
+    rcases hvalid.1 x hx with h | h | h | h | ⟨pnd, hpnd, hdom, hlb⟩ | ⟨qnd, hmem, hdom, hlb⟩
     · exact Or.inl h
     · exact Or.inr (Or.inl h)
     · exact Or.inr (Or.inr (Or.inl h))
-    · right; right; right; right
+    · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
+    · right; right; right; right; right
       refine ⟨pnd, ?_, hdom, hlb⟩
       simp [hpnd]
     · rcases (hiff qnd).mp hmem with rfl | hrest
-      · right; right; right; left
+      · right; right; right; right; left
         exact ⟨qnd, rfl, hdom, hlb⟩
-      · right; right; right; right
+      · right; right; right; right; right
         refine ⟨qnd, ?_, hdom, hlb⟩
         cases s.plungeNode <;> simp [hrest]
 
@@ -835,18 +978,19 @@ theorem stepTightenLowerBound_valid {P : VIPRInstance} {s : BabState P.n} {newLB
   | none => exact hvalid
   | some nd =>
     refine ⟨fun x hx => ?_, hvalid.2⟩
-    rcases hvalid.1 x hx with h | h | h | ⟨pnd, hpnd, hdom, hlb0⟩ | h
+    rcases hvalid.1 x hx with h | h | h | h | ⟨pnd, hpnd, hdom, hlb0⟩ | h
     · exact Or.inl h
     · exact Or.inr (Or.inl h)
     · exact Or.inr (Or.inr (Or.inl h))
+    · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
     · rw [hp] at hpnd; injection hpnd with heq; subst heq
-      right; right; right; left
+      right; right; right; right; left
       refine ⟨{ nd with lowerBound := max nd.lowerBound newLB }, rfl, hdom, ?_⟩
       simp only [Rat.max_def]
       split
       · exact hlb nd hp x hx hdom
       · exact hlb0
-    · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
 
 theorem stepTightenLowerBound_monotone {n : Nat} (s : BabState n) (newLB : Rat) :
     leOpt (currentGlobalBound s) (currentGlobalBound (stepTightenLowerBound s newLB)) := by
@@ -856,6 +1000,7 @@ theorem stepTightenLowerBound_monotone {n : Nat} (s : BabState n) (newLB : Rat) 
   | some nd =>
     dsimp only [currentGlobalBound]
     rw [hp]
+    apply minOpt_monotone (leOpt_refl _)
     apply minOpt_monotone (leOpt_refl _)
     apply minOpt_monotone (leOpt_refl _)
     apply minOpt_monotone (leOpt_refl _)
@@ -874,17 +1019,19 @@ theorem stepFathomInfeas_valid {P : VIPRInstance} {s : BabState P.n}
     (hinfeas : ∀ nd, s.plungeNode = some nd → ∀ x, MILPFeasible P x → ¬ nd.domain x) :
     ValidBabState P (stepFathomInfeas s) := by
   refine ⟨fun x hx => ?_, hvalid.2⟩
-  rcases hvalid.1 x hx with h | h | h | ⟨nd, hnd, hdom, _⟩ | h
+  rcases hvalid.1 x hx with h | h | h | h | ⟨nd, hnd, hdom, _⟩ | h
   · exact Or.inl h
   · exact Or.inr (Or.inl h)
   · exact Or.inr (Or.inr (Or.inl h))
+  · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
   · exact absurd hdom (hinfeas nd hnd x hx)
-  · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
 
 theorem stepFathomInfeas_monotone {n : Nat} (s : BabState n) :
     leOpt (currentGlobalBound s) (currentGlobalBound (stepFathomInfeas s)) := by
   unfold stepFathomInfeas currentGlobalBound
   dsimp only
+  apply minOpt_monotone (leOpt_refl _)
   apply minOpt_monotone (leOpt_refl _)
   apply minOpt_monotone (leOpt_refl _)
   apply minOpt_monotone (leOpt_refl _)
@@ -908,18 +1055,19 @@ theorem stepFathomBound_valid {P : VIPRInstance} {s : BabState P.n}
   | none => exact hvalid
   | some nd =>
     refine ⟨fun x hx => ?_, hvalid.2⟩
-    rcases hvalid.1 x hx with h | ⟨p, hpr, hpx⟩ | h | ⟨pnd, hpnd, _, hlb⟩ | h
+    rcases hvalid.1 x hx with h | ⟨p, hpr, hpx⟩ | h | h | ⟨pnd, hpnd, _, hlb⟩ | h
     · exact Or.inl h
     · right; left
       obtain ⟨m, hm⟩ := minOpt_isSome_of_left (some nd.lowerBound) hpr
       exact ⟨m, hm, Rat.le_trans (minOpt_le_left hpr hm) hpx⟩
     · exact Or.inr (Or.inr (Or.inl h))
+    · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
     · rw [hp] at hpnd; injection hpnd with heq; subst heq
       right; left
       obtain ⟨m, hm⟩ := minOpt_isSome_of_right s.prunedMinBound
         (rfl : some nd.lowerBound = some nd.lowerBound)
       exact ⟨m, hm, Rat.le_trans (minOpt_le_right rfl hm) hlb⟩
-    · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
 
 theorem stepFathomBound_preserves_bound {n : Nat} (s : BabState n) :
     currentGlobalBound (stepFathomBound s) = currentGlobalBound s := by
@@ -963,6 +1111,7 @@ theorem stepBranchInt_valid {P : VIPRInstance} {s : BabState P.n} {j : Fin P.n}
         (∃ z, s.bestObjMin = some z ∧ z ≤ LPObjective P x) ∨
         (∃ p, s.prunedMinBound = some p ∧ p ≤ LPObjective P x) ∨
         (∃ u, s.unsolvedMinBound = some u ∧ u ≤ LPObjective P x) ∨
+        (∃ ab ∈ s.activeBounds, ab ≤ LPObjective P x) ∨
         (∃ cnd, (if chooseUpFirst then some (nd.tightenLB j ((k + 1 : Int) : Rat))
             else some (nd.tightenUB j (k : Rat))) = some cnd ∧
           cnd.domain x ∧ cnd.lowerBound ≤ LPObjective P x) ∨
@@ -970,25 +1119,26 @@ theorem stepBranchInt_valid {P : VIPRInstance} {s : BabState P.n} {j : Fin P.n}
             else nd.tightenLB j ((k + 1 : Int) : Rat) :: s.openQueue),
           qnd.domain x ∧ qnd.lowerBound ≤ LPObjective P x) := by
       intro x hx
-      rcases hvalid.1 x hx with h | h | h | ⟨pnd, hpnd, hdom, hlb⟩ | ⟨qnd, hmem, hdom, hlb⟩
+      rcases hvalid.1 x hx with h | h | h | h | ⟨pnd, hpnd, hdom, hlb⟩ | ⟨qnd, hmem, hdom, hlb⟩
       · exact Or.inl h
       · exact Or.inr (Or.inl h)
       · exact Or.inr (Or.inr (Or.inl h))
+      · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
       · rw [hp] at hpnd; injection hpnd with heq; subst heq
         rcases int_split_exhaustive (x j) (hx.2.2 j hj) k with hdown | hup
         · have hdomDown := BabNode.domain_tightenUB nd j (k : Rat) x hdom hdown
           cases chooseUpFirst
-          · right; right; right; left
+          · right; right; right; right; left
             exact ⟨nd.tightenUB j (k : Rat), rfl, hdomDown, hlb⟩
-          · right; right; right; right
+          · right; right; right; right; right
             exact ⟨nd.tightenUB j (k : Rat), by simp, hdomDown, hlb⟩
         · have hdomUp := BabNode.domain_tightenLB nd j ((k + 1 : Int) : Rat) x hdom hup
           cases chooseUpFirst
-          · right; right; right; right
+          · right; right; right; right; right
             exact ⟨nd.tightenLB j ((k + 1 : Int) : Rat), by simp, hdomUp, hlb⟩
-          · right; right; right; left
+          · right; right; right; right; left
             exact ⟨nd.tightenLB j ((k + 1 : Int) : Rat), rfl, hdomUp, hlb⟩
-      · right; right; right; right
+      · right; right; right; right; right
         cases chooseUpFirst
         · exact ⟨qnd, List.mem_cons_of_mem _ hmem, hdom, hlb⟩
         · exact ⟨qnd, List.mem_cons_of_mem _ hmem, hdom, hlb⟩
@@ -1202,17 +1352,18 @@ theorem stepReducedCostFix_valid {P : VIPRInstance} {s : BabState P.n}
   | some nd =>
     obtain ⟨hlbEq, hdomKeep⟩ := htighten nd hp
     refine ⟨fun x hx => ?_, hvalid.2⟩
-    rcases hvalid.1 x hx with h | h | h | ⟨pnd, hpnd, hdom, hlb⟩ | h
+    rcases hvalid.1 x hx with h | h | h | h | ⟨pnd, hpnd, hdom, hlb⟩ | h
     · exact Or.inl h
     · exact Or.inr (Or.inl h)
     · exact Or.inr (Or.inr (Or.inl h))
+    · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
     · rw [hp] at hpnd; injection hpnd with heq; subst heq
       by_cases hlt : LPObjective P x < zInc
-      · right; right; right; left
+      · right; right; right; right; left
         exact ⟨tighten nd, rfl, hdomKeep x hx hdom hlt, hlbEq ▸ hlb⟩
       · left
         exact ⟨zInc, hbest, Rat.not_lt.mp hlt⟩
-    · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
 
 theorem stepReducedCostFix_preserves_bound {n : Nat} (s : BabState n)
     (tighten : BabNode n → BabNode n)
@@ -1232,15 +1383,16 @@ theorem stepReducedCostFixInfeas_valid {P : VIPRInstance} {s : BabState P.n} {zI
       ∀ x, MILPFeasible P x → nd.domain x → zInc ≤ LPObjective P x) :
     ValidBabState P (stepFathomInfeas s) := by
   refine ⟨fun x hx => ?_, hvalid.2⟩
-  rcases hvalid.1 x hx with h | h | h | ⟨nd, hnd, hdom, _⟩ | h
+  rcases hvalid.1 x hx with h | h | h | h | ⟨nd, hnd, hdom, _⟩ | h
   · exact Or.inl h
   · exact Or.inr (Or.inl h)
   · exact Or.inr (Or.inr (Or.inl h))
+  · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
   · left
     exact ⟨zInc, hbest, hempty nd hnd x hx hdom⟩
-  · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
 
-/-- Updates `bestObjMin` and `bestPrimal` when `xInc` improves the incumbent (`bab.go:2689`). -/
+/-- Updates `bestObjMin` and `bestPrimal` when `xInc` improves the incumbent (`babEngine.acceptIncumbent`, `bab.go:3225`). -/
 def stepIncumbent (P : VIPRInstance) (s : BabState P.n) (xInc : Fin P.n → Rat) :
     BabState P.n :=
   let zInc := LPObjective P xInc
@@ -1261,12 +1413,13 @@ theorem stepIncumbent_valid {P : VIPRInstance} {s : BabState P.n} (xInc : Fin P.
   | none =>
     simp only
     refine ⟨fun x hx => ?_, fun x' hx' => ?_⟩
-    · rcases hvalid.1 x hx with ⟨z, hz, _⟩ | h | h | h | h
+    · rcases hvalid.1 x hx with ⟨z, hz, _⟩ | h | h | h | h | h
       · rw [hz] at hb; contradiction
       · exact Or.inr (Or.inl h)
       · exact Or.inr (Or.inr (Or.inl h))
       · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
-      · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl h))))
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
     · injection hx' with heq; subst heq
       exact ⟨hxInc, rfl⟩
   | some z0 =>
@@ -1274,14 +1427,15 @@ theorem stepIncumbent_valid {P : VIPRInstance} {s : BabState P.n} (xInc : Fin P.
     by_cases hlt : LPObjective P xInc < z0
     · simp only [hlt, ↓reduceIte]
       refine ⟨fun x hx => ?_, fun x' hx' => ?_⟩
-      · rcases hvalid.1 x hx with ⟨z, hz, hzx⟩ | h | h | h | h
+      · rcases hvalid.1 x hx with ⟨z, hz, hzx⟩ | h | h | h | h | h
         · rw [hz] at hb; injection hb with heq; subst heq
           left
           exact ⟨LPObjective P xInc, rfl, Rat.le_trans (Rat.le_of_lt hlt) hzx⟩
         · exact Or.inr (Or.inl h)
         · exact Or.inr (Or.inr (Or.inl h))
         · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
-        · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+        · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl h))))
+        · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h))))
       · injection hx' with heq; subst heq
         exact ⟨hxInc, rfl⟩
     · simp only [hlt, ↓reduceIte]
@@ -1321,7 +1475,9 @@ theorem stepIncumbent_preserves_bound {P : VIPRInstance} {s : BabState P.n}
         unfold currentGlobalBound at hcur ⊢
         rw [hb] at hcur
         cases hrest : minOpt s.unsolvedMinBound
-            (minOpt s.prunedMinBound (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))) with
+            (minOpt s.prunedMinBound
+              (minOpt (listMinRat s.activeBounds)
+                (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)))) with
         | none =>
           rw [hrest, minOpt_none_right] at hcur
           injection hcur with hbz
@@ -1354,12 +1510,162 @@ theorem stepIncumbent_preserves_bound {P : VIPRInstance} {s : BabState P.n}
           simp [minOpt, hm1]
     · simp only [hlt, ↓reduceIte]
 
-/-- Moves all unprocessed open/active nodes into `unsolvedMinBound` on budget exhaustion. -/
+/-- Parallel worker acquires node `idx` from `openQueue`, recording its lower bound in
+`activeBounds` (modeling `parCoordinator` worker dispatch, `bab.go:2173-2185`). -/
+def stepWorkerAcquire {n : Nat} (s : BabState n) (idx : Nat) : BabState n :=
+  match removeAt s.openQueue idx with
+  | none => s
+  | some (nd, rest) =>
+    { s with openQueue := rest, activeBounds := nd.lowerBound :: s.activeBounds }
+
+theorem stepWorkerAcquire_valid {P : VIPRInstance} {s : BabState P.n} (idx : Nat)
+    (hvalid : ValidBabState P s) : ValidBabState P (stepWorkerAcquire s idx) := by
+  unfold stepWorkerAcquire
+  cases hrem : removeAt s.openQueue idx with
+  | none => exact hvalid
+  | some pair =>
+    rcases pair with ⟨nd, rest⟩
+    obtain ⟨_, hiff⟩ := removeAt_mem hrem
+    refine ⟨fun x hx => ?_, hvalid.2⟩
+    rcases hvalid.1 x hx with h | h | h | ⟨ab, hab, hle⟩ | h | ⟨qnd, hmem, hdom, hlb⟩
+    · exact Or.inl h
+    · exact Or.inr (Or.inl h)
+    · exact Or.inr (Or.inr (Or.inl h))
+    · exact Or.inr (Or.inr (Or.inr (Or.inl ⟨ab, List.mem_cons_of_mem _ hab, hle⟩)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl h))))
+    · rcases (hiff qnd).mp hmem with rfl | hrest
+      · exact Or.inr (Or.inr (Or.inr (Or.inl ⟨qnd.lowerBound, by simp, hlb⟩)))
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨qnd, hrest, hdom, hlb⟩))))
+
+theorem stepWorkerAcquire_preserves_bound {n : Nat} (s : BabState n) (idx : Nat) :
+    currentGlobalBound (stepWorkerAcquire s idx) = currentGlobalBound s := by
+  unfold stepWorkerAcquire
+  cases hrem : removeAt s.openQueue idx with
+  | none => rfl
+  | some pair =>
+    rcases pair with ⟨nd, rest⟩
+    dsimp only [currentGlobalBound, listMinRat]
+    rw [listMinBound_removeAt hrem]
+    ac_rfl
+
+/-- Parallel worker finishes processing active bound at `workerIdx`, removing it from
+`activeBounds`, pushing any generated `children` onto `openQueue`, and folding any
+bound-fathomed value `prunedLB` into `prunedMinBound`. -/
+def stepWorkerFinish {n : Nat} (s : BabState n) (workerIdx : Nat)
+    (children : List (BabNode n)) (prunedLB : Option Rat) : BabState n :=
+  match removeAt s.activeBounds workerIdx with
+  | none => s
+  | some (_, restActive) =>
+    { s with
+      activeBounds := restActive
+      openQueue := children ++ s.openQueue
+      prunedMinBound := minOpt s.prunedMinBound prunedLB }
+
+theorem stepWorkerFinish_valid {P : VIPRInstance} {s : BabState P.n}
+    (workerIdx : Nat) (children : List (BabNode P.n)) (prunedLB : Option Rat)
+    (hvalid : ValidBabState P s)
+    (hcover : ∀ ab restActive, removeAt s.activeBounds workerIdx = some (ab, restActive) →
+      ∀ x, MILPFeasible P x → ab ≤ LPObjective P x →
+        (∃ z, s.bestObjMin = some z ∧ z ≤ LPObjective P x) ∨
+        (∃ p, prunedLB = some p ∧ p ≤ LPObjective P x) ∨
+        (∃ cnd ∈ children, cnd.domain x ∧ cnd.lowerBound ≤ LPObjective P x)) :
+    ValidBabState P (stepWorkerFinish s workerIdx children prunedLB) := by
+  unfold stepWorkerFinish
+  cases hrem : removeAt s.activeBounds workerIdx with
+  | none => exact hvalid
+  | some pair =>
+    rcases pair with ⟨ab, restActive⟩
+    obtain ⟨_, hiff⟩ := removeAt_mem hrem
+    refine ⟨fun x hx => ?_, hvalid.2⟩
+    rcases hvalid.1 x hx with h | ⟨p, hp, hpx⟩ | h | ⟨ab0, hab0, hle⟩ | h | ⟨qnd, hmem, hdom, hlb⟩
+    · exact Or.inl h
+    · right; left
+      obtain ⟨m, hm⟩ := minOpt_isSome_of_left prunedLB hp
+      exact ⟨m, hm, Rat.le_trans (minOpt_le_left hp hm) hpx⟩
+    · exact Or.inr (Or.inr (Or.inl h))
+    · rcases (hiff ab0).mp hab0 with rfl | hrest
+      · rcases hcover ab0 restActive hrem x hx hle with hbest | ⟨p, hp, hpx⟩ | ⟨cnd, hcnd, hdom, hlb⟩
+        · exact Or.inl hbest
+        · right; left
+          obtain ⟨m, hm⟩ := minOpt_isSome_of_right s.prunedMinBound hp
+          exact ⟨m, hm, Rat.le_trans (minOpt_le_right hp hm) hpx⟩
+        · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨cnd, List.mem_append_left _ hcnd, hdom, hlb⟩))))
+      · exact Or.inr (Or.inr (Or.inr (Or.inl ⟨ab0, hrest, hle⟩)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl h))))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨qnd, List.mem_append_right _ hmem, hdom, hlb⟩))))
+
+private theorem leOpt_listMinBound_of_all {n : Nat} (ab : Rat) :
+    ∀ (cs : List (BabNode n)), (∀ cnd ∈ cs, ab ≤ cnd.lowerBound) → leOpt (some ab) (listMinBound cs)
+  | [], _ => trivial
+  | c :: rest, hge => by
+    have hc : ab ≤ c.lowerBound := hge c (by simp)
+    have hrest : leOpt (some ab) (listMinBound rest) :=
+      leOpt_listMinBound_of_all ab rest (fun x hx => hge x (List.mem_cons_of_mem _ hx))
+    have hm := minOpt_monotone (a1 := some ab) (a2 := some c.lowerBound) hc hrest
+    rwa [minOpt_self] at hm
+
+theorem stepWorkerFinish_monotone {n : Nat} (s : BabState n)
+    (workerIdx : Nat) (children : List (BabNode n)) (prunedLB : Option Rat)
+    (hge : ∀ ab restActive, removeAt s.activeBounds workerIdx = some (ab, restActive) →
+      (∀ p, prunedLB = some p → ab ≤ p) ∧
+      (∀ cnd ∈ children, ab ≤ cnd.lowerBound)) :
+    leOpt (currentGlobalBound s) (currentGlobalBound (stepWorkerFinish s workerIdx children prunedLB)) := by
+  unfold stepWorkerFinish
+  cases hrem : removeAt s.activeBounds workerIdx with
+  | none => exact leOpt_refl _
+  | some pair =>
+    rcases pair with ⟨ab, restActive⟩
+    obtain ⟨hprGe, hchGe⟩ := hge ab restActive hrem
+    have hchLe : leOpt (some ab) (listMinBound children) :=
+      leOpt_listMinBound_of_all ab children hchGe
+    have hprLe : leOpt (some ab) prunedLB := by
+      cases hp : prunedLB with
+      | none => trivial
+      | some p => exact hprGe p hp
+    have hcomb : leOpt (some ab) (minOpt prunedLB (listMinBound children)) := by
+      have hm := minOpt_monotone hprLe hchLe
+      rwa [minOpt_self] at hm
+    dsimp only [currentGlobalBound]
+    rw [listMinRat_removeAt hrem, listMinBound_append]
+    have hlhs :
+        minOpt s.bestObjMin
+          (minOpt s.unsolvedMinBound
+            (minOpt s.prunedMinBound
+              (minOpt (minOpt (some ab) (listMinRat restActive))
+                (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))))) =
+        minOpt (some ab)
+          (minOpt s.bestObjMin
+            (minOpt s.unsolvedMinBound
+              (minOpt s.prunedMinBound
+                (minOpt (listMinRat restActive)
+                  (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)))))) := by
+      ac_rfl
+    have hrhs :
+        minOpt s.bestObjMin
+          (minOpt s.unsolvedMinBound
+            (minOpt (minOpt s.prunedMinBound prunedLB)
+              (minOpt (listMinRat restActive)
+                (minOpt (s.plungeNode.map (·.lowerBound))
+                  (minOpt (listMinBound children) (listMinBound s.openQueue)))))) =
+        minOpt (minOpt prunedLB (listMinBound children))
+          (minOpt s.bestObjMin
+            (minOpt s.unsolvedMinBound
+              (minOpt s.prunedMinBound
+                (minOpt (listMinRat restActive)
+                  (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)))))) := by
+      ac_rfl
+    rw [hlhs, hrhs]
+    exact minOpt_monotone hcomb (leOpt_refl _)
+
+/-- Moves all unprocessed open, plunge, and active parallel worker bounds into
+`unsolvedMinBound` on budget exhaustion. -/
 def stepBudgetAbort {n : Nat} (s : BabState n) : BabState n :=
-  let rem := minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)
+  let rem := minOpt (listMinRat s.activeBounds)
+    (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))
   { s with
     openQueue := []
     plungeNode := none
+    activeBounds := []
     unsolvedMinBound := minOpt s.unsolvedMinBound rem }
 
 theorem stepBudgetAbort_valid {P : VIPRInstance} {s : BabState P.n}
@@ -1367,105 +1673,82 @@ theorem stepBudgetAbort_valid {P : VIPRInstance} {s : BabState P.n}
   unfold stepBudgetAbort
   dsimp only
   refine ⟨fun x hx => ?_, hvalid.2⟩
-  rcases hvalid.1 x hx with h | h | ⟨u, hu, hux⟩ | ⟨nd, hnd, _, hlb⟩ | ⟨nd, hmem, _, hlb⟩
+  rcases hvalid.1 x hx with h | h | ⟨u, hu, hux⟩ | ⟨ab, hab, habx⟩ | ⟨nd, hnd, _, hlb⟩ | ⟨nd, hmem, _, hlb⟩
   · exact Or.inl h
   · exact Or.inr (Or.inl h)
   · right; right; left
     obtain ⟨m, hm⟩ := minOpt_isSome_of_left
-      (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)) hu
+      (minOpt (listMinRat s.activeBounds)
+        (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue))) hu
     exact ⟨m, hm, Rat.le_trans (minOpt_le_left hu hm) hux⟩
+  · right; right; left
+    obtain ⟨ma, hma⟩ := listMinRat_isSome_of_mem hab
+    obtain ⟨m1, hm1⟩ := minOpt_isSome_of_left
+      (minOpt (s.plungeNode.map (·.lowerBound)) (listMinBound s.openQueue)) hma
+    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm1
+    exact ⟨m2, hm2, Rat.le_trans (minOpt_le_right hm1 hm2)
+      (Rat.le_trans (minOpt_le_left hma hm1) (Rat.le_trans (listMinRat_le_mem hab hma) habx))⟩
   · right; right; left
     have hpl : s.plungeNode.map (·.lowerBound) = some nd.lowerBound := by simp [hnd]
     obtain ⟨m1, hm1⟩ := minOpt_isSome_of_left (listMinBound s.openQueue) hpl
-    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm1
-    exact ⟨m2, hm2, Rat.le_trans (minOpt_le_right hm1 hm2)
-      (Rat.le_trans (minOpt_le_left hpl hm1) hlb)⟩
+    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right (listMinRat s.activeBounds) hm1
+    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
+    exact ⟨m3, hm3, Rat.le_trans (minOpt_le_right hm2 hm3)
+      (Rat.le_trans (minOpt_le_right hm1 hm2) (Rat.le_trans (minOpt_le_left hpl hm1) hlb))⟩
   · right; right; left
     obtain ⟨mq, hmq⟩ := listMinBound_isSome_of_mem hmem
     obtain ⟨m1, hm1⟩ := minOpt_isSome_of_right (s.plungeNode.map (·.lowerBound)) hmq
-    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm1
-    exact ⟨m2, hm2, Rat.le_trans (minOpt_le_right hm1 hm2)
-      (Rat.le_trans (minOpt_le_right hmq hm1) (Rat.le_trans (listMinBound_le_mem hmem hmq) hlb))⟩
+    obtain ⟨m2, hm2⟩ := minOpt_isSome_of_right (listMinRat s.activeBounds) hm1
+    obtain ⟨m3, hm3⟩ := minOpt_isSome_of_right s.unsolvedMinBound hm2
+    exact ⟨m3, hm3, Rat.le_trans (minOpt_le_right hm2 hm3)
+      (Rat.le_trans (minOpt_le_right hm1 hm2)
+        (Rat.le_trans (minOpt_le_right hmq hm1) (Rat.le_trans (listMinBound_le_mem hmem hmq) hlb)))⟩
 
 theorem stepBudgetAbort_preserves_bound {n : Nat} (s : BabState n) :
     currentGlobalBound (stepBudgetAbort s) = currentGlobalBound s := by
   unfold stepBudgetAbort currentGlobalBound
-  simp only [Option.map_none, listMinBound, minOpt_none_right]
+  simp only [Option.map_none, listMinBound, listMinRat, minOpt_none_right]
   ac_rfl
 
-/-- Terminal optimality theorem when all queues are drained and gap is closed. -/
+/-- Epsilon-optimality theorem for the abstract `BabState` design model when a valid global
+lower bound and incumbent close the gap under `isGapClosedSpec` (linear objective magnitude
+`max 1 |∑ obj_j * xInc_j|`, matching `exactGapClosedRat` at `certified.go:590-634`). -/
 theorem stepGapClosed_optimal {P : VIPRInstance} {s : BabState P.n} {xInc : Fin P.n → Rat}
     {lb relTol absTol : Rat}
     (hvalid : ValidBabState P s)
-    (hq : s.openQueue = [])
-    (hp : s.plungeNode = none)
-    (hu : s.unsolvedMinBound = none)
-    (hxInc : MILPFeasible P xInc)
-    (hbest : s.bestObjMin = some (LPObjective P xInc))
     (hlb : currentGlobalBound s = some lb)
-    (hgap : isGapClosedSpec lb (LPObjective P xInc) relTol absTol = true) :
+    (hgap : isGapClosedSpec P xInc lb relTol absTol = true) :
     ∀ x : Fin P.n → Rat, MILPFeasible P x →
-      LPObjective P xInc - LPObjective P x ≤ absTol ∨
-      (LPObjective P xInc - LPObjective P x) / max (1 : Rat) (LPObjective P xInc).abs ≤ relTol := by
-  have _ := hq; have _ := hp; have _ := hu; have _ := hxInc; have _ := hbest
+      LPObjective P xInc - LPObjective P x ≤ max (0 : Rat) absTol ∨
+      LPObjective P xInc - LPObjective P x ≤
+        max (0 : Rat) relTol * max (1 : Rat) (finSum P.n (fun j => P.obj j * xInc j)).abs := by
   intro x hx
   have hx_lb : lb ≤ LPObjective P x := bestBound_global_valid hvalid hlb x hx
   have hdiff_le : LPObjective P xInc - LPObjective P x ≤ LPObjective P xInc - lb := by
     rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg]
     exact Rat.add_le_add_left.mpr (Rat.neg_le_neg hx_lb)
-  unfold isGapClosedSpec at hgap
-  dsimp only at hgap
-  split at hgap
-  · next habs =>
-    exact Or.inl (Rat.le_trans hdiff_le habs)
-  · right
-    have hdenom_pos : 0 < max (1 : Rat) (LPObjective P xInc).abs := by
-      have h1 : (1 : Rat) ≤ max (1 : Rat) (LPObjective P xInc).abs := by
-        rw [Rat.max_def]
-        split
-        · assumption
-        · exact Rat.le_refl
-      exact rat_lt_of_lt_of_le (by decide : (0 : Rat) < 1) h1
-    have hrel : (LPObjective P xInc - lb) / max (1 : Rat) (LPObjective P xInc).abs ≤ relTol :=
-      decide_eq_true_eq.mp hgap
-    have hdiv_le :
-        (LPObjective P xInc - LPObjective P x) / max (1 : Rat) (LPObjective P xInc).abs ≤
-        (LPObjective P xInc - lb) / max (1 : Rat) (LPObjective P xInc).abs := by
-      rw [Rat.div_def, Rat.div_def]
-      exact Rat.mul_le_mul_of_nonneg_right hdiff_le
-        (Rat.le_of_lt (Rat.inv_pos.mpr hdenom_pos))
-    exact Rat.le_trans hdiv_le hrel
+  obtain ⟨_, hclosed⟩ := exactGapClosedSpec_sound hgap
+  rcases hclosed with habs | hrel
+  · exact Or.inl (Rat.le_trans hdiff_le habs)
+  · exact Or.inr (Rat.le_trans hdiff_le hrel)
 
 /-- Exact optimality specialization when `relTol = 0` and `absTol = 0`. -/
 theorem stepGapClosed_exact_optimal {P : VIPRInstance} {s : BabState P.n} {xInc : Fin P.n → Rat}
     {lb : Rat}
     (hvalid : ValidBabState P s)
-    (hq : s.openQueue = [])
-    (hp : s.plungeNode = none)
-    (hu : s.unsolvedMinBound = none)
-    (hxInc : MILPFeasible P xInc)
-    (hbest : s.bestObjMin = some (LPObjective P xInc))
     (hlb : currentGlobalBound s = some lb)
-    (hgap : isGapClosedSpec lb (LPObjective P xInc) 0 0 = true) :
+    (hgap : isGapClosedSpec P xInc lb 0 0 = true) :
     ∀ x : Fin P.n → Rat, MILPFeasible P x → LPObjective P xInc ≤ LPObjective P x := by
   intro x hx
-  rcases stepGapClosed_optimal hvalid hq hp hu hxInc hbest hlb hgap x hx with habs | hrel
-  · rw [Rat.sub_eq_add_neg] at habs
-    have := Rat.add_le_add_right (c := LPObjective P x) |>.mpr habs
-    simpa [Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add, Rat.add_zero] using this
-  · have hdenom_pos : 0 < max (1 : Rat) (LPObjective P xInc).abs := by
-      have h1 : (1 : Rat) ≤ max (1 : Rat) (LPObjective P xInc).abs := by
-        rw [Rat.max_def]
-        split
-        · assumption
-        · exact Rat.le_refl
-      exact rat_lt_of_lt_of_le (by decide : (0 : Rat) < 1) h1
-    have hle0 : LPObjective P xInc - LPObjective P x ≤ 0 := by
-      have hmul := (rat_div_le_iff hdenom_pos).mp hrel
-      simpa [Rat.zero_mul] using hmul
-    rw [Rat.sub_eq_add_neg] at hle0
-    have := Rat.add_le_add_right (c := LPObjective P x) |>.mpr hle0
-    simpa [Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add, Rat.add_zero] using this
+  have hmax0 : max (0 : Rat) 0 = 0 := by decide
+  have hle0 : LPObjective P xInc - LPObjective P x ≤ 0 := by
+    rcases stepGapClosed_optimal hvalid hlb hgap x hx with habs | hrel
+    · rwa [hmax0] at habs
+    · rw [hmax0, Rat.zero_mul] at hrel
+      exact hrel
+  rw [Rat.sub_eq_add_neg] at hle0
+  have := (Rat.add_le_add_right (c := LPObjective P x)).mpr hle0
+  simpa [Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add, Rat.add_zero] using this
 
 /-! ## Section 3: Mini-VIPR Rational MILP Trace Checker & Soundness -/
 
@@ -1491,7 +1774,12 @@ structure VarBoundRef where
   mult : Rat
   deriving Repr, DecidableEq
 
-/-- Explicit node-automorphism witness for an orbital branching companion `c ≠ br`. -/
+/-- Explicit node-symmetry witness for an orbital branching integer companion `c ≠ br`:
+- `colPerm` must be a bijection `σ` on `Fin n` mapping `br ↦ c`.
+- `rowPerm` is a row-implication witness map of length `baseRows.size` (bijectivity is not
+  required for soundness; each `baseRows[rowPerm[i]]` must imply `σ(baseRows[i])`).
+- `companion` only needs `P.isInt companion = true` (soundness uses `x_c ≤ 0 ∨ x_c ≥ 1`
+  from integrality, without requiring `[0, 1]` binary bounds). -/
 structure OrbitWitness where
   companion : Nat
   colPerm : Array Nat
@@ -3086,8 +3374,9 @@ private def optUbLe (a b : Option Rat) : Bool :=
   | some u1, some u2 => decide (u1 ≤ u2)
   | none, some _ => false
 
-/-- Checks that `w` is an exact node-level automorphism mapping `br ↦ c`, preserving `P`'s bounds,
-integrality, objective, base rows, conclusion `rightCon`, and all active `rightRem` assumptions. -/
+/-- Checks that `w` is an exact node-level symmetry witness mapping `br ↦ c`, preserving `P`'s
+bounds, integrality, objective, base-row implications (via `w.rowPerm`, not required to be
+bijective), conclusion `rightCon`, and all active `rightRem` assumptions. -/
 def checkOrbitAutomorphism (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
     (outAsms rightRem : List Nat) (br c : Fin P.n)
     (rightCon : LinCon P.n) (w : OrbitWitness) : Bool :=
@@ -7579,6 +7868,187 @@ theorem checkVIPRWithPresolve_bound_sound (cert : VIPRWithPresolveCert) {targetL
   have hs := checkVIPRWithPresolve_sound cert h
   rw [hmode] at hs
   exact hs.2
+
+/-- Passing `checkVIPRWithPresolve` proves the reduced Mini-VIPR instance preserves the
+original variable dimension `cert.orig.n`. -/
+theorem checkVIPRWithPresolve_dim_eq {cert : VIPRWithPresolveCert}
+    (h : checkVIPRWithPresolve cert = true) :
+    cert.reduced.inst.n = cert.orig.n := by
+  unfold checkVIPRWithPresolve at h
+  cases hrun : runPresolveSteps cert.presolve 0 (PresolveState.ofInstance cert.orig) with
+  | none => simp [hrun] at h
+  | some stFinal =>
+    simp only [hrun, Bool.and_eq_true] at h
+    have hInstEq := checkVIPRInstanceEq_sound h.1
+    exact (congrArg VIPRInstance.n hInstEq).symm
+
+/-- Constructively lifts a reduced-instance primal vector `xRed : RatVec cert.reduced.inst.n`
+onto `Fin cert.orig.n → Rat` (coinciding with `xRed.get ∘ Fin.cast hn.symm` whenever
+`hn : cert.reduced.inst.n = cert.orig.n`). -/
+def liftPresolvePrimal (cert : VIPRWithPresolveCert) (xRed : RatVec cert.reduced.inst.n) :
+    Fin cert.orig.n → Rat :=
+  fun j =>
+    if hj : j.val < cert.reduced.inst.n then
+      xRed.get ⟨j.val, hj⟩
+    else
+      0
+
+theorem liftPresolvePrimal_eq_cast (cert : VIPRWithPresolveCert)
+    (xRed : RatVec cert.reduced.inst.n) (hn : cert.reduced.inst.n = cert.orig.n) :
+    liftPresolvePrimal cert xRed = fun j => xRed.get (j.cast hn.symm) := by
+  funext j
+  unfold liftPresolvePrimal
+  have hj : j.val < cert.reduced.inst.n := by rw [hn]; exact j.isLt
+  simp only [hj, ↓reduceDIte]
+  rfl
+
+private theorem checkVIPRWithPresolve_lift_feasible_and_obj (cert : VIPRWithPresolveCert)
+    (h : checkVIPRWithPresolve cert = true) (xRed : RatVec cert.reduced.inst.n)
+    (hfeasRed : MILPFeasible cert.reduced.inst xRed.get) :
+    MILPFeasible cert.orig (liftPresolvePrimal cert xRed) ∧
+    LPObjective cert.orig (liftPresolvePrimal cert xRed) =
+      LPObjective cert.reduced.inst xRed.get := by
+  cases cert with
+  | mk orig presolve reduced =>
+    unfold checkVIPRWithPresolve at h
+    dsimp only at h
+    cases hrun : runPresolveSteps presolve 0 (PresolveState.ofInstance orig) with
+    | none => simp [hrun] at h
+    | some stFinal =>
+      simp only [hrun, Bool.and_eq_true] at h
+      have hInstEq : stFinal.toInstance = reduced.inst := checkVIPRInstanceEq_sound h.1
+      obtain ⟨_, hBwdSt⟩ :=
+        runPresolveSteps_sound presolve 0 (PresolveState.ofInstance orig) stFinal hrun
+      cases reduced with
+      | mk redInst mode steps rootStep inc =>
+        dsimp only at hInstEq hfeasRed ⊢
+        subst hInstEq
+        have hliftEq :
+            liftPresolvePrimal
+              (VIPRWithPresolveCert.mk orig presolve
+                (MiniVIPRCert.mk stFinal.toInstance mode steps rootStep inc)) xRed = xRed.get := by
+          funext j
+          unfold liftPresolvePrimal
+          have hj : j.val < stFinal.toInstance.n := j.isLt
+          simp only [hj, ↓reduceDIte]
+          rfl
+        rw [hliftEq]
+        obtain ⟨hxOrig, hobj⟩ := hBwdSt xRed.get ((stateFeasible_toInstance stFinal xRed.get).mpr hfeasRed)
+        refine ⟨(stateFeasible_ofInstance orig xRed.get).mp hxOrig, ?_⟩
+        rw [← stateObjective_ofInstance orig xRed.get, ← stateObjective_toInstance stFinal xRed.get]
+        exact hobj
+
+/-- Constructive optimal-vector lifting theorem for `checkVIPRWithPresolve`:
+explicitly exhibits `xOrig := liftPresolvePrimal cert xStar` (rather than an existential)
+as a MILP-feasible global minimizer on `cert.orig` with identical objective. -/
+theorem checkVIPRWithPresolve_optimal_constructive_sound (cert : VIPRWithPresolveCert)
+    (xStar : RatVec cert.reduced.inst.n)
+    (hmode : cert.reduced.mode = .optimal xStar) (h : checkVIPRWithPresolve cert = true) :
+    let xOrig := liftPresolvePrimal cert xStar
+    MILPFeasible cert.orig xOrig ∧
+    LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xStar.get ∧
+    ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+      LPObjective cert.orig xOrig ≤ LPObjective cert.orig x := by
+  have hRedSound : checkMiniVIPR cert.reduced = true := by
+    unfold checkVIPRWithPresolve at h
+    cases hrun : runPresolveSteps cert.presolve 0 (PresolveState.ofInstance cert.orig) with
+    | none => simp [hrun] at h
+    | some stFinal =>
+      simp only [hrun, Bool.and_eq_true] at h
+      exact h.2
+  have hMini := checkMiniVIPR_sound cert.reduced hRedSound
+  rw [hmode] at hMini
+  obtain ⟨hOrigFeas, hObjEq⟩ :=
+    checkVIPRWithPresolve_lift_feasible_and_obj cert h xStar hMini.1
+  obtain ⟨xEx, _, hExObj, hExOpt⟩ := checkVIPRWithPresolve_optimal_sound cert xStar hmode h
+  refine ⟨hOrigFeas, hObjEq, fun x hx => ?_⟩
+  rw [hObjEq, ← hExObj]
+  exact hExOpt x hx
+
+/-- Same-dimension constructive corollary: given `hn : cert.reduced.inst.n = cert.orig.n`,
+`fun j => xStar.get (j.cast hn.symm)` is directly MILP-feasible and globally optimal on `cert.orig`. -/
+theorem checkVIPRWithPresolve_optimal_same_n_sound (cert : VIPRWithPresolveCert)
+    (xStar : RatVec cert.reduced.inst.n)
+    (hn : cert.reduced.inst.n = cert.orig.n)
+    (hmode : cert.reduced.mode = .optimal xStar) (h : checkVIPRWithPresolve cert = true) :
+    let xOrig : Fin cert.orig.n → Rat := fun j => xStar.get (j.cast hn.symm)
+    MILPFeasible cert.orig xOrig ∧
+    LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xStar.get ∧
+    ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+      LPObjective cert.orig xOrig ≤ LPObjective cert.orig x := by
+  have hcons := checkVIPRWithPresolve_optimal_constructive_sound cert xStar hmode h
+  rwa [liftPresolvePrimal_eq_cast cert xStar hn] at hcons
+
+/-- Exact rational epsilon-optimality soundness on `cert.orig` when `cert` verifies in
+`.bound targetLB` mode with feasible `incumbent? = some xInc` and closes the gap under
+`exactGapClosedSpec` (matching `certified.go:exactGapClosedRat`). -/
+theorem checkVIPRWithPresolve_eps_optimal_sound (cert : VIPRWithPresolveCert)
+    {targetLB relTol absTol : Rat} {xInc : RatVec cert.reduced.inst.n}
+    (h : checkVIPRWithPresolve cert = true)
+    (hmode : cert.reduced.mode = .bound targetLB)
+    (hinc : cert.reduced.incumbent? = some xInc)
+    (hgap : exactGapClosedSpec cert.orig (liftPresolvePrimal cert xInc) targetLB relTol absTol = true) :
+    let xOrig := liftPresolvePrimal cert xInc
+    MILPFeasible cert.orig xOrig ∧
+    LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xInc.get ∧
+    (∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+      targetLB ≤ LPObjective cert.orig x ∧
+      (LPObjective cert.orig xOrig - LPObjective cert.orig x ≤ max (0 : Rat) absTol ∨
+       LPObjective cert.orig xOrig - LPObjective cert.orig x ≤
+         max (0 : Rat) relTol *
+           max (1 : Rat) (finSum cert.orig.n (fun j => cert.orig.obj j * xOrig j)).abs)) := by
+  have hRedSound : checkMiniVIPR cert.reduced = true := by
+    unfold checkVIPRWithPresolve at h
+    cases hrun : runPresolveSteps cert.presolve 0 (PresolveState.ofInstance cert.orig) with
+    | none => simp [hrun] at h
+    | some stFinal =>
+      simp only [hrun, Bool.and_eq_true] at h
+      exact h.2
+  have hMini := checkMiniVIPR_sound cert.reduced hRedSound
+  rw [hmode] at hMini
+  have hFeasRed : MILPFeasible cert.reduced.inst xInc.get := hMini.1 xInc hinc
+  obtain ⟨hOrigFeas, hObjEq⟩ :=
+    checkVIPRWithPresolve_lift_feasible_and_obj cert h xInc hFeasRed
+  have hBound := checkVIPRWithPresolve_bound_sound cert h hmode
+  obtain ⟨_, hclosed⟩ := exactGapClosedSpec_sound hgap
+  refine ⟨hOrigFeas, hObjEq, fun x hx => ?_⟩
+  have hlb_x : targetLB ≤ LPObjective cert.orig x := hBound x hx
+  have hdiff_le :
+      LPObjective cert.orig (liftPresolvePrimal cert xInc) - LPObjective cert.orig x ≤
+      LPObjective cert.orig (liftPresolvePrimal cert xInc) - targetLB := by
+    rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg]
+    exact Rat.add_le_add_left.mpr (Rat.neg_le_neg hlb_x)
+  refine ⟨hlb_x, ?_⟩
+  rcases hclosed with habs | hrel
+  · exact Or.inl (Rat.le_trans hdiff_le habs)
+  · exact Or.inr (Rat.le_trans hdiff_le hrel)
+
+/-- Exact zero-tolerance specialization of `checkVIPRWithPresolve_eps_optimal_sound`:
+when `relTol = 0` and `absTol = 0`, `liftPresolvePrimal cert xInc` is globally optimal on `cert.orig`. -/
+theorem checkVIPRWithPresolve_eps_optimal_zero_tol (cert : VIPRWithPresolveCert)
+    {targetLB : Rat} {xInc : RatVec cert.reduced.inst.n}
+    (h : checkVIPRWithPresolve cert = true)
+    (hmode : cert.reduced.mode = .bound targetLB)
+    (hinc : cert.reduced.incumbent? = some xInc)
+    (hgap : exactGapClosedSpec cert.orig (liftPresolvePrimal cert xInc) targetLB 0 0 = true) :
+    let xOrig := liftPresolvePrimal cert xInc
+    MILPFeasible cert.orig xOrig ∧
+    LPObjective cert.orig xOrig = LPObjective cert.reduced.inst xInc.get ∧
+    ∀ x : Fin cert.orig.n → Rat, MILPFeasible cert.orig x →
+      LPObjective cert.orig xOrig ≤ LPObjective cert.orig x := by
+  obtain ⟨hFeas, hObj, hAll⟩ :=
+    checkVIPRWithPresolve_eps_optimal_sound cert h hmode hinc hgap
+  refine ⟨hFeas, hObj, fun x hx => ?_⟩
+  have hmax0 : max (0 : Rat) 0 = 0 := by decide
+  have hle0 :
+      LPObjective cert.orig (liftPresolvePrimal cert xInc) - LPObjective cert.orig x ≤ 0 := by
+    rcases (hAll x hx).2 with habs | hrel
+    · rwa [hmax0] at habs
+    · rw [hmax0, Rat.zero_mul] at hrel
+      exact hrel
+  rw [Rat.sub_eq_add_neg] at hle0
+  have := (Rat.add_le_add_right (c := LPObjective cert.orig x)).mpr hle0
+  simpa [Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add, Rat.add_zero] using this
 
 
 /-! ## Section 5: JSON Decoding & Verification Entry Point -/

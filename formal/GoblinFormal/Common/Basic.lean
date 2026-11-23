@@ -468,4 +468,202 @@ theorem float64BitsToRat_nonpos_of_sign_true {bits : UInt64} {r : Rat}
       rw [← Option.some.inj hr]
       exact dyadicRat_nonpos (Int.neg_nonpos_of_nonneg (Int.natCast_nonneg _)) _
 
+/-- Sign bit of an IEEE-754 binary64 bit pattern (`0` or `1`). -/
+def ieee754Sign (bits : UInt64) : Nat :=
+  bits.toNat / 2 ^ 63
+
+/-- Biased 11-bit exponent field of an IEEE-754 binary64 bit pattern (`0 .. 2047`). -/
+def ieee754Exp (bits : UInt64) : Nat :=
+  (bits.toNat / 2 ^ 52) % 2 ^ 11
+
+/-- 52-bit trailing significand field of an IEEE-754 binary64 bit pattern (`0 .. 2^52 - 1`). -/
+def ieee754Mant (bits : UInt64) : Nat :=
+  bits.toNat % 2 ^ 52
+
+/-- Textbook IEEE-754-2008 binary64 rational value function:
+`none` for `exp = 2047` (Inf/NaN),
+`(-1)^sign * (mant / 2^52) * 2^(-1022)` for `exp = 0` (zero/subnormal),
+`(-1)^sign * (1 + mant / 2^52) * 2^(exp - 1023)` for `1 ≤ exp ≤ 2046` (normal). -/
+def ieee754Binary64Val (bits : UInt64) : Option Rat :=
+  let s := ieee754Sign bits
+  let e := ieee754Exp bits
+  let m := ieee754Mant bits
+  if e == 0x7ff then
+    none
+  else if e == 0 then
+    some ((-1 : Rat) ^ s * ((m : Rat) / (2 : Rat) ^ (52 : Nat)) * (2 : Rat) ^ (-1022 : Int))
+  else
+    some ((-1 : Rat) ^ s * (1 + (m : Rat) / (2 : Rat) ^ (52 : Nat)) * (2 : Rat) ^ ((e : Int) - 1023))
+
+theorem float64Bits_sign_eq (bits : UInt64) :
+    (bits >>> 63).toNat = ieee754Sign bits := by
+  unfold ieee754Sign
+  rw [UInt64.toNat_shiftRight]
+  have hmod : (63 : UInt64).toNat % 64 = 63 := by decide
+  rw [hmod, Nat.shiftRight_eq_div_pow]
+
+theorem float64Bits_exp_eq (bits : UInt64) :
+    ((bits >>> 52) &&& 0x7ff).toNat = ieee754Exp bits := by
+  unfold ieee754Exp
+  rw [UInt64.toNat_and, UInt64.toNat_shiftRight]
+  have hmod : (52 : UInt64).toNat % 64 = 52 := by decide
+  have hmask : (0x7ff : UInt64).toNat = 2 ^ 11 - 1 := by decide
+  rw [hmod, hmask, Nat.shiftRight_eq_div_pow, Nat.and_two_pow_sub_one_eq_mod]
+
+theorem float64Bits_mant_eq (bits : UInt64) :
+    (bits &&& 0x000fffffffffffff).toNat = ieee754Mant bits := by
+  unfold ieee754Mant
+  rw [UInt64.toNat_and]
+  have hmask : (0x000fffffffffffff : UInt64).toNat = 2 ^ 52 - 1 := by decide
+  rw [hmask, Nat.and_two_pow_sub_one_eq_mod]
+
+/-- Exact 64-bit field reconstruction: `bits.toNat = sign * 2^63 + exp * 2^52 + mant`
+with exact field ranges `sign < 2`, `exp < 2048`, `mant < 2^52`. -/
+theorem float64Bits_field_decomp (bits : UInt64) :
+    ieee754Sign bits < 2 ∧
+    ieee754Exp bits < 2 ^ 11 ∧
+    ieee754Mant bits < 2 ^ 52 ∧
+    bits.toNat = ieee754Sign bits * 2 ^ 63 + ieee754Exp bits * 2 ^ 52 + ieee754Mant bits := by
+  unfold ieee754Sign ieee754Exp ieee754Mant
+  have hlt : bits.toNat < 2 ^ 64 := bits.toBitVec.isLt
+  refine ⟨by omega, Nat.mod_lt _ (by decide), Nat.mod_lt _ (by decide), ?_⟩
+  have hdiv : bits.toNat = (bits.toNat / 2 ^ 52) * 2 ^ 52 + bits.toNat % 2 ^ 52 := by
+    have hdm := Nat.div_add_mod bits.toNat (2 ^ 52)
+    rw [Nat.mul_comm] at hdm
+    exact hdm.symm
+  have hq : bits.toNat / 2 ^ 52 =
+      (bits.toNat / 2 ^ 63) * 2 ^ 11 + (bits.toNat / 2 ^ 52) % 2 ^ 11 := by
+    have hdiv2 : (bits.toNat / 2 ^ 52) / 2 ^ 11 = bits.toNat / 2 ^ 63 := by
+      rw [Nat.div_div_eq_div_mul]
+    have hdm := Nat.div_add_mod (bits.toNat / 2 ^ 52) (2 ^ 11)
+    rw [hdiv2, Nat.mul_comm] at hdm
+    exact hdm.symm
+  have hpow63 : (2 ^ 11 : Nat) * 2 ^ 52 = 2 ^ 63 := by decide
+  conv => lhs; rw [hdiv, hq]
+  rw [Nat.add_mul, Nat.mul_assoc, hpow63]
+
+private theorem rat_signed_nat_eq_sign_pow (signBit : Nat) (hs : signBit < 2) (k : Nat) :
+    (((if (signBit != 0) then -(k : Int) else (k : Int)) : Int) : Rat) =
+      (-1 : Rat) ^ signBit * (k : Rat) := by
+  have hcases : signBit = 0 ∨ signBit = 1 := by omega
+  rcases hcases with rfl | rfl
+  · simp [Rat.one_mul, Rat.intCast_natCast]
+  · simp [Rat.neg_mul, Rat.one_mul, Rat.intCast_natCast]
+
+private theorem rat_pow2_52_ne_zero : ((2 : Rat) ^ (52 : Nat)) ≠ 0 := by
+  intro h
+  have hcast : ((2 ^ 52 : Nat) : Rat) = (0 : Nat) := by
+    rw [Rat.natCast_pow]
+    exact h
+  have hnat : (2 ^ 52 : Nat) = 0 := Rat.natCast_inj.mp hcast
+  exact absurd hnat (by decide)
+
+private theorem rat_two_ne_zero : (2 : Rat) ≠ 0 := by
+  decide
+
+private theorem float64Bits_sign_bne_zero (bits : UInt64) :
+    ((bits >>> 63) != 0) = (ieee754Sign bits != 0) := by
+  rw [← float64Bits_sign_eq bits]
+  by_cases h : (bits >>> 63) = 0
+  · simp [h]
+  · have hne : (bits >>> 63).toNat ≠ 0 := by
+      intro hz
+      exact h (UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hz))
+    rw [bne_iff_ne.mpr h, bne_iff_ne.mpr hne]
+
+/-- IEEE-754 subnormal and signed-zero value theorem for `float64BitsToRat`:
+when `exp = 0`, `float64BitsToRat bits = some ((-1)^sign * mant * 2^(-1074))`. -/
+theorem float64BitsToRat_subnormal {bits : UInt64} (he : ieee754Exp bits = 0) :
+    float64BitsToRat bits =
+      some ((-1 : Rat) ^ ieee754Sign bits * (ieee754Mant bits : Rat) * (2 : Rat) ^ (-1074 : Int)) := by
+  unfold float64BitsToRat
+  dsimp only
+  have heEq := float64Bits_exp_eq bits
+  have hmEq := float64Bits_mant_eq bits
+  have hsLt : ieee754Sign bits < 2 := (float64Bits_field_decomp bits).1
+  have hsignBool := float64Bits_sign_bne_zero bits
+  rw [heEq, he, hmEq, hsignBool]
+  simp only [show (0 == 0x7ff) = false by decide, Bool.false_eq_true, ↓reduceIte,
+    show (0 == 0) = true by decide]
+  by_cases hm : ieee754Mant bits = 0
+  · rw [hm]
+    simp only [beq_self_eq_true, ↓reduceIte]
+    have hzero : (-1 : Rat) ^ ieee754Sign bits * ((0 : Nat) : Rat) * (2 : Rat) ^ (-1074 : Int) = 0 := by
+      rw [show ((0 : Nat) : Rat) = 0 from rfl, Rat.mul_zero, Rat.zero_mul]
+    rw [hzero]
+  · have hmb : (ieee754Mant bits == 0) = false := beq_false_of_ne hm
+    simp only [hmb, Bool.false_eq_true, ↓reduceIte]
+    apply congrArg some
+    rw [dyadicRat_eq_zpow, rat_signed_nat_eq_sign_pow (ieee754Sign bits) hsLt (ieee754Mant bits)]
+
+/-- IEEE-754 normal value theorem for `float64BitsToRat`:
+when `0 < exp < 2047`, `float64BitsToRat bits = some ((-1)^sign * (2^52 + mant) * 2^(exp - 1075))`. -/
+theorem float64BitsToRat_normal {bits : UInt64}
+    (hePos : 0 < ieee754Exp bits) (heLt : ieee754Exp bits < 0x7ff) :
+    float64BitsToRat bits =
+      some ((-1 : Rat) ^ ieee754Sign bits *
+        ((2 ^ 52 + ieee754Mant bits : Nat) : Rat) *
+        (2 : Rat) ^ ((ieee754Exp bits : Int) - 1075)) := by
+  unfold float64BitsToRat
+  dsimp only
+  have heEq := float64Bits_exp_eq bits
+  have hmEq := float64Bits_mant_eq bits
+  have hsLt : ieee754Sign bits < 2 := (float64Bits_field_decomp bits).1
+  have hsignBool := float64Bits_sign_bne_zero bits
+  have hne7ff : (ieee754Exp bits == 0x7ff) = false := beq_false_of_ne (by omega)
+  have hne0 : (ieee754Exp bits == 0) = false := beq_false_of_ne (by omega)
+  have hshift52 : (1 <<< 52 : Nat) = 2 ^ 52 := by decide
+  rw [heEq, hmEq, hsignBool, hne7ff, hne0, hshift52]
+  simp only [Bool.false_eq_true, ↓reduceIte]
+  apply congrArg some
+  rw [dyadicRat_eq_zpow,
+    rat_signed_nat_eq_sign_pow (ieee754Sign bits) hsLt (2 ^ 52 + ieee754Mant bits)]
+
+/-- Equivalence between `float64BitsToRat` and the textbook IEEE-754-2008 binary64
+value specification `ieee754Binary64Val` across all 2^64 bit patterns
+(Inf/NaN, signed zeros, subnormals, and normals). -/
+theorem float64BitsToRat_eq_ieee754 (bits : UInt64) :
+    float64BitsToRat bits = ieee754Binary64Val bits := by
+  unfold ieee754Binary64Val
+  dsimp only
+  have heLtAll : ieee754Exp bits < 2 ^ 11 := (float64Bits_field_decomp bits).2.1
+  by_cases h7ff : ieee754Exp bits = 0x7ff
+  · have hnone : (float64BitsToRat bits).isNone = true := by
+      rw [float64BitsToRat_isNone_iff, float64Bits_exp_eq]
+      exact h7ff
+    cases hres : float64BitsToRat bits with
+    | none =>
+      simp [h7ff]
+    | some r =>
+      rw [hres] at hnone
+      simp at hnone
+  · have hne7ff : (ieee754Exp bits == 0x7ff) = false := beq_false_of_ne h7ff
+    simp only [hne7ff, Bool.false_eq_true, ↓reduceIte]
+    by_cases h0 : ieee754Exp bits = 0
+    · simp only [h0, beq_self_eq_true, ↓reduceIte]
+      rw [float64BitsToRat_subnormal h0]
+      apply congrArg some
+      have hpow : (2 : Rat) ^ (-1074 : Int) =
+          ((2 : Rat) ^ (52 : Nat))⁻¹ * (2 : Rat) ^ (-1022 : Int) := by
+        have hsplit : (-1074 : Int) = -((52 : Nat) : Int) + (-1022 : Int) := by omega
+        rw [hsplit, Rat.zpow_add rat_two_ne_zero, Rat.zpow_neg, Rat.zpow_natCast]
+      rw [hpow, Rat.div_def, ← Rat.mul_assoc, Rat.mul_assoc ((-1 : Rat) ^ ieee754Sign bits)]
+    · have hne0 : (ieee754Exp bits == 0) = false := beq_false_of_ne h0
+      simp only [hne0, Bool.false_eq_true, ↓reduceIte]
+      have hePos : 0 < ieee754Exp bits := by omega
+      have heLt : ieee754Exp bits < 0x7ff := by omega
+      rw [float64BitsToRat_normal hePos heLt]
+      apply congrArg some
+      have hpow : (2 : Rat) ^ ((ieee754Exp bits : Int) - 1075) =
+          ((2 : Rat) ^ (52 : Nat))⁻¹ * (2 : Rat) ^ ((ieee754Exp bits : Int) - 1023) := by
+        have hsplit : ((ieee754Exp bits : Int) - 1075) =
+            -((52 : Nat) : Int) + ((ieee754Exp bits : Int) - 1023) := by omega
+        rw [hsplit, Rat.zpow_add rat_two_ne_zero, Rat.zpow_neg, Rat.zpow_natCast]
+      have hsig :
+          ((2 ^ 52 + ieee754Mant bits : Nat) : Rat) * ((2 : Rat) ^ (52 : Nat))⁻¹ =
+          1 + (ieee754Mant bits : Rat) / (2 : Rat) ^ (52 : Nat) := by
+        rw [Rat.natCast_add, Rat.natCast_pow, Rat.natCast_ofNat, Rat.add_mul,
+          Rat.mul_inv_cancel _ rat_pow2_52_ne_zero, Rat.div_def]
+      rw [hpow, ← Rat.mul_assoc, Rat.mul_assoc ((-1 : Rat) ^ ieee754Sign bits), hsig]
+
 end GoblinFormal

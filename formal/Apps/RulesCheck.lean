@@ -158,19 +158,34 @@ private def handleActivitySummary (v : JsonVal) : Except String String := do
     pure ({ coeff, lb, ub, isInt } : ActivityTerm)
   let res := evalActivitySummarySpec rhs hasLo hasHi terms
   for j in [:termsJson.size] do
-    if hj : j < res.terms.size then
+    if hj : j < res.terms.size ∧ j < terms.size then
       let tv := termsJson[j]!
-      let tr := res.terms[j]
+      let tr := res.terms[j]'(hj.1)
+      let origTerm := terms[j]'(hj.2)
       if let some gubVal := optNonNullField? tv "go_ub" then
         let goUB ← gubVal.asRat
-        if let some exactUB := tr.impliedUB then
+        match tr.impliedUB with
+        | some exactUB =>
           if goUB < exactUB then
             throw s!"term {j}: solver tightened UB {goUB} < exact impliedUB {exactUB}"
+        | none =>
+          let stricter := match origTerm.ub with
+            | none => true
+            | some origUB => goUB < origUB
+          if stricter then
+            throw s!"term {j}: solver tightened UB to {goUB} without a valid impliedUB"
       if let some glbVal := optNonNullField? tv "go_lb" then
         let goLB ← glbVal.asRat
-        if let some exactLB := tr.impliedLB then
+        match tr.impliedLB with
+        | some exactLB =>
           if exactLB < goLB then
             throw s!"term {j}: solver tightened LB {goLB} > exact impliedLB {exactLB}"
+        | none =>
+          let stricter := match origTerm.lb with
+            | none => true
+            | some origLB => origLB < goLB
+          if stricter then
+            throw s!"term {j}: solver tightened LB to {goLB} without a valid impliedLB"
   let termObjs := res.terms.map fun t =>
     "{\"quot_upper\":" ++ optRatJson t.quotUpper ++
     ",\"quot_lower\":" ++ optRatJson t.quotLower ++
@@ -197,7 +212,7 @@ private def handleActivitySkip (v : JsonVal) : Except String String := do
   if let some gsv := optNonNullField? v "go_skip" then
     let goSkip ← gsv.asBool
     if goSkip && !rawStrict then
-      throw "unsound skip-term: solver skipped term without abs_a*(u-l) < slack_lo"
+      throw "incomplete skip-term: solver skipped term without abs_a*(u-l) < slack_lo"
   if let some esv := optNonNullField? v "expect_can_skip" then
     let expSkip ← esv.asBool
     if expSkip != canSkip then
@@ -222,49 +237,57 @@ private def handleActivity (v : JsonVal) : Except String String := do
 
 private def handleBinStrengthen (v : JsonVal) : Except String String := do
   let rhs ← v.getRat "rhs"
-  let a ← v.getRat "a"
-  let maxOther ← v.getRat "max_other"
-  let surplus ← v.getRat "surplus"
-  let optNewA ← match v.getField? "new_a" with
-    | none => pure none
-    | some fv => parseOptRat fv
-  let optNewRHS ← match v.getField? "new_rhs" with
-    | none => pure none
-    | some fv => parseOptRat fv
-  let (specOpt, applicable, proposedValid, exactIff) :=
-    if 0 < a then
-      let sp := strengthenBinaryPosSpec rhs a surplus
-      let app := sp.isSome && decide (maxOther + a - rhs ≤ surplus)
-      let (pv, ex) :=
-        match optNewA, optNewRHS with
-        | some na, some nr =>
-          (app && decide (na == surplus) && decide (rhs - (a - surplus) ≤ nr),
-           app && decide (na == surplus) && decide (nr == rhs - (a - surplus)))
-        | _, _ => (app, app)
-      (sp, app, pv, ex)
-    else if a < 0 then
-      let sp := strengthenBinaryNegSpec rhs a surplus
-      let app := sp.isSome && decide (maxOther - rhs ≤ surplus)
-      let (pv, ex) :=
-        match optNewA, optNewRHS with
-        | some na, some nr =>
-          (app && decide (na == -surplus) && decide (rhs ≤ nr),
-           app && decide (na == -surplus) && decide (nr == rhs))
-        | _, _ => (app, app)
-      (sp, app, pv, ex)
-    else
-      (none, false, false, false)
-  if let some rvv := optNonNullField? v "require_valid" then
-    let reqVal ← rvv.asBool
-    if reqVal && !proposedValid then
-      throw s!"binary coefficient strengthening failed soundness check (applicable={applicable}, proposed_valid={proposedValid})"
-  let specNewA := specOpt.map Prod.fst
-  let specNewRHS := specOpt.map Prod.snd
-  .ok ("{\"applicable\":" ++ boolJson applicable ++
-       ",\"spec_new_a\":" ++ optRatJson specNewA ++
-       ",\"spec_new_rhs\":" ++ optRatJson specNewRHS ++
-       ",\"proposed_valid\":" ++ boolJson proposedValid ++
-       ",\"exact_iff\":" ++ boolJson exactIff ++ "}")
+  let termsJson ← v.getArray "terms"
+  let terms ← termsJson.mapM fun tv => do
+    let coeff ← tv.getRat "a"
+    let lb ← parseOptRat (← tv.getField "l")
+    let ub ← parseOptRat (← tv.getField "u")
+    let isInt ← tv.getBool "is_int"
+    pure ({ coeff, lb, ub, isInt } : ActivityTerm)
+  let targetIdx ← v.getNat "target_idx"
+  if hIdx : targetIdx < terms.size then
+    let a := terms[targetIdx].coeff
+    if let some av := optNonNullField? v "a" then
+      let inputA ← av.asRat
+      if inputA != a then
+        throw s!"input a={inputA} does not match terms[{targetIdx}].a={a}"
+    let surplus ← v.getRat "surplus"
+    let optNewA ← match v.getField? "new_a" with
+      | none => pure none
+      | some fv => parseOptRat fv
+    let optNewRHS ← match v.getField? "new_rhs" with
+      | none => pure none
+      | some fv => parseOptRat fv
+    let specOpt :=
+      if 0 < a then strengthenBinaryPosSpec rhs a surplus
+      else if a < 0 then strengthenBinaryNegSpec rhs a surplus
+      else none
+    let (newA, newRHS) ← match optNewA, optNewRHS with
+      | some na, some nr => pure (na, nr)
+      | none, none =>
+        match specOpt with
+        | some (sa, sr) => pure (sa, sr)
+        | none => throw s!"binary coefficient strengthening not applicable (a={a}, surplus={surplus})"
+      | _, _ => throw "provide both new_a and new_rhs or neither"
+    let exactMaxOther ← checkBinStrengthenFromRowSpec rhs terms targetIdx surplus newA newRHS
+    if let some mv := optNonNullField? v "max_other" then
+      let inputMaxOther ← mv.asRat
+      if inputMaxOther < exactMaxOther then
+        throw s!"spoofed max_other={inputMaxOther} < exact computed max_other={exactMaxOther}"
+    let exactIff :=
+      match specOpt with
+      | some (sa, sr) => newA == sa && newRHS == sr
+      | none => false
+    let specNewA := specOpt.map Prod.fst
+    let specNewRHS := specOpt.map Prod.snd
+    .ok ("{\"applicable\":true" ++
+         ",\"exact_max_other\":" ++ ratJson exactMaxOther ++
+         ",\"spec_new_a\":" ++ optRatJson specNewA ++
+         ",\"spec_new_rhs\":" ++ optRatJson specNewRHS ++
+         ",\"proposed_valid\":true" ++
+         ",\"exact_iff\":" ++ boolJson exactIff ++ "}")
+  else
+    throw s!"target_idx {targetIdx} out of bounds ({terms.size})"
 
 private def handleOrbitCheck (v : JsonVal) : Except String String := do
   let numVars ← v.getNat "num_vars"
@@ -291,12 +314,10 @@ private def handleOrbitCheck (v : JsonVal) : Except String String := do
   else
     let valid := verifyOrbitSymmetrySpec
       numVars isInt lb ub rows gCount orbits rowTuples colOrbit colGroup rowState
-    let exactObj := valid && exactOrbitObjSpec gCount orbits obj
-    let monoNonNeg := valid && monotoneOrbitNonNegSpec gCount orbits lb obj
-    if let some rvv := optNonNullField? v "require_valid" then
-      let reqVal ← rvv.asBool
-      if reqVal && !valid then
-        throw "orbit symmetry verification failed"
+    if !valid then
+      throw "orbit symmetry verification failed"
+    let exactObj := exactOrbitObjSpec gCount orbits obj
+    let monoNonNeg := monotoneOrbitNonNegSpec gCount orbits lb obj
     if let some rmv := optNonNullField? v "require_monotone" then
       let reqMono ← rmv.asBool
       if reqMono && !monoNonNeg then
@@ -305,7 +326,7 @@ private def handleOrbitCheck (v : JsonVal) : Except String String := do
       let reqEx ← rev.asBool
       if reqEx && !exactObj then
         throw "exact orbit objective invariance check failed"
-    .ok ("{\"valid\":" ++ boolJson valid ++
+    .ok ("{\"valid\":true" ++
          ",\"exact_obj\":" ++ boolJson exactObj ++
          ",\"monotone_non_neg\":" ++ boolJson monoNonNeg ++ "}")
 
@@ -343,12 +364,14 @@ private def runSingleOrBatch (handler : JsonVal → Except String String)
     (input : JsonVal) : Except String String :=
   match input with
   | .arr items => do
+    if items.isEmpty then
+      throw "empty batch array"
     let outs ← items.mapM handler
     .ok ("[" ++ String.intercalate "," outs.toList ++ "]")
   | _ => handler input
 
 private def dispatch (subcmd : String) (payload : String) : Except String String := do
-  let v ← parseJson payload
+  let v ← parseJsonStrict payload
   match subcmd with
   | "divceil" => runSingleOrBatch handleDivCeil v
   | "gcd-infeas" => runSingleOrBatch handleGcdInfeas v
@@ -391,7 +414,7 @@ private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultSubcmd : 
   let trimmed := line.trimAscii.toString
   if !trimmed.isEmpty then
     let resp :=
-      match parseJson trimmed >>= dispatchItem defaultSubcmd with
+      match parseJsonStrict trimmed >>= dispatchItem defaultSubcmd with
       | .ok resJson => "{\"ok\":true,\"detail\":\"VERIFIED\",\"result\":" ++ resJson ++ "}"
       | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
     stdout.putStr resp
@@ -406,11 +429,14 @@ private def runBatchFlag (defaultSubcmd : Option String) (path : String) : IO UI
     catch e =>
       IO.eprintln s!"rules-check I/O error '{path}': {e}"
       return 1
-  match parseJson raw >>= JsonVal.asArray with
+  match parseJsonStrict raw >>= JsonVal.asArray with
   | .error msg =>
     IO.eprintln s!"rules-check JSON parse error '{path}': {msg}"
     return 1
   | .ok items =>
+    if items.isEmpty then
+      IO.eprintln "rules-check: empty batch array"
+      return 1
     for i in [:items.size] do
       match dispatchItem defaultSubcmd items[i]! with
       | .ok _ => pure ()

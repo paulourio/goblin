@@ -1090,12 +1090,28 @@ theorem vub_disagg_opt_sound {n : Nat} {a x : Fin n → Rat} {u : Fin n → Opti
         exact hak_le_Cy
   exact Rat.le_trans hexact (Rat.mul_le_mul_of_nonneg_right heff hy_nn)
 
+private theorem min_mul_bounds_le {v l u x : Rat} (hl : l ≤ x) (hu : x ≤ u) :
+    min (v * l) (v * u) ≤ v * x := by
+  rcases Rat.le_total (a := 0) (b := v) with hv | hv
+  · have hmin : min (v * l) (v * u) ≤ v * l := by
+      rw [Rat.min_def]
+      split
+      · exact Rat.le_refl
+      · next h => exact Rat.le_of_lt (Rat.not_le.mp h)
+    exact Rat.le_trans hmin (Rat.mul_le_mul_of_nonneg_left hl hv)
+  · have hmin : min (v * l) (v * u) ≤ v * u := by
+      rw [Rat.min_def]
+      split
+      · assumption
+      · exact Rat.le_refl
+    exact Rat.le_trans hmin (rat_mul_le_mul_of_nonpos_left hu hv)
+
 /-- Soundness of dropping small cut coefficients via bounds and scaling by `s > 0` (`cuts.go:finalizeSparseCut`). -/
 theorem cut_drop_scale_sound {n : Nat} {v kept lb ub x : Fin n → Rat}
     {rhs droppedRHS s cutRHS : Rat}
     (hcut : finSum n (fun j => v j * x j) ≤ rhs)
-    (_hxbnd : ∀ j, lb j ≤ x j ∧ x j ≤ ub j)
-    (hdrop : ∀ j, kept j = v j ∨ (kept j = 0 ∧ min (v j * lb j) (v j * ub j) ≤ v j * x j))
+    (hxbnd : ∀ j, lb j ≤ x j ∧ x j ≤ ub j)
+    (hdrop : ∀ j, kept j = v j ∨ kept j = 0)
     (hdropRHS : rhs - finSum n (fun j => if kept j = v j then 0 else min (v j * lb j) (v j * ub j)) ≤ droppedRHS)
     (hs : 0 < s)
     (hscale : s * droppedRHS ≤ cutRHS) :
@@ -1104,9 +1120,11 @@ theorem cut_drop_scale_sound {n : Nat} {v kept lb ub x : Fin n → Rat}
     intro j
     by_cases hkv : kept j = v j
     · simp [hkv, rat_sub_zero]
-    · rcases hdrop j with hkv' | ⟨hk0, hmin⟩
+    · rcases hdrop j with hkv' | hk0
       · exact absurd hkv' hkv
-      · have hite : (if kept j = v j then (0 : Rat) else min (v j * lb j) (v j * ub j)) =
+      · have hmin : min (v j * lb j) (v j * ub j) ≤ v j * x j :=
+          min_mul_bounds_le (hxbnd j).1 (hxbnd j).2
+        have hite : (if kept j = v j then (0 : Rat) else min (v j * lb j) (v j * ub j)) =
             min (v j * lb j) (v j * ub j) := by
           split
           · next heq => exact absurd heq hkv
@@ -1127,7 +1145,7 @@ theorem cut_drop_scale_sound {n : Nat} {v kept lb ub x : Fin n → Rat}
   rw [hlhs]
   exact Rat.le_trans h4 hscale
 
-/-! ### 5. Executable Checkers for `cuts-check` CLI -/
+/-! ### 5. Executable Checkers and Universal Soundness Proofs for `cuts-check` CLI -/
 
 /-- Sparse linear term `(col, val)`. -/
 structure SparseTerm where
@@ -1210,37 +1228,126 @@ def checkCutAtPoint (cut : CutSpec) (x : Array Rat) : Except String Bool := do
   let lhs ← evalTerms cut.terms x
   pure (decide (lhs ≤ cut.rhs))
 
-/-- Verifies a GMI tableau cut (exact or upward-weakened) and checks all witness points. -/
-def checkTableauGMI
-    (aI aC : Array Rat)
-    (beta : Rat)
+private def allFinB : (n : Nat) → (Fin n → Bool) → Bool
+  | 0, _ => true
+  | n + 1, p => allFinB n (fun i => p i.castSucc) && p (Fin.last n)
+
+private theorem allFinB_eq_true_iff {n : Nat} {p : Fin n → Bool} :
+    allFinB n p = true ↔ ∀ i : Fin n, p i = true := by
+  induction n with
+  | zero =>
+    constructor
+    · intro _ i; exact Fin.elim0 i
+    · intro _; rfl
+  | succ n ih =>
+    simp only [allFinB, Bool.and_eq_true, ih]
+    constructor
+    · intro ⟨hprev, hlast⟩ i
+      by_cases hi : i.val < n
+      · have heq : i = (⟨i.val, hi⟩ : Fin n).castSucc := Fin.ext rfl
+        rw [heq]; exact hprev ⟨i.val, hi⟩
+      · have heq : i = Fin.last n := Fin.ext (by simp [Fin.val_last]; have := i.isLt; omega)
+        rw [heq]; exact hlast
+    · intro hall
+      exact ⟨fun i => hall i.castSucc, hall (Fin.last n)⟩
+
+private def guardExcB {α : Type} (c : Bool) (msg : String) (k : Except String α) : Except String α :=
+  if c then k else .error msg
+
+private theorem guardExcB_ok {α : Type} {c : Bool} {msg : String} {k : Except String α} {v : α}
+    (h : guardExcB c msg k = .ok v) : c = true ∧ k = .ok v := by
+  unfold guardExcB at h
+  cases c
+  · simp at h
+  · exact ⟨rfl, h⟩
+
+private theorem rat_eq_intCast_of_den_eq_one (r : Rat) (h : r.den = 1) : r = (r.num : Rat) :=
+  Rat.ext (by simp) (by simpa using h)
+
+/-- Sum of coefficients for column `c` in a sparse term list (handling duplicates). -/
+def sparseTermsCoeff : List SparseTerm → Nat → Rat
+  | [], _ => 0
+  | t :: ts, c => (if t.col == c then t.val else 0) + sparseTermsCoeff ts c
+
+/-- Evaluates a sparse term list against `x : Fin n → Rat` (zero for out-of-range cols). -/
+def evalSparseTermsFin (n : Nat) (terms : List SparseTerm) (x : Fin n → Rat) : Rat :=
+  match terms with
+  | [] => 0
+  | t :: ts =>
+    (if h : t.col < n then t.val * x ⟨t.col, h⟩ else 0) + evalSparseTermsFin n ts x
+
+private theorem sparseTermsCoeff_not_mem {ts : List SparseTerm} {c : Nat}
+    (hnot : ∀ t ∈ ts, t.col ≠ c) : sparseTermsCoeff ts c = 0 := by
+  induction ts with
+  | nil => rfl
+  | cons t rest ih =>
+    have hne : (t.col == c) = false := beq_false_of_ne (hnot t (List.mem_cons_self ..))
+    simp only [sparseTermsCoeff, hne, Bool.false_eq_true, ↓reduceIte, Rat.zero_add]
+    exact ih (fun u hu => hnot u (List.mem_cons_of_mem _ hu))
+
+private theorem evalSparseTermsFin_eq_finSum {n : Nat} (ts : List SparseTerm) (x : Fin n → Rat)
+    (hcols : ∀ t ∈ ts, t.col < n) :
+    evalSparseTermsFin n ts x = finSum n (fun j => sparseTermsCoeff ts j.val * x j) := by
+  induction ts with
+  | nil => simp [evalSparseTermsFin, sparseTermsCoeff]
+  | cons t rest ih =>
+    have ht : t.col < n := hcols t (List.mem_cons_self ..)
+    have hrest : ∀ u ∈ rest, u.col < n := fun u hu => hcols u (List.mem_cons_of_mem _ hu)
+    simp only [evalSparseTermsFin, sparseTermsCoeff, ht, ↓reduceDIte]
+    rw [ih hrest]
+    have hsingle :
+        t.val * x ⟨t.col, ht⟩ =
+          finSum n (fun j : Fin n => (if t.col == j.val then t.val else 0) * x j) := by
+      have hcong :
+          finSum n (fun j : Fin n => (if t.col == j.val then t.val else 0) * x j) =
+            finSum n (fun j : Fin n => if j = ⟨t.col, ht⟩ then t.val * x ⟨t.col, ht⟩ else 0) := by
+        apply finSum_congr
+        intro j
+        by_cases hj : j = ⟨t.col, ht⟩
+        · subst hj; simp
+        · have hne : (t.col == j.val) = false := beq_false_of_ne (fun heq => hj (Fin.ext heq.symm))
+          simp [hj, hne]
+      rw [hcong, finSum_single]
+    rw [hsingle, ← finSum_add]
+    exact finSum_congr fun j => (Rat.add_mul _ _ _).symm
+
+/-- Helper avoiding dependent `match` generalization over optional certificate coefficient arrays. -/
+def optCoeffAt (opt : Option (Array Rat)) (fallback : Rat) (i : Nat) : Rat :=
+  match opt with
+  | none => fallback
+  | some c => if h : i < c.size then c[i] else fallback
+
+private theorem ite_not_error_okB {b : Bool} {msg : String} {k : Except String Unit}
+    (h : (if !b then Except.error msg else k) = .ok ()) : b = true ∧ k = .ok () := by
+  cases b <;> simp at h ⊢
+  exact h
+
+/-- Algebraic core of `checkTableauGMI`: checks `0 < fracPart beta < 1` and exact/weakened
+GMI coefficients `gmiIntCoeff ≤ cI`, `gmiContCoeff ≤ cC`. -/
+def checkTableauGMIAlg
+    (aI aC : Array Rat) (beta : Rat)
+    (cIOpt cCOpt : Option (Array Rat)) : Except String Unit :=
+  let f0 := fracPart beta
+  let cILenOk : Bool := match cIOpt with | none => true | some c => c.size == aI.size
+  let cCLenOk : Bool := match cCOpt with | none => true | some c => c.size == aC.size
+  let cIOk : Bool := allFinB aI.size (fun j =>
+    decide (gmiIntCoeff aI[j.val] f0 ≤ optCoeffAt cIOpt (gmiIntCoeff aI[j.val] f0) j.val))
+  let cCOk : Bool := allFinB aC.size (fun k =>
+    decide (gmiContCoeff aC[k.val] f0 ≤ optCoeffAt cCOpt (gmiContCoeff aC[k.val] f0) k.val))
+  guardExcB (decide (0 < f0) && decide (f0 < 1)) s!"GMI row beta={beta} has non-fractional f0={f0}" <|
+  guardExcB cILenOk s!"cI length mismatch with aI ({aI.size})" <|
+  guardExcB cIOk "cI coefficient below exact gmiIntCoeff" <|
+  guardExcB cCLenOk s!"cC length mismatch with aC ({aC.size})" <|
+  guardExcB cCOk "cC coefficient below exact gmiContCoeff" <|
+  .ok ()
+
+private def checkTableauGMIWitnesses
+    (aI aC : Array Rat) (beta : Rat)
     (cIOpt cCOpt : Option (Array Rat))
     (solutions : Array (Rat × Array Rat × Array Rat)) : Except String Unit := do
-  if solutions.isEmpty then
-    throw "GMI verification requires at least one witness solution"
   let f0 := fracPart beta
-  if !(0 < f0 && f0 < 1) then
-    throw s!"GMI row beta={beta} has non-fractional f0={f0}"
-  let exactI := aI.map (fun a => gmiIntCoeff a f0)
-  let exactC := aC.map (fun g => gmiContCoeff g f0)
-  let cI ← match cIOpt with
-    | none => pure exactI
-    | some c => do
-      if c.size != aI.size then
-        throw s!"cI length {c.size} != aI length {aI.size}"
-      for j in [:c.size] do
-        if !(exactI[j]! ≤ c[j]!) then
-          throw s!"cI[{j}]={c[j]!} < exact gmiIntCoeff={exactI[j]!}"
-      pure c
-  let cC ← match cCOpt with
-    | none => pure exactC
-    | some c => do
-      if c.size != aC.size then
-        throw s!"cC length {c.size} != aC length {aC.size}"
-      for k in [:c.size] do
-        if !(exactC[k]! ≤ c[k]!) then
-          throw s!"cC[{k}]={c[k]!} < exact gmiContCoeff={exactC[k]!}"
-      pure c
+  let cI := cIOpt.getD (aI.map (fun a => gmiIntCoeff a f0))
+  let cC := cCOpt.getD (aC.map (fun g => gmiContCoeff g f0))
   for sIdx in [:solutions.size] do
     let (xB, xI, xC) := solutions[sIdx]!
     if xB.den != 1 then
@@ -1264,137 +1371,165 @@ def checkTableauGMI
     if !(1 ≤ cutI + cutC) then
       throw s!"solution {sIdx}: GMI cut violated: {cutI + cutC} < 1"
 
-/-- Verifies a safe-rounded complemented MIR certificate (`cmir_safe_rounded_sound`) on witness points. -/
-def checkCMIRCertificate
+/-- Verifies a GMI tableau cut (exact or upward-weakened) algebraically over all feasible
+mixed-integer points, plus any optional witness points supplied. -/
+def checkTableauGMI
+    (aI aC : Array Rat)
+    (beta : Rat)
+    (cIOpt cCOpt : Option (Array Rat))
+    (solutions : Array (Rat × Array Rat × Array Rat)) : Except String Unit :=
+  match checkTableauGMIAlg aI aC beta cIOpt cCOpt with
+  | .error e => .error e
+  | .ok () => checkTableauGMIWitnesses aI aC beta cIOpt cCOpt solutions
+
+/-- Universal soundness of `checkTableauGMI`: whenever `checkTableauGMI` succeeds, the
+verified GMI cut holds for EVERY mixed-integer non-negative point satisfying the tableau row. -/
+theorem checkTableauGMI_sound
+    {aI aC : Array Rat} {beta : Rat}
+    {cIOpt cCOpt : Option (Array Rat)}
+    {solutions : Array (Rat × Array Rat × Array Rat)}
+    (hok : checkTableauGMI aI aC beta cIOpt cCOpt solutions = .ok ())
+    {xB : Rat} {xI : Fin aI.size → Rat} {xC : Fin aC.size → Rat}
+    (hrow : xB + finSum aI.size (fun j => aI[j.val] * xI j) +
+      finSum aC.size (fun k => aC[k.val] * xC k) = beta)
+    (hxB : ∃ z : Int, xB = (z : Rat))
+    (hxI : ∀ j, 0 ≤ xI j ∧ ∃ z : Int, xI j = (z : Rat))
+    (hxC : ∀ k, 0 ≤ xC k) :
+    let f0 := fracPart beta
+    let cIFn : Fin aI.size → Rat := fun j => optCoeffAt cIOpt (gmiIntCoeff aI[j.val] f0) j.val
+    let cCFn : Fin aC.size → Rat := fun k => optCoeffAt cCOpt (gmiContCoeff aC[k.val] f0) k.val
+    1 ≤ finSum aI.size (fun j => cIFn j * xI j) + finSum aC.size (fun k => cCFn k * xC k) := by
+  have halg : checkTableauGMIAlg aI aC beta cIOpt cCOpt = .ok () := by
+    unfold checkTableauGMI at hok
+    cases h : checkTableauGMIAlg aI aC beta cIOpt cCOpt with
+    | error e => rw [h] at hok; contradiction
+    | ok _ => rfl
+  unfold checkTableauGMIAlg at halg
+  rcases guardExcB_ok halg with ⟨hf0B, halg⟩
+  rcases guardExcB_ok halg with ⟨_, halg⟩
+  rcases guardExcB_ok halg with ⟨hcIOk, halg⟩
+  rcases guardExcB_ok halg with ⟨_, halg⟩
+  rcases guardExcB_ok halg with ⟨hcCOk, _⟩
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hf0B
+  have hcI : ∀ j : Fin aI.size, gmiIntCoeff aI[j.val] (fracPart beta) ≤
+      optCoeffAt cIOpt (gmiIntCoeff aI[j.val] (fracPart beta)) j.val :=
+    fun j => of_decide_eq_true (allFinB_eq_true_iff.mp hcIOk j)
+  have hcC : ∀ k : Fin aC.size, gmiContCoeff aC[k.val] (fracPart beta) ≤
+      optCoeffAt cCOpt (gmiContCoeff aC[k.val] (fracPart beta)) k.val :=
+    fun k => of_decide_eq_true (allFinB_eq_true_iff.mp hcCOk k)
+  exact gmi_weaken_upward_sound hrow hxB hxI hxC rfl hf0B.1 hf0B.2 hcI hcC
+
+/-- Algebraic core of `checkCMIRCertificate` matching `cmir_safe_rounded_sound`. -/
+def checkCMIRCertificateAlg
     (aI aC : Array Rat)
     (lbI ubI lbC ubC : Array (Option Rat))
     (useLowerI useLowerC : Array Bool)
     (rhs delta : Rat)
     (betaHatOpt : Option Rat)
-    (alphaHatOpt cIOpt : Option (Array Rat))
-    (cCOpt : Option (Array Rat))
+    (alphaHatOpt cIOpt cCOpt : Option (Array Rat))
     (cutRHSOpt : Option Rat)
-    (lpPrimalOpt : Option (Array Rat × Array Rat))
-    (solutions : Array (Array Rat × Array Rat)) : Except String Unit := do
-  if solutions.isEmpty then
-    throw "cMIR verification requires at least one witness solution"
+    (lpPrimalOpt : Option (Array Rat × Array Rat)) : Except String Unit :=
   let mI := aI.size
   let mC := aC.size
-  if lbI.size != mI || ubI.size != mI || useLowerI.size != mI then
-    throw "cMIR integer dimension mismatch"
-  if lbC.size != mC || ubC.size != mC || useLowerC.size != mC then
-    throw "cMIR continuous dimension mismatch"
-  if !(0 < delta) then
-    throw s!"cMIR delta={delta} must be > 0"
-  if let some (lpI, lpC) := lpPrimalOpt then
-    if lpI.size != mI || lpC.size != mC then
-      throw "cMIR lpPrimal dimension mismatch"
-    for j in [:mI] do
-      let hasL := lbI[j]!.isSome
-      let hasU := ubI[j]!.isSome
-      let l := lbI[j]!.getD 0
-      let u := ubI[j]!.getD 0
-      if useLowerI[j]! != mirUseLowerSpec lpI[j]! l u hasL hasU then
-        throw s!"cMIR integer useLower[{j}] does not match mirUseLowerSpec"
-    for k in [:mC] do
-      let hasL := lbC[k]!.isSome
-      let hasU := ubC[k]!.isSome
-      let l := lbC[k]!.getD 0
-      let u := ubC[k]!.getD 0
-      if useLowerC[k]! != mirUseLowerSpec lpC[k]! l u hasL hasU then
-        throw s!"cMIR continuous useLower[{k}] does not match mirUseLowerSpec"
-  let mut bndI : Array Rat := Array.mkEmpty mI
-  let mut fixedI : Array Bool := Array.mkEmpty mI
-  for j in [:mI] do
-    if useLowerI[j]! then
-      match lbI[j]! with
-      | some l =>
-        if l.den != 1 then
-          throw s!"integer variable {j} active lower bound {l} is not integer"
-        bndI := bndI.push l
-      | none => throw s!"integer variable {j} missing lower bound"
+  if !(lbI.size == mI && ubI.size == mI && useLowerI.size == mI) then
+    .error "cMIR integer dimension mismatch"
+  else if !(lbC.size == mC && ubC.size == mC && useLowerC.size == mC) then
+    .error "cMIR continuous dimension mismatch"
+  else
+  let lpOk : Bool := match lpPrimalOpt with
+    | none => true
+    | some (lpI, lpC) =>
+      lpI.size == mI && lpC.size == mC &&
+      allFinB mI (fun j =>
+        let lOpt := lbI[j.val]!
+        let uOpt := ubI[j.val]!
+        useLowerI[j.val]! == mirUseLowerSpec lpI[j.val]! (lOpt.getD 0) (uOpt.getD 0) lOpt.isSome uOpt.isSome) &&
+      allFinB mC (fun k =>
+        let lOpt := lbC[k.val]!
+        let uOpt := ubC[k.val]!
+        useLowerC[k.val]! == mirUseLowerSpec lpC[k.val]! (lOpt.getD 0) (uOpt.getD 0) lOpt.isSome uOpt.isSome)
+  let intBndOk : Bool := allFinB mI fun j =>
+    if useLowerI[j.val]! then
+      match lbI[j.val]! with | some l => l.den == 1 | none => false
     else
-      match ubI[j]! with
-      | some u =>
-        if u.den != 1 then
-          throw s!"integer variable {j} active upper bound {u} is not integer"
-        bndI := bndI.push u
-      | none => throw s!"integer variable {j} missing upper bound"
-    let isFix := match lbI[j]!, ubI[j]! with
-      | some l, some u => l == u
-      | _, _ => false
-    fixedI := fixedI.push isFix
-  let mut bndC : Array Rat := Array.mkEmpty mC
-  for k in [:mC] do
-    if useLowerC[k]! then
-      match lbC[k]! with
-      | some l => bndC := bndC.push l
-      | none => throw s!"continuous variable {k} missing lower bound"
-    else
-      match ubC[k]! with
-      | some u => bndC := bndC.push u
-      | none => throw s!"continuous variable {k} missing upper bound"
-  let shiftI ← evalArrayDot aI bndI
-  let shiftC ← evalArrayDot aC bndC
-  let exactBeta := (rhs - shiftI - shiftC) / delta
-  let betaHat := betaHatOpt.getD exactBeta
-  if !(exactBeta ≤ betaHat) then
-    throw s!"cMIR betaHat={betaHat} < exactBeta={exactBeta}"
-  let f0 := fracPart betaHat
-  let exactAlpha : Array Rat := Id.run do
-    let mut out := Array.mkEmpty mI
-    for j in [:mI] do
-      out := out.push (cmirSignedCoeff useLowerI[j]! aI[j]! / delta)
-    out
-  let alphaHat ← match alphaHatOpt with
-    | none => pure exactAlpha
-    | some ah => do
-      if ah.size != mI then
-        throw s!"alphaHat length {ah.size} != {mI}"
-      for j in [:mI] do
-        if !(ah[j]! ≤ exactAlpha[j]!) then
-          throw s!"alphaHat[{j}]={ah[j]!} > exactAlpha={exactAlpha[j]!}"
-      pure ah
-  let exactCI : Array Rat := alphaHat.map (fun al => mirIntCoeff al f0)
-  let cI ← match cIOpt with
-    | none => pure exactCI
-    | some ci => do
-      if ci.size != mI then
-        throw s!"cI length {ci.size} != {mI}"
-      for j in [:mI] do
-        if !(fixedI[j]! && ci[j]! == 0) && !(ci[j]! ≤ exactCI[j]!) then
-          throw s!"cI[{j}]={ci[j]!} > mirIntCoeff={exactCI[j]!}"
-      pure ci
-  let exactCC : Array Rat := Id.run do
-    let mut out := Array.mkEmpty mC
-    for k in [:mC] do
-      let sg := cmirSignedCoeff useLowerC[k]! aC[k]!
-      let num := max (-sg) 0
-      out := out.push (num / (delta * (1 - f0)))
-    out
-  let cC ← match cCOpt with
-    | none => pure exactCC
-    | some cc => do
-      if cc.size != mC then
-        throw s!"cC length {cc.size} != {mC}"
-      for k in [:mC] do
-        if !(exactCC[k]! ≤ cc[k]!) then
-          throw s!"cC[{k}]={cc[k]!} < exactContCoeff={exactCC[k]!}"
-      pure cc
-  let origI : Array Rat := Id.run do
-    let mut out := Array.mkEmpty mI
-    for j in [:mI] do
-      out := out.push (cmirSignedCoeff useLowerI[j]! cI[j]!)
-    out
-  let origC : Array Rat := Id.run do
-    let mut out := Array.mkEmpty mC
-    for k in [:mC] do
-      out := out.push (if useLowerC[k]! then -cC[k]! else cC[k]!)
-    out
-  let exactCutRHS := (betaHat.floor : Rat) + (← evalArrayDot origI bndI) + (← evalArrayDot origC bndC)
-  let cutRHS := cutRHSOpt.getD exactCutRHS
-  if !(exactCutRHS ≤ cutRHS) then
-    throw s!"cutRHS={cutRHS} < exactCutRHS={exactCutRHS}"
+      match ubI[j.val]! with | some u => u.den == 1 | none => false
+  let contBndOk : Bool := allFinB mC fun k =>
+    if useLowerC[k.val]! then (lbC[k.val]!).isSome else (ubC[k.val]!).isSome
+  let bndIFn : Fin mI → Rat := fun j =>
+    cmirBound useLowerI[j.val]! (lbI[j.val]!.getD 0) (ubI[j.val]!.getD 0)
+  let bndCFn : Fin mC → Rat := fun k =>
+    cmirBound useLowerC[k.val]! (lbC[k.val]!.getD 0) (ubC[k.val]!.getD 0)
+  let exactBeta : Rat :=
+    (rhs - finSum mI (fun j => aI[j.val] * bndIFn j) - finSum mC (fun k => aC[k.val] * bndCFn k)) / delta
+  let betaHat : Rat := betaHatOpt.getD exactBeta
+  let f0 : Rat := fracPart betaHat
+  let alphaLenOk : Bool := match alphaHatOpt with | none => true | some ah => ah.size == mI
+  let alphaHatFn : Fin mI → Rat := fun j =>
+    optCoeffAt alphaHatOpt (cmirSignedCoeff useLowerI[j.val]! aI[j.val] / delta) j.val
+  let alphaOk : Bool := allFinB mI fun j =>
+    decide (alphaHatFn j ≤ cmirSignedCoeff useLowerI[j.val]! aI[j.val] / delta)
+  let cILenOk : Bool := match cIOpt with | none => true | some ci => ci.size == mI
+  let cIFn : Fin mI → Rat := fun j =>
+    optCoeffAt cIOpt (mirIntCoeff (alphaHatFn j) f0) j.val
+  let cIOk : Bool := allFinB mI fun j =>
+    let isFix := match lbI[j.val]!, ubI[j.val]! with | some l, some u => l == u | _, _ => false
+    (isFix && cIFn j == 0) || decide (cIFn j ≤ mirIntCoeff (alphaHatFn j) f0)
+  let cCLenOk : Bool := match cCOpt with | none => true | some cc => cc.size == mC
+  let cCFn : Fin mC → Rat := fun k =>
+    optCoeffAt cCOpt (max (-(cmirSignedCoeff useLowerC[k.val]! aC[k.val])) 0 / (delta * (1 - f0))) k.val
+  let cCOk : Bool := allFinB mC fun k =>
+    decide (max (-(cmirSignedCoeff useLowerC[k.val]! aC[k.val])) 0 / (delta * (1 - f0)) ≤ cCFn k)
+  let exactCutRHS : Rat := (betaHat.floor : Rat) +
+    finSum mI (fun j => cmirSignedCoeff useLowerI[j.val]! (cIFn j) * bndIFn j) +
+    finSum mC (fun k => (if useLowerC[k.val]! then -cCFn k else cCFn k) * bndCFn k)
+  let cutRHS : Rat := cutRHSOpt.getD exactCutRHS
+  guardExcB (decide (0 < delta)) s!"cMIR delta={delta} must be > 0" <|
+  guardExcB lpOk "cMIR lpPrimal / useLower parity mismatch" <|
+  guardExcB intBndOk "cMIR integer variable missing integral active bound" <|
+  guardExcB contBndOk "cMIR continuous variable missing active bound" <|
+  guardExcB (decide (exactBeta ≤ betaHat)) s!"cMIR betaHat={betaHat} < exactBeta={exactBeta}" <|
+  guardExcB (alphaLenOk && cILenOk && cCLenOk) "cMIR optional array length mismatch" <|
+  guardExcB alphaOk "cMIR alphaHat exceeds exact scaled integer coefficient" <|
+  guardExcB cIOk "cMIR cI exceeds mirIntCoeff" <|
+  guardExcB cCOk "cMIR cC below exact continuous MIR coefficient" <|
+  guardExcB (decide (exactCutRHS ≤ cutRHS)) s!"cutRHS={cutRHS} < exactCutRHS={exactCutRHS}" <|
+  .ok ()
+
+private def checkCMIRCertificateWitnesses
+    (aI aC : Array Rat)
+    (lbI ubI lbC ubC : Array (Option Rat))
+    (useLowerI useLowerC : Array Bool)
+    (rhs delta : Rat)
+    (betaHatOpt : Option Rat)
+    (alphaHatOpt cIOpt cCOpt : Option (Array Rat))
+    (cutRHSOpt : Option Rat)
+    (solutions : Array (Array Rat × Array Rat)) : Except String Unit := do
+  let mI := aI.size
+  let mC := aC.size
+  let bndIFn : Fin mI → Rat := fun j =>
+    cmirBound useLowerI[j.val]! (lbI[j.val]!.getD 0) (ubI[j.val]!.getD 0)
+  let bndCFn : Fin mC → Rat := fun k =>
+    cmirBound useLowerC[k.val]! (lbC[k.val]!.getD 0) (ubC[k.val]!.getD 0)
+  let exactBeta : Rat :=
+    (rhs - finSum mI (fun j => aI[j.val] * bndIFn j) - finSum mC (fun k => aC[k.val] * bndCFn k)) / delta
+  let betaHat : Rat := betaHatOpt.getD exactBeta
+  let f0 : Rat := fracPart betaHat
+  let alphaHatFn : Fin mI → Rat := fun j =>
+    match alphaHatOpt with
+    | none => cmirSignedCoeff useLowerI[j.val]! aI[j.val] / delta
+    | some ah => ah[j.val]!
+  let cIFn : Fin mI → Rat := fun j =>
+    match cIOpt with | none => mirIntCoeff (alphaHatFn j) f0 | some ci => ci[j.val]!
+  let cCFn : Fin mC → Rat := fun k =>
+    match cCOpt with
+    | none => max (-(cmirSignedCoeff useLowerC[k.val]! aC[k.val])) 0 / (delta * (1 - f0))
+    | some cc => cc[k.val]!
+  let exactCutRHS : Rat := (betaHat.floor : Rat) +
+    finSum mI (fun j => cmirSignedCoeff useLowerI[j.val]! (cIFn j) * bndIFn j) +
+    finSum mC (fun k => (if useLowerC[k.val]! then -cCFn k else cCFn k) * bndCFn k)
+  let cutRHS : Rat := cutRHSOpt.getD exactCutRHS
+  let origI : Array Rat := Array.ofFn fun (j : Fin mI) => cmirSignedCoeff useLowerI[j.val]! (cIFn j)
+  let origC : Array Rat := Array.ofFn fun (k : Fin mC) => if useLowerC[k.val]! then -cCFn k else cCFn k
   for sIdx in [:solutions.size] do
     let (xI, xC) := solutions[sIdx]!
     if xI.size != mI || xC.size != mC then
@@ -1420,32 +1555,207 @@ def checkCMIRCertificate
     if !(cutLHS ≤ cutRHS) then
       throw s!"solution {sIdx}: cMIR cut violated: {cutLHS} > {cutRHS}"
 
-/-- Verifies a VUB disaggregation certificate matching `vub_disagg_opt_sound`. -/
-def checkVUBDisagg
-    (a : Array Rat)
-    (u : Array (Option Rat))
-    (cap rhsRow : Rat)
-    (targetIdx : Nat)
-    (effUB cutRHS : Rat)
+/-- Verifies a safe-rounded complemented MIR certificate (`cmir_safe_rounded_sound`)
+algebraically over all feasible points, plus any optional witness points supplied. -/
+def checkCMIRCertificate
+    (aI aC : Array Rat)
+    (lbI ubI lbC ubC : Array (Option Rat))
+    (useLowerI useLowerC : Array Bool)
+    (rhs delta : Rat)
+    (betaHatOpt : Option Rat)
+    (alphaHatOpt cIOpt : Option (Array Rat))
+    (cCOpt : Option (Array Rat))
+    (cutRHSOpt : Option Rat)
+    (lpPrimalOpt : Option (Array Rat × Array Rat))
+    (solutions : Array (Array Rat × Array Rat)) : Except String Unit :=
+  match checkCMIRCertificateAlg aI aC lbI ubI lbC ubC useLowerI useLowerC rhs delta
+      betaHatOpt alphaHatOpt cIOpt cCOpt cutRHSOpt lpPrimalOpt with
+  | .error e => .error e
+  | .ok () =>
+    checkCMIRCertificateWitnesses aI aC lbI ubI lbC ubC useLowerI useLowerC rhs delta
+      betaHatOpt alphaHatOpt cIOpt cCOpt cutRHSOpt solutions
+
+/-- Universal soundness of `checkCMIRCertificate`: whenever `checkCMIRCertificate` succeeds,
+the verified complemented safe-rounded MIR cut holds for EVERY mixed-integer point satisfying
+the optional variable bounds and the source inequality. -/
+theorem checkCMIRCertificate_sound
+    {aI aC : Array Rat}
+    {lbI ubI lbC ubC : Array (Option Rat)}
+    {useLowerI useLowerC : Array Bool}
+    {rhs delta : Rat}
+    {betaHatOpt : Option Rat}
+    {alphaHatOpt cIOpt cCOpt : Option (Array Rat)}
+    {cutRHSOpt : Option Rat}
+    {lpPrimalOpt : Option (Array Rat × Array Rat)}
+    {solutions : Array (Array Rat × Array Rat)}
+    (hok : checkCMIRCertificate aI aC lbI ubI lbC ubC useLowerI useLowerC rhs delta
+      betaHatOpt alphaHatOpt cIOpt cCOpt cutRHSOpt lpPrimalOpt solutions = .ok ())
+    {xI : Fin aI.size → Rat} {xC : Fin aC.size → Rat}
+    (hxI : ∀ j : Fin aI.size, (∃ z : Int, xI j = (z : Rat)) ∧
+      (∀ l, lbI[j.val]! = some l → l ≤ xI j) ∧ (∀ u, ubI[j.val]! = some u → xI j ≤ u))
+    (hxC : ∀ k : Fin aC.size,
+      (∀ l, lbC[k.val]! = some l → l ≤ xC k) ∧ (∀ u, ubC[k.val]! = some u → xC k ≤ u))
+    (hrow : finSum aI.size (fun j => aI[j.val] * xI j) +
+      finSum aC.size (fun k => aC[k.val] * xC k) ≤ rhs) :
+    let bndIFn : Fin aI.size → Rat := fun j =>
+      cmirBound useLowerI[j.val]! (lbI[j.val]!.getD 0) (ubI[j.val]!.getD 0)
+    let bndCFn : Fin aC.size → Rat := fun k =>
+      cmirBound useLowerC[k.val]! (lbC[k.val]!.getD 0) (ubC[k.val]!.getD 0)
+    let exactBeta : Rat :=
+      (rhs - finSum aI.size (fun j => aI[j.val] * bndIFn j) - finSum aC.size (fun k => aC[k.val] * bndCFn k)) / delta
+    let betaHat : Rat := betaHatOpt.getD exactBeta
+    let f0 : Rat := fracPart betaHat
+    let alphaHatFn : Fin aI.size → Rat := fun j =>
+      optCoeffAt alphaHatOpt (cmirSignedCoeff useLowerI[j.val]! aI[j.val] / delta) j.val
+    let cIFn : Fin aI.size → Rat := fun j =>
+      optCoeffAt cIOpt (mirIntCoeff (alphaHatFn j) f0) j.val
+    let cCFn : Fin aC.size → Rat := fun k =>
+      optCoeffAt cCOpt (max (-(cmirSignedCoeff useLowerC[k.val]! aC[k.val])) 0 / (delta * (1 - f0))) k.val
+    let exactCutRHS : Rat := (betaHat.floor : Rat) +
+      finSum aI.size (fun j => cmirSignedCoeff useLowerI[j.val]! (cIFn j) * bndIFn j) +
+      finSum aC.size (fun k => (if useLowerC[k.val]! then -cCFn k else cCFn k) * bndCFn k)
+    let cutRHS : Rat := cutRHSOpt.getD exactCutRHS
+    finSum aI.size (fun j => cmirSignedCoeff useLowerI[j.val]! (cIFn j) * xI j) +
+      finSum aC.size (fun k => (if useLowerC[k.val]! then -cCFn k else cCFn k) * xC k) ≤ cutRHS := by
+  have halg : checkCMIRCertificateAlg aI aC lbI ubI lbC ubC useLowerI useLowerC rhs delta
+      betaHatOpt alphaHatOpt cIOpt cCOpt cutRHSOpt lpPrimalOpt = .ok () := by
+    unfold checkCMIRCertificate at hok
+    cases h : checkCMIRCertificateAlg aI aC lbI ubI lbC ubC useLowerI useLowerC rhs delta
+        betaHatOpt alphaHatOpt cIOpt cCOpt cutRHSOpt lpPrimalOpt with
+    | error e => rw [h] at hok; contradiction
+    | ok _ => rfl
+  unfold checkCMIRCertificateAlg at halg
+  rcases ite_not_error_okB halg with ⟨_, halg⟩
+  rcases ite_not_error_okB halg with ⟨_, halg⟩
+  rcases guardExcB_ok halg with ⟨hdeltaD, halg⟩
+  rcases guardExcB_ok halg with ⟨_, halg⟩
+  rcases guardExcB_ok halg with ⟨hintBndOk, halg⟩
+  rcases guardExcB_ok halg with ⟨hcontBndOk, halg⟩
+  rcases guardExcB_ok halg with ⟨hbetaD, halg⟩
+  rcases guardExcB_ok halg with ⟨_, halg⟩
+  rcases guardExcB_ok halg with ⟨halphaOk, halg⟩
+  rcases guardExcB_ok halg with ⟨hcIOk, halg⟩
+  rcases guardExcB_ok halg with ⟨hcCOk, halg⟩
+  rcases guardExcB_ok halg with ⟨hcutRHSD, _⟩
+  have hdeltaPos : 0 < delta := of_decide_eq_true hdeltaD
+  have hintBndAll := allFinB_eq_true_iff.mp hintBndOk
+  have hcontBndAll := allFinB_eq_true_iff.mp hcontBndOk
+  have halphaAll := allFinB_eq_true_iff.mp halphaOk
+  have hcIAll := allFinB_eq_true_iff.mp hcIOk
+  have hcCAll := allFinB_eq_true_iff.mp hcCOk
+  let lIFn : Fin aI.size → Rat := fun j => (lbI[j.val]!).getD 0
+  let uIFn : Fin aI.size → Rat := fun j => (ubI[j.val]!).getD 0
+  let hasLI : Fin aI.size → Bool := fun j => (lbI[j.val]!).isSome
+  let hasUI : Fin aI.size → Bool := fun j => (ubI[j.val]!).isSome
+  let lCFn : Fin aC.size → Rat := fun k => (lbC[k.val]!).getD 0
+  let uCFn : Fin aC.size → Rat := fun k => (ubC[k.val]!).getD 0
+  let hasLC : Fin aC.size → Bool := fun k => (lbC[k.val]!).isSome
+  let hasUC : Fin aC.size → Bool := fun k => (ubC[k.val]!).isSome
+  have hxI' : ∀ j : Fin aI.size, (∃ z : Int, xI j = (z : Rat)) ∧
+      (hasLI j = true → lIFn j ≤ xI j) ∧ (hasUI j = true → xI j ≤ uIFn j) ∧
+      (if useLowerI[j.val]! then hasLI j = true ∧ ∃ z : Int, lIFn j = (z : Rat)
+       else hasUI j = true ∧ ∃ z : Int, uIFn j = (z : Rat)) := by
+    intro j
+    rcases hxI j with ⟨hzx, hL, hU⟩
+    refine ⟨hzx, ?_, ?_, ?_⟩
+    · intro hhas
+      cases hlb : lbI[j.val]! with
+      | none => simp [hasLI, hlb] at hhas
+      | some l => simp only [lIFn, hlb, Option.getD_some]; exact hL l hlb
+    · intro hhas
+      cases hub : ubI[j.val]! with
+      | none => simp [hasUI, hub] at hhas
+      | some u => simp only [uIFn, hub, Option.getD_some]; exact hU u hub
+    · have hb := hintBndAll j
+      cases hu : useLowerI[j.val]!
+      · simp only [hu, Bool.false_eq_true, ↓reduceIte] at hb ⊢
+        cases hub : ubI[j.val]! with
+        | none => simp [hub] at hb
+        | some u =>
+          simp only [hub, beq_iff_eq] at hb
+          exact ⟨by simp [hasUI, hub], ⟨u.num, by simp only [uIFn, hub, Option.getD_some]; exact rat_eq_intCast_of_den_eq_one u hb⟩⟩
+      · simp only [hu, ↓reduceIte] at hb ⊢
+        cases hlb : lbI[j.val]! with
+        | none => simp [hlb] at hb
+        | some l =>
+          simp only [hlb, beq_iff_eq] at hb
+          exact ⟨by simp [hasLI, hlb], ⟨l.num, by simp only [lIFn, hlb, Option.getD_some]; exact rat_eq_intCast_of_den_eq_one l hb⟩⟩
+  have hxC' : ∀ k : Fin aC.size, (hasLC k = true → lCFn k ≤ xC k) ∧ (hasUC k = true → xC k ≤ uCFn k) ∧
+      (if useLowerC[k.val]! then hasLC k = true else hasUC k = true) := by
+    intro k
+    rcases hxC k with ⟨hL, hU⟩
+    refine ⟨?_, ?_, ?_⟩
+    · intro hhas
+      cases hlb : lbC[k.val]! with
+      | none => simp [hasLC, hlb] at hhas
+      | some l => simp only [lCFn, hlb, Option.getD_some]; exact hL l hlb
+    · intro hhas
+      cases hub : ubC[k.val]! with
+      | none => simp [hasUC, hub] at hhas
+      | some u => simp only [uCFn, hub, Option.getD_some]; exact hU u hub
+    · have hb := hcontBndAll k
+      cases hu : useLowerC[k.val]! <;> simp [hasLC, hasUC, hu] at hb ⊢ <;> exact hb
+  let exactBeta : Rat :=
+    cmirShiftedRHS (fun j => aI[j.val]) lIFn uIFn (fun j => useLowerI[j.val]!)
+      (fun k => aC[k.val]) lCFn uCFn (fun k => useLowerC[k.val]!) rhs / delta
+  let betaHat : Rat := betaHatOpt.getD exactBeta
+  let alphaHatFn : Fin aI.size → Rat := fun j =>
+    optCoeffAt alphaHatOpt (cmirSignedCoeff useLowerI[j.val]! aI[j.val] / delta) j.val
+  let cIFn : Fin aI.size → Rat := fun j =>
+    optCoeffAt cIOpt (mirIntCoeff (alphaHatFn j) (fracPart betaHat)) j.val
+  let cCFn : Fin aC.size → Rat := fun k =>
+    optCoeffAt cCOpt (max (-(cmirSignedCoeff useLowerC[k.val]! aC[k.val])) 0 / (delta * (1 - fracPart betaHat))) k.val
+  have hcI' : ∀ j : Fin aI.size,
+      (hasLI j = true ∧ hasUI j = true ∧ lIFn j = uIFn j ∧ cIFn j = 0) ∨
+      cIFn j ≤ mirIntCoeff (alphaHatFn j) (fracPart betaHat) := by
+    intro j
+    have hj := hcIAll j
+    dsimp only at hj
+    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hj
+    rcases hj with ⟨hfix, hc0⟩ | hle
+    · left
+      cases hlb : lbI[j.val]! with
+      | none => simp [hlb] at hfix
+      | some l =>
+        cases hub : ubI[j.val]! with
+        | none => simp [hlb, hub] at hfix
+        | some u =>
+          simp only [hlb, hub, beq_iff_eq] at hfix
+          exact ⟨by simp [hasLI, hlb], by simp [hasUI, hub], by simp [lIFn, uIFn, hlb, hub, hfix], hc0⟩
+    · right; exact hle
+  exact cmir_safe_rounded_sound
+    (aI := fun j => aI[j.val]) (xI := xI) (lI := lIFn) (uI := uIFn)
+    (hasLI := hasLI) (hasUI := hasUI) (useLowerI := fun j => useLowerI[j.val]!)
+    (aC := fun k => aC[k.val]) (xC := xC) (lC := lCFn) (uC := uCFn)
+    (hasLC := hasLC) (hasUC := hasUC) (useLowerC := fun k => useLowerC[k.val]!)
+    (rhs := rhs) (delta := delta) (betaHat := betaHat)
+    (alphaHat := alphaHatFn) (cI := cIFn) (cC := cCFn)
+    hdeltaPos hxI' hxC' hrow (of_decide_eq_true hbetaD)
+    (fun j => of_decide_eq_true (halphaAll j)) hcI'
+    (fun k => of_decide_eq_true (hcCAll k)) (of_decide_eq_true hcutRHSD)
+
+/-- Algebraic core of `checkVUBDisagg` matching `vub_disagg_opt_sound`. -/
+def checkVUBDisaggAlg
+    (a : Array Rat) (u : Array (Option Rat))
+    (cap rhsRow : Rat) (targetIdx : Nat) (effUB cutRHS : Rat) : Except String Unit :=
+  if !(a.size == u.size) then
+    .error s!"VUB arrays a ({a.size}) and u ({u.size}) mismatch"
+  else if !(decide (targetIdx < a.size)) then
+    .error s!"targetIdx {targetIdx} out of bounds ({a.size})"
+  else
+  let aPosOk : Bool := allFinB a.size (fun j => decide (0 < a[j.val]))
+  guardExcB (decide (0 ≤ cap)) s!"VUB capacity C={cap} must be non-negative" <|
+  guardExcB (decide (rhsRow ≤ 0)) s!"VUB row RHS={rhsRow} must be ≤ 0" <|
+  guardExcB aPosOk "VUB coefficients must all be > 0" <|
+  guardExcB (decide (vubEffUB u[targetIdx]! cap a[targetIdx]! ≤ effUB))
+    s!"violated min bound: effUB={effUB} < min(u, C/a)={vubEffUB u[targetIdx]! cap a[targetIdx]!}" <|
+  guardExcB (decide (0 ≤ cutRHS)) s!"VUB cutRHS={cutRHS} must be ≥ 0" <|
+  .ok ()
+
+private def checkVUBDisaggWitnesses
+    (a : Array Rat) (u : Array (Option Rat))
+    (cap rhsRow : Rat) (targetIdx : Nat) (effUB cutRHS : Rat)
     (solutions : Array (Array Rat × Rat)) : Except String Unit := do
-  if solutions.isEmpty then
-    throw "VUB verification requires at least one witness solution"
-  if a.size != u.size then
-    throw s!"VUB arrays a ({a.size}) and u ({u.size}) mismatch"
-  if !(targetIdx < a.size) then
-    throw s!"targetIdx {targetIdx} out of bounds ({a.size})"
-  if !(0 ≤ cap) then
-    throw s!"VUB capacity C={cap} must be non-negative"
-  if !(rhsRow ≤ 0) then
-    throw s!"VUB row RHS={rhsRow} must be ≤ 0"
-  for j in [:a.size] do
-    if !(0 < a[j]!) then
-      throw s!"VUB coeff a[{j}]={a[j]!} must be > 0"
-  let reqEff := vubEffUB u[targetIdx]! cap a[targetIdx]!
-  if !(reqEff ≤ effUB) then
-    throw s!"violated min bound: effUB={effUB} < min(u, C/a)={reqEff}"
-  if !(0 ≤ cutRHS) then
-    throw s!"VUB cutRHS={cutRHS} must be ≥ 0"
   for sIdx in [:solutions.size] do
     let (x, y) := solutions[sIdx]!
     if x.size != a.size then
@@ -1467,38 +1777,92 @@ def checkVUBDisagg
     if !(x[targetIdx]! - effUB * y ≤ cutRHS) then
       throw s!"solution {sIdx}: disaggregated VUB cut violated: {x[targetIdx]! - effUB * y} > {cutRHS}"
 
-/-- Verifies a batch of structural cuts against a MIP and feasible mixed-integer solutions. -/
-def checkStructuralCuts
-    (mipOpt : Option MIPSpec)
-    (cuts : Array CutSpec)
-    (solutions : Array (Array Rat)) : Except String Unit := do
-  if solutions.isEmpty then
-    throw "structural cut verification requires at least one feasible solution"
-  for sIdx in [:solutions.size] do
-    let x := solutions[sIdx]!
-    if let some mip := mipOpt then
-      checkMIPFeasible mip x
-    for cIdx in [:cuts.size] do
-      let ok ← checkCutAtPoint cuts[cIdx]! x
-      if !ok then
-        let lhs ← evalTerms cuts[cIdx]!.terms x
-        throw s!"cut {cIdx} violated at solution {sIdx}: lhs={lhs} > rhs={cuts[cIdx]!.rhs}"
+/-- Verifies a VUB disaggregation certificate (`vub_disagg_opt_sound`) algebraically over all
+feasible points, plus any optional witness points supplied. -/
+def checkVUBDisagg
+    (a : Array Rat)
+    (u : Array (Option Rat))
+    (cap rhsRow : Rat)
+    (targetIdx : Nat)
+    (effUB cutRHS : Rat)
+    (solutions : Array (Array Rat × Rat)) : Except String Unit :=
+  match checkVUBDisaggAlg a u cap rhsRow targetIdx effUB cutRHS with
+  | .error e => .error e
+  | .ok () => checkVUBDisaggWitnesses a u cap rhsRow targetIdx effUB cutRHS solutions
 
-/-- Verifies row aggregation multiplier legality (`rowLegalMuSignSpec`) and aggregated row validity on witness points. -/
-def checkRowAgg
+/-- Universal soundness of `checkVUBDisagg`: whenever `checkVUBDisagg` succeeds, the
+disaggregated VUB inequality `x[targetIdx] - effUB * y ≤ cutRHS` holds for EVERY feasible `(x, y)`. -/
+theorem checkVUBDisagg_sound
+    {a : Array Rat} {u : Array (Option Rat)}
+    {cap rhsRow : Rat} {targetIdx : Nat} {effUB cutRHS : Rat}
+    {solutions : Array (Array Rat × Rat)}
+    (hok : checkVUBDisagg a u cap rhsRow targetIdx effUB cutRHS solutions = .ok ())
+    {x : Fin a.size → Rat} {y : Rat}
+    (hx : ∀ j, 0 ≤ x j)
+    (hu : ∀ j uj, u[j.val]! = some uj → x j ≤ uj)
+    (hy : y = 0 ∨ y = 1)
+    (hrow : finSum a.size (fun j => a[j.val] * x j) - cap * y ≤ rhsRow) :
+    ∃ ht : targetIdx < a.size, x ⟨targetIdx, ht⟩ - effUB * y ≤ cutRHS := by
+  have halg : checkVUBDisaggAlg a u cap rhsRow targetIdx effUB cutRHS = .ok () := by
+    unfold checkVUBDisagg at hok
+    cases h : checkVUBDisaggAlg a u cap rhsRow targetIdx effUB cutRHS with
+    | error e => rw [h] at hok; contradiction
+    | ok _ => rfl
+  unfold checkVUBDisaggAlg at halg
+  rcases ite_not_error_okB halg with ⟨_, halg⟩
+  rcases ite_not_error_okB halg with ⟨htD, halg⟩
+  rcases guardExcB_ok halg with ⟨hcapD, halg⟩
+  rcases guardExcB_ok halg with ⟨hrhsD, halg⟩
+  rcases guardExcB_ok halg with ⟨haPosOk, halg⟩
+  rcases guardExcB_ok halg with ⟨heffD, halg⟩
+  rcases guardExcB_ok halg with ⟨hcutRHSD, _⟩
+  have ht : targetIdx < a.size := of_decide_eq_true htD
+  have haPos : ∀ j : Fin a.size, 0 < a[j.val] := fun j => of_decide_eq_true (allFinB_eq_true_iff.mp haPosOk j)
+  have heff : vubEffUB u[targetIdx]! cap a[targetIdx] ≤ effUB := by
+    have h := of_decide_eq_true heffD
+    rwa [getElem!_pos a targetIdx ht] at h
+  have hvub := vub_disagg_opt_sound hrow (of_decide_eq_true hrhsD) haPos hx hu
+    (of_decide_eq_true hcapD) hy ⟨targetIdx, ht⟩ heff
+  have hsub : x ⟨targetIdx, ht⟩ - effUB * y ≤ 0 := by
+    have h := (Rat.add_le_add_right (c := -(effUB * y))).mpr hvub
+    simpa [Rat.sub_eq_add_neg, Rat.add_neg_cancel] using h
+  exact ⟨ht, Rat.le_trans hsub (of_decide_eq_true hcutRHSD)⟩
+
+/-- Algebraic core of `checkRowAgg`: verifies multiplier sign legality on all rows AND, when
+`aggCutOpt = some cut`, algebraically verifies exact coefficient matching across every
+mentioned column plus `∑ mu_i * rhs_i ≤ cut.rhs`. -/
+def checkRowAggAlg
     (rows : Array (RowSpec × Rat))
     (allowZero : Bool)
+    (aggCutOpt : Option CutSpec) : Except String Unit :=
+  let m := rows.size
+  let muOk : Bool := allFinB m fun i =>
+    let (row, mu) := rows[i.val]
+    (allowZero && mu == 0) || rowLegalMuSignSpec row.sense mu
+  let cutOk : Bool := match aggCutOpt with
+    | none => true
+    | some cut =>
+      let exactRHS : Rat := finSum m (fun i => rows[i.val].2 * rows[i.val].1.rhs)
+      let rowColsOk : Bool := allFinB m fun i =>
+        let terms := rows[i.val].1.terms
+        allFinB terms.size fun k =>
+          let c := terms[k.val].col
+          decide (finSum m (fun r => rows[r.val].2 * sparseTermsCoeff rows[r.val].1.terms.toList c) =
+            sparseTermsCoeff cut.terms.toList c)
+      let cutColsOk : Bool := allFinB cut.terms.size fun k =>
+        let c := cut.terms[k.val].col
+        decide (finSum m (fun r => rows[r.val].2 * sparseTermsCoeff rows[r.val].1.terms.toList c) =
+          sparseTermsCoeff cut.terms.toList c)
+      rowColsOk && cutColsOk && decide (exactRHS ≤ cut.rhs)
+  guardExcB (!rows.isEmpty) "row aggregation verification requires at least one row" <|
+  guardExcB muOk "row aggregation has illegal multiplier sign for constraint sense" <|
+  guardExcB cutOk "aggregated cut coefficients or RHS do not match algebraic linear combination" <|
+  .ok ()
+
+private def checkRowAggWitnesses
+    (rows : Array (RowSpec × Rat))
     (aggCutOpt : Option CutSpec)
     (solutions : Array (Array Rat)) : Except String Unit := do
-  if solutions.isEmpty then
-    throw "row aggregation verification requires at least one witness solution"
-  if rows.isEmpty then
-    throw "row aggregation verification requires at least one row"
-  for idx in [:rows.size] do
-    let (row, mu) := rows[idx]!
-    let legal := (allowZero && mu == 0) || rowLegalMuSignSpec row.sense mu
-    if !legal then
-      throw s!"row {idx}: illegal multiplier mu={mu} for sense={repr row.sense}"
   for sIdx in [:solutions.size] do
     let x := solutions[sIdx]!
     let mut aggLHS : Rat := 0
@@ -1517,5 +1881,108 @@ def checkRowAgg
       if !ok then
         let clhs ← evalTerms cut.terms x
         throw s!"solution {sIdx}: aggregated cut violated: {clhs} > {cut.rhs}"
+
+/-- Verifies row aggregation multiplier legality (`rowLegalMuSignSpec`) and exact algebraic
+aggregation of `aggCutOpt` over all feasible points, plus any optional witness points supplied. -/
+def checkRowAgg
+    (rows : Array (RowSpec × Rat))
+    (allowZero : Bool)
+    (aggCutOpt : Option CutSpec)
+    (solutions : Array (Array Rat)) : Except String Unit :=
+  match checkRowAggAlg rows allowZero aggCutOpt with
+  | .error e => .error e
+  | .ok () => checkRowAggWitnesses rows aggCutOpt solutions
+
+/-- Universal soundness of `checkRowAgg`: whenever `checkRowAgg` succeeds, BOTH the exact
+linear combination `∑ mu_i * row_i ≤ ∑ mu_i * rhs_i` AND (when provided) `aggCut` hold for
+EVERY point `x : Fin n → Rat` satisfying all source rows. -/
+theorem checkRowAgg_sound
+    {rows : Array (RowSpec × Rat)} {allowZero : Bool}
+    {aggCutOpt : Option CutSpec} {solutions : Array (Array Rat)}
+    (hok : checkRowAgg rows allowZero aggCutOpt solutions = .ok ())
+    {n : Nat} {x : Fin n → Rat}
+    (hRowCols : ∀ i : Fin rows.size, ∀ t ∈ rows[i.val].1.terms.toList, t.col < n)
+    (hRowSat : ∀ i : Fin rows.size,
+      satisfiesSense (evalSparseTermsFin n rows[i.val].1.terms.toList x) rows[i.val].1.sense rows[i.val].1.rhs) :
+    finSum rows.size (fun i => rows[i.val].2 * evalSparseTermsFin n rows[i.val].1.terms.toList x) ≤
+      finSum rows.size (fun i => rows[i.val].2 * rows[i.val].1.rhs) ∧
+    (∀ cut, aggCutOpt = some cut → (∀ t ∈ cut.terms.toList, t.col < n) →
+      evalSparseTermsFin n cut.terms.toList x ≤ cut.rhs) := by
+  have halg : checkRowAggAlg rows allowZero aggCutOpt = .ok () := by
+    unfold checkRowAgg at hok
+    cases h : checkRowAggAlg rows allowZero aggCutOpt with
+    | error e => rw [h] at hok; contradiction
+    | ok _ => rfl
+  unfold checkRowAggAlg at halg
+  rcases guardExcB_ok halg with ⟨_, halg⟩
+  rcases guardExcB_ok halg with ⟨hmuOk, halg⟩
+  rcases guardExcB_ok halg with ⟨hcutOk, _⟩
+  have hmuAll := allFinB_eq_true_iff.mp hmuOk
+  have hmu : ∀ i : Fin rows.size,
+      rows[i.val].2 = 0 ∨ rowLegalMuSignSpec rows[i.val].1.sense rows[i.val].2 = true := by
+    intro i
+    have hi := hmuAll i
+    dsimp only at hi
+    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hi
+    rcases hi with ⟨_, h0⟩ | hleg
+    · exact Or.inl h0
+    · exact Or.inr hleg
+  have hsatFin : ∀ i : Fin rows.size,
+      satisfiesSense (finSum n (fun j => sparseTermsCoeff rows[i.val].1.terms.toList j.val * x j))
+        rows[i.val].1.sense rows[i.val].1.rhs := by
+    intro i
+    have h := hRowSat i
+    rwa [evalSparseTermsFin_eq_finSum _ x (hRowCols i)] at h
+  have hagg := row_agg_sum_sound hmu hsatFin
+  have hswapLhs :
+      finSum rows.size (fun i => rows[i.val].2 * evalSparseTermsFin n rows[i.val].1.terms.toList x) =
+      finSum n (fun j => finSum rows.size (fun i => rows[i.val].2 * sparseTermsCoeff rows[i.val].1.terms.toList j.val) * x j) := by
+    have h1 :
+        finSum rows.size (fun i => rows[i.val].2 * evalSparseTermsFin n rows[i.val].1.terms.toList x) =
+        finSum rows.size (fun i => finSum n (fun j => (rows[i.val].2 * sparseTermsCoeff rows[i.val].1.terms.toList j.val) * x j)) := by
+      apply finSum_congr
+      intro i
+      rw [evalSparseTermsFin_eq_finSum _ x (hRowCols i), ← finSum_const_mul]
+      exact finSum_congr fun j => (Rat.mul_assoc _ _ _).symm
+    rw [h1, finSum_swap]
+    exact finSum_congr fun j => by rw [finSum_mul_const]
+  refine ⟨by rwa [hswapLhs], ?_⟩
+  intro cut hcutEq hcutCols
+  rw [hcutEq] at hcutOk
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hcutOk
+  rcases hcutOk with ⟨⟨hrowColsOk, hcutColsOk⟩, hrhsLe⟩
+  have hrowColsAll := allFinB_eq_true_iff.mp hrowColsOk
+  have hcutColsAll := allFinB_eq_true_iff.mp hcutColsOk
+  have hCoeffAll : ∀ c : Nat,
+      finSum rows.size (fun r => rows[r.val].2 * sparseTermsCoeff rows[r.val].1.terms.toList c) =
+      sparseTermsCoeff cut.terms.toList c := by
+    intro c
+    by_cases hInCut : ∃ t ∈ cut.terms.toList, t.col = c
+    · rcases hInCut with ⟨t, htMem, rfl⟩
+      rw [List.mem_iff_getElem] at htMem
+      rcases htMem with ⟨k, hk, rfl⟩
+      have hk' : k < cut.terms.size := by simpa using hk
+      exact of_decide_eq_true (hcutColsAll ⟨k, hk'⟩)
+    · by_cases hInRow : ∃ i : Fin rows.size, ∃ t ∈ rows[i.val].1.terms.toList, t.col = c
+      · rcases hInRow with ⟨i, t, htMem, rfl⟩
+        rw [List.mem_iff_getElem] at htMem
+        rcases htMem with ⟨k, hk, rfl⟩
+        have hk' : k < rows[i.val].1.terms.size := by simpa using hk
+        exact of_decide_eq_true (allFinB_eq_true_iff.mp (hrowColsAll i) ⟨k, hk'⟩)
+      · have hCut0 : sparseTermsCoeff cut.terms.toList c = 0 :=
+          sparseTermsCoeff_not_mem (fun t ht heq => hInCut ⟨t, ht, heq⟩)
+        have hRows0 : ∀ r : Fin rows.size,
+            rows[r.val].2 * sparseTermsCoeff rows[r.val].1.terms.toList c = 0 := by
+          intro r
+          have hr0 : sparseTermsCoeff rows[r.val].1.terms.toList c = 0 :=
+            sparseTermsCoeff_not_mem (fun t ht heq => hInRow ⟨r, t, ht, heq⟩)
+          rw [hr0, Rat.mul_zero]
+        rw [finSum_congr hRows0, finSum_zero, hCut0]
+  rw [evalSparseTermsFin_eq_finSum cut.terms.toList x hcutCols]
+  have hmatch : finSum n (fun j => sparseTermsCoeff cut.terms.toList j.val * x j) =
+      finSum n (fun j => finSum rows.size (fun r => rows[r.val].2 * sparseTermsCoeff rows[r.val].1.terms.toList j.val) * x j) :=
+    finSum_congr fun j => by rw [hCoeffAll j.val]
+  rw [hmatch]
+  exact Rat.le_trans hagg hrhsLe
 
 end GoblinFormal.Track2B

@@ -118,7 +118,7 @@ private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) : IO UInt32 := do
   let trimmed := line.trimAscii.toString
   if !trimmed.isEmpty then
     let resp :=
-      match parseJson trimmed >>= verifyCertVal with
+      match parseJsonStrict trimmed >>= verifyCertVal with
       | .ok cert => formatJsonlOk cert
       | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
     stdout.putStr resp
@@ -133,11 +133,14 @@ private def runBatch (path : String) : IO UInt32 := do
     catch err =>
       IO.eprintln s!"ERROR: read '{path}': {err}"
       return 1
-  match parseJson raw >>= JsonVal.asArray with
+  match parseJsonStrict raw >>= JsonVal.asArray with
   | .error msg =>
     IO.eprintln s!"ERROR: parse batch JSON '{path}': {msg}"
     return 1
   | .ok items =>
+    if items.isEmpty then
+      IO.eprintln s!"ERROR: empty batch JSON '{path}'"
+      return 1
     for i in [:items.size] do
       match verifyCertVal items[i]! with
       | .ok _ => pure ()
@@ -171,7 +174,7 @@ def main (args : List String) : IO UInt32 := do
       catch err =>
         IO.eprintln s!"ERROR: read '{path}': {err}"
         return 1
-    match parseJson raw >>= Apps.ViprCheck.verifyCertVal with
+    match parseJsonStrict raw >>= Apps.ViprCheck.verifyCertVal with
     | .ok _ =>
       IO.println "VERIFIED"
       return 0

@@ -679,6 +679,114 @@ def getUInt64 (v : JsonVal) (key : String) : Except String UInt64 :=
 def getRat (v : JsonVal) (key : String) : Except String Rat :=
   v.getField key >>= asRat
 
+private def findDupSmall (fields : Array (String × JsonVal)) : Option String :=
+  let rec inner (ki : String) (j : Nat) : Option String :=
+    if hj : j < fields.size then
+      if fields[j].1 == ki then some ki else inner ki (j + 1)
+    else
+      none
+  termination_by fields.size - j
+  let rec outer (i : Nat) : Option String :=
+    if hi : i < fields.size then
+      match inner fields[i].1 (i + 1) with
+      | some dup => some dup
+      | none => outer (i + 1)
+    else
+      none
+  termination_by fields.size - i
+  outer 0
+
+private def mergeStrings : List String → List String → List String
+  | [], ys => ys
+  | xs, [] => xs
+  | x :: xs, y :: ys =>
+    if x ≤ y then x :: mergeStrings xs (y :: ys)
+    else y :: mergeStrings (x :: xs) ys
+termination_by xs ys => xs.length + ys.length
+
+private def sortStrings (xs : List String) : List String :=
+  if h : xs.length ≤ 1 then
+    xs
+  else
+    let half := xs.length / 2
+    let left := xs.take half
+    let right := xs.drop half
+    mergeStrings (sortStrings left) (sortStrings right)
+termination_by xs.length
+decreasing_by
+  all_goals simp_wf
+  · omega
+  · omega
+
+private def findDupAdjacent : List String → Option String
+  | [] => none
+  | [_] => none
+  | x :: y :: rest =>
+    if x == y then some x else findDupAdjacent (y :: rest)
+
+private def findDupInFields (fields : Array (String × JsonVal)) : Option String :=
+  if fields.size ≤ 1 then
+    none
+  else if fields.size ≤ 16 then
+    findDupSmall fields
+  else
+    let keys := (fields.map Prod.fst).toList
+    findDupAdjacent (sortStrings keys)
+
+/-- Recursively searches a JSON value for any object containing duplicate keys,
+returning the first duplicate key encountered. -/
+def findDuplicateKey? : JsonVal → Option String
+  | .arr elems => findInArr elems 0
+  | .obj fields =>
+    match findDupInFields fields with
+    | some k => some k
+    | none => findInObj fields 0
+  | _ => none
+termination_by v => (sizeOf v, 0)
+decreasing_by
+  all_goals simp_wf
+  · left; omega
+  · left; omega
+where
+  findInArr (xs : Array JsonVal) (i : Nat) : Option String :=
+    if h : i < xs.size then
+      match findDuplicateKey? xs[i] with
+      | some k => some k
+      | none => findInArr xs (i + 1)
+    else
+      none
+  termination_by (sizeOf xs, xs.size - i)
+  decreasing_by
+    all_goals simp_wf
+    · left; have := Array.sizeOf_getElem xs i h; omega
+    · right; omega
+  findInObj (xs : Array (String × JsonVal)) (i : Nat) : Option String :=
+    if h : i < xs.size then
+      match findDuplicateKey? xs[i].2 with
+      | some k => some k
+      | none => findInObj xs (i + 1)
+    else
+      none
+  termination_by (sizeOf xs, xs.size - i)
+  decreasing_by
+    all_goals simp_wf
+    · left
+      have h1 : sizeOf xs[i] < sizeOf xs := Array.sizeOf_getElem xs i h
+      have h2 : sizeOf (xs[i].1, xs[i].2) = 1 + sizeOf xs[i].1 + sizeOf xs[i].2 :=
+        Prod.mk.sizeOf_spec xs[i].1 xs[i].2
+      rw [Prod.eta] at h2
+      change sizeOf xs[i].2 < sizeOf xs
+      omega
+    · right; omega
+
 end JsonVal
+
+/-- Parses a complete JSON value from `s`, rejecting trailing tokens and
+recursively rejecting any object containing duplicate keys. -/
+def parseJsonStrict (s : String) : Except String JsonVal := do
+  let v ← parseJson s
+  match v.findDuplicateKey? with
+  | some dup => .error s!"duplicate JSON object key '{dup}'"
+  | none => .ok v
 
 end GoblinFormal

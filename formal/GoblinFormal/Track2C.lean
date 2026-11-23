@@ -352,6 +352,206 @@ theorem evalRowOnFin_eq_finSum_accum {n : Nat} (row : RowSpec) (x : Fin n → Ra
   rw [evalTermsList_eq_finSum row.terms.toList x (allTermsInBounds_iff.mp hcols)]
   exact finSum_congr fun j => by rw [accumTerms_getElem]
 
+/-- Executable existential quantifier over `Fin n`. -/
+def anyFin : (n : Nat) → (Fin n → Bool) → Bool
+  | 0, _ => false
+  | n + 1, p => anyFin n (fun i => p i.castSucc) || p (Fin.last n)
+
+theorem anyFin_eq_true_iff {n : Nat} {p : Fin n → Bool} :
+    anyFin n p = true ↔ ∃ i : Fin n, p i = true := by
+  induction n with
+  | zero =>
+    constructor
+    · intro h; simp [anyFin] at h
+    · rintro ⟨i, _⟩; exact Fin.elim0 i
+  | succ n ih =>
+    simp only [anyFin, Bool.or_eq_true, ih]
+    constructor
+    · rintro (⟨i, hi⟩ | hlast)
+      · exact ⟨i.castSucc, hi⟩
+      · exact ⟨Fin.last n, hlast⟩
+    · rintro ⟨i, hi⟩
+      by_cases hlt : i.val < n
+      · left
+        have heq : i = (⟨i.val, hlt⟩ : Fin n).castSucc := Fin.ext rfl
+        rw [heq] at hi
+        exact ⟨⟨i.val, hlt⟩, hi⟩
+      · right
+        have heq : i = Fin.last n := Fin.ext (by simp [Fin.val_last]; have := i.isLt; omega)
+        rwa [heq] at hi
+
+/-- Full MIP feasibility predicate over optional bounds, integrality flags, and base rows. -/
+def MIPFeasible (n : Nat) (isInt : Fin n → Bool) (lb ub : Fin n → Option Rat)
+    (baseRows : Array RowSpec) (x : Fin n → Rat) : Prop :=
+  boundsSat lb ub x ∧
+  (∀ j : Fin n, isInt j = true → isIntVal (x j)) ∧
+  (∀ r : Fin baseRows.size, rowSatOnFin n baseRows[r.val] x)
+
+/-- Executable check that column `c` is an integer variable with finite bounds in `[0, 1]`. -/
+def isBinaryCol (isInt : Array Bool) (lb ub : Array (Option Rat)) (c : Nat) : Bool :=
+  if h : c < isInt.size ∧ c < lb.size ∧ c < ub.size then
+    isInt[c]'(h.1) &&
+    match lb[c]'(h.2.1), ub[c]'(h.2.2) with
+    | some l, some u => decide (0 ≤ l) && decide (u ≤ 1)
+    | _, _ => false
+  else false
+
+/-- Executable check that column `c` has a finite non-negative lower bound `0 ≤ l`. -/
+def isNonnegCol (lb : Array (Option Rat)) (c : Nat) : Bool :=
+  if h : c < lb.size then
+    match lb[c]'h with
+    | some l => decide (0 ≤ l)
+    | none => false
+  else false
+
+theorem isBinVal_of_int_bounds {x l u : Rat}
+    (hint : isIntVal x) (hl : l ≤ x) (hu : x ≤ u) (h0 : 0 ≤ l) (h1 : u ≤ 1) :
+    isBinVal x := by
+  rcases hint with ⟨z, rfl⟩
+  have hz0 : (0 : Int) ≤ z := Rat.intCast_le_intCast.mp (Rat.le_trans h0 hl)
+  have hz1 : z ≤ (1 : Int) := Rat.intCast_le_intCast.mp (Rat.le_trans hu h1)
+  have hcases : z = 0 ∨ z = 1 := by omega
+  rcases hcases with rfl | rfl
+  · exact Or.inl rfl
+  · exact Or.inr rfl
+
+theorem isBinaryCol_sound {n : Nat} {isInt : Array Bool} {lb ub : Array (Option Rat)}
+    {baseRows : Array RowSpec} {x : Fin n → Rat}
+    (hIntLen : isInt.size = n) (hlbLen : lb.size = n) (hubLen : ub.size = n)
+    (hfeas : MIPFeasible n (fun j => isInt[j.val]'(by omega))
+      (fun j => lb[j.val]'(by omega)) (fun j => ub[j.val]'(by omega)) baseRows x)
+    {c : Nat} (hc : c < n) (hbin : isBinaryCol isInt lb ub c = true) :
+    isBinVal (x ⟨c, hc⟩) := by
+  unfold isBinaryCol at hbin
+  have hlt : c < isInt.size ∧ c < lb.size ∧ c < ub.size := by omega
+  rw [dite_eq_left hlt] at hbin
+  simp only [Bool.and_eq_true] at hbin
+  have hIntX := hfeas.2.1 ⟨c, hc⟩ hbin.1
+  have hbnd := hbin.2
+  cases hlb : lb[c]'(by omega) with
+  | none => simp [hlb] at hbnd
+  | some l =>
+    cases hub : ub[c]'(by omega) with
+    | none => simp [hlb, hub] at hbnd
+    | some u =>
+      simp only [hlb, hub, Bool.and_eq_true, decide_eq_true_eq] at hbnd
+      exact isBinVal_of_int_bounds hIntX ((hfeas.1 ⟨c, hc⟩).1 l hlb) ((hfeas.1 ⟨c, hc⟩).2 u hub) hbnd.1 hbnd.2
+
+theorem isNonnegCol_sound {n : Nat} {isInt : Array Bool} {lb ub : Array (Option Rat)}
+    {baseRows : Array RowSpec} {x : Fin n → Rat}
+    (hIntLen : isInt.size = n) (hlbLen : lb.size = n) (hubLen : ub.size = n)
+    (hfeas : MIPFeasible n (fun j => isInt[j.val]'(by omega))
+      (fun j => lb[j.val]'(by omega)) (fun j => ub[j.val]'(by omega)) baseRows x)
+    {c : Nat} (hc : c < n) (hnn : isNonnegCol lb c = true) :
+    0 ≤ x ⟨c, hc⟩ := by
+  unfold isNonnegCol at hnn
+  have hlt : c < lb.size := by omega
+  simp only [hlt, ↓reduceDIte] at hnn
+  cases hlb : lb[c]'(by omega) with
+  | none => simp [hlb] at hnn
+  | some l =>
+    simp only [hlb, decide_eq_true_eq] at hnn
+    exact Rat.le_trans hnn ((hfeas.1 ⟨c, hc⟩).1 l hlb)
+
+/-- Checks whether `baseRow` matches `targetRow` identically in sense, RHS, and dense coefficients. -/
+def rowMatchesBaseRow (n : Nat) (baseRow targetRow : RowSpec) : Bool :=
+  allTermsInBounds n baseRow.terms &&
+  (baseRow.sense == targetRow.sense) &&
+  decide (baseRow.rhs = targetRow.rhs) &&
+  let baseDense := accumTerms n baseRow.terms
+  let tgtDense := accumTerms n targetRow.terms
+  allFin n fun j =>
+    decide (baseDense.1[j.val]'(by rw [baseDense.2]; exact j.isLt) =
+      tgtDense.1[j.val]'(by rw [tgtDense.2]; exact j.isLt))
+
+theorem rowMatchesBaseRow_sound {n : Nat} {baseRow targetRow : RowSpec} {x : Fin n → Rat}
+    (hmatch : rowMatchesBaseRow n baseRow targetRow = true)
+    (htgtCols : allTermsInBounds n targetRow.terms = true)
+    (hbaseSat : rowSatOnFin n baseRow x) :
+    rowSatOnFin n targetRow x := by
+  unfold rowMatchesBaseRow at hmatch
+  simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hmatch
+  rcases hmatch with ⟨⟨⟨hbaseCols, hsense⟩, hrhs⟩, hcoeffs⟩
+  have hall := allFin_eq_true_iff.mp hcoeffs
+  unfold rowSatOnFin at hbaseSat ⊢
+  rw [evalRowOnFin_eq_finSum_accum baseRow x hbaseCols] at hbaseSat
+  rw [evalRowOnFin_eq_finSum_accum targetRow x htgtCols]
+  have hsum :
+      finSum n (fun j => (accumTerms n baseRow.terms).1[j.val]'(by rw [(accumTerms n baseRow.terms).2]; exact j.isLt) * x j) =
+      finSum n (fun j => (accumTerms n targetRow.terms).1[j.val]'(by rw [(accumTerms n targetRow.terms).2]; exact j.isLt) * x j) :=
+    finSum_congr fun j => by rw [of_decide_eq_true (hall j)]
+  rwa [hsum, hsense, hrhs] at hbaseSat
+
+/-- Exact column error compensation term over optional bounds:
+zero when `cv = exactCoeff` (valid for unbounded/semi-bounded columns!), otherwise
+`|cv - exactCoeff| * max(|l|, |u|)` requiring both finite bounds. -/
+def aggColErrTerm (cv exactCoeff : Rat) (lb ub : Option Rat) : Option Rat :=
+  if cv == exactCoeff then some 0
+  else
+    match lb, ub with
+    | some l, some u => some ((cv - exactCoeff).abs * max l.abs u.abs)
+    | _, _ => none
+
+/-- Soundness of error-bounded aggregated row materialization over arbitrary `Option Rat` bounds
+(allowing unbounded and semi-bounded columns whenever `cv j = exactCoeff j`). -/
+theorem row_agg_error_bound_opt_sound {n : Nat}
+    {cv exactCoeff errTerm x : Fin n → Rat} {lb ub : Fin n → Option Rat}
+    {exactRHS rhsErr aggRHS : Rat}
+    (hexact : finSum n (fun j => exactCoeff j * x j) ≤ exactRHS)
+    (hxbnd : boundsSat lb ub x)
+    (herr : ∀ j, ∃ e, aggColErrTerm (cv j) (exactCoeff j) (lb j) (ub j) = some e ∧ e ≤ errTerm j)
+    (hrhsErr : 0 ≤ rhsErr)
+    (hrhs : exactRHS + rhsErr + finSum n errTerm ≤ aggRHS) :
+    finSum n (fun j => cv j * x j) ≤ aggRHS := by
+  have hterm : ∀ j : Fin n, cv j * x j ≤ exactCoeff j * x j + errTerm j := by
+    intro j
+    rcases herr j with ⟨e, heq, hele⟩
+    unfold aggColErrTerm at heq
+    by_cases hcv : cv j = exactCoeff j
+    · have hbeq : (cv j == exactCoeff j) = true := beq_iff_eq.mpr hcv
+      simp only [hbeq, ↓reduceIte, Option.some.injEq] at heq
+      subst heq
+      rw [hcv]
+      simpa [Rat.add_zero] using Rat.add_le_add_left (c := exactCoeff j * x j) |>.mpr hele
+    · have hbeq : (cv j == exactCoeff j) = false := beq_false_of_ne hcv
+      simp only [hbeq, Bool.false_eq_true, ↓reduceIte] at heq
+      cases hlb : lb j with
+      | none => simp [hlb] at heq
+      | some l =>
+        cases hub : ub j with
+        | none => simp [hlb, hub] at heq
+        | some u =>
+          simp only [hlb, hub, Option.some.injEq] at heq
+          subst heq
+          have hxabs : (x j).abs ≤ max l.abs u.abs := by
+            rw [rat_abs_le_iff]
+            have hlb_le : -max l.abs u.abs ≤ l := by
+              have h := Rat.neg_le_neg (Rat.le_trans (rat_le_abs (-l))
+                (by simpa [Rat.abs_neg] using rat_le_max_left (a := l.abs) (b := u.abs)))
+              simpa [Rat.neg_neg] using h
+            have hub_le : u ≤ max l.abs u.abs :=
+              Rat.le_trans (rat_le_abs u) rat_le_max_right
+            exact ⟨Rat.le_trans hlb_le ((hxbnd j).1 l hlb), Rat.le_trans ((hxbnd j).2 u hub) hub_le⟩
+          have hdiff : (cv j - exactCoeff j) * x j ≤ ((cv j - exactCoeff j) * x j).abs := rat_le_abs _
+          rw [rat_abs_mul] at hdiff
+          have hmul : (cv j - exactCoeff j).abs * (x j).abs ≤ (cv j - exactCoeff j).abs * max l.abs u.abs :=
+            Rat.mul_le_mul_of_nonneg_left hxabs Rat.abs_nonneg
+          have hle : (cv j - exactCoeff j) * x j ≤ errTerm j :=
+            Rat.le_trans (Rat.le_trans hdiff hmul) hele
+          have hcv_eq : cv j * x j = exactCoeff j * x j + (cv j - exactCoeff j) * x j := by
+            rw [rat_sub_mul, Rat.add_comm (exactCoeff j * x j), Rat.sub_add_cancel]
+          rw [hcv_eq]
+          exact Rat.add_le_add_left.mpr hle
+  have h1 := finSum_le_finSum hterm
+  rw [finSum_add] at h1
+  have h2 := rat_add_le_add hexact (Rat.le_refl (a := finSum n errTerm))
+  have h3 := Rat.le_trans h1 h2
+  have h4 : exactRHS + finSum n errTerm ≤ exactRHS + rhsErr + finSum n errTerm := by
+    have hle := Rat.add_le_add_left (c := exactRHS) |>.mpr hrhsErr
+    rw [Rat.add_zero] at hle
+    exact Rat.add_le_add_right.mpr hle
+  exact Rat.le_trans (Rat.le_trans h3 h4) hrhs
+
 /-! ### 1. Minimal & Lifted Binary Knapsack Cover Cuts -/
 
 /-- Minimal binary knapsack cover cut soundness over `{0, 1}^n` in `Rat`. -/
@@ -961,11 +1161,16 @@ structure CoverItemCert where
   alpha : Nat
   deriving Repr, Inhabited
 
-/-- Complete certificate for a minimal/lifted binary knapsack cover cut (with optional positive scaling). -/
+/-- Complete certificate for a minimal/lifted binary knapsack cover cut (with optional positive scaling),
+verified end-to-end against variable integrality/bounds and `baseRows`. -/
 structure KnapsackCoverCert where
   numVars : Nat
+  isInt : Array Bool
   lb : Array (Option Rat)
   ub : Array (Option Rat)
+  baseRows : Array RowSpec
+  rowIdx : Option Nat := none
+  aggMultipliers : Option (Array (Nat × Rat)) := none
   row : RowSpec
   sign : Rat
   items : Array CoverItemCert
@@ -974,9 +1179,155 @@ structure KnapsackCoverCert where
   cut : CutSpec
   deriving Repr, Inhabited
 
-/-- Executable verifier for `KnapsackCoverCert`. -/
+/-- Verifies that the scaled inequality `sign * row ≤ sign * row.rhs` is implied by `baseRows`
+(either by matching a base row verbatim, or via legal `aggMultipliers` with optional bound-protected
+error compensation). -/
+def checkCoverRowFromBase (n : Nat) (lb ub : Array (Option Rat)) (baseRows : Array RowSpec)
+    (rowIdxOpt : Option Nat) (aggMultsOpt : Option (Array (Nat × Rat)))
+    (row : RowSpec) (sign : Rat) : Bool :=
+  match aggMultsOpt with
+  | some mus =>
+    !mus.isEmpty &&
+    allFin mus.size (fun i =>
+      let (rIdx, mu) := mus[i.val]
+      if h : rIdx < baseRows.size then
+        allTermsInBounds n baseRows[rIdx].terms &&
+        (decide (mu = 0) || rowLegalMuSignSpec baseRows[rIdx].sense mu)
+      else false) &&
+    let rowDense := accumTerms n row.terms
+    let exactCoeff : Fin n → Rat := fun j =>
+      finSum mus.size fun i =>
+        let (rIdx, mu) := mus[i.val]
+        if h : rIdx < baseRows.size then mu * termsCoeff baseRows[rIdx].terms.toList j.val else 0
+    let exactRHS : Rat :=
+      finSum mus.size fun i =>
+        let (rIdx, mu) := mus[i.val]
+        if h : rIdx < baseRows.size then mu * baseRows[rIdx].rhs else 0
+    let errOk := allFin n fun j =>
+      (aggColErrTerm (sign * rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt))
+        (exactCoeff j) lb[j.val]! ub[j.val]!).isSome
+    let errSum : Rat := finSum n fun j =>
+      (aggColErrTerm (sign * rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt))
+        (exactCoeff j) lb[j.val]! ub[j.val]!).getD 0
+    errOk && decide (exactRHS + errSum ≤ sign * row.rhs)
+  | none =>
+    rowLegalMuSignSpec row.sense sign &&
+    match rowIdxOpt with
+    | some rIdx =>
+      if h : rIdx < baseRows.size then rowMatchesBaseRow n baseRows[rIdx] row else false
+    | none =>
+      anyFin baseRows.size fun rIdx => rowMatchesBaseRow n baseRows[rIdx.val] row
+
+private theorem checkCoverRowFromBase_sound {n : Nat}
+    {isInt : Array Bool} {lb ub : Array (Option Rat)} {baseRows : Array RowSpec}
+    {rowIdxOpt : Option Nat} {aggMultsOpt : Option (Array (Nat × Rat))}
+    {row : RowSpec} {sign : Rat} {x : Fin n → Rat}
+    (hIntLen : isInt.size = n) (hlbLen : lb.size = n) (hubLen : ub.size = n)
+    (hrowCols : allTermsInBounds n row.terms = true)
+    (hder : checkCoverRowFromBase n lb ub baseRows rowIdxOpt aggMultsOpt row sign = true)
+    (hfeas : MIPFeasible n (fun j => isInt[j.val]'(by omega))
+      (fun j => lb[j.val]'(by omega)) (fun j => ub[j.val]'(by omega)) baseRows x) :
+    finSum n (fun j =>
+      (sign * (accumTerms n row.terms).1[j.val]'(by rw [(accumTerms n row.terms).2]; exact j.isLt)) * x j) ≤
+      sign * row.rhs := by
+  unfold checkCoverRowFromBase at hder
+  cases hagg : aggMultsOpt with
+  | none =>
+    rw [hagg] at hder
+    simp only [Bool.and_eq_true] at hder
+    rcases hder with ⟨hsignOk, hmatch⟩
+    have hrowSat : rowSatOnFin n row x := by
+      cases hrIdx : rowIdxOpt with
+      | some rIdx =>
+        simp only [hrIdx] at hmatch
+        by_cases hlt : rIdx < baseRows.size
+        · simp only [hlt, ↓reduceDIte] at hmatch
+          exact rowMatchesBaseRow_sound hmatch hrowCols (hfeas.2.2 ⟨rIdx, hlt⟩)
+        · simp only [hlt, ↓reduceDIte] at hmatch
+          contradiction
+      | none =>
+        simp only [hrIdx] at hmatch
+        rcases anyFin_eq_true_iff.mp hmatch with ⟨rIdx, hrMatch⟩
+        exact rowMatchesBaseRow_sound hrMatch hrowCols (hfeas.2.2 rIdx)
+    unfold rowSatOnFin at hrowSat
+    rw [evalRowOnFin_eq_finSum_accum row x hrowCols] at hrowSat
+    exact row_agg_legal_sound hsignOk hrowSat
+  | some mus =>
+    rw [hagg] at hder
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hder
+    rcases hder with ⟨⟨_, hmusAll⟩, ⟨herrOk, hrhsLe⟩⟩
+    have hmus := allFin_eq_true_iff.mp hmusAll
+    have herrAll := allFin_eq_true_iff.mp herrOk
+    have hrIdxLt : ∀ i : Fin mus.size, mus[i.val].1 < baseRows.size := by
+      intro i
+      have hi := hmus i
+      split at hi
+      · assumption
+      · contradiction
+    let AFn : Fin mus.size → Fin n → Rat := fun i j =>
+      termsCoeff (baseRows[mus[i.val].1]'(hrIdxLt i)).terms.toList j.val
+    let senseFn : Fin mus.size → ConstraintSense := fun i => (baseRows[mus[i.val].1]'(hrIdxLt i)).sense
+    let rhsFn : Fin mus.size → Rat := fun i => (baseRows[mus[i.val].1]'(hrIdxLt i)).rhs
+    let muFn : Fin mus.size → Rat := fun i => mus[i.val].2
+    have hmuOk : ∀ i : Fin mus.size, muFn i = 0 ∨ rowLegalMuSignSpec (senseFn i) (muFn i) = true := by
+      intro i
+      have hi := hmus i
+      simp only [hrIdxLt i, ↓reduceDIte, Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq] at hi
+      exact hi.2
+    have hsatOk : ∀ i : Fin mus.size,
+        satisfiesSense (finSum n (fun j => AFn i j * x j)) (senseFn i) (rhsFn i) := by
+      intro i
+      have hi := hmus i
+      simp only [hrIdxLt i, ↓reduceDIte, Bool.and_eq_true] at hi
+      have hcols := allTermsInBounds_iff.mp hi.1
+      have hsat := hfeas.2.2 ⟨mus[i.val].1, hrIdxLt i⟩
+      unfold rowSatOnFin evalRowOnFin at hsat
+      rwa [evalTermsList_eq_finSum _ x hcols] at hsat
+    have hexactAgg := row_agg_sum_sound hmuOk hsatOk
+    let rowDense := accumTerms n row.terms
+    let cvFn : Fin n → Rat := fun j => sign * rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt)
+    let lbFn : Fin n → Option Rat := fun j => lb[j.val]'(by omega)
+    let ubFn : Fin n → Option Rat := fun j => ub[j.val]'(by omega)
+    have hlbB : ∀ j : Fin n, lb[j.val]! = lbFn j := fun j => getElem!_pos lb j.val (by omega)
+    have hubB : ∀ j : Fin n, ub[j.val]! = ubFn j := fun j => getElem!_pos ub j.val (by omega)
+    have hexCoeffEq : ∀ j : Fin n,
+        (finSum mus.size fun i =>
+          if h : mus[i.val].1 < baseRows.size then mus[i.val].2 * termsCoeff baseRows[mus[i.val].1].terms.toList j.val else 0) =
+        finSum mus.size (fun i => muFn i * AFn i j) :=
+      fun j => finSum_congr fun i => by simp [hrIdxLt i, muFn, AFn]
+    have hexRHSEq :
+        (finSum mus.size fun i =>
+          if h : mus[i.val].1 < baseRows.size then mus[i.val].2 * baseRows[mus[i.val].1].rhs else 0) =
+        finSum mus.size (fun i => muFn i * rhsFn i) :=
+      finSum_congr fun i => by simp [hrIdxLt i, muFn, rhsFn]
+    let errTermFn : Fin n → Rat := fun j =>
+      (aggColErrTerm (cvFn j) (finSum mus.size fun i => muFn i * AFn i j) (lbFn j) (ubFn j)).getD 0
+    have herr : ∀ j : Fin n, ∃ e,
+        aggColErrTerm (cvFn j) (finSum mus.size fun i => muFn i * AFn i j) (lbFn j) (ubFn j) = some e ∧
+        e ≤ errTermFn j := by
+      intro j
+      have hj := herrAll j
+      rw [hexCoeffEq j, hlbB j, hubB j] at hj
+      cases he : aggColErrTerm (cvFn j) (finSum mus.size fun i => muFn i * AFn i j) (lbFn j) (ubFn j) with
+      | none => rw [he] at hj; simp at hj
+      | some e => exact ⟨e, rfl, by simp [errTermFn, he]⟩
+    have hrhsLe' : finSum mus.size (fun i => muFn i * rhsFn i) + 0 + finSum n errTermFn ≤ sign * row.rhs := by
+      rw [Rat.add_zero]
+      have hcong : finSum n (fun j =>
+          (aggColErrTerm (sign * rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt))
+            (finSum mus.size fun i => if h : mus[i.val].1 < baseRows.size then mus[i.val].2 * termsCoeff baseRows[mus[i.val].1].terms.toList j.val else 0)
+            lb[j.val]! ub[j.val]!).getD 0) = finSum n errTermFn :=
+        finSum_congr fun j => by dsimp only [errTermFn, cvFn]; rw [hexCoeffEq j, hlbB j, hubB j]
+      rwa [hexRHSEq, hcong] at hrhsLe
+    exact row_agg_error_bound_opt_sound hexactAgg hfeas.1 herr Rat.le_refl hrhsLe'
+
+/-- Executable verifier for `KnapsackCoverCert` verifying binary integrality/bounds on every
+cover item and proving the source row follows from `baseRows`. -/
 def checkKnapsackCoverCert (cert : KnapsackCoverCert) : Except String Unit :=
   let n := cert.numVars
+  if !(cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n) then
+    .error s!"cover cert metadata arrays (isInt, lb, ub) must have length {n}"
+  else
   let m := cert.items.size
   let inCoverFn : Fin m → Bool := fun i => cert.items[i.val].inCover
   let wFn : Fin m → Rat := fun i => cert.items[i.val].weight
@@ -994,8 +1345,10 @@ def checkKnapsackCoverCert (cert : KnapsackCoverCert) : Except String Unit :=
   let itemCutDense := accumTerms n itemCutTerms
   let itemsOk := allFin m fun i =>
     let it := cert.items[i.val]
-    decide (it.col < n) && decide (0 ≤ it.weight) &&
-      (!it.inCover || decide (it.alpha == 1))
+    decide (it.col < n) &&
+    isBinaryCol cert.isInt cert.lb cert.ub it.col &&
+    decide (0 ≤ it.weight) &&
+    (!it.inCover || decide (it.alpha == 1))
   let relaxOk := allFin n fun j =>
     let rj := cert.sign * rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt) -
       itemRowDense.1[j.val]'(by rw [itemRowDense.2]; exact j.isLt)
@@ -1016,12 +1369,12 @@ def checkKnapsackCoverCert (cert : KnapsackCoverCert) : Except String Unit :=
       cert.scale * itemCutDense.1[j.val]'(by rw [itemCutDense.2]; exact j.isLt))
   let cutCompShift : Rat := finSum m fun i => if compFn i then (alphaFn i : Rat) else 0
   let exactCutRHS := cert.scale * ((cap : Rat) - cutCompShift)
-  guardExc (cert.lb.size == n && cert.ub.size == n) s!"cover cert bound arrays must have length {n}" <|
   guardExc (allTermsInBounds n cert.row.terms) "cover cert row has out-of-bounds column index" <|
   guardExc (allTermsInBounds n cert.cut.terms) "cover cert cut has out-of-bounds column index" <|
   guardExc (decide (0 < cert.scale)) s!"cover cert scale={cert.scale} must be > 0" <|
-  guardExc (rowLegalMuSignSpec cert.row.sense cert.sign) s!"cover cert sign={cert.sign} illegal for sense={repr cert.row.sense}" <|
-  guardExc itemsOk "cover cert item has out-of-bounds col, negative weight, or cover alpha != 1" <|
+  guardExc (checkCoverRowFromBase n cert.lb cert.ub cert.baseRows cert.rowIdx cert.aggMultipliers cert.row cert.sign)
+    "cover cert row is not verified against baseRows" <|
+  guardExc itemsOk "cover cert item is not a binary [0,1] integer variable, has negative weight, or cover alpha != 1" <|
   guardExc (decide (1 ≤ covCnt)) "cover cert must have at least one item in cover" <|
   guardExc relaxOk "cover cert non-binary relaxation missing required finite bound" <|
   guardExc (decide (exactKnapRHS ≤ cert.knapRHS)) s!"cover cert knapRHS={cert.knapRHS} < exact relaxed RHS {exactKnapRHS}" <|
@@ -1079,23 +1432,26 @@ private theorem accumTerms_map_eq_finSum {n : Nat} (items : Array CoverItemCert)
       have hbeq : ((items[k]'(by omega)).col == j.val) = false := beq_false_of_ne heq
       simp [hbeq, hfin]
 
-/-- Universal soundness of `checkKnapsackCoverCert` over all feasible `x : Fin cert.numVars → Rat`. -/
+/-- Universal soundness of `checkKnapsackCoverCert` over `MIPFeasible` (no unverified binary
+or source-row assumptions). -/
 theorem checkKnapsackCoverCert_sound (cert : KnapsackCoverCert)
     (hok : checkKnapsackCoverCert cert = .ok ())
+    (hIntLen : cert.isInt.size = cert.numVars)
     (hlbLen : cert.lb.size = cert.numVars)
     (hubLen : cert.ub.size = cert.numVars)
     (x : Fin cert.numVars → Rat)
-    (hxbnd : boundsSat (fun j => cert.lb[j.val]'(by omega)) (fun j => cert.ub[j.val]'(by omega)) x)
-    (hxBin : ∀ i : Fin cert.items.size, (h : cert.items[i.val].col < cert.numVars) →
-      isBinVal (x ⟨cert.items[i.val].col, h⟩))
-    (hrowSat : rowSatOnFin cert.numVars cert.row x) :
+    (hfeas : MIPFeasible cert.numVars
+      (fun j => cert.isInt[j.val]'(by omega))
+      (fun j => cert.lb[j.val]'(by omega))
+      (fun j => cert.ub[j.val]'(by omega))
+      cert.baseRows x) :
     evalCutOnFin cert.numVars cert.cut x ≤ cert.cut.rhs := by
   unfold checkKnapsackCoverCert at hok
-  rcases guardExc_ok hok with ⟨_, hok⟩
+  simp only [hIntLen, hlbLen, hubLen, beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hok
   rcases guardExc_ok hok with ⟨hrowColsT, hok⟩
   rcases guardExc_ok hok with ⟨hcutColsT, hok⟩
   rcases guardExc_ok hok with ⟨hscaleD, hok⟩
-  rcases guardExc_ok hok with ⟨hsignOk, hok⟩
+  rcases guardExc_ok hok with ⟨hrowBaseOk, hok⟩
   rcases guardExc_ok hok with ⟨hitemsT, hok⟩
   rcases guardExc_ok hok with ⟨hcovCntD, hok⟩
   rcases guardExc_ok hok with ⟨hrelaxT, hok⟩
@@ -1110,7 +1466,14 @@ theorem checkKnapsackCoverCert_sound (cert : KnapsackCoverCert)
     intro i
     have hi := hitemsAll i
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hi
-    exact hi.1.1
+    exact hi.1.1.1
+  have hbinItem : ∀ i : Fin cert.items.size, isBinaryCol cert.isInt cert.lb cert.ub cert.items[i.val].col = true := by
+    intro i
+    have hi := hitemsAll i
+    simp only [Bool.and_eq_true] at hi
+    exact hi.1.1.2
+  have hxBin : ∀ i : Fin cert.items.size, isBinVal (x ⟨cert.items[i.val].col, hcolLt i⟩) :=
+    fun i => isBinaryCol_sound hIntLen hlbLen hubLen hfeas (hcolLt i) (hbinItem i)
   have hwNN : ∀ i : Fin cert.items.size, 0 ≤ cert.items[i.val].weight := by
     intro i
     have hi := hitemsAll i
@@ -1142,12 +1505,8 @@ theorem checkKnapsackCoverCert_sound (cert : KnapsackCoverCert)
   let lbFn : Fin n → Option Rat := fun j => cert.lb[j.val]'(by omega)
   let ubFn : Fin n → Option Rat := fun j => cert.ub[j.val]'(by omega)
   have hrowLe : finSum n (fun j => (cert.sign * rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt)) * x j) ≤
-      cert.sign * cert.row.rhs := by
-    have hsat : satisfiesSense (finSum n (fun j => rowDense.1[j.val]'(by rw [rowDense.2]; exact j.isLt) * x j))
-        cert.row.sense cert.row.rhs := by
-      unfold rowSatOnFin at hrowSat
-      rwa [evalRowOnFin_eq_finSum_accum cert.row x hrowColsT] at hrowSat
-    exact row_agg_legal_sound hsignOk hsat
+      cert.sign * cert.row.rhs :=
+    checkCoverRowFromBase_sound hIntLen hlbLen hubLen hrowColsT hrowBaseOk hfeas
   have hitemRowEq : ∀ j : Fin n,
       (accumTerms n (cert.items.map fun it => { col := it.col, val := if it.comp then -it.weight else it.weight })).1[j.val]'(by
         rw [(accumTerms n _).2]; exact j.isLt) =
@@ -1214,7 +1573,7 @@ theorem checkKnapsackCoverCert_sound (cert : KnapsackCoverCert)
     (knapRHS := cert.knapRHS)
     (cutRHS := ((countTrue m inCoverFn - 1 : Nat) : Rat) - finSum m (fun i => if compFn i then (alphaFn i : Rat) else 0))
     (cutCoeff := unscaledCutCoeff)
-    hxbnd (fun i => hxBin i (hcolLt i)) hrowLe hwNN hcovPos hcovAlpha hrelaxProp hknapLe'
+    hfeas.1 hxBin hrowLe hwNN hcovPos hcovAlpha hrelaxProp hknapLe'
     hcoverLt hliftT (fun _ => rfl) Rat.le_refl
   have hscaled := Rat.mul_le_mul_of_nonneg_left hunscaled (Rat.le_of_lt hscalePos)
   rw [← finSum_const_mul] at hscaled
@@ -1456,11 +1815,18 @@ structure LotSizingNodeCert where
   vubRHS : Rat := 0
   inS : Bool
   coeffY : Rat
+  flowRowIdx : Option Nat := none
+  vubRowIdx : Option Nat := none
   deriving Repr, Inhabited
 
-/-- Complete certificate for an `(l, S)` lot-sizing flow-conservation cut (with optional positive scaling). -/
+/-- Complete certificate for an `(l, S)` lot-sizing flow-conservation cut (with optional positive scaling),
+verified end-to-end against variable domains, column distinctness, and `baseRows`. -/
 structure LotSizingCutCert where
   numVars : Nat
+  isInt : Array Bool
+  lb : Array (Option Rat)
+  ub : Array (Option Rat)
+  baseRows : Array RowSpec
   invInCol : Option Nat
   nodes : Array LotSizingNodeCert
   cutDem : Rat
@@ -1513,22 +1879,302 @@ private theorem hasEarlierBinInS_true_iff {nodes : Array LotSizingNodeCert} {τ 
     rw [htrue] at hfalse
     contradiction
 
-/-- Executable verifier for `LotSizingCutCert`. -/
+private def optColCoeff (opt : Option Nat) (j : Nat) : Rat :=
+  match opt with
+  | some c => if c == j then 1 else 0
+  | none => 0
+
+private def optColVal {n : Nat} (opt : Option Nat) (x : Fin n → Rat) : Rat :=
+  match opt with
+  | some c => if hc : c < n then x ⟨c, hc⟩ else 0
+  | none => 0
+
+/-- Checks whether an equality base row matches `s * (prevInv + x[prodCol] - x[invOutCol]) = s * demand`. -/
+def flowRowMatchesOriented (n : Nat) (prevInvCol : Option Nat) (prodCol invOutCol : Nat)
+    (demand s : Rat) (r : RowSpec) : Bool :=
+  allTermsInBounds n r.terms &&
+  (r.sense == .eq) &&
+  decide (r.rhs = s * demand) &&
+  let rd := accumTerms n r.terms
+  allFin n fun j =>
+    let exp : Rat :=
+      optColCoeff prevInvCol j.val +
+      (if prodCol == j.val then (1 : Rat) else 0) +
+      (if invOutCol == j.val then (-1 : Rat) else 0)
+    decide (rd.1[j.val]'(by rw [rd.2]; exact j.isLt) = s * exp)
+
+/-- Checks whether a base row matches a lot-sizing flow conservation equality (up to `±1` sign). -/
+def flowRowMatchesBase (n : Nat) (prevInvCol : Option Nat) (prodCol invOutCol : Nat)
+    (demand : Rat) (r : RowSpec) : Bool :=
+  flowRowMatchesOriented n prevInvCol prodCol invOutCol demand 1 r ||
+  flowRowMatchesOriented n prevInvCol prodCol invOutCol demand (-1) r
+
+private theorem flowRowMatchesOriented_sound {n : Nat}
+    {prevInvCol : Option Nat} {prodCol invOutCol : Nat} {demand s : Rat} {r : RowSpec}
+    {x : Fin n → Rat}
+    (hsNe : s ≠ 0)
+    (hp : prodCol < n) (hi : invOutCol < n)
+    (hprev : ∀ c, prevInvCol = some c → c < n)
+    (hmatch : flowRowMatchesOriented n prevInvCol prodCol invOutCol demand s r = true)
+    (hsat : rowSatOnFin n r x) :
+    optColVal prevInvCol x + x ⟨prodCol, hp⟩ - x ⟨invOutCol, hi⟩ = demand := by
+  unfold flowRowMatchesOriented at hmatch
+  simp only [Bool.and_eq_true] at hmatch
+  rcases hmatch with ⟨⟨⟨hcols, hsenseB⟩, hrhsD⟩, hcoeffs⟩
+  have hsense : r.sense = .eq := beq_iff_eq.mp hsenseB
+  have hrhs : r.rhs = s * demand := of_decide_eq_true hrhsD
+  have hall := allFin_eq_true_iff.mp hcoeffs
+  unfold rowSatOnFin at hsat
+  rw [evalRowOnFin_eq_finSum_accum r x hcols, hsense] at hsat
+  dsimp only [satisfiesSense] at hsat
+  rw [hrhs] at hsat
+  have hsumEq :
+      finSum n (fun j => (accumTerms n r.terms).1[j.val]'(by rw [(accumTerms n r.terms).2]; exact j.isLt) * x j) =
+      s * (optColVal prevInvCol x + x ⟨prodCol, hp⟩ - x ⟨invOutCol, hi⟩) := by
+    have h1 :
+        finSum n (fun j => (accumTerms n r.terms).1[j.val]'(by rw [(accumTerms n r.terms).2]; exact j.isLt) * x j) =
+        s * finSum n (fun j =>
+          (optColCoeff prevInvCol j.val +
+           (if prodCol == j.val then (1 : Rat) else 0) +
+           (if invOutCol == j.val then (-1 : Rat) else 0)) * x j) := by
+      rw [← finSum_const_mul]
+      apply finSum_congr
+      intro j
+      have hj := of_decide_eq_true (hall j)
+      rw [hj, Rat.mul_assoc]
+    rw [h1]
+    congr 1
+    have hadd :
+        finSum n (fun j =>
+          (optColCoeff prevInvCol j.val +
+           (if prodCol == j.val then (1 : Rat) else 0) +
+           (if invOutCol == j.val then (-1 : Rat) else 0)) * x j) =
+        finSum n (fun j => optColCoeff prevInvCol j.val * x j) +
+        finSum n (fun j => (if prodCol == j.val then (1 : Rat) else 0) * x j) +
+        finSum n (fun j => (if invOutCol == j.val then (-1 : Rat) else 0) * x j) := by
+      rw [← finSum_add, ← finSum_add]
+      exact finSum_congr fun j => by rw [Rat.add_mul, Rat.add_mul]
+    rw [hadd]
+    have hPartPrev :
+        finSum n (fun j => optColCoeff prevInvCol j.val * x j) = optColVal prevInvCol x := by
+      cases hpc : prevInvCol with
+      | none => simp [optColCoeff, optColVal]
+      | some c =>
+        have hc := hprev c hpc
+        simp only [optColCoeff, optColVal, hc, ↓reduceDIte]
+        have hcong :
+            finSum n (fun j : Fin n => (if c == j.val then (1 : Rat) else 0) * x j) =
+            finSum n (fun j : Fin n => if j = ⟨c, hc⟩ then x ⟨c, hc⟩ else 0) := by
+          apply finSum_congr; intro j
+          by_cases hj : j = ⟨c, hc⟩
+          · subst hj; simp [Rat.one_mul]
+          · have hne : (c == j.val) = false := beq_false_of_ne (fun h => hj (Fin.ext h.symm))
+            simp [hj, hne]
+        rw [hcong, finSum_single]
+    have hPartProd :
+        finSum n (fun j => (if prodCol == j.val then (1 : Rat) else 0) * x j) = x ⟨prodCol, hp⟩ := by
+      have hcong :
+          finSum n (fun j : Fin n => (if prodCol == j.val then (1 : Rat) else 0) * x j) =
+          finSum n (fun j : Fin n => if j = ⟨prodCol, hp⟩ then x ⟨prodCol, hp⟩ else 0) := by
+        apply finSum_congr; intro j
+        by_cases hj : j = ⟨prodCol, hp⟩
+        · subst hj; simp [Rat.one_mul]
+        · have hne : (prodCol == j.val) = false := beq_false_of_ne (fun h => hj (Fin.ext h.symm))
+          simp [hj, hne]
+      rw [hcong, finSum_single]
+    have hPartInv :
+        finSum n (fun j => (if invOutCol == j.val then (-1 : Rat) else 0) * x j) = -x ⟨invOutCol, hi⟩ := by
+      have hcong :
+          finSum n (fun j : Fin n => (if invOutCol == j.val then (-1 : Rat) else 0) * x j) =
+          finSum n (fun j : Fin n => if j = ⟨invOutCol, hi⟩ then -x ⟨invOutCol, hi⟩ else 0) := by
+        apply finSum_congr; intro j
+        by_cases hj : j = ⟨invOutCol, hi⟩
+        · subst hj; simp [Rat.neg_mul, Rat.one_mul]
+        · have hne : (invOutCol == j.val) = false := beq_false_of_ne (fun h => hj (Fin.ext h.symm))
+          simp [hj, hne]
+      rw [hcong, finSum_single]
+    rw [hPartPrev, hPartProd, hPartInv, ← Rat.sub_eq_add_neg]
+  rw [hsumEq] at hsat
+  have hmul := congrArg (s⁻¹ * ·) hsat
+  rwa [← Rat.mul_assoc, ← Rat.mul_assoc, Rat.inv_mul_cancel _ hsNe, Rat.one_mul, Rat.one_mul] at hmul
+
+private theorem flowRowMatchesBase_sound {n : Nat}
+    {prevInvCol : Option Nat} {prodCol invOutCol : Nat} {demand : Rat} {r : RowSpec}
+    {x : Fin n → Rat}
+    (hp : prodCol < n) (hi : invOutCol < n)
+    (hprev : ∀ c, prevInvCol = some c → c < n)
+    (hmatch : flowRowMatchesBase n prevInvCol prodCol invOutCol demand r = true)
+    (hsat : rowSatOnFin n r x) :
+    optColVal prevInvCol x + x ⟨prodCol, hp⟩ - x ⟨invOutCol, hi⟩ = demand := by
+  unfold flowRowMatchesBase at hmatch
+  rcases Bool.or_eq_true _ _ |>.mp hmatch with h1 | hm1
+  · exact flowRowMatchesOriented_sound (by decide) hp hi hprev h1 hsat
+  · exact flowRowMatchesOriented_sound (by decide) hp hi hprev hm1 hsat
+
+/-- Checks whether a base row scaled by `s ∈ {1, -1}` implies `x[prodCol] - vubCap * x[binCol] ≤ vubRHS`. -/
+def vubRowImpliesOriented (n : Nat) (lb : Array (Option Rat))
+    (prodCol binCol : Nat) (vubCap vubRHS s : Rat) (r : RowSpec) : Bool :=
+  if hp : prodCol < n then
+    if hb : binCol < n then
+      allTermsInBounds n r.terms &&
+      rowLegalMuSignSpec r.sense s &&
+      decide (prodCol ≠ binCol) &&
+      let rd := accumTerms n r.terms
+      let ap := s * rd.1[prodCol]'(by rw [rd.2]; exact hp)
+      let ay := s * rd.1[binCol]'(by rw [rd.2]; exact hb)
+      decide (0 < ap) &&
+      decide (-ay ≤ ap * vubCap) &&
+      decide (s * r.rhs ≤ ap * vubRHS) &&
+      allFin n fun j =>
+        if j.val == prodCol || j.val == binCol then true
+        else
+          let cj := s * rd.1[j.val]'(by rw [rd.2]; exact j.isLt)
+          decide (cj = 0) || (decide (0 < cj) && isNonnegCol lb j.val)
+    else false
+  else false
+
+/-- Checks whether a base row implies `x[prodCol] - vubCap * x[binCol] ≤ vubRHS` (either orientation). -/
+def vubRowImpliesBase (n : Nat) (lb : Array (Option Rat))
+    (prodCol binCol : Nat) (vubCap vubRHS : Rat) (r : RowSpec) : Bool :=
+  vubRowImpliesOriented n lb prodCol binCol vubCap vubRHS 1 r ||
+  vubRowImpliesOriented n lb prodCol binCol vubCap vubRHS (-1) r
+
+private theorem vubRowImpliesOriented_sound {n : Nat}
+    {isInt : Array Bool} {lb ub : Array (Option Rat)} {baseRows : Array RowSpec}
+    {prodCol binCol : Nat} {vubCap vubRHS s : Rat} {r : RowSpec} {x : Fin n → Rat}
+    (hIntLen : isInt.size = n) (hlbLen : lb.size = n) (hubLen : ub.size = n)
+    (hp : prodCol < n) (hb : binCol < n)
+    (hfeas : MIPFeasible n (fun j => isInt[j.val]'(by omega))
+      (fun j => lb[j.val]'(by omega)) (fun j => ub[j.val]'(by omega)) baseRows x)
+    (hyNN : 0 ≤ x ⟨binCol, hb⟩)
+    (himp : vubRowImpliesOriented n lb prodCol binCol vubCap vubRHS s r = true)
+    (hsat : rowSatOnFin n r x) :
+    x ⟨prodCol, hp⟩ - vubCap * x ⟨binCol, hb⟩ ≤ vubRHS := by
+  unfold vubRowImpliesOriented at himp
+  simp only [hp, hb, ↓reduceDIte, Bool.and_eq_true, decide_eq_true_eq] at himp
+  rcases himp with ⟨⟨⟨hcols, hleg⟩, hne⟩, ⟨⟨⟨hapPos, hayLe⟩, hrhsLe⟩, hothers⟩⟩
+  have hothersAll := allFin_eq_true_iff.mp hothers
+  let rd := accumTerms n r.terms
+  let cFn : Fin n → Rat := fun j => s * rd.1[j.val]'(by rw [rd.2]; exact j.isLt)
+  have hscaled : finSum n (fun j => cFn j * x j) ≤ s * r.rhs := by
+    unfold rowSatOnFin at hsat
+    rw [evalRowOnFin_eq_finSum_accum r x hcols] at hsat
+    exact row_agg_legal_sound hleg hsat
+  let pFin : Fin n := ⟨prodCol, hp⟩
+  let bFin : Fin n := ⟨binCol, hb⟩
+  have hpbNe : pFin ≠ bFin := fun h => hne (congrArg Fin.val h)
+  have htwoLe : cFn pFin * x pFin + cFn bFin * x bFin ≤ finSum n (fun j => cFn j * x j) := by
+    have hterm : ∀ j : Fin n,
+        ((if j = pFin then cFn pFin * x pFin else 0) + (if j = bFin then cFn bFin * x bFin else 0)) ≤
+        cFn j * x j := by
+      intro j
+      by_cases hjp : j = pFin
+      · subst hjp; simp [hpbNe, Rat.add_zero]
+      · by_cases hjb : j = bFin
+        · subst hjb; simp [hjp, Rat.zero_add]
+        · simp only [hjp, hjb, ↓reduceIte, Rat.add_zero]
+          have ho := hothersAll j
+          have hne1 : (j.val == prodCol) = false := beq_false_of_ne (fun h => hjp (Fin.ext h))
+          have hne2 : (j.val == binCol) = false := beq_false_of_ne (fun h => hjb (Fin.ext h))
+          simp only [hne1, hne2, Bool.or_self, Bool.false_eq_true, ↓reduceIte,
+            Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at ho
+          rcases ho with h0 | ⟨hcPos, hnn⟩
+          · change 0 ≤ cFn j * x j
+            have hc0 : cFn j = 0 := h0
+            rw [hc0, Rat.zero_mul]; exact Rat.le_refl
+          · exact Rat.mul_nonneg (Rat.le_of_lt hcPos)
+              (isNonnegCol_sound hIntLen hlbLen hubLen hfeas j.isLt hnn)
+    have hsum := finSum_le_finSum hterm
+    rwa [finSum_add, finSum_single, finSum_single] at hsum
+  have hpairLe : cFn pFin * x pFin + cFn bFin * x bFin ≤ cFn pFin * vubRHS :=
+    Rat.le_trans htwoLe (Rat.le_trans hscaled hrhsLe)
+  have hayNeg : -(cFn pFin * vubCap) ≤ cFn bFin := by
+    have h := Rat.neg_le_neg hayLe
+    simpa [Rat.neg_neg] using h
+  have hmulY : -(cFn pFin * vubCap) * x bFin ≤ cFn bFin * x bFin :=
+    Rat.mul_le_mul_of_nonneg_right hayNeg hyNN
+  have hcomb : cFn pFin * (x pFin - vubCap * x bFin) ≤ cFn pFin * vubRHS := by
+    have heq : cFn pFin * (x pFin - vubCap * x bFin) = cFn pFin * x pFin + -(cFn pFin * vubCap) * x bFin := by
+      rw [rat_mul_sub, Rat.sub_eq_add_neg, ← Rat.mul_assoc, ← Rat.neg_mul]
+    rw [heq]
+    exact Rat.le_trans (Rat.add_le_add_left.mpr hmulY) hpairLe
+  exact Rat.le_of_mul_le_mul_left hcomb hapPos
+
+private theorem vubRowImpliesBase_sound {n : Nat}
+    {isInt : Array Bool} {lb ub : Array (Option Rat)} {baseRows : Array RowSpec}
+    {prodCol binCol : Nat} {vubCap vubRHS : Rat} {r : RowSpec} {x : Fin n → Rat}
+    (hIntLen : isInt.size = n) (hlbLen : lb.size = n) (hubLen : ub.size = n)
+    (hp : prodCol < n) (hb : binCol < n)
+    (hfeas : MIPFeasible n (fun j => isInt[j.val]'(by omega))
+      (fun j => lb[j.val]'(by omega)) (fun j => ub[j.val]'(by omega)) baseRows x)
+    (hyNN : 0 ≤ x ⟨binCol, hb⟩)
+    (himp : vubRowImpliesBase n lb prodCol binCol vubCap vubRHS r = true)
+    (hsat : rowSatOnFin n r x) :
+    x ⟨prodCol, hp⟩ - vubCap * x ⟨binCol, hb⟩ ≤ vubRHS := by
+  unfold vubRowImpliesBase at himp
+  rcases Bool.or_eq_true _ _ |>.mp himp with h1 | hm1
+  · exact vubRowImpliesOriented_sound hIntLen hlbLen hubLen hp hb hfeas hyNN h1 hsat
+  · exact vubRowImpliesOriented_sound hIntLen hlbLen hubLen hp hb hfeas hyNN hm1 hsat
+
+/-- Executable verifier for `LotSizingCutCert` enforcing non-negative/binary domains, column
+distinctness (`invInCol`, `prodCol`, `invOutCol` pairwise distinct and disjoint from all `binCol`),
+and base-row verification of every node's flow conservation equality and VUB constraint. -/
 def checkLotSizingCutCert (cert : LotSizingCutCert) : Except String Unit :=
   let n := cert.numVars
+  if !(cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n) then
+    .error s!"lot-sizing cert metadata arrays (isInt, lb, ub) must have length {n}"
+  else
   let L := cert.nodes.size
-  let invOk : Bool := match cert.invInCol with | none => true | some c => decide (c < n)
+  let invOk : Bool := match cert.invInCol with
+    | none => true
+    | some c => decide (c < n) && isNonnegCol cert.lb c
+  let distinctOk : Bool := allFin L fun τ =>
+    let nd := cert.nodes[τ.val]
+    let invDisj := match cert.invInCol with
+      | none => true
+      | some c => decide (c ≠ nd.prodCol) && decide (c ≠ nd.invOutCol) && decide (c ≠ nd.binCol)
+    let selfDisj := decide (nd.prodCol ≠ nd.invOutCol) &&
+      decide (nd.binCol ≠ nd.prodCol) && decide (nd.binCol ≠ nd.invOutCol)
+    let pairDisj := allFin L fun τ' =>
+      let nd' := cert.nodes[τ'.val]
+      let binDisj := decide (nd.binCol ≠ nd'.prodCol) && decide (nd.binCol ≠ nd'.invOutCol)
+      let flowDisj := if τ'.val == τ.val then true
+        else decide (nd.prodCol ≠ nd'.prodCol) &&
+             decide (nd.prodCol ≠ nd'.invOutCol) &&
+             decide (nd.invOutCol ≠ nd'.invOutCol)
+      binDisj && flowDisj
+    invDisj && selfDisj && pairDisj
   let dFn : Fin L → Rat := fun τ => cert.nodes[τ.val].demand
   let nodesOk := allFin L fun τ =>
     let nd := cert.nodes[τ.val]
     let colOk := decide (nd.prodCol < n) && decide (nd.invOutCol < n) && decide (nd.binCol < n)
+    let domOk := isNonnegCol cert.lb nd.prodCol && isNonnegCol cert.lb nd.invOutCol &&
+      isBinaryCol cert.isInt cert.lb cert.ub nd.binCol
     let valOk := decide (0 ≤ nd.demand) && decide (0 ≤ nd.vubCap) &&
       decide (nd.vubRHS ≤ 0) && decide (0 ≤ nd.coeffY)
     let covOk := if nd.inS then
         decide (suffixDemand dFn τ ≤ nd.coeffY) || hasEarlierBinInS cert.nodes τ.val nd.binCol
       else
         decide (nd.coeffY == 0)
-    colOk && valOk && covOk
+    let prevInvCol : Option Nat :=
+      if h0 : τ.val = 0 then cert.invInCol else some (cert.nodes[τ.val - 1]'(by omega)).invOutCol
+    let flowOk := match nd.flowRowIdx with
+      | some rIdx =>
+        if h : rIdx < cert.baseRows.size then
+          flowRowMatchesBase n prevInvCol nd.prodCol nd.invOutCol nd.demand cert.baseRows[rIdx]
+        else false
+      | none =>
+        anyFin cert.baseRows.size fun rIdx =>
+          flowRowMatchesBase n prevInvCol nd.prodCol nd.invOutCol nd.demand cert.baseRows[rIdx.val]
+    let vubOk := match nd.vubRowIdx with
+      | some rIdx =>
+        if h : rIdx < cert.baseRows.size then
+          vubRowImpliesBase n cert.lb nd.prodCol nd.binCol nd.vubCap nd.vubRHS cert.baseRows[rIdx]
+        else false
+      | none =>
+        anyFin cert.baseRows.size fun rIdx =>
+          vubRowImpliesBase n cert.lb nd.prodCol nd.binCol nd.vubCap nd.vubRHS cert.baseRows[rIdx.val]
+    colOk && domOk && valOk && covOk && flowOk && vubOk
   let totalDem := finSum L dFn
   let cutDense := accumTerms n cert.cut.terms
   let coeffOk := allFin n fun j =>
@@ -1537,68 +2183,82 @@ def checkLotSizingCutCert (cert : LotSizingCutCert) : Except String Unit :=
   guardExc (L != 0) "lot-sizing cert requires at least one flow node" <|
   guardExc (decide (0 < cert.scale)) s!"lot-sizing cert scale={cert.scale} must be > 0" <|
   guardExc (allTermsInBounds n cert.cut.terms) "lot-sizing cert cut has out-of-bounds column index" <|
-  guardExc invOk "lot-sizing cert invInCol out of bounds" <|
-  guardExc nodesOk "lot-sizing cert node failed bounds, VUB, or suffix-demand coverage check" <|
+  guardExc invOk "lot-sizing cert invInCol out of bounds or not non-negative" <|
+  guardExc distinctOk "lot-sizing cert has colliding prodCol/invOutCol/invInCol/binCol column indices" <|
+  guardExc nodesOk "lot-sizing cert node failed domain, base-row flow/VUB, or suffix-demand check" <|
   guardExc (decide (cert.cutDem ≤ totalDem)) s!"lot-sizing cert cutDem={cert.cutDem} > totalDemand={totalDem}" <|
   guardExc coeffOk "lot-sizing cert cut coefficients do not match scaled (l, S) terms" <|
   guardExc (decide (cert.scale * (-cert.cutDem) ≤ cert.cut.rhs))
     s!"lot-sizing cert cut.rhs={cert.cut.rhs} < scaled -cutDem={cert.scale * (-cert.cutDem)}" <|
   .ok ()
 
-/-- Universal soundness of `checkLotSizingCutCert` over all feasible `x : Fin cert.numVars → Rat`. -/
+set_option maxHeartbeats 400000 in
+/-- Universal soundness of `checkLotSizingCutCert` over `MIPFeasible` (no unverified flow,
+VUB, non-negativity, or binary assumptions). -/
 theorem checkLotSizingCutCert_sound (cert : LotSizingCutCert)
     (hok : checkLotSizingCutCert cert = .ok ())
+    (hIntLen : cert.isInt.size = cert.numVars)
+    (hlbLen : cert.lb.size = cert.numVars)
+    (hubLen : cert.ub.size = cert.numVars)
     (x : Fin cert.numVars → Rat)
-    (hInvIn : ∀ c, cert.invInCol = some c → (h : c < cert.numVars) → 0 ≤ x ⟨c, h⟩)
-    (hNodesFeas : ∀ τ : Fin cert.nodes.size,
-      (hp : cert.nodes[τ.val].prodCol < cert.numVars) →
-      (hi : cert.nodes[τ.val].invOutCol < cert.numVars) →
-      (hb : cert.nodes[τ.val].binCol < cert.numVars) →
-      let nd := cert.nodes[τ.val]
-      let prevInv : Rat :=
-        if _h0 : τ.val = 0 then
-          match cert.invInCol with
-          | none => 0
-          | some c => if hc : c < cert.numVars then x ⟨c, hc⟩ else 0
-        else
-          let prevCol := cert.nodes[τ.val - 1].invOutCol
-          if hpv : prevCol < cert.numVars then x ⟨prevCol, hpv⟩ else 0
-      0 ≤ x ⟨nd.prodCol, hp⟩ ∧
-      0 ≤ x ⟨nd.invOutCol, hi⟩ ∧
-      isBinVal (x ⟨nd.binCol, hb⟩) ∧
-      x ⟨nd.prodCol, hp⟩ - nd.vubCap * x ⟨nd.binCol, hb⟩ ≤ nd.vubRHS ∧
-      prevInv + x ⟨nd.prodCol, hp⟩ - x ⟨nd.invOutCol, hi⟩ = nd.demand) :
+    (hfeas : MIPFeasible cert.numVars
+      (fun j => cert.isInt[j.val]'(by omega))
+      (fun j => cert.lb[j.val]'(by omega))
+      (fun j => cert.ub[j.val]'(by omega))
+      cert.baseRows x) :
     evalCutOnFin cert.numVars cert.cut x ≤ cert.cut.rhs := by
   unfold checkLotSizingCutCert at hok
+  simp only [hIntLen, hlbLen, hubLen, beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hok
   rcases guardExc_ok hok with ⟨_, hok⟩
   rcases guardExc_ok hok with ⟨hscaleD, hok⟩
   rcases guardExc_ok hok with ⟨hcutColsT, hok⟩
   rcases guardExc_ok hok with ⟨hinvOkT, hok⟩
+  rcases guardExc_ok hok with ⟨_, hok⟩
   rcases guardExc_ok hok with ⟨hnodesOkT, hok⟩
   rcases guardExc_ok hok with ⟨hcutDemD, hok⟩
   rcases guardExc_ok hok with ⟨hcoeffOkT, hok⟩
   rcases guardExc_ok hok with ⟨hcutRHSD, _⟩
   have hscalePos : 0 < cert.scale := of_decide_eq_true hscaleD
-  have hInvInLt : ∀ c, cert.invInCol = some c → c < cert.numVars := by
+  have hInvInOk : ∀ c, cert.invInCol = some c → c < cert.numVars ∧ isNonnegCol cert.lb c = true := by
     intro c hc
-    simp only [hc] at hinvOkT
-    exact of_decide_eq_true hinvOkT
+    simp only [hc, Bool.and_eq_true, decide_eq_true_eq] at hinvOkT
+    exact hinvOkT
+  have hInvInLt : ∀ c, cert.invInCol = some c → c < cert.numVars := fun c hc => (hInvInOk c hc).1
   have hnodesAll := allFin_eq_true_iff.mp hnodesOkT
   have hcutDemLe : cert.cutDem ≤ finSum cert.nodes.size (fun τ => cert.nodes[τ.val].demand) :=
     of_decide_eq_true hcutDemD
   have hcoeffAll := allFin_eq_true_iff.mp hcoeffOkT
   have hcutRHSLe : cert.scale * (-cert.cutDem) ≤ cert.cut.rhs :=
     of_decide_eq_true hcutRHSD
-  have hpLt : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].prodCol < cert.numVars := by
-    intro τ; have h := hnodesAll τ; simp only [Bool.and_eq_true, decide_eq_true_eq] at h; exact h.1.1.1.1
-  have hiLt : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].invOutCol < cert.numVars := by
-    intro τ; have h := hnodesAll τ; simp only [Bool.and_eq_true, decide_eq_true_eq] at h; exact h.1.1.1.2
-  have hbLt : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].binCol < cert.numVars := by
-    intro τ; have h := hnodesAll τ; simp only [Bool.and_eq_true, decide_eq_true_eq] at h; exact h.1.1.2
-  have hvubRHSLe : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].vubRHS ≤ 0 := by
-    intro τ; have h := hnodesAll τ; simp only [Bool.and_eq_true, decide_eq_true_eq] at h; exact h.1.2.1.2
-  have hcoeffYNN : ∀ τ : Fin cert.nodes.size, 0 ≤ cert.nodes[τ.val].coeffY := by
-    intro τ; have h := hnodesAll τ; simp only [Bool.and_eq_true, decide_eq_true_eq] at h; exact h.1.2.2
+  have hnodeUnpack : ∀ τ : Fin cert.nodes.size,
+      let nd := cert.nodes[τ.val]
+      (nd.prodCol < cert.numVars ∧ nd.invOutCol < cert.numVars ∧ nd.binCol < cert.numVars) ∧
+      (isNonnegCol cert.lb nd.prodCol = true ∧ isNonnegCol cert.lb nd.invOutCol = true ∧
+        isBinaryCol cert.isInt cert.lb cert.ub nd.binCol = true) ∧
+      (0 ≤ nd.demand ∧ 0 ≤ nd.vubCap ∧ nd.vubRHS ≤ 0 ∧ 0 ≤ nd.coeffY) ∧
+      (if nd.inS then
+          decide (suffixDemand (fun s => cert.nodes[s.val].demand) τ ≤ nd.coeffY) || hasEarlierBinInS cert.nodes τ.val nd.binCol
+        else decide (nd.coeffY == 0)) = true ∧
+      (let prevInvCol : Option Nat :=
+          if h0 : τ.val = 0 then cert.invInCol else some (cert.nodes[τ.val - 1]'(by omega)).invOutCol
+       (match nd.flowRowIdx with
+        | some rIdx => if h : rIdx < cert.baseRows.size then flowRowMatchesBase cert.numVars prevInvCol nd.prodCol nd.invOutCol nd.demand cert.baseRows[rIdx] else false
+        | none => anyFin cert.baseRows.size fun rIdx => flowRowMatchesBase cert.numVars prevInvCol nd.prodCol nd.invOutCol nd.demand cert.baseRows[rIdx.val]) = true) ∧
+      ((match nd.vubRowIdx with
+        | some rIdx => if h : rIdx < cert.baseRows.size then vubRowImpliesBase cert.numVars cert.lb nd.prodCol nd.binCol nd.vubCap nd.vubRHS cert.baseRows[rIdx] else false
+        | none => anyFin cert.baseRows.size fun rIdx => vubRowImpliesBase cert.numVars cert.lb nd.prodCol nd.binCol nd.vubCap nd.vubRHS cert.baseRows[rIdx.val]) = true) := by
+    intro τ
+    have h := hnodesAll τ
+    simp only [Bool.and_eq_true] at h
+    rcases h with ⟨⟨⟨⟨⟨hcol, hdom⟩, hval⟩, hcov⟩, hfl⟩, hvub⟩
+    simp only [decide_eq_true_eq] at hcol hval
+    exact ⟨⟨hcol.1.1, hcol.1.2, hcol.2⟩, ⟨hdom.1.1, hdom.1.2, hdom.2⟩,
+      ⟨hval.1.1.1, hval.1.1.2, hval.1.2, hval.2⟩, hcov, hfl, hvub⟩
+  have hpLt : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].prodCol < cert.numVars := fun τ => (hnodeUnpack τ).1.1
+  have hiLt : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].invOutCol < cert.numVars := fun τ => (hnodeUnpack τ).1.2.1
+  have hbLt : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].binCol < cert.numVars := fun τ => (hnodeUnpack τ).1.2.2
+  have hvubRHSLe : ∀ τ : Fin cert.nodes.size, cert.nodes[τ.val].vubRHS ≤ 0 := fun τ => (hnodeUnpack τ).2.2.1.2.2.1
+  have hcoeffYNN : ∀ τ : Fin cert.nodes.size, 0 ≤ cert.nodes[τ.val].coeffY := fun τ => (hnodeUnpack τ).2.2.1.2.2.2
   let xExt : Nat → Rat := fun c => if h : c < cert.numVars then x ⟨c, h⟩ else 0
   let I0 : Rat := match cert.invInCol with | none => 0 | some c => xExt c
   have hI0_nn : 0 ≤ I0 := by
@@ -1606,9 +2266,9 @@ theorem checkLotSizingCutCert_sound (cert : LotSizingCutCert)
     cases hI : cert.invInCol with
     | none => exact Rat.le_refl
     | some c =>
-      have hc := hInvInLt c hI
+      rcases hInvInOk c hI with ⟨hc, hnn⟩
       simp only [hc, ↓reduceDIte]
-      exact hInvIn c hI hc
+      exact isNonnegCol_sound hIntLen hlbLen hubLen hfeas hc hnn
   let xProd : Fin cert.nodes.size → Rat := fun τ => x ⟨cert.nodes[τ.val].prodCol, hpLt τ⟩
   let xInv : Fin cert.nodes.size → Rat := fun τ => x ⟨cert.nodes[τ.val].invOutCol, hiLt τ⟩
   let dFn : Fin cert.nodes.size → Rat := fun τ => cert.nodes[τ.val].demand
@@ -1620,38 +2280,68 @@ theorem checkLotSizingCutCert_sound (cert : LotSizingCutCert)
       (xExt (binColFn τ) = 0 → xProd τ = 0) ∧
       (if _h : τ.val = 0 then I0 else xInv ⟨τ.val - 1, by omega⟩) + xProd τ - xInv τ = dFn τ := by
     intro τ
-    have hf := hNodesFeas τ (hpLt τ) (hiLt τ) (hbLt τ)
-    dsimp only at hf
-    rcases hf with ⟨hpx, hix, hbin, hvub, hfl⟩
+    rcases hnodeUnpack τ with ⟨_, ⟨hpNN, hiNN, hbBin⟩, _, _, hflOk, hvubOk⟩
+    have hpx : 0 ≤ xProd τ := isNonnegCol_sound hIntLen hlbLen hubLen hfeas (hpLt τ) hpNN
+    have hix : 0 ≤ xInv τ := isNonnegCol_sound hIntLen hlbLen hubLen hfeas (hiLt τ) hiNN
+    have hbin : isBinVal (x ⟨cert.nodes[τ.val].binCol, hbLt τ⟩) :=
+      isBinaryCol_sound hIntLen hlbLen hubLen hfeas (hbLt τ) hbBin
+    have hyNN : 0 ≤ x ⟨cert.nodes[τ.val].binCol, hbLt τ⟩ := by
+      rcases hbin with h0 | h1
+      · rw [h0]; exact Rat.le_refl
+      · rw [h1]; decide
+    have hvub : xProd τ - cert.nodes[τ.val].vubCap * x ⟨cert.nodes[τ.val].binCol, hbLt τ⟩ ≤ cert.nodes[τ.val].vubRHS := by
+      cases hvi : cert.nodes[τ.val].vubRowIdx with
+      | some rIdx =>
+        simp only [hvi] at hvubOk
+        by_cases hr : rIdx < cert.baseRows.size
+        · simp only [hr, ↓reduceDIte] at hvubOk
+          exact vubRowImpliesBase_sound hIntLen hlbLen hubLen (hpLt τ) (hbLt τ) hfeas hyNN hvubOk (hfeas.2.2 ⟨rIdx, hr⟩)
+        · simp only [hr, ↓reduceDIte] at hvubOk
+          contradiction
+      | none =>
+        simp only [hvi] at hvubOk
+        rcases anyFin_eq_true_iff.mp hvubOk with ⟨rIdx, hrOk⟩
+        exact vubRowImpliesBase_sound hIntLen hlbLen hubLen (hpLt τ) (hbLt τ) hfeas hyNN hrOk (hfeas.2.2 rIdx)
+    let prevInvCol : Option Nat :=
+      if h0 : τ.val = 0 then cert.invInCol else some (cert.nodes[τ.val - 1]'(by omega)).invOutCol
+    have hprevLt : ∀ c, prevInvCol = some c → c < cert.numVars := by
+      intro c hc
+      dsimp only [prevInvCol] at hc
+      split at hc
+      · exact hInvInLt c hc
+      · simp only [Option.some.injEq] at hc
+        rw [← hc]
+        exact hiLt ⟨τ.val - 1, by omega⟩
+    have hflRaw : optColVal prevInvCol x + xProd τ - xInv τ = dFn τ := by
+      cases hfi : cert.nodes[τ.val].flowRowIdx with
+      | some rIdx =>
+        simp only [hfi] at hflOk
+        by_cases hr : rIdx < cert.baseRows.size
+        · simp only [hr, ↓reduceDIte] at hflOk
+          exact flowRowMatchesBase_sound (hpLt τ) (hiLt τ) hprevLt hflOk (hfeas.2.2 ⟨rIdx, hr⟩)
+        · simp only [hr, ↓reduceDIte] at hflOk
+          contradiction
+      | none =>
+        simp only [hfi] at hflOk
+        rcases anyFin_eq_true_iff.mp hflOk with ⟨rIdx, hrOk⟩
+        exact flowRowMatchesBase_sound (hpLt τ) (hiLt τ) hprevLt hrOk (hfeas.2.2 rIdx)
+    have hprevEq :
+        (if _h : τ.val = 0 then I0 else xInv ⟨τ.val - 1, by omega⟩) = optColVal prevInvCol x := by
+      dsimp only [prevInvCol]
+      by_cases h0 : τ.val = 0
+      · cases hI : cert.invInCol <;> simp [h0, I0, xExt, optColVal, hI]
+      · simp [h0, xInv, optColVal, hiLt ⟨τ.val - 1, by omega⟩]
     have hyExt : xExt (binColFn τ) = x ⟨cert.nodes[τ.val].binCol, hbLt τ⟩ := by
       simp [xExt, binColFn, hbLt τ]
-    refine ⟨hpx, hix, by rwa [hyExt], fun hy0 => ?_, ?_⟩
-    · rw [hyExt] at hy0
-      exact vub_zero_forces_prod_zero hpx (hvubRHSLe τ) hvub hy0
-    · have hprev : (if _h : τ.val = 0 then I0 else xInv ⟨τ.val - 1, by omega⟩) =
-          (if h0 : τ.val = 0 then
-            match cert.invInCol with
-            | none => 0
-            | some c => if hc : c < cert.numVars then x ⟨c, hc⟩ else 0
-          else
-            let prevCol := cert.nodes[τ.val - 1].invOutCol
-            if hpv : prevCol < cert.numVars then x ⟨prevCol, hpv⟩ else 0) := by
-        by_cases h0 : τ.val = 0
-        · simp [h0, I0, xExt]
-        · simp only [h0, ↓reduceDIte, xInv]
-          have hprevLt := hiLt ⟨τ.val - 1, by omega⟩
-          simp [hprevLt]
-      rw [hprev]
-      exact hfl
+    refine ⟨hpx, hix, by rwa [hyExt], fun hy0 => ?_, by rwa [hprevEq]⟩
+    rw [hyExt] at hy0
+    exact vub_zero_forces_prod_zero hpx (hvubRHSLe τ) hvub hy0
   have hcovCond : ∀ τ : Fin cert.nodes.size, inSFn τ = true →
       suffixDemand dFn τ ≤ coeffYFn τ ∨
       ∃ τ' : Fin cert.nodes.size, τ'.val < τ.val ∧ inSFn τ' = true ∧ binColFn τ' = binColFn τ := by
     intro τ hS
-    have h := hnodesAll τ
+    have hcov := (hnodeUnpack τ).2.2.2.1
     dsimp only [inSFn] at hS
-    dsimp only at h
-    simp only [Bool.and_eq_true] at h
-    have hcov := h.2
     simp only [hS, ↓reduceIte, Bool.or_eq_true, decide_eq_true_eq] at hcov
     rcases hcov with hle | hearl
     · exact Or.inl hle
@@ -1772,76 +2462,6 @@ theorem checkLotSizingCutCert_sound (cert : LotSizingCutCert)
   exact Rat.le_trans (Rat.mul_le_mul_of_nonneg_left hneg (Rat.le_of_lt hscalePos)) hcutRHSLe
 
 /-! ### 3. Multi-Row Aggregated cMIR & Pairwise Surrogate Cuts Over Optional Bounds -/
-
-/-- Exact column error compensation term over optional bounds:
-zero when `cv = exactCoeff` (valid for unbounded/semi-bounded columns!), otherwise
-`|cv - exactCoeff| * max(|l|, |u|)` requiring both finite bounds. -/
-def aggColErrTerm (cv exactCoeff : Rat) (lb ub : Option Rat) : Option Rat :=
-  if cv == exactCoeff then some 0
-  else
-    match lb, ub with
-    | some l, some u => some ((cv - exactCoeff).abs * max l.abs u.abs)
-    | _, _ => none
-
-/-- Soundness of error-bounded aggregated row materialization over arbitrary `Option Rat` bounds
-(allowing unbounded and semi-bounded columns whenever `cv j = exactCoeff j`). -/
-theorem row_agg_error_bound_opt_sound {n : Nat}
-    {cv exactCoeff errTerm x : Fin n → Rat} {lb ub : Fin n → Option Rat}
-    {exactRHS rhsErr aggRHS : Rat}
-    (hexact : finSum n (fun j => exactCoeff j * x j) ≤ exactRHS)
-    (hxbnd : boundsSat lb ub x)
-    (herr : ∀ j, ∃ e, aggColErrTerm (cv j) (exactCoeff j) (lb j) (ub j) = some e ∧ e ≤ errTerm j)
-    (hrhsErr : 0 ≤ rhsErr)
-    (hrhs : exactRHS + rhsErr + finSum n errTerm ≤ aggRHS) :
-    finSum n (fun j => cv j * x j) ≤ aggRHS := by
-  have hterm : ∀ j : Fin n, cv j * x j ≤ exactCoeff j * x j + errTerm j := by
-    intro j
-    rcases herr j with ⟨e, heq, hele⟩
-    unfold aggColErrTerm at heq
-    by_cases hcv : cv j = exactCoeff j
-    · have hbeq : (cv j == exactCoeff j) = true := beq_iff_eq.mpr hcv
-      simp only [hbeq, ↓reduceIte, Option.some.injEq] at heq
-      subst heq
-      rw [hcv]
-      simpa [Rat.add_zero] using Rat.add_le_add_left (c := exactCoeff j * x j) |>.mpr hele
-    · have hbeq : (cv j == exactCoeff j) = false := beq_false_of_ne hcv
-      simp only [hbeq, Bool.false_eq_true, ↓reduceIte] at heq
-      cases hlb : lb j with
-      | none => simp [hlb] at heq
-      | some l =>
-        cases hub : ub j with
-        | none => simp [hlb, hub] at heq
-        | some u =>
-          simp only [hlb, hub, Option.some.injEq] at heq
-          subst heq
-          have hxabs : (x j).abs ≤ max l.abs u.abs := by
-            rw [rat_abs_le_iff]
-            have hlb_le : -max l.abs u.abs ≤ l := by
-              have h := Rat.neg_le_neg (Rat.le_trans (rat_le_abs (-l))
-                (by simpa [Rat.abs_neg] using rat_le_max_left (a := l.abs) (b := u.abs)))
-              simpa [Rat.neg_neg] using h
-            have hub_le : u ≤ max l.abs u.abs :=
-              Rat.le_trans (rat_le_abs u) rat_le_max_right
-            exact ⟨Rat.le_trans hlb_le ((hxbnd j).1 l hlb), Rat.le_trans ((hxbnd j).2 u hub) hub_le⟩
-          have hdiff : (cv j - exactCoeff j) * x j ≤ ((cv j - exactCoeff j) * x j).abs := rat_le_abs _
-          rw [rat_abs_mul] at hdiff
-          have hmul : (cv j - exactCoeff j).abs * (x j).abs ≤ (cv j - exactCoeff j).abs * max l.abs u.abs :=
-            Rat.mul_le_mul_of_nonneg_left hxabs Rat.abs_nonneg
-          have hle : (cv j - exactCoeff j) * x j ≤ errTerm j :=
-            Rat.le_trans (Rat.le_trans hdiff hmul) hele
-          have hcv_eq : cv j * x j = exactCoeff j * x j + (cv j - exactCoeff j) * x j := by
-            rw [rat_sub_mul, Rat.add_comm (exactCoeff j * x j), Rat.sub_add_cancel]
-          rw [hcv_eq]
-          exact Rat.add_le_add_left.mpr hle
-  have h1 := finSum_le_finSum hterm
-  rw [finSum_add] at h1
-  have h2 := rat_add_le_add hexact (Rat.le_refl (a := finSum n errTerm))
-  have h3 := Rat.le_trans h1 h2
-  have h4 : exactRHS + finSum n errTerm ≤ exactRHS + rhsErr + finSum n errTerm := by
-    have hle := Rat.add_le_add_left (c := exactRHS) |>.mpr hrhsErr
-    rw [Rat.add_zero] at hle
-    exact Rat.add_le_add_right.mpr hle
-  exact Rat.le_trans (Rat.le_trans h3 h4) hrhs
 
 /-- Effective lower bound for cMIR (tightening fractional bounds to `ceil(l)` on integer columns). -/
 def cmirEffLB (isInt : Bool) (lb : Option Rat) : Option Rat :=
@@ -2122,6 +2742,14 @@ structure AggCMIRCert where
 /-- Executable verifier for `AggCMIRCert`. -/
 def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
   let n := cert.numVars
+  let alphaLenOk : Bool := match cert.alphaHat with | none => true | some arr => arr.size == n
+  let cIntLenOk : Bool := match cert.cInt with | none => true | some arr => arr.size == n
+  let cContLenOk : Bool := match cert.cCont with | none => true | some arr => arr.size == n
+  if !(cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n && cert.useLower.size == n) then
+    .error s!"agg-cmir cert metadata arrays must have length {n}"
+  else if !(alphaLenOk && cIntLenOk && cContLenOk) then
+    .error "agg-cmir cert optional certificate array length mismatch"
+  else
   let m := cert.rows.size
   let aggDense := accumTerms n cert.aggTerms
   let cutDense := accumTerms n cert.cut.terms
@@ -2152,7 +2780,6 @@ def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
     match cert.alphaHat with
     | none => cmirSignedCoeff cert.useLower[j.val]! (cvFn j) / cert.delta
     | some arr => arr[j.val]!
-  let alphaLenOk : Bool := match cert.alphaHat with | none => true | some arr => arr.size == n
   let alphaOk := allFin n fun j =>
     if cert.isInt[j.val]! && decide (cvFn j ≠ 0) then
       decide (alphaHatFn j ≤ cmirSignedCoeff cert.useLower[j.val]! (cvFn j) / cert.delta)
@@ -2162,7 +2789,6 @@ def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
     else match cert.cInt with
       | none => mirIntCoeff (alphaHatFn j) f0
       | some arr => arr[j.val]!
-  let cIntLenOk : Bool := match cert.cInt with | none => true | some arr => arr.size == n
   let cIntOk := allFin n fun j =>
     if cert.isInt[j.val]! && decide (cvFn j ≠ 0) then
       let lOpt := cmirEffLB true cert.lb[j.val]!
@@ -2175,7 +2801,6 @@ def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
     else match cert.cCont with
       | none => max (-(cmirSignedCoeff cert.useLower[j.val]! (cvFn j))) 0 / (cert.delta * (1 - f0))
       | some arr => arr[j.val]!
-  let cContLenOk : Bool := match cert.cCont with | none => true | some arr => arr.size == n
   let cContOk := allFin n fun j =>
     if !cert.isInt[j.val]! && decide (cvFn j ≠ 0) then
       decide (max (-(cmirSignedCoeff cert.useLower[j.val]! (cvFn j))) 0 / (cert.delta * (1 - f0)) ≤ cContFn j)
@@ -2187,8 +2812,6 @@ def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
     decide (cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt) = cert.scale * unscaledCutCoeff j)
   let exactCutRHS : Rat :=
     (betaHat.floor : Rat) + finSum n (fun j => unscaledCutCoeff j * (actBndFn j).getD 0)
-  guardExc (cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n && cert.useLower.size == n)
-    s!"agg-cmir cert metadata arrays must have length {n}" <|
   guardExc (m != 0) "agg-cmir cert requires at least one row" <|
   guardExc (allTermsInBounds n cert.aggTerms) "agg-cmir cert aggTerms has out-of-bounds column" <|
   guardExc (allTermsInBounds n cert.cut.terms) "agg-cmir cert cut has out-of-bounds column" <|
@@ -2200,7 +2823,6 @@ def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
     s!"agg-cmir cert aggRHS={cert.aggRHS} < exactAggRHS + errSum={exactAggRHS + errSum}" <|
   guardExc actBndOk "agg-cmir cert active column missing chosen bound" <|
   guardExc (decide (exactBeta ≤ betaHat)) s!"agg-cmir cert betaHat={betaHat} < exactBeta={exactBeta}" <|
-  guardExc (alphaLenOk && cIntLenOk && cContLenOk) "agg-cmir cert optional certificate array length mismatch" <|
   guardExc alphaOk "agg-cmir cert alphaHat exceeds exact scaled integer coefficient" <|
   guardExc cIntOk "agg-cmir cert cInt exceeds exact mirIntCoeff" <|
   guardExc cContOk "agg-cmir cert cCont below exact continuous MIR coefficient" <|
@@ -2208,6 +2830,11 @@ def checkAggCMIRCert (cert : AggCMIRCert) : Except String Unit :=
   guardExc (decide (cert.scale * exactCutRHS ≤ cert.cut.rhs))
     s!"agg-cmir cert cut.rhs={cert.cut.rhs} < scaled exactCutRHS={cert.scale * exactCutRHS}" <|
   .ok ()
+
+private theorem ite_not_error_ok {b : Bool} {msg : String} {k : Except String Unit}
+    (h : (if !b then Except.error msg else k) = .ok ()) : b = true ∧ k = .ok () := by
+  cases b <;> simp at h ⊢
+  exact h
 
 /-- Universal soundness of `checkAggCMIRCert` over all feasible `x : Fin cert.numVars → Rat`
 satisfying optional bounds, integrality, and all aggregated source rows. -/
@@ -2223,7 +2850,8 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
     (hrowsSat : ∀ i : Fin cert.rows.size, rowSatOnFin cert.numVars cert.rows[i.val].1 x) :
     evalCutOnFin cert.numVars cert.cut x ≤ cert.cut.rhs := by
   unfold checkAggCMIRCert at hok
-  rcases guardExc_ok hok with ⟨_, hok⟩
+  simp only [hIntLen, hlbLen, hubLen, huLen, beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hok
+  rcases ite_not_error_ok hok with ⟨_, hok⟩
   rcases guardExc_ok hok with ⟨_, hok⟩
   rcases guardExc_ok hok with ⟨_, hok⟩
   rcases guardExc_ok hok with ⟨hcutColsT, hok⟩
@@ -2234,7 +2862,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
   rcases guardExc_ok hok with ⟨haggRHSD, hok⟩
   rcases guardExc_ok hok with ⟨hactBndT, hok⟩
   rcases guardExc_ok hok with ⟨hbetaD, hok⟩
-  rcases guardExc_ok hok with ⟨_, hok⟩
   rcases guardExc_ok hok with ⟨halphaT, hok⟩
   rcases guardExc_ok hok with ⟨hcIntT, hok⟩
   rcases guardExc_ok hok with ⟨hcContT, hok⟩
@@ -2286,7 +2913,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
   have hmu : ∀ i : Fin m, muFn i = 0 ∨ rowLegalMuSignSpec (senseFn i) (muFn i) = true := by
     intro i
     have hi := hrowsAll i
-    dsimp only at hi
     simp only [Bool.and_eq_true, Bool.or_eq_true, decide_eq_true_eq] at hi
     rcases hi.2 with h0 | hleg
     · exact Or.inl (by simpa [muFn] using h0)
@@ -2294,7 +2920,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
   have hsat : ∀ i : Fin m, satisfiesSense (finSum n (fun j => AFn i j * x j)) (senseFn i) (rowRHSFn i) := by
     intro i
     have hi := hrowsAll i
-    dsimp only at hi
     simp only [Bool.and_eq_true] at hi
     have hcols := allTermsInBounds_iff.mp hi.1
     have hrow := hrowsSat i
@@ -2304,7 +2929,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
       aggColErrTerm (cvFn j) (finSum m fun i => muFn i * AFn i j) (lbFn j) (ubFn j) = some e ∧ e ≤ errTermFn j := by
     intro j
     have hj := herrAll j
-    dsimp only at hj
     rw [hlbB j, hubB j] at hj
     cases he : aggColErrTerm (cvFn j) (finSum m fun i => muFn i * AFn i j) (lbFn j) (ubFn j) with
     | none => rw [he] at hj; simp at hj
@@ -2319,7 +2943,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
   have hactBnd : ∀ j : Fin n, (cmirActiveBound (isIntFn j) (useLFn j) (cvFn j) (lbFn j) (ubFn j)).isSome = true := by
     intro j
     have hj := hactAll j
-    dsimp only at hj
     rwa [hisIntB j, huLB j, hlbB j, hubB j] at hj
   have hactBndEq : ∀ j : Fin n,
       cmirActiveBound cert.isInt[j.val]! cert.useLower[j.val]! (cvFn j) cert.lb[j.val]! cert.ub[j.val]! =
@@ -2343,7 +2966,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
       alphaHatFn j ≤ cmirSignedCoeff (useLFn j) (cvFn j) / cert.delta := by
     intro j hInt hne0
     have hj := halphaAll j
-    dsimp only at hj
     have hd : decide ((accumTerms cert.numVars cert.aggTerms).1[j.val]'(by rw [(accumTerms cert.numVars cert.aggTerms).2]; exact j.isLt) ≠ 0) = true :=
       decide_eq_true hne0
     simp only [hisIntB, huLB, hInt, hd, Bool.and_self, ↓reduceIte, decide_eq_true_eq] at hj
@@ -2391,7 +3013,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
       cIntFn j ≤ mirIntCoeff (alphaHatFn j) (fracPart betaHat) := by
     intro j hInt hne0
     have hj := hcIntAll j
-    dsimp only at hj
     have hd : decide ((accumTerms cert.numVars cert.aggTerms).1[j.val]'(by rw [(accumTerms cert.numVars cert.aggTerms).2]; exact j.isLt) ≠ 0) = true :=
       decide_eq_true hne0
     simp only [hisIntB, huLB, hlbB, hubB, hInt, hd, Bool.and_self, ↓reduceIte,
@@ -2403,7 +3024,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
       max (-(cmirSignedCoeff (useLFn j) (cvFn j))) 0 / (cert.delta * (1 - fracPart betaHat)) ≤ cContFn j := by
     intro j hCont hne0
     have hj := hcContAll j
-    dsimp only at hj
     have hd : decide ((accumTerms cert.numVars cert.aggTerms).1[j.val]'(by rw [(accumTerms cert.numVars cert.aggTerms).2]; exact j.isLt) ≠ 0) = true :=
       decide_eq_true hne0
     simp only [hisIntB, huLB, hlbB, hubB, hCont, Bool.not_false, hd, Bool.and_self, ↓reduceIte,
@@ -2430,7 +3050,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
     apply finSum_congr
     intro j
     have hj := of_decide_eq_true (hcutCoeffAll j)
-    dsimp only at hj
     rw [hcIntEq j, hcContEq j] at hj
     simp only [hisIntB, huLB] at hj
     change (accumTerms n cert.cut.terms).1[j.val]'(by rw [(accumTerms n cert.cut.terms).2]; exact j.isLt) =
@@ -2438,7 +3057,6 @@ theorem checkAggCMIRCert_sound (cert : AggCMIRCert)
     rw [hj, Rat.mul_assoc]
   have hrhsLe : cert.scale * exactCutRHS ≤ cert.cut.rhs := by
     have h := of_decide_eq_true hcutRHSD
-    dsimp only at h
     have hsumEq :
         finSum cert.numVars (fun j =>
           (if cert.isInt[j.val]! then
@@ -2567,6 +3185,9 @@ structure FinalizedCutCert where
 /-- Executable universal verifier for `FinalizedCutCert`. -/
 def checkFinalizedCutCert (cert : FinalizedCutCert) : Except String Unit :=
   let n := cert.numVars
+  if !(cert.lb.size == n && cert.ub.size == n) then
+    .error s!"drop cert bound arrays must have length {n}"
+  else
   let rawDense := accumTerms n cert.rawCut.terms
   let finalDense := accumTerms n cert.finalCut.terms
   let dropTerms : Fin n → Option Rat := fun j =>
@@ -2576,7 +3197,6 @@ def checkFinalizedCutCert (cert : FinalizedCutCert) : Except String Unit :=
   let dropOk := allFin n fun j => (dropTerms j).isSome
   let loSum : Rat := finSum n fun j => (dropTerms j).getD 0
   let reqRHS := cert.scale * cert.rawCut.rhs - loSum
-  guardExc (cert.lb.size == n && cert.ub.size == n) s!"drop cert bound arrays must have length {n}" <|
   guardExc (decide (0 < cert.scale)) s!"drop cert scale={cert.scale} must be > 0" <|
   guardExc (allTermsInBounds n cert.rawCut.terms) "drop cert rawCut has out-of-bounds column" <|
   guardExc (allTermsInBounds n cert.finalCut.terms) "drop cert finalCut has out-of-bounds column" <|
@@ -2596,7 +3216,7 @@ theorem checkFinalizedCutCert_sound (cert : FinalizedCutCert)
     (hraw : evalCutOnFin cert.numVars cert.rawCut x ≤ cert.rawCut.rhs) :
     evalCutOnFin cert.numVars cert.finalCut x ≤ cert.finalCut.rhs := by
   unfold checkFinalizedCutCert at hok
-  rcases guardExc_ok hok with ⟨_, hok⟩
+  simp only [hlbLen, hubLen, beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hok
   rcases guardExc_ok hok with ⟨hscaleD, hok⟩
   rcases guardExc_ok hok with ⟨hrawColsT, hok⟩
   rcases guardExc_ok hok with ⟨hfinColsT, hok⟩
@@ -2618,7 +3238,6 @@ theorem checkFinalizedCutCert_sound (cert : FinalizedCutCert)
   have hlo : ∀ j : Fin n, dropMinTerm (cert.scale * vFn j - outFn j) (lbFn j) (ubFn j) = some (loFn j) := by
     intro j
     have hj := hdropAll j
-    dsimp only at hj
     rw [hlbB j, hubB j] at hj
     dsimp only [loFn]
     cases hd : dropMinTerm (cert.scale * vFn j - outFn j) (lbFn j) (ubFn j) with
@@ -2634,6 +3253,854 @@ theorem checkFinalizedCutCert_sound (cert : FinalizedCutCert)
   rw [evalCutOnFin_eq_finSum_accum cert.rawCut x hrawColsT] at hraw
   rw [evalCutOnFin_eq_finSum_accum cert.finalCut x hfinColsT]
   exact finalize_cut_drop_universal_sound hscalePos hraw hxbnd hlo hrhsLe
+
+/-! ### 4b. Universal Structural GMI Cut Certificate (Production Tableau Derivation + Finalization) -/
+
+private theorem finSum_append {a b : Nat} (f : Fin (a + b) → Rat) :
+    finSum (a + b) f =
+      finSum a (fun i => f ⟨i.val, by omega⟩) +
+      finSum b (fun j => f ⟨a + j.val, by omega⟩) := by
+  induction b with
+  | zero => simp [Rat.add_zero]
+  | succ b ih =>
+    change finSum ((a + b) + 1) f = _
+    rw [finSum_succ, ih (fun k => f k.castSucc), finSum_succ, Rat.add_assoc]
+    rfl
+
+private def slackSignVal : ConstraintSense → Rat
+  | .le => 1
+  | .ge => -1
+  | .eq => 0
+
+private theorem rat_eq_intCast_of_den1 (r : Rat) (h : r.den = 1) : r = (r.num : Rat) :=
+  Rat.ext (by simp) (by simpa using h)
+
+/-- Complete structural GMI certificate deriving a cut directly from `baseRows` via rational
+tableau row multipliers `rho : Array (Nat × Rat)`, non-basic bound side `colAtUpper`,
+optional upward-weakened GMI coefficients (`cStruct`, `cSlack`), and `finalizeSparseCut`
+coefficient dropping & scaling. -/
+structure StructuralGMICert where
+  numVars : Nat
+  isInt : Array Bool
+  lb : Array (Option Rat)
+  ub : Array (Option Rat)
+  baseRows : Array RowSpec
+  basicCol : Nat
+  rho : Array (Nat × Rat)
+  colAtUpper : Array Bool
+  cStruct : Option (Array Rat) := none
+  cSlack : Option (Array Rat) := none
+  scale : Rat := 1
+  cut : CutSpec
+  deriving Repr, Inhabited
+
+private def sgmiAlpha (cert : StructuralGMICert) (j : Fin cert.numVars) : Rat :=
+  finSum cert.rho.size fun i =>
+    let (rIdx, rVal) := cert.rho[i.val]
+    if h : rIdx < cert.baseRows.size then rVal * termsCoeff cert.baseRows[rIdx].terms.toList j.val else 0
+
+private def sgmiBeta0 (cert : StructuralGMICert) : Rat :=
+  finSum cert.rho.size fun i =>
+    let (rIdx, rVal) := cert.rho[i.val]
+    if h : rIdx < cert.baseRows.size then rVal * cert.baseRows[rIdx].rhs else 0
+
+private def sgmiActiveCol (cert : StructuralGMICert) (j : Fin cert.numVars) : Bool :=
+  (j.val != cert.basicCol) && decide (sgmiAlpha cert j ≠ 0)
+
+private def sgmiColBnd (cert : StructuralGMICert) (j : Fin cert.numVars) : Option Rat :=
+  if !sgmiActiveCol cert j then some 0
+  else if cert.colAtUpper[j.val]! then cert.ub[j.val]! else cert.lb[j.val]!
+
+private def sgmiBeta (cert : StructuralGMICert) : Rat :=
+  sgmiBeta0 cert - finSum cert.numVars (fun j =>
+    if sgmiActiveCol cert j then sgmiAlpha cert j * (sgmiColBnd cert j).getD 0 else 0)
+
+private def sgmiAlphaTilde (cert : StructuralGMICert) (j : Fin cert.numVars) : Rat :=
+  if !sgmiActiveCol cert j then 0
+  else if cert.colAtUpper[j.val]! then -sgmiAlpha cert j else sgmiAlpha cert j
+
+private def sgmiUseInt (cert : StructuralGMICert) (j : Fin cert.numVars) : Bool :=
+  sgmiActiveCol cert j && cert.isInt[j.val]! && ((sgmiColBnd cert j).getD 0).den == 1
+
+private def sgmiExactStruct (cert : StructuralGMICert) (j : Fin cert.numVars) : Rat :=
+  let f0 := fracPart (sgmiBeta cert)
+  if !sgmiActiveCol cert j then 0
+  else if sgmiUseInt cert j then gmiIntCoeff (sgmiAlphaTilde cert j) f0 else gmiContCoeff (sgmiAlphaTilde cert j) f0
+
+private def sgmiCStruct (cert : StructuralGMICert) (j : Fin cert.numVars) : Rat :=
+  if !sgmiActiveCol cert j then 0 else optCoeffAt cert.cStruct (sgmiExactStruct cert j) j.val
+
+private def sgmiRowSense (cert : StructuralGMICert) (i : Fin cert.rho.size) : ConstraintSense :=
+  let rIdx := cert.rho[i.val].1
+  if h : rIdx < cert.baseRows.size then cert.baseRows[rIdx].sense else .eq
+
+private def sgmiExactSlack (cert : StructuralGMICert) (i : Fin cert.rho.size) : Rat :=
+  let f0 := fracPart (sgmiBeta cert)
+  let rVal := cert.rho[i.val].2
+  match sgmiRowSense cert i with
+  | .le => gmiContCoeff rVal f0
+  | .ge => gmiContCoeff (-rVal) f0
+  | .eq => 0
+
+private def sgmiCSlack (cert : StructuralGMICert) (i : Fin cert.rho.size) : Rat :=
+  match sgmiRowSense cert i with
+  | .eq => 0
+  | _ => optCoeffAt cert.cSlack (sgmiExactSlack cert i) i.val
+
+private def sgmiV (cert : StructuralGMICert) (j : Fin cert.numVars) : Rat :=
+  (if !sgmiActiveCol cert j then 0 else if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) +
+  finSum cert.rho.size fun i =>
+    let rIdx := cert.rho[i.val].1
+    if h : rIdx < cert.baseRows.size then
+      (slackSignVal cert.baseRows[rIdx].sense * sgmiCSlack cert i) * termsCoeff cert.baseRows[rIdx].terms.toList j.val
+    else 0
+
+private def sgmiRawRHS (cert : StructuralGMICert) : Rat :=
+  -1 +
+  finSum cert.numVars (fun j =>
+    if !sgmiActiveCol cert j then 0
+    else (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * (sgmiColBnd cert j).getD 0) +
+  finSum cert.rho.size fun i =>
+    let rIdx := cert.rho[i.val].1
+    if h : rIdx < cert.baseRows.size then
+      (slackSignVal cert.baseRows[rIdx].sense * sgmiCSlack cert i) * cert.baseRows[rIdx].rhs
+    else 0
+
+/-- Executable universal verifier for `StructuralGMICert`. -/
+def checkStructuralGMICert (cert : StructuralGMICert) : Except String Unit :=
+  let n := cert.numVars
+  let m := cert.rho.size
+  if !(cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n && cert.colAtUpper.size == n) then
+    .error s!"structural GMI cert metadata arrays must have length {n}"
+  else
+  let rhoOk := allFin m fun i =>
+    let (rIdx, _) := cert.rho[i.val]
+    if h : rIdx < cert.baseRows.size then allTermsInBounds n cert.baseRows[rIdx].terms else false
+  let basicOk : Bool :=
+    if hB : cert.basicCol < n then
+      cert.isInt[cert.basicCol]! && decide (sgmiAlpha cert ⟨cert.basicCol, hB⟩ = 1)
+    else false
+  let colBndOk := allFin n fun j => (sgmiColBnd cert j).isSome
+  let f0 : Rat := fracPart (sgmiBeta cert)
+  let cStructLenOk : Bool := match cert.cStruct with | none => true | some arr => arr.size == n
+  let cStructOk := allFin n fun j =>
+    if sgmiActiveCol cert j then decide (sgmiExactStruct cert j ≤ sgmiCStruct cert j) else true
+  let cSlackLenOk : Bool := match cert.cSlack with | none => true | some arr => arr.size == m
+  let cSlackOk := allFin m fun i =>
+    match sgmiRowSense cert i with
+    | .eq => true
+    | _ => decide (sgmiExactSlack cert i ≤ sgmiCSlack cert i)
+  let cutDense := accumTerms n cert.cut.terms
+  let dropTerms : Fin n → Option Rat := fun j =>
+    dropMinTerm (cert.scale * sgmiV cert j - cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+      cert.lb[j.val]! cert.ub[j.val]!
+  let dropOk := allFin n fun j => (dropTerms j).isSome
+  let reqRHS := cert.scale * sgmiRawRHS cert - finSum n (fun j => (dropTerms j).getD 0)
+  guardExc (decide (0 < cert.scale)) s!"structural GMI cert scale={cert.scale} must be > 0" <|
+  guardExc (allTermsInBounds n cert.cut.terms) "structural GMI cert cut has out-of-bounds column" <|
+  guardExc rhoOk "structural GMI cert rho references out-of-bounds row or column" <|
+  guardExc basicOk "structural GMI cert basicCol must be an integer variable with tableau coeff 1" <|
+  guardExc colBndOk "structural GMI cert active non-basic column missing active bound" <|
+  guardExc (decide (0 < f0) && decide (f0 < 1)) s!"structural GMI cert beta={sgmiBeta cert} has non-fractional f0={f0}" <|
+  guardExc (cStructLenOk && cSlackLenOk) "structural GMI cert optional coeff array length mismatch" <|
+  guardExc cStructOk "structural GMI cert cStruct coefficient below exact GMI coefficient" <|
+  guardExc cSlackOk "structural GMI cert cSlack coefficient below exact GMI coefficient" <|
+  guardExc dropOk "structural GMI cert finalize/drop perturbed coefficient on unbounded variable side" <|
+  guardExc (decide (reqRHS ≤ cert.cut.rhs))
+    s!"structural GMI cert cut.rhs={cert.cut.rhs} < required outward RHS {reqRHS}" <|
+  .ok ()
+
+set_option maxHeartbeats 600000 in
+/-- Universal soundness of `checkStructuralGMICert` over `MIPFeasible`: derives the tableau
+equality directly from `baseRows` via `rho`, applies `Track2B.gmi_weaken_upward_sound`, back-substitutes
+all non-basic variables and slacks, and applies `finalize_cut_drop_universal_sound`. -/
+theorem checkStructuralGMICert_sound (cert : StructuralGMICert)
+    (hok : checkStructuralGMICert cert = .ok ())
+    (hIntLen : cert.isInt.size = cert.numVars)
+    (hlbLen : cert.lb.size = cert.numVars)
+    (hubLen : cert.ub.size = cert.numVars)
+    (hAtULen : cert.colAtUpper.size = cert.numVars)
+    (x : Fin cert.numVars → Rat)
+    (hfeas : MIPFeasible cert.numVars
+      (fun j => cert.isInt[j.val]'(by omega))
+      (fun j => cert.lb[j.val]'(by omega))
+      (fun j => cert.ub[j.val]'(by omega))
+      cert.baseRows x) :
+    evalCutOnFin cert.numVars cert.cut x ≤ cert.cut.rhs := by
+  unfold checkStructuralGMICert at hok
+  simp only [hIntLen, hlbLen, hubLen, hAtULen, beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hok
+  rcases guardExc_ok hok with ⟨hscaleD, hok⟩
+  rcases guardExc_ok hok with ⟨hcutColsT, hok⟩
+  rcases guardExc_ok hok with ⟨hrhoOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hbasicOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hcolBndOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hf0OkT, hok⟩
+  rcases guardExc_ok hok with ⟨_, hok⟩
+  rcases guardExc_ok hok with ⟨hcStructOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hcSlackOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hdropOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hrhsD, _⟩
+  have hscalePos : 0 < cert.scale := of_decide_eq_true hscaleD
+  have hrhoAll := allFin_eq_true_iff.mp hrhoOkT
+  have hrIdxLt : ∀ i : Fin cert.rho.size, cert.rho[i.val].1 < cert.baseRows.size := by
+    intro i
+    have hi := hrhoAll i
+    by_cases hlt : cert.rho[i.val].1 < cert.baseRows.size
+    · exact hlt
+    · simp only [hlt, ↓reduceDIte] at hi
+      contradiction
+  have hrCols : ∀ i : Fin cert.rho.size,
+      allTermsInBounds cert.numVars (cert.baseRows[cert.rho[i.val].1]'(hrIdxLt i)).terms = true := by
+    intro i; have hi := hrhoAll i; simp only [hrIdxLt i, ↓reduceDIte] at hi; exact hi
+  have hB : cert.basicCol < cert.numVars := by
+    by_cases hlt : cert.basicCol < cert.numVars
+    · exact hlt
+    · simp only [hlt, ↓reduceDIte] at hbasicOkT
+      contradiction
+  simp only [hB, ↓reduceDIte, Bool.and_eq_true, decide_eq_true_eq] at hbasicOkT
+  have hBasicInt : isIntVal (x ⟨cert.basicCol, hB⟩) := by
+    apply hfeas.2.1 ⟨cert.basicCol, hB⟩
+    have h1 := hbasicOkT.1
+    rwa [getElem!_pos cert.isInt cert.basicCol (by omega)] at h1
+  have hAlphaB : sgmiAlpha cert ⟨cert.basicCol, hB⟩ = 1 := hbasicOkT.2
+  let f0 : Rat := fracPart (sgmiBeta cert)
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hf0OkT
+  have hf0Pos : 0 < f0 := hf0OkT.1
+  have hf0Lt : f0 < 1 := hf0OkT.2
+  have hcolBndAll := allFin_eq_true_iff.mp hcolBndOkT
+  have hcStructAll := allFin_eq_true_iff.mp hcStructOkT
+  have hcSlackAll := allFin_eq_true_iff.mp hcSlackOkT
+  have hdropAll := allFin_eq_true_iff.mp hdropOkT
+  let yStruct : Fin cert.numVars → Rat := fun j =>
+    if !sgmiActiveCol cert j then 0
+    else if cert.colAtUpper[j.val]! then (sgmiColBnd cert j).getD 0 - x j else x j - (sgmiColBnd cert j).getD 0
+  have hyStructNN : ∀ j : Fin cert.numVars, 0 ≤ yStruct j := by
+    intro j
+    dsimp only [yStruct]
+    cases ha : sgmiActiveCol cert j
+    · simp
+    · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      have hsome := hcolBndAll j
+      unfold sgmiColBnd at hsome ⊢
+      simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hsome ⊢
+      cases hu : cert.colAtUpper[j.val]!
+      · simp only [hu, Bool.false_eq_true, ↓reduceIte] at hsome ⊢
+        rw [getElem!_pos cert.lb j.val (by omega)] at hsome ⊢
+        cases hlb : cert.lb[j.val]'(by omega) with
+        | none => simp [hlb] at hsome
+        | some l =>
+          simp only [Option.getD_some]
+          exact (Rat.le_iff_sub_nonneg l (x j)).mp ((hfeas.1 j).1 l hlb)
+      · simp only [hu, ↓reduceIte] at hsome ⊢
+        rw [getElem!_pos cert.ub j.val (by omega)] at hsome ⊢
+        cases hub : cert.ub[j.val]'(by omega) with
+        | none => simp [hub] at hsome
+        | some u =>
+          simp only [Option.getD_some]
+          exact (Rat.le_iff_sub_nonneg (x j) u).mp ((hfeas.1 j).2 u hub)
+  have hyStructInt : ∀ j : Fin cert.numVars, sgmiUseInt cert j = true → isIntVal (yStruct j) := by
+    intro j huI
+    unfold sgmiUseInt at huI
+    simp only [Bool.and_eq_true, beq_iff_eq] at huI
+    rcases huI with ⟨⟨ha, hIntJ⟩, hden1⟩
+    have hIntX : isIntVal (x j) := hfeas.2.1 j (by rwa [getElem!_pos cert.isInt j.val (by omega)] at hIntJ)
+    rcases hIntX with ⟨zx, hzx⟩
+    have hBndInt : (sgmiColBnd cert j).getD 0 = (((sgmiColBnd cert j).getD 0).num : Rat) :=
+      rat_eq_intCast_of_den1 _ hden1
+    dsimp only [yStruct]
+    simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases cert.colAtUpper[j.val]!
+    · refine ⟨zx - ((sgmiColBnd cert j).getD 0).num, ?_⟩
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      rw [Rat.intCast_sub, ← hzx, ← hBndInt]
+    · refine ⟨((sgmiColBnd cert j).getD 0).num - zx, ?_⟩
+      simp only [↓reduceIte]
+      rw [Rat.intCast_sub, ← hzx, ← hBndInt]
+  let rowEvalAt : Fin cert.rho.size → Rat := fun i =>
+    evalRowOnFin cert.numVars (cert.baseRows[cert.rho[i.val].1]'(hrIdxLt i)) x
+  let rowRHSAt : Fin cert.rho.size → Rat := fun i =>
+    (cert.baseRows[cert.rho[i.val].1]'(hrIdxLt i)).rhs
+  let ySlack : Fin cert.rho.size → Rat := fun i =>
+    slackSignVal (sgmiRowSense cert i) * (rowRHSAt i - rowEvalAt i)
+  have hySlackNN : ∀ i : Fin cert.rho.size, 0 ≤ ySlack i := by
+    intro i
+    have hsat := hfeas.2.2 ⟨cert.rho[i.val].1, hrIdxLt i⟩
+    unfold rowSatOnFin at hsat
+    dsimp only [ySlack, rowRHSAt, rowEvalAt]
+    unfold sgmiRowSense
+    simp only [hrIdxLt i, ↓reduceDIte]
+    cases hs : (cert.baseRows[cert.rho[i.val].1]'(hrIdxLt i)).sense <;> rw [hs] at hsat
+    · simp only [slackSignVal, Rat.one_mul]
+      exact (Rat.le_iff_sub_nonneg _ _).mp hsat
+    · simp only [slackSignVal, Rat.zero_mul]; exact Rat.le_refl
+    · simp only [slackSignVal, Rat.neg_mul, Rat.one_mul, Rat.neg_sub]
+      exact (Rat.le_iff_sub_nonneg _ _).mp hsat
+  let aI : Fin cert.numVars → Rat := fun j => if sgmiUseInt cert j then sgmiAlphaTilde cert j else 0
+  let xI : Fin cert.numVars → Rat := fun j => if sgmiUseInt cert j then yStruct j else 0
+  let cI : Fin cert.numVars → Rat := fun j => if sgmiUseInt cert j then sgmiCStruct cert j else 0
+  let aC : Fin (cert.numVars + cert.rho.size) → Rat := fun k =>
+    if hk : k.val < cert.numVars then
+      let j : Fin cert.numVars := ⟨k.val, hk⟩
+      if sgmiActiveCol cert j && !sgmiUseInt cert j then sgmiAlphaTilde cert j else 0
+    else
+      let i : Fin cert.rho.size := ⟨k.val - cert.numVars, by omega⟩
+      slackSignVal (sgmiRowSense cert i) * cert.rho[i.val].2
+  let xC : Fin (cert.numVars + cert.rho.size) → Rat := fun k =>
+    if hk : k.val < cert.numVars then
+      let j : Fin cert.numVars := ⟨k.val, hk⟩
+      if sgmiActiveCol cert j && !sgmiUseInt cert j then yStruct j else 0
+    else
+      ySlack ⟨k.val - cert.numVars, by omega⟩
+  let cC : Fin (cert.numVars + cert.rho.size) → Rat := fun k =>
+    if hk : k.val < cert.numVars then
+      let j : Fin cert.numVars := ⟨k.val, hk⟩
+      if sgmiActiveCol cert j && !sgmiUseInt cert j then sgmiCStruct cert j else 0
+    else
+      sgmiCSlack cert ⟨k.val - cert.numVars, by omega⟩
+  have hrowEq : x ⟨cert.basicCol, hB⟩ + finSum cert.numVars (fun j => aI j * xI j) +
+      finSum (cert.numVars + cert.rho.size) (fun k => aC k * xC k) = sgmiBeta cert := by
+    rw [finSum_append]
+    have hC1 : finSum cert.numVars (fun j => aC ⟨j.val, by omega⟩ * xC ⟨j.val, by omega⟩) =
+        finSum cert.numVars (fun j => if sgmiActiveCol cert j && !sgmiUseInt cert j then sgmiAlphaTilde cert j * yStruct j else 0) := by
+      apply finSum_congr; intro j
+      dsimp only [aC, xC]
+      simp only [j.isLt, ↓reduceDIte]
+      cases sgmiActiveCol cert j && !sgmiUseInt cert j <;> simp
+    have hC2 : finSum cert.rho.size (fun i => aC ⟨cert.numVars + i.val, by omega⟩ * xC ⟨cert.numVars + i.val, by omega⟩) =
+        finSum cert.rho.size (fun i => cert.rho[i.val].2 * (rowRHSAt i - rowEvalAt i)) := by
+      apply finSum_congr; intro i
+      dsimp only [aC, xC, ySlack]
+      have hnot : ¬(cert.numVars + i.val < cert.numVars) := by omega
+      have hsub : cert.numVars + i.val - cert.numVars = i.val := by omega
+      simp only [hnot, ↓reduceDIte, hsub]
+      have hsat := hfeas.2.2 ⟨cert.rho[i.val].1, hrIdxLt i⟩
+      unfold rowSatOnFin at hsat
+      dsimp only [rowRHSAt, rowEvalAt]
+      unfold sgmiRowSense
+      simp only [hrIdxLt i, ↓reduceDIte]
+      cases hs : (cert.baseRows[cert.rho[i.val].1]'(hrIdxLt i)).sense <;> rw [hs] at hsat
+      · simp [slackSignVal, Rat.one_mul]
+      · dsimp only [satisfiesSense] at hsat
+        simp [slackSignVal, hsat, Rat.sub_self, Rat.mul_zero]
+      · simp [slackSignVal, Rat.neg_mul, Rat.mul_neg, Rat.one_mul, Rat.neg_neg]
+    have hI_add_C1 :
+        finSum cert.numVars (fun j => aI j * xI j) +
+        finSum cert.numVars (fun j => if sgmiActiveCol cert j && !sgmiUseInt cert j then sgmiAlphaTilde cert j * yStruct j else 0) =
+        finSum cert.numVars (fun j => if sgmiActiveCol cert j then sgmiAlpha cert j * x j - sgmiAlpha cert j * (sgmiColBnd cert j).getD 0 else 0) := by
+      rw [← finSum_add]
+      apply finSum_congr; intro j
+      dsimp only [aI, xI]
+      by_cases ha : sgmiActiveCol cert j = true
+      · cases huI : sgmiUseInt cert j
+        · simp only [ha, Bool.false_eq_true, Bool.not_false, Bool.and_self, ↓reduceIte,
+            Rat.zero_mul, Rat.zero_add]
+          dsimp only [yStruct]; unfold sgmiAlphaTilde
+          simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+          cases cert.colAtUpper[j.val]!
+          · simp [rat_mul_sub]
+          · simp only [↓reduceIte]
+            rw [Rat.neg_mul, rat_mul_sub, Rat.neg_sub]
+        · simp only [ha, Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte,
+            Rat.add_zero]
+          dsimp only [yStruct]; unfold sgmiAlphaTilde
+          simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+          cases cert.colAtUpper[j.val]!
+          · simp [rat_mul_sub]
+          · simp only [↓reduceIte]
+            rw [Rat.neg_mul, rat_mul_sub, Rat.neg_sub]
+      · have haf : sgmiActiveCol cert j = false := Bool.eq_false_iff.mpr ha
+        have huIf : sgmiUseInt cert j = false := by simp [sgmiUseInt, haf]
+        simp [haf, huIf, Rat.add_zero]
+    have hAddB :
+        x ⟨cert.basicCol, hB⟩ +
+        finSum cert.numVars (fun j => if sgmiActiveCol cert j then sgmiAlpha cert j * x j - sgmiAlpha cert j * (sgmiColBnd cert j).getD 0 else 0) =
+        finSum cert.numVars (fun j => sgmiAlpha cert j * x j) -
+        finSum cert.numVars (fun j => if sgmiActiveCol cert j then sgmiAlpha cert j * (sgmiColBnd cert j).getD 0 else 0) := by
+      have hsingle : x ⟨cert.basicCol, hB⟩ =
+          finSum cert.numVars (fun j => if j = ⟨cert.basicCol, hB⟩ then sgmiAlpha cert ⟨cert.basicCol, hB⟩ * x ⟨cert.basicCol, hB⟩ else 0) := by
+        rw [finSum_single, hAlphaB, Rat.one_mul]
+      rw [hsingle, ← finSum_add, ← finSum_sub]
+      apply finSum_congr; intro j
+      by_cases hjB : j = ⟨cert.basicCol, hB⟩
+      · subst hjB
+        have haf : sgmiActiveCol cert ⟨cert.basicCol, hB⟩ = false := by simp [sgmiActiveCol]
+        simp [haf, Rat.add_zero, rat_sub_zero]
+      · have hne : (j.val != cert.basicCol) = true := by
+          simp only [bne_iff_ne]; intro h; exact hjB (Fin.ext h)
+        by_cases ha0 : sgmiAlpha cert j = 0
+        · have haf : sgmiActiveCol cert j = false := by simp [sgmiActiveCol, hne, ha0]
+          simp [hjB, haf, ha0, Rat.zero_mul, Rat.add_zero, rat_sub_zero]
+        · have hat : sgmiActiveCol cert j = true := by simp [sgmiActiveCol, hne, ha0]
+          simp [hjB, hat, Rat.zero_add]
+    have hSlackCancel :
+        finSum cert.rho.size (fun i => cert.rho[i.val].2 * (rowRHSAt i - rowEvalAt i)) =
+        sgmiBeta0 cert - finSum cert.numVars (fun j => sgmiAlpha cert j * x j) := by
+      have hsplit : finSum cert.rho.size (fun i => cert.rho[i.val].2 * (rowRHSAt i - rowEvalAt i)) =
+          finSum cert.rho.size (fun i => cert.rho[i.val].2 * rowRHSAt i) -
+          finSum cert.rho.size (fun i => cert.rho[i.val].2 * rowEvalAt i) := by
+        rw [← finSum_sub]
+        exact finSum_congr fun i => rat_mul_sub _ _ _
+      rw [hsplit]
+      have h1 : finSum cert.rho.size (fun i => cert.rho[i.val].2 * rowRHSAt i) = sgmiBeta0 cert :=
+        finSum_congr fun i => by simp [rowRHSAt, hrIdxLt i]
+      have h2 : finSum cert.rho.size (fun i => cert.rho[i.val].2 * rowEvalAt i) =
+          finSum cert.numVars (fun j => sgmiAlpha cert j * x j) := by
+        have hev : ∀ i : Fin cert.rho.size, cert.rho[i.val].2 * rowEvalAt i =
+            finSum cert.numVars (fun j => (cert.rho[i.val].2 * termsCoeff (cert.baseRows[cert.rho[i.val].1]'(hrIdxLt i)).terms.toList j.val) * x j) := by
+          intro i
+          dsimp only [rowEvalAt, evalRowOnFin]
+          rw [evalTermsList_eq_finSum _ x (allTermsInBounds_iff.mp (hrCols i)), ← finSum_const_mul]
+          exact finSum_congr fun j => (Rat.mul_assoc _ _ _).symm
+        rw [finSum_congr hev, finSum_swap]
+        apply finSum_congr; intro j
+        rw [finSum_mul_const]
+        congr 1
+        exact finSum_congr fun i => by simp [hrIdxLt i]
+      rw [h1, h2]
+    rw [hC1, hC2, ← Rat.add_assoc, Rat.add_assoc (x ⟨cert.basicCol, hB⟩), hI_add_C1, hAddB, hSlackCancel]
+    unfold sgmiBeta
+    simp only [Rat.sub_eq_add_neg]
+    have hre :
+        (finSum cert.numVars fun j => sgmiAlpha cert j * x j) +
+          -(finSum cert.numVars fun j => if sgmiActiveCol cert j then sgmiAlpha cert j * (sgmiColBnd cert j).getD 0 else 0) +
+          (sgmiBeta0 cert + -(finSum cert.numVars fun j => sgmiAlpha cert j * x j)) =
+        ((finSum cert.numVars fun j => sgmiAlpha cert j * x j) + -(finSum cert.numVars fun j => sgmiAlpha cert j * x j)) +
+          (sgmiBeta0 cert + -(finSum cert.numVars fun j => if sgmiActiveCol cert j then sgmiAlpha cert j * (sgmiColBnd cert j).getD 0 else 0)) := by ac_rfl
+    rw [hre, Rat.add_neg_cancel, Rat.zero_add]
+  have hxI_ok : ∀ j : Fin cert.numVars, 0 ≤ xI j ∧ ∃ z : Int, xI j = (z : Rat) := by
+    intro j
+    dsimp only [xI]
+    cases huI : sgmiUseInt cert j
+    · simp only [Bool.false_eq_true, ↓reduceIte]; exact ⟨Rat.le_refl, ⟨0, rfl⟩⟩
+    · simp only [↓reduceIte]; exact ⟨hyStructNN j, hyStructInt j huI⟩
+  have hxC_ok : ∀ k : Fin (cert.numVars + cert.rho.size), 0 ≤ xC k := by
+    intro k
+    dsimp only [xC]
+    split
+    · split
+      · exact hyStructNN _
+      · exact Rat.le_refl
+    · exact hySlackNN _
+  have hcI_ok : ∀ j : Fin cert.numVars, gmiIntCoeff (aI j) f0 ≤ cI j := by
+    intro j
+    dsimp only [aI, cI]
+    cases huI : sgmiUseInt cert j
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      have h0 : gmiIntCoeff 0 f0 = 0 := by
+        unfold gmiIntCoeff fracPart
+        have hfl0 : Rat.floor (0 : Rat) = 0 := by decide
+        rw [hfl0]
+        simp only [Rat.intCast_zero, Rat.sub_self, Rat.le_of_lt hf0Pos, ↓reduceIte, Rat.div_def, Rat.zero_mul]
+      rw [h0]; exact Rat.le_refl
+    · simp only [↓reduceIte]
+      have ha : sgmiActiveCol cert j = true := by
+        unfold sgmiUseInt at huI; simp only [Bool.and_eq_true] at huI; exact huI.1.1
+      have hj := hcStructAll j
+      simp only [ha, ↓reduceIte, decide_eq_true_eq] at hj
+      unfold sgmiExactStruct at hj
+      simp only [ha, Bool.not_true, Bool.false_eq_true, huI, ↓reduceIte] at hj
+      exact hj
+  have hcC_ok : ∀ k : Fin (cert.numVars + cert.rho.size), gmiContCoeff (aC k) f0 ≤ cC k := by
+    intro k
+    dsimp only [aC, cC]
+    split
+    · next hk =>
+      let j : Fin cert.numVars := ⟨k.val, hk⟩
+      cases hac : sgmiActiveCol cert j && !sgmiUseInt cert j
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        have h0 : gmiContCoeff 0 f0 = 0 := by simp [gmiContCoeff, Rat.div_def, Rat.zero_mul]
+        rw [h0]; exact Rat.le_refl
+      · simp only [↓reduceIte]
+        simp only [Bool.and_eq_true, Bool.not_eq_true'] at hac
+        have hj := hcStructAll j
+        simp only [hac.1, ↓reduceIte, decide_eq_true_eq] at hj
+        unfold sgmiExactStruct at hj
+        simp only [hac.1, Bool.not_true, Bool.false_eq_true, hac.2, ↓reduceIte] at hj
+        exact hj
+    · next hnk =>
+      let i : Fin cert.rho.size := ⟨k.val - cert.numVars, by omega⟩
+      change gmiContCoeff (slackSignVal (sgmiRowSense cert i) * cert.rho[i.val].2) f0 ≤ sgmiCSlack cert i
+      have hi := hcSlackAll i
+      cases hs : sgmiRowSense cert i
+      · rw [hs] at hi
+        have hle : sgmiExactSlack cert i ≤ sgmiCSlack cert i := of_decide_eq_true hi
+        simpa [sgmiExactSlack, hs, slackSignVal, Rat.one_mul, f0] using hle
+      · simp only [slackSignVal, Rat.zero_mul, sgmiCSlack, hs]
+        have h0 : gmiContCoeff 0 f0 = 0 := by simp [gmiContCoeff, Rat.div_def, Rat.zero_mul]
+        rw [h0]; exact Rat.le_refl
+      · rw [hs] at hi
+        have hle : sgmiExactSlack cert i ≤ sgmiCSlack cert i := of_decide_eq_true hi
+        simpa [sgmiExactSlack, hs, slackSignVal, Rat.neg_mul, Rat.one_mul, f0] using hle
+  have hgmi := gmi_weaken_upward_sound hrowEq hBasicInt hxI_ok hxC_ok rfl hf0Pos hf0Lt hcI_ok hcC_ok
+  rw [finSum_append] at hgmi
+  have hrawCut : finSum cert.numVars (fun j => sgmiV cert j * x j) ≤ sgmiRawRHS cert := by
+    have hStructSum :
+        finSum cert.numVars (fun j => cI j * xI j) +
+        finSum cert.numVars (fun j => cC ⟨j.val, by omega⟩ * xC ⟨j.val, by omega⟩) =
+        finSum cert.numVars (fun j =>
+          if !sgmiActiveCol cert j then 0
+          else (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * (sgmiColBnd cert j).getD 0 -
+               (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * x j) := by
+      rw [← finSum_add]
+      apply finSum_congr; intro j
+      dsimp only [cI, xI, cC, xC]
+      simp only [j.isLt, ↓reduceDIte]
+      by_cases ha : sgmiActiveCol cert j = true
+      · cases huI : sgmiUseInt cert j
+        · simp only [ha, Bool.false_eq_true, Bool.not_false, Bool.not_true, Bool.and_self,
+            ↓reduceIte, Rat.zero_mul, Rat.zero_add]
+          dsimp only [yStruct]
+          simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+          cases cert.colAtUpper[j.val]!
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            rw [rat_mul_sub, Rat.neg_mul, Rat.neg_mul, Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.neg_neg, Rat.add_comm]
+          · simp only [↓reduceIte]
+            rw [rat_mul_sub]
+        · simp only [ha, Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte,
+            Rat.zero_mul, Rat.add_zero]
+          dsimp only [yStruct]
+          simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+          cases cert.colAtUpper[j.val]!
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+            rw [rat_mul_sub, Rat.neg_mul, Rat.neg_mul, Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.neg_neg, Rat.add_comm]
+          · simp only [↓reduceIte]
+            rw [rat_mul_sub]
+      · have haf : sgmiActiveCol cert j = false := Bool.eq_false_iff.mpr ha
+        have huIf : sgmiUseInt cert j = false := by simp [sgmiUseInt, haf]
+        simp [haf, huIf, Rat.add_zero]
+    have hSlackSum :
+        finSum cert.rho.size (fun i => cC ⟨cert.numVars + i.val, by omega⟩ * xC ⟨cert.numVars + i.val, by omega⟩) =
+        finSum cert.rho.size (fun i =>
+          if h : cert.rho[i.val].1 < cert.baseRows.size then
+            (slackSignVal cert.baseRows[cert.rho[i.val].1].sense * sgmiCSlack cert i) * cert.baseRows[cert.rho[i.val].1].rhs
+          else 0) -
+        finSum cert.numVars (fun j =>
+          (finSum cert.rho.size fun i =>
+            if h : cert.rho[i.val].1 < cert.baseRows.size then
+              (slackSignVal cert.baseRows[cert.rho[i.val].1].sense * sgmiCSlack cert i) * termsCoeff cert.baseRows[cert.rho[i.val].1].terms.toList j.val
+            else 0) * x j) := by
+      have hstep1 : finSum cert.rho.size (fun i => cC ⟨cert.numVars + i.val, by omega⟩ * xC ⟨cert.numVars + i.val, by omega⟩) =
+          finSum cert.rho.size (fun i => (slackSignVal (sgmiRowSense cert i) * sgmiCSlack cert i) * rowRHSAt i) -
+          finSum cert.rho.size (fun i => (slackSignVal (sgmiRowSense cert i) * sgmiCSlack cert i) * rowEvalAt i) := by
+        rw [← finSum_sub]
+        apply finSum_congr; intro i
+        dsimp only [cC, xC, ySlack]
+        have hnot : ¬(cert.numVars + i.val < cert.numVars) := by omega
+        have hsub : cert.numVars + i.val - cert.numVars = i.val := by omega
+        simp only [hnot, ↓reduceDIte, hsub]
+        rw [← Rat.mul_assoc, Rat.mul_comm (sgmiCSlack cert i) (slackSignVal (sgmiRowSense cert i)), rat_mul_sub]
+      rw [hstep1]
+      congr 1
+      · exact finSum_congr fun i => by simp [sgmiRowSense, rowRHSAt, hrIdxLt i]
+      · have hev : ∀ i : Fin cert.rho.size, (slackSignVal (sgmiRowSense cert i) * sgmiCSlack cert i) * rowEvalAt i =
+            finSum cert.numVars (fun j => ((if h : cert.rho[i.val].1 < cert.baseRows.size then
+              (slackSignVal cert.baseRows[cert.rho[i.val].1].sense * sgmiCSlack cert i) * termsCoeff cert.baseRows[cert.rho[i.val].1].terms.toList j.val
+            else 0)) * x j) := by
+          intro i
+          dsimp only [rowEvalAt, evalRowOnFin]
+          rw [evalTermsList_eq_finSum _ x (allTermsInBounds_iff.mp (hrCols i)), ← finSum_const_mul]
+          apply finSum_congr; intro j
+          simp only [sgmiRowSense, hrIdxLt i, ↓reduceDIte, Rat.mul_assoc]
+        rw [finSum_congr hev, finSum_swap]
+        exact finSum_congr fun j => by rw [finSum_mul_const]
+    rw [← Rat.add_assoc, hStructSum, hSlackSum] at hgmi
+    have hStructSplit :
+        finSum cert.numVars (fun j =>
+          if !sgmiActiveCol cert j then 0
+          else (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * (sgmiColBnd cert j).getD 0 -
+               (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * x j) =
+        finSum cert.numVars (fun j =>
+          if !sgmiActiveCol cert j then 0
+          else (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * (sgmiColBnd cert j).getD 0) -
+        finSum cert.numVars (fun j =>
+          (if !sgmiActiveCol cert j then 0 else if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * x j) := by
+      rw [← finSum_sub]
+      apply finSum_congr; intro j
+      cases sgmiActiveCol cert j <;> simp [Rat.zero_mul, rat_sub_zero]
+    rw [hStructSplit] at hgmi
+    have hvSplit : finSum cert.numVars (fun j => sgmiV cert j * x j) =
+        finSum cert.numVars (fun j => (if !sgmiActiveCol cert j then 0 else if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * x j) +
+        finSum cert.numVars (fun j =>
+          (finSum cert.rho.size fun i =>
+            if h : cert.rho[i.val].1 < cert.baseRows.size then
+              (slackSignVal cert.baseRows[cert.rho[i.val].1].sense * sgmiCSlack cert i) * termsCoeff cert.baseRows[cert.rho[i.val].1].terms.toList j.val
+            else 0) * x j) := by
+      unfold sgmiV
+      rw [← finSum_add]
+      exact finSum_congr fun j => Rat.add_mul _ _ _
+    rw [hvSplit]
+    unfold sgmiRawRHS
+    let X1 := finSum cert.numVars (fun j => (if !sgmiActiveCol cert j then 0 else if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * x j)
+    let X2 := finSum cert.numVars (fun j => (finSum cert.rho.size fun i => if h : cert.rho[i.val].1 < cert.baseRows.size then (slackSignVal cert.baseRows[cert.rho[i.val].1].sense * sgmiCSlack cert i) * termsCoeff cert.baseRows[cert.rho[i.val].1].terms.toList j.val else 0) * x j)
+    let A := finSum cert.numVars (fun j => if !sgmiActiveCol cert j then 0 else (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) * (sgmiColBnd cert j).getD 0)
+    let B := finSum cert.rho.size (fun i => if h : cert.rho[i.val].1 < cert.baseRows.size then (slackSignVal cert.baseRows[cert.rho[i.val].1].sense * sgmiCSlack cert i) * cert.baseRows[cert.rho[i.val].1].rhs else 0)
+    have hmove : (1 : Rat) + ((X1 + X2) + (-1 : Rat)) ≤ (A - X1 + (B - X2)) + ((X1 + X2) + (-1 : Rat)) :=
+      (Rat.add_le_add_right (c := (X1 + X2) + (-1 : Rat))).mpr hgmi
+    have hL : (1 : Rat) + ((X1 + X2) + (-1 : Rat)) = X1 + X2 := by
+      have : (1 : Rat) + ((X1 + X2) + (-1 : Rat)) = ((1 : Rat) + (-1 : Rat)) + (X1 + X2) := by ac_rfl
+      rw [this, Rat.add_neg_cancel, Rat.zero_add]
+    have hR : (A - X1 + (B - X2)) + ((X1 + X2) + (-1 : Rat)) = -1 + A + B := by
+      simp only [Rat.sub_eq_add_neg]
+      have : A + -X1 + (B + -X2) + (X1 + X2 + -1) = (-1 + A + B) + (-X1 + X1) + (-X2 + X2) := by ac_rfl
+      rw [this, Rat.neg_add_cancel, Rat.neg_add_cancel, Rat.add_zero, Rat.add_zero]
+    rwa [hL, hR] at hmove
+  let lbFn : Fin cert.numVars → Option Rat := fun j => cert.lb[j.val]'(by omega)
+  let ubFn : Fin cert.numVars → Option Rat := fun j => cert.ub[j.val]'(by omega)
+  have hlbB : ∀ j : Fin cert.numVars, cert.lb[j.val]! = lbFn j := fun j => getElem!_pos cert.lb j.val (by omega)
+  have hubB : ∀ j : Fin cert.numVars, cert.ub[j.val]! = ubFn j := fun j => getElem!_pos cert.ub j.val (by omega)
+  let cutDense := accumTerms cert.numVars cert.cut.terms
+  let outFn : Fin cert.numVars → Rat := fun j => cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt)
+  let loFn : Fin cert.numVars → Rat := fun j => (dropMinTerm (cert.scale * sgmiV cert j - outFn j) (lbFn j) (ubFn j)).getD 0
+  have hlo : ∀ j : Fin cert.numVars, dropMinTerm (cert.scale * sgmiV cert j - outFn j) (lbFn j) (ubFn j) = some (loFn j) := by
+    intro j
+    have hj := hdropAll j
+    rw [hlbB j, hubB j] at hj
+    dsimp only [loFn]
+    cases hd : dropMinTerm (cert.scale * sgmiV cert j - outFn j) (lbFn j) (ubFn j) with
+    | none => rw [hd] at hj; simp at hj
+    | some lo => simp
+  have hrhsLe : cert.scale * sgmiRawRHS cert - finSum cert.numVars loFn ≤ cert.cut.rhs := by
+    have h := of_decide_eq_true hrhsD
+    have hcong : finSum cert.numVars (fun j => (dropMinTerm (cert.scale * sgmiV cert j - outFn j) cert.lb[j.val]! cert.ub[j.val]!).getD 0) =
+        finSum cert.numVars loFn :=
+      finSum_congr fun j => by dsimp only [loFn]; rw [hlbB j, hubB j]
+    rwa [← hcong]
+  rw [evalCutOnFin_eq_finSum_accum cert.cut x hcutColsT]
+  exact finalize_cut_drop_universal_sound hscalePos hrawCut hfeas.1 hlo hrhsLe
+
+/-! ### 4c. Universal Structural VUB Disaggregation Certificate Over `baseRows` -/
+
+/-- Complete structural VUB disaggregation certificate deriving `x[targetCol] - effUB * x[binCol] ≤ 0`
+directly from a base row in `baseRows`, followed by `finalizeSparseCut` drop & scaling. -/
+structure StructuralVUBCert where
+  numVars : Nat
+  isInt : Array Bool
+  lb : Array (Option Rat)
+  ub : Array (Option Rat)
+  baseRows : Array RowSpec
+  rowIdx : Nat
+  binCol : Nat
+  targetCol : Nat
+  effUB : Rat
+  scale : Rat := 1
+  cut : CutSpec
+  deriving Repr, Inhabited
+
+/-- Checks whether `baseRow` in orientation `s ∈ {1, -1}` certifies `x[targetCol] ≤ effUB * x[binCol]`. -/
+def structVUBRowOkOriented (n : Nat) (lb ub : Array (Option Rat))
+    (binCol targetCol : Nat) (effUB s : Rat) (r : RowSpec) : Bool :=
+  if hb : binCol < n then
+    if ht : targetCol < n then
+      allTermsInBounds n r.terms &&
+      rowLegalMuSignSpec r.sense s &&
+      decide (s * r.rhs ≤ 0) &&
+      let rd := accumTerms n r.terms
+      let cap := -(s * rd.1[binCol]'(by rw [rd.2]; exact hb))
+      let atgt := s * rd.1[targetCol]'(by rw [rd.2]; exact ht)
+      decide (0 ≤ cap) &&
+      decide (0 < atgt) &&
+      decide (vubEffUB ub[targetCol]! cap atgt ≤ effUB) &&
+      allFin n fun j =>
+        if j.val == binCol then true
+        else
+          let cj := s * rd.1[j.val]'(by rw [rd.2]; exact j.isLt)
+          decide (cj = 0) || (decide (0 < cj) && isNonnegCol lb j.val)
+    else false
+  else false
+
+/-- Executable universal verifier for `StructuralVUBCert`. -/
+def checkStructuralVUBCert (cert : StructuralVUBCert) : Except String Unit :=
+  let n := cert.numVars
+  if !(cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n) then
+    .error s!"structural VUB cert metadata arrays must have length {n}"
+  else
+  let rowOk : Bool :=
+    if h : cert.rowIdx < cert.baseRows.size then
+      let r := cert.baseRows[cert.rowIdx]
+      structVUBRowOkOriented n cert.lb cert.ub cert.binCol cert.targetCol cert.effUB 1 r ||
+      structVUBRowOkOriented n cert.lb cert.ub cert.binCol cert.targetCol cert.effUB (-1) r
+    else false
+  let cutDense := accumTerms n cert.cut.terms
+  let rawV : Fin n → Rat := fun j =>
+    (if j.val == cert.targetCol then (1 : Rat) else 0) +
+    (if j.val == cert.binCol then -cert.effUB else 0)
+  let dropTerms : Fin n → Option Rat := fun j =>
+    dropMinTerm (cert.scale * rawV j - cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+      cert.lb[j.val]! cert.ub[j.val]!
+  let dropOk := allFin n fun j => (dropTerms j).isSome
+  let reqRHS := -finSum n (fun j => (dropTerms j).getD 0)
+  guardExc (decide (0 < cert.scale)) s!"structural VUB cert scale={cert.scale} must be > 0" <|
+  guardExc (allTermsInBounds n cert.cut.terms) "structural VUB cert cut has out-of-bounds column" <|
+  guardExc (decide (cert.binCol < n) && decide (cert.targetCol < n) && decide (cert.binCol ≠ cert.targetCol))
+    "structural VUB cert binCol/targetCol out of bounds or equal" <|
+  guardExc (isBinaryCol cert.isInt cert.lb cert.ub cert.binCol)
+    s!"structural VUB cert binCol={cert.binCol} is not a binary [0,1] integer variable" <|
+  guardExc rowOk "structural VUB cert baseRows[rowIdx] does not certify disaggregated VUB bound" <|
+  guardExc dropOk "structural VUB cert finalize/drop perturbed coefficient on unbounded variable side" <|
+  guardExc (decide (reqRHS ≤ cert.cut.rhs))
+    s!"structural VUB cert cut.rhs={cert.cut.rhs} < required outward RHS {reqRHS}" <|
+  .ok ()
+
+private theorem structVUBRowOkOriented_sound {n : Nat}
+    {isInt : Array Bool} {lb ub : Array (Option Rat)} {baseRows : Array RowSpec}
+    {binCol targetCol : Nat} {effUB s : Rat} {r : RowSpec} {x : Fin n → Rat}
+    (hIntLen : isInt.size = n) (hlbLen : lb.size = n) (hubLen : ub.size = n)
+    (hb : binCol < n) (ht : targetCol < n) (hne : binCol ≠ targetCol)
+    (hfeas : MIPFeasible n (fun j => isInt[j.val]'(by omega))
+      (fun j => lb[j.val]'(by omega)) (fun j => ub[j.val]'(by omega)) baseRows x)
+    (hyBin : isBinVal (x ⟨binCol, hb⟩))
+    (hok : structVUBRowOkOriented n lb ub binCol targetCol effUB s r = true)
+    (hsat : rowSatOnFin n r x) :
+    x ⟨targetCol, ht⟩ - effUB * x ⟨binCol, hb⟩ ≤ 0 := by
+  unfold structVUBRowOkOriented at hok
+  simp only [hb, ht, ↓reduceDIte, Bool.and_eq_true, decide_eq_true_eq] at hok
+  rcases hok with ⟨⟨⟨hcols, hleg⟩, hrhsLe⟩, ⟨⟨⟨hcapNN, hatgtPos⟩, heffLe⟩, hothers⟩⟩
+  have hothersAll := allFin_eq_true_iff.mp hothers
+  let rd := accumTerms n r.terms
+  let cFn : Fin n → Rat := fun j => s * rd.1[j.val]'(by rw [rd.2]; exact j.isLt)
+  let cap : Rat := -cFn ⟨binCol, hb⟩
+  have hscaled : finSum n (fun j => cFn j * x j) ≤ s * r.rhs := by
+    unfold rowSatOnFin at hsat
+    rw [evalRowOnFin_eq_finSum_accum r x hcols] at hsat
+    exact row_agg_legal_sound hleg hsat
+  -- Use `vub_disagg_opt_sound` on the active positive terms (embedding `Fin n` with inactive slots = 0)
+  have hrowSplit : cFn ⟨targetCol, ht⟩ * x ⟨targetCol, ht⟩ - cap * x ⟨binCol, hb⟩ ≤ 0 := by
+    let tFin : Fin n := ⟨targetCol, ht⟩
+    let bFin : Fin n := ⟨binCol, hb⟩
+    have htbNe : tFin ≠ bFin := fun h => hne (congrArg Fin.val h).symm
+    have hterm : ∀ j : Fin n,
+        ((if j = tFin then cFn tFin * x tFin else 0) + (if j = bFin then cFn bFin * x bFin else 0)) ≤
+        cFn j * x j := by
+      intro j
+      by_cases hjt : j = tFin
+      · subst hjt; simp [htbNe, Rat.add_zero]
+      · by_cases hjb : j = bFin
+        · subst hjb; simp [hjt, Rat.zero_add]
+        · simp only [hjt, hjb, ↓reduceIte, Rat.add_zero]
+          have ho := hothersAll j
+          have hneB : (j.val == binCol) = false := beq_false_of_ne (fun h => hjb (Fin.ext h))
+          simp only [hneB, Bool.false_eq_true, ↓reduceIte, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at ho
+          rcases ho with h0 | ⟨hcPos, hnn⟩
+          · change 0 ≤ cFn j * x j
+            have hc0 : cFn j = 0 := h0
+            rw [hc0, Rat.zero_mul]; exact Rat.le_refl
+          · exact Rat.mul_nonneg (Rat.le_of_lt hcPos)
+              (isNonnegCol_sound hIntLen hlbLen hubLen hfeas j.isLt hnn)
+    have hsum := finSum_le_finSum hterm
+    rw [finSum_add, finSum_single, finSum_single] at hsum
+    have hcomb := Rat.le_trans hsum (Rat.le_trans hscaled hrhsLe)
+    have hcapEq : cFn tFin * x tFin - cap * x bFin = cFn tFin * x tFin + cFn bFin * x bFin := by
+      dsimp only [cap, bFin]; rw [Rat.sub_eq_add_neg, Rat.neg_mul, Rat.neg_neg]
+    rwa [← hcapEq] at hcomb
+  have htNN : 0 ≤ x ⟨targetCol, ht⟩ := by
+    have ho := hothersAll ⟨targetCol, ht⟩
+    have hneB : (targetCol == binCol) = false := beq_false_of_ne (Ne.symm hne)
+    simp only [hneB, Bool.false_eq_true, ↓reduceIte, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at ho
+    rcases ho with h0 | ⟨_, hnn⟩
+    · exact absurd h0 (Rat.ne_of_gt hatgtPos)
+    · exact isNonnegCol_sound hIntLen hlbLen hubLen hfeas ht hnn
+  have h1row : finSum 1 (fun _ => cFn ⟨targetCol, ht⟩ * x ⟨targetCol, ht⟩) - cap * x ⟨binCol, hb⟩ ≤ 0 := by
+    simpa [finSum, Rat.zero_add] using hrowSplit
+  have heff' : vubEffUB (ub[targetCol]'(by omega)) cap (cFn ⟨targetCol, ht⟩) ≤ effUB := by
+    rwa [getElem!_pos ub targetCol (by omega)] at heffLe
+  have hvub := vub_disagg_opt_sound (n := 1)
+    (a := fun _ => cFn ⟨targetCol, ht⟩) (x := fun _ => x ⟨targetCol, ht⟩)
+    (u := fun _ => ub[targetCol]'(by omega)) (C := cap) (rhs := 0) (y := x ⟨binCol, hb⟩)
+    h1row Rat.le_refl (fun _ => hatgtPos) (fun _ => htNN)
+    (fun _ uk huk => (hfeas.1 ⟨targetCol, ht⟩).2 uk huk) hcapNN hyBin ⟨0, by omega⟩ heff'
+  have hsub := (Rat.add_le_add_right (c := -(effUB * x ⟨binCol, hb⟩))).mpr hvub
+  simpa [Rat.sub_eq_add_neg, Rat.add_neg_cancel] using hsub
+
+/-- Universal soundness of `checkStructuralVUBCert` over `MIPFeasible`. -/
+theorem checkStructuralVUBCert_sound (cert : StructuralVUBCert)
+    (hok : checkStructuralVUBCert cert = .ok ())
+    (hIntLen : cert.isInt.size = cert.numVars)
+    (hlbLen : cert.lb.size = cert.numVars)
+    (hubLen : cert.ub.size = cert.numVars)
+    (x : Fin cert.numVars → Rat)
+    (hfeas : MIPFeasible cert.numVars
+      (fun j => cert.isInt[j.val]'(by omega))
+      (fun j => cert.lb[j.val]'(by omega))
+      (fun j => cert.ub[j.val]'(by omega))
+      cert.baseRows x) :
+    evalCutOnFin cert.numVars cert.cut x ≤ cert.cut.rhs := by
+  unfold checkStructuralVUBCert at hok
+  simp only [hIntLen, hlbLen, hubLen, beq_self_eq_true, Bool.and_self, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hok
+  rcases guardExc_ok hok with ⟨hscaleD, hok⟩
+  rcases guardExc_ok hok with ⟨hcutColsT, hok⟩
+  rcases guardExc_ok hok with ⟨hcolBndT, hok⟩
+  rcases guardExc_ok hok with ⟨hbinColT, hok⟩
+  rcases guardExc_ok hok with ⟨hrowOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hdropOkT, hok⟩
+  rcases guardExc_ok hok with ⟨hrhsD, _⟩
+  let n := cert.numVars
+  have hscalePos : 0 < cert.scale := of_decide_eq_true hscaleD
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hcolBndT
+  rcases hcolBndT with ⟨⟨hb, ht⟩, hne⟩
+  have hyBin : isBinVal (x ⟨cert.binCol, hb⟩) :=
+    isBinaryCol_sound hIntLen hlbLen hubLen hfeas hb hbinColT
+  have hrawLe0 : x ⟨cert.targetCol, ht⟩ - cert.effUB * x ⟨cert.binCol, hb⟩ ≤ 0 := by
+    split at hrowOkT
+    · next hr =>
+      rcases Bool.or_eq_true _ _ |>.mp hrowOkT with h1 | hm1
+      · exact structVUBRowOkOriented_sound hIntLen hlbLen hubLen hb ht hne hfeas hyBin h1 (hfeas.2.2 ⟨cert.rowIdx, hr⟩)
+      · exact structVUBRowOkOriented_sound hIntLen hlbLen hubLen hb ht hne hfeas hyBin hm1 (hfeas.2.2 ⟨cert.rowIdx, hr⟩)
+    · contradiction
+  let rawV : Fin n → Rat := fun j =>
+    (if j.val == cert.targetCol then (1 : Rat) else 0) +
+    (if j.val == cert.binCol then -cert.effUB else 0)
+  have hrawSum : finSum n (fun j => rawV j * x j) ≤ 0 := by
+    have hsplit : finSum n (fun j => rawV j * x j) =
+        finSum n (fun j => (if j.val == cert.targetCol then (1 : Rat) else 0) * x j) +
+        finSum n (fun j => (if j.val == cert.binCol then -cert.effUB else 0) * x j) := by
+      rw [← finSum_add]
+      exact finSum_congr fun j => Rat.add_mul _ _ _
+    rw [hsplit]
+    have h1 : finSum n (fun j => (if j.val == cert.targetCol then (1 : Rat) else 0) * x j) = x ⟨cert.targetCol, ht⟩ := by
+      have hc : finSum n (fun j : Fin n => (if j.val == cert.targetCol then (1 : Rat) else 0) * x j) =
+          finSum n (fun j : Fin n => if j = ⟨cert.targetCol, ht⟩ then x ⟨cert.targetCol, ht⟩ else 0) := by
+        apply finSum_congr; intro j
+        by_cases hj : j = ⟨cert.targetCol, ht⟩
+        · subst hj; simp [Rat.one_mul]
+        · have hne' : (j.val == cert.targetCol) = false := beq_false_of_ne (fun h => hj (Fin.ext h))
+          simp [hj, hne']
+      rw [hc, finSum_single]
+    have h2 : finSum n (fun j => (if j.val == cert.binCol then -cert.effUB else 0) * x j) = -(cert.effUB * x ⟨cert.binCol, hb⟩) := by
+      have hc : finSum n (fun j : Fin n => (if j.val == cert.binCol then -cert.effUB else 0) * x j) =
+          finSum n (fun j : Fin n => if j = ⟨cert.binCol, hb⟩ then -(cert.effUB * x ⟨cert.binCol, hb⟩) else 0) := by
+        apply finSum_congr; intro j
+        by_cases hj : j = ⟨cert.binCol, hb⟩
+        · subst hj; simp [Rat.neg_mul]
+        · have hne' : (j.val == cert.binCol) = false := beq_false_of_ne (fun h => hj (Fin.ext h))
+          simp [hj, hne']
+      rw [hc, finSum_single]
+    rw [h1, h2, ← Rat.sub_eq_add_neg]
+    exact hrawLe0
+  let lbFn : Fin n → Option Rat := fun j => cert.lb[j.val]'(by omega)
+  let ubFn : Fin n → Option Rat := fun j => cert.ub[j.val]'(by omega)
+  have hlbB : ∀ j : Fin n, cert.lb[j.val]! = lbFn j := fun j => getElem!_pos cert.lb j.val (by omega)
+  have hubB : ∀ j : Fin n, cert.ub[j.val]! = ubFn j := fun j => getElem!_pos cert.ub j.val (by omega)
+  let cutDense := accumTerms n cert.cut.terms
+  let outFn : Fin n → Rat := fun j => cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt)
+  let loFn : Fin n → Rat := fun j => (dropMinTerm (cert.scale * rawV j - outFn j) (lbFn j) (ubFn j)).getD 0
+  have hdropAll := allFin_eq_true_iff.mp hdropOkT
+  have hlo : ∀ j : Fin n, dropMinTerm (cert.scale * rawV j - outFn j) (lbFn j) (ubFn j) = some (loFn j) := by
+    intro j
+    have hj := hdropAll j
+    rw [hlbB j, hubB j] at hj
+    dsimp only [loFn]
+    cases hd : dropMinTerm (cert.scale * rawV j - outFn j) (lbFn j) (ubFn j) with
+    | none => rw [hd] at hj; simp at hj
+    | some lo => simp
+  have hrhsLe : cert.scale * 0 - finSum n loFn ≤ cert.cut.rhs := by
+    have h := of_decide_eq_true hrhsD
+    have hcong : finSum n (fun j => (dropMinTerm (cert.scale * rawV j - outFn j) cert.lb[j.val]! cert.ub[j.val]!).getD 0) =
+        finSum n loFn :=
+      finSum_congr fun j => by dsimp only [loFn]; rw [hlbB j, hubB j]
+    rw [Rat.mul_zero, rat_zero_sub]
+    rwa [← hcong]
+  rw [evalCutOnFin_eq_finSum_accum cert.cut x hcutColsT]
+  exact finalize_cut_drop_universal_sound hscalePos hrawSum hfeas.1 hlo hrhsLe
 
 /-! ### 5. JSON Decoders & Executable Entrypoints for Wave 2 `Apps/CutsCheck.lean` -/
 
@@ -2701,7 +4168,25 @@ private def parseLotSizingNodeJson (v : JsonVal) : Except String LotSizingNodeCe
     | some rv => rv.asRat
   let inS ← v.getBool "inS"
   let coeffY ← v.getRat "coeffY"
-  pure { prodCol, invOutCol, binCol, demand, vubCap, vubRHS, inS, coeffY }
+  let flowRowIdx ← match v.getField? "flowRowIdx" with
+    | none | some .null => pure none
+    | some fv => some <$> fv.asNat
+  let vubRowIdx ← match v.getField? "vubRowIdx" with
+    | none | some .null => pure none
+    | some vv => some <$> vv.asNat
+  pure { prodCol, invOutCol, binCol, demand, vubCap, vubRHS, inS, coeffY, flowRowIdx, vubRowIdx }
+
+private def parseRowMultPairJson (v : JsonVal) : Except String (Nat × Rat) := do
+  let rowIdx ← v.getNat "rowIdx"
+  let mu ← v.getRat "mu"
+  pure (rowIdx, mu)
+
+private def parseRhoEntryJson (v : JsonVal) : Except String (Nat × Rat) := do
+  let rowIdx ← v.getNat "rowIdx"
+  let val ← match v.getField? "val" with
+    | some rv => rv.asRat
+    | none => v.getRat "mu"
+  pure (rowIdx, val)
 
 private def checkOptionalWitnesses (v : JsonVal) (cut : CutSpec) : Except String Nat := do
   match v.getField? "solutions" with
@@ -2716,11 +4201,20 @@ private def checkOptionalWitnesses (v : JsonVal) (cut : CutSpec) : Except String
         throw s!"witness {i}: cut violated ({lhs} > {cut.rhs})"
     pure solsRaw.size
 
-/-- JSON entrypoint for `cover-check`: universally verifies a lifted binary knapsack cover certificate. -/
+/-- JSON entrypoint for `cover-check`: universally verifies a lifted binary knapsack cover certificate
+against `isInt`, `(lb, ub)`, and `baseRows`. -/
 def checkKnapsackCoverJson (v : JsonVal) : Except String String := do
   let numVars ← v.getNat "numVars"
+  let isInt ← v.getArray "isInt" >>= parseBoolArrayJson
   let lb ← v.getArray "lb" >>= parseOptRatArrayJson
   let ub ← v.getArray "ub" >>= parseOptRatArrayJson
+  let baseRows ← (← v.getArray "baseRows").mapM parseRowSpecJson
+  let rowIdx ← match v.getField? "rowIdx" with
+    | none | some .null => pure none
+    | some rv => some <$> rv.asNat
+  let aggMultipliers ← match v.getField? "aggMultipliers" with
+    | none | some .null => pure none
+    | some av => some <$> ((← av.asArray).mapM parseRowMultPairJson)
   let row ← v.getField "row" >>= parseRowSpecJson
   let sign ← match v.getField? "sign" with
     | none | some .null =>
@@ -2732,14 +4226,20 @@ def checkKnapsackCoverJson (v : JsonVal) : Except String String := do
   let knapRHS ← v.getRat "knapRHS"
   let scale ← parseScaleJson v
   let cut ← v.getField "cut" >>= parseCutSpecJson
-  let cert : KnapsackCoverCert := { numVars, lb, ub, row, sign, items, knapRHS, scale, cut }
+  let cert : KnapsackCoverCert :=
+    { numVars, isInt, lb, ub, baseRows, rowIdx, aggMultipliers, row, sign, items, knapRHS, scale, cut }
   checkKnapsackCoverCert cert
   let wits ← checkOptionalWitnesses v cut
   pure s!"VERIFIED (cover-check, {items.size} items, {wits} witnesses)"
 
-/-- JSON entrypoint for `lotsizing-check`: universally verifies an `(l, S)` lot-sizing chain cut. -/
+/-- JSON entrypoint for `lotsizing-check`: universally verifies an `(l, S)` lot-sizing chain cut
+against `isInt`, `(lb, ub)`, column distinctness, and `baseRows`. -/
 def checkLotSizingCutJson (v : JsonVal) : Except String String := do
   let numVars ← v.getNat "numVars"
+  let isInt ← v.getArray "isInt" >>= parseBoolArrayJson
+  let lb ← v.getArray "lb" >>= parseOptRatArrayJson
+  let ub ← v.getArray "ub" >>= parseOptRatArrayJson
+  let baseRows ← (← v.getArray "baseRows").mapM parseRowSpecJson
   let invInCol ← match v.getField? "invInCol" with
     | none | some .null => pure none
     | some iv => some <$> iv.asNat
@@ -2747,10 +4247,55 @@ def checkLotSizingCutJson (v : JsonVal) : Except String String := do
   let cutDem ← v.getRat "cutDem"
   let scale ← parseScaleJson v
   let cut ← v.getField "cut" >>= parseCutSpecJson
-  let cert : LotSizingCutCert := { numVars, invInCol, nodes, cutDem, scale, cut }
+  let cert : LotSizingCutCert := { numVars, isInt, lb, ub, baseRows, invInCol, nodes, cutDem, scale, cut }
   checkLotSizingCutCert cert
   let wits ← checkOptionalWitnesses v cut
   pure s!"VERIFIED (lotsizing-check, {nodes.size} nodes, {wits} witnesses)"
+
+/-- JSON entrypoint for structural-derivation `gmi-check`: universally verifies a GMI cut derived
+from `baseRows` via rational tableau multipliers `rho`. -/
+def checkStructuralGMIJson (v : JsonVal) : Except String String := do
+  let numVars ← v.getNat "numVars"
+  let isInt ← v.getArray "isInt" >>= parseBoolArrayJson
+  let lb ← v.getArray "lb" >>= parseOptRatArrayJson
+  let ub ← v.getArray "ub" >>= parseOptRatArrayJson
+  let baseRows ← (← v.getArray "baseRows").mapM parseRowSpecJson
+  let basicCol ← v.getNat "basicCol"
+  let rho ← (← v.getArray "rho").mapM parseRhoEntryJson
+  let colAtUpper ← v.getArray "colAtUpper" >>= parseBoolArrayJson
+  let cStruct ← match v.getField? "cStruct" with
+    | none | some .null => pure none
+    | some av => some <$> (av.asArray >>= parseRatArrayJson)
+  let cSlack ← match v.getField? "cSlack" with
+    | none | some .null => pure none
+    | some av => some <$> (av.asArray >>= parseRatArrayJson)
+  let scale ← parseScaleJson v
+  let cut ← v.getField "cut" >>= parseCutSpecJson
+  let cert : StructuralGMICert :=
+    { numVars, isInt, lb, ub, baseRows, basicCol, rho, colAtUpper, cStruct, cSlack, scale, cut }
+  checkStructuralGMICert cert
+  let wits ← checkOptionalWitnesses v cut
+  pure s!"VERIFIED (gmi-check-structural, {rho.size} rows, {wits} witnesses)"
+
+/-- JSON entrypoint for structural-derivation `vub-check`: universally verifies a disaggregated VUB
+cut derived directly from `baseRows[rowIdx]`. -/
+def checkStructuralVUBJson (v : JsonVal) : Except String String := do
+  let numVars ← v.getNat "numVars"
+  let isInt ← v.getArray "isInt" >>= parseBoolArrayJson
+  let lb ← v.getArray "lb" >>= parseOptRatArrayJson
+  let ub ← v.getArray "ub" >>= parseOptRatArrayJson
+  let baseRows ← (← v.getArray "baseRows").mapM parseRowSpecJson
+  let rowIdx ← v.getNat "rowIdx"
+  let binCol ← v.getNat "binCol"
+  let targetCol ← v.getNat "targetCol"
+  let effUB ← v.getRat "effUB"
+  let scale ← parseScaleJson v
+  let cut ← v.getField "cut" >>= parseCutSpecJson
+  let cert : StructuralVUBCert :=
+    { numVars, isInt, lb, ub, baseRows, rowIdx, binCol, targetCol, effUB, scale, cut }
+  checkStructuralVUBCert cert
+  let wits ← checkOptionalWitnesses v cut
+  pure s!"VERIFIED (vub-check-structural, row {rowIdx}, {wits} witnesses)"
 
 /-- JSON entrypoint for `agg-cmir-check`: universally verifies a multi-row aggregated or pairwise-surrogate cMIR cut. -/
 def checkAggCMIRJson (v : JsonVal) : Except String String := do
