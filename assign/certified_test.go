@@ -467,14 +467,15 @@ func TestAssignCertifiedNegativeControlsFailClosed(t *testing.T) {
 		res.V = []float64{0, 0, 0}
 	})
 	// Also test pure residual graph negative-cycle detection directly without dual vector precheck.
-	if _, err := certifyAssignCore(
-		ctx, 3, 3,
-		func(r, c int) float64 { return matULP[r][c] },
-		Minimize,
-		[]int{0, 1, 2}, []int{1, 0, 2},
-		nil, nil, false,
-		0.75+ulp025, nil,
-	); !errors.Is(err, ErrCertificationFailed) {
+	if _, err := certifyAssignCore(ctx, certAssignReq{
+		rows:       3,
+		cols:       3,
+		costAt:     func(r, c int) float64 { return matULP[r][c] },
+		sense:      Minimize,
+		rowInd:     []int{0, 1, 2},
+		colInd:     []int{1, 0, 2},
+		claimedObj: 0.75 + ulp025,
+	}); !errors.Is(err, ErrCertificationFailed) {
 		t.Fatalf("direct residual negative-cycle check got %v, want ErrCertificationFailed", err)
 	}
 
@@ -484,14 +485,15 @@ func TestAssignCertifiedNegativeControlsFailClosed(t *testing.T) {
 		{10.0, 0.5, c2PlusULP},
 		{0.25, 9.0, 8.0},
 	}
-	if _, err := certifyAssignCore(
-		ctx, 2, 3,
-		func(r, c int) float64 { return matWide[r][c] },
-		Minimize,
-		[]int{0, 1}, []int{2, 0},
-		nil, nil, false,
-		0.25+c2PlusULP, nil,
-	); !errors.Is(err, ErrCertificationFailed) {
+	if _, err := certifyAssignCore(ctx, certAssignReq{
+		rows:       2,
+		cols:       3,
+		costAt:     func(r, c int) float64 { return matWide[r][c] },
+		sense:      Minimize,
+		rowInd:     []int{0, 1},
+		colInd:     []int{2, 0},
+		claimedObj: 0.25 + c2PlusULP,
+	}); !errors.Is(err, ErrCertificationFailed) {
 		t.Fatalf("wide suboptimal augmenting-path check got %v, want ErrCertificationFailed", err)
 	}
 

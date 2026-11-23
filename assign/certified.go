@@ -227,7 +227,14 @@ func isForbiddenAssignEntry(val float64, sense Sense) (forbidden, valid bool) {
 	return math.IsInf(val, -1), true
 }
 
-func certifyLinearSum2D(ctx context.Context, rows, cols int, cost [][]float64, sense Sense, res Result, solveErr error) (Result, error) {
+func certifyLinearSumWith(
+	ctx context.Context,
+	rows, cols int,
+	costAt func(int, int) float64,
+	sense Sense,
+	res Result,
+	solveErr error,
+) (Result, error) {
 	if ctx != nil {
 		if solveErr != nil && ctx.Err() != nil && errors.Is(solveErr, ctx.Err()) {
 			return Result{}, solveErr
@@ -236,10 +243,20 @@ func certifyLinearSum2D(ctx context.Context, rows, cols int, cost [][]float64, s
 			fn(rows, cols, sense, &res, &solveErr)
 		}
 	}
-	costAt := func(r, c int) float64 {
-		return cost[r][c]
-	}
-	exactObj, err := certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, res.RowInd, res.ColInd, res.U, res.V, true, true, res.Objective, solveErr)
+	exactObj, err := certifyAssignCore(ctx, certAssignReq{
+		rows:          rows,
+		cols:          cols,
+		costAt:        costAt,
+		sense:         sense,
+		rowInd:        res.RowInd,
+		colInd:        res.ColInd,
+		uRaw:          res.U,
+		vRaw:          res.V,
+		checkDualVecs: true,
+		writeDuals:    true,
+		claimedObj:    res.Objective,
+		solveErr:      solveErr,
+	})
 	if err != nil {
 		return Result{}, err
 	}
@@ -247,24 +264,16 @@ func certifyLinearSum2D(ctx context.Context, rows, cols int, cost [][]float64, s
 	return res, nil
 }
 
+func certifyLinearSum2D(ctx context.Context, rows, cols int, cost [][]float64, sense Sense, res Result, solveErr error) (Result, error) {
+	return certifyLinearSumWith(ctx, rows, cols, func(r, c int) float64 {
+		return cost[r][c]
+	}, sense, res, solveErr)
+}
+
 func certifyLinearSumFlat(ctx context.Context, rows, cols int, origCost []float64, sense Sense, res Result, solveErr error) (Result, error) {
-	if ctx != nil {
-		if solveErr != nil && ctx.Err() != nil && errors.Is(solveErr, ctx.Err()) {
-			return Result{}, solveErr
-		}
-		if fn, ok := ctx.Value(certFaultKey{}).(assignFaultFunc); ok && fn != nil {
-			fn(rows, cols, sense, &res, &solveErr)
-		}
-	}
-	costAt := func(r, c int) float64 {
+	return certifyLinearSumWith(ctx, rows, cols, func(r, c int) float64 {
 		return origCost[r*cols+c]
-	}
-	exactObj, err := certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, res.RowInd, res.ColInd, res.U, res.V, true, true, res.Objective, solveErr)
-	if err != nil {
-		return Result{}, err
-	}
-	res.Objective = exactObj
-	return res, nil
+	}, sense, res, solveErr)
 }
 
 func certifySolveInto(ctx context.Context, rows, cols int, origCost []float64, sense Sense, rowInd, colInd []int, ws *Workspace, obj float64, solveErr error) (float64, error) {
@@ -318,7 +327,20 @@ func certifySolveInto(ctx context.Context, rows, cols int, origCost []float64, s
 	costAt := func(r, c int) float64 {
 		return origCost[r*cols+c]
 	}
-	exactObj, err := certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, rowInd, colInd, uHint, vHint, hasDuals, false, obj, solveErr)
+	exactObj, err := certifyAssignCore(ctx, certAssignReq{
+		rows:          rows,
+		cols:          cols,
+		costAt:        costAt,
+		sense:         sense,
+		rowInd:        rowInd,
+		colInd:        colInd,
+		uRaw:          uHint,
+		vRaw:          vHint,
+		checkDualVecs: hasDuals,
+		writeDuals:    false,
+		claimedObj:    obj,
+		solveErr:      solveErr,
+	})
 	if err != nil {
 		if errors.Is(err, ErrCertificationFailed) {
 			for i := range rowInd {
@@ -356,22 +378,30 @@ func (d dyadic2304) toFloat64Floor() float64 {
 	return f
 }
 
-func writeRepairedDualsFast(uExact, vExact []dyadic2304, uNormOut, vNormOut []float64) {
-	if len(uNormOut) != len(uExact) || len(vNormOut) != len(vExact) {
-		return
-	}
-	uTmp := make([]float64, len(uExact))
-	for i, d := range uExact {
-		// Floor rounding preserves uOut[i] + vOut[j] <= C[i,j] over Q
-		// when vExact is already exact in float64.
+func convertDyadicSliceFloor(src []dyadic2304) ([]float64, bool) {
+	out := make([]float64, len(src))
+	for i, d := range src {
 		f := d.toFloat64Floor()
 		if math.IsInf(f, 0) || math.IsNaN(f) {
-			return
+			return nil, false
 		}
 		if f == 0 {
 			f = 0
 		}
-		uTmp[i] = f
+		out[i] = f
+	}
+	return out, true
+}
+
+func writeRepairedDualsFast(uExact, vExact []dyadic2304, uNormOut, vNormOut []float64) {
+	if len(uNormOut) != len(uExact) || len(vNormOut) != len(vExact) {
+		return
+	}
+	// Floor rounding preserves uOut[i] + vOut[j] <= C[i,j] over Q
+	// when vExact is already exact in float64.
+	uTmp, okU := convertDyadicSliceFloor(uExact)
+	if !okU {
+		return
 	}
 	vTmp := make([]float64, len(vExact))
 	for j, d := range vExact {
@@ -419,21 +449,17 @@ func writeRepairedDualsFromMatrix(
 		}
 		vTmpD[j] = fd
 	}
-	uTmp := make([]float64, m)
+	var uTmp []float64
 	if vAllExact {
-		for i, d := range uExact {
-			f := d.toFloat64Floor()
-			if math.IsInf(f, 0) || math.IsNaN(f) {
-				return
-			}
-			if f == 0 {
-				f = 0
-			}
-			uTmp[i] = f
+		var okU bool
+		uTmp, okU = convertDyadicSliceFloor(uExact)
+		if !okU {
+			return
 		}
 	} else {
 		// Recompute uSafe[i] = min_{j finite} (C[i,j] - vOut[j]) floored to float64 so the
 		// returned float64 pair (uOut, vOut) remains strictly dual-feasible over Q.
+		uTmp = make([]float64, m)
 		for i := range m {
 			base := i * n
 			var minU dyadic2304
@@ -465,32 +491,29 @@ func writeRepairedDualsFromMatrix(
 	copy(vNormOut, vTmp)
 }
 
-func certifyAssignCore(
-	ctx context.Context,
-	rows, cols int,
-	costAt func(int, int) float64,
-	sense Sense,
-	rowInd, colInd []int,
-	uRaw, vRaw []float64,
-	checkDualVecs bool,
-	claimedObj float64,
-	solveErr error,
-) (float64, error) {
-	return certifyAssignCoreImpl(ctx, rows, cols, costAt, sense, rowInd, colInd, uRaw, vRaw, checkDualVecs, checkDualVecs, claimedObj, solveErr)
+type certAssignReq struct {
+	rows          int
+	cols          int
+	costAt        func(int, int) float64
+	sense         Sense
+	rowInd        []int
+	colInd        []int
+	uRaw          []float64
+	vRaw          []float64
+	checkDualVecs bool
+	writeDuals    bool
+	claimedObj    float64
+	solveErr      error
 }
 
-func certifyAssignCoreImpl(
-	ctx context.Context,
-	rows, cols int,
-	costAt func(int, int) float64,
-	sense Sense,
-	rowInd, colInd []int,
-	uRaw, vRaw []float64,
-	checkDualVecs bool,
-	writeDuals bool,
-	claimedObj float64,
-	solveErr error,
-) (float64, error) {
+func certifyAssignCore(ctx context.Context, req certAssignReq) (float64, error) {
+	rows, cols := req.rows, req.cols
+	costAt := req.costAt
+	sense := req.sense
+	rowInd, colInd := req.rowInd, req.colInd
+	uRaw, vRaw := req.uRaw, req.vRaw
+	checkDualVecs, writeDuals := req.checkDualVecs, req.writeDuals
+	claimedObj, solveErr := req.claimedObj, req.solveErr
 	if !sense.valid() || rows < 0 || cols < 0 {
 		return 0, ErrCertificationFailed
 	}

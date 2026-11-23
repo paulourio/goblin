@@ -1218,6 +1218,26 @@ func downscaleSlice(orig, dst []float64, downExp int) bool {
 	return lostSub
 }
 
+func scanCostExtremeAndInt(vals []float64, intLim float64, checkInt bool) (maxAbsFinite float64, allInt bool, err error) {
+	allInt = checkInt
+	for _, c := range vals {
+		if !(math.Abs(c) <= hugeCostThreshold) {
+			if math.IsNaN(c) || math.IsInf(c, -1) {
+				return 0, false, ErrInvalidCost
+			}
+			if !math.IsInf(c, 1) {
+				allInt = false
+				if ac := math.Abs(c); ac > maxAbsFinite {
+					maxAbsFinite = ac
+				}
+			}
+		} else if allInt && !isExactSmallInt(c, intLim) {
+			allInt = false
+		}
+	}
+	return maxAbsFinite, allInt, nil
+}
+
 func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (m, n int, normCost, unscaledCost []float64, transposed, lostSubnormal, allSmallInt bool, scaleExp int, err error) {
 	negate := sense == Maximize
 	transposed = rows > cols
@@ -1235,21 +1255,10 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		} else if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD) {
 			return m, n, cost, cost, false, false, false, 0, nil
 		}
-		allInt := checkInt
-		for _, c := range cost {
-			if !(math.Abs(c) <= hugeCostThreshold) {
-				if math.IsNaN(c) || math.IsInf(c, -1) {
-					return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
-				}
-				if !math.IsInf(c, 1) {
-					allInt = false
-					if ac := math.Abs(c); ac > maxAbsFinite {
-						maxAbsFinite = ac
-					}
-				}
-			} else if allInt && !isExactSmallInt(c, intLim) {
-				allInt = false
-			}
+		var allInt bool
+		maxAbsFinite, allInt, err = scanCostExtremeAndInt(cost, intLim, checkInt)
+		if err != nil {
+			return 0, 0, nil, nil, false, false, false, 0, err
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
 		if downExp == 0 {
@@ -1281,21 +1290,10 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		} else if simd.ValidateAndNegate64With(dst, cost, hugeCostThreshold, disableSIMD) {
 			return m, n, dst, dst, false, false, false, 0, nil
 		}
-		allInt := checkInt
-		for _, nc := range dst {
-			if !(math.Abs(nc) <= hugeCostThreshold) {
-				if math.IsNaN(nc) || math.IsInf(nc, -1) {
-					return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
-				}
-				if !math.IsInf(nc, 1) {
-					allInt = false
-					if ac := math.Abs(nc); ac > maxAbsFinite {
-						maxAbsFinite = ac
-					}
-				}
-			} else if allInt && !isExactSmallInt(nc, intLim) {
-				allInt = false
-			}
+		var allInt bool
+		maxAbsFinite, allInt, err = scanCostExtremeAndInt(dst, intLim, checkInt)
+		if err != nil {
+			return 0, 0, nil, nil, false, false, false, 0, err
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
 		if downExp > 0 {
@@ -1692,7 +1690,20 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 		stage2Accepted bool
 	)
 	if lostSubnormal || hasPotCancel {
-		st, stage2Accepted, err = runStage2Refinement(ctx, m, n, scaleExp, normCost, unscaledCost, u, v, col4row, row4col, ws, cfg.DisableSIMD, done)
+		s2 := stage2Problem{
+			m:            m,
+			n:            n,
+			scaleExp:     scaleExp,
+			normCost:     normCost,
+			unscaledCost: unscaledCost,
+			u:            u,
+			v:            v,
+			col4row:      col4row,
+			row4col:      row4col,
+			ws:           ws,
+			disableSIMD:  cfg.DisableSIMD,
+		}
+		st, stage2Accepted, err = runStage2Refinement(ctx, s2, done)
 		if err != nil {
 			return 0, transposed, err
 		}
@@ -1723,7 +1734,20 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	}
 
 	if scaleExp > 0 || st.numDualPasses > 0 || hasPotCancel {
-		finalizeStage2Duals(m, n, scaleExp, unscaledCost, col4row, row4col, u, v, &st, hasPotCancel, ws, cfg.DisableSIMD)
+		s2 := stage2Problem{
+			m:            m,
+			n:            n,
+			scaleExp:     scaleExp,
+			normCost:     normCost,
+			unscaledCost: unscaledCost,
+			u:            u,
+			v:            v,
+			col4row:      col4row,
+			row4col:      row4col,
+			ws:           ws,
+			disableSIMD:  cfg.DisableSIMD,
+		}
+		finalizeStage2Duals(s2, &st, hasPotCancel)
 	}
 
 	obj := totalMin
@@ -1799,15 +1823,26 @@ func evalStage2Edge(acc *assignWideAcc, m, n, scaleExp, i, j int, normCost, unsc
 	return acc.eval()
 }
 
-func runStage2Refinement(
-	ctx context.Context,
-	m, n, scaleExp int,
-	normCost, unscaledCost, u, v []float64,
-	col4row, row4col []int,
-	ws *Workspace,
-	disableSIMD bool,
-	done <-chan struct{},
-) (stage2State, bool, error) {
+type stage2Problem struct {
+	m            int
+	n            int
+	scaleExp     int
+	normCost     []float64
+	unscaledCost []float64
+	u            []float64
+	v            []float64
+	col4row      []int
+	row4col      []int
+	ws           *Workspace
+	disableSIMD  bool
+}
+
+func runStage2Refinement(ctx context.Context, p stage2Problem, done <-chan struct{}) (stage2State, bool, error) {
+	m, n, scaleExp := p.m, p.n, p.scaleExp
+	normCost, unscaledCost := p.normCost, p.unscaledCost
+	u, v := p.u, p.v
+	col4row, row4col := p.col4row, p.row4col
+	ws, disableSIMD := p.ws, p.disableSIMD
 	tau := 4.0 * float64(m+1) * math.SmallestNonzeroFloat64
 	subCap := float64(m+2) * tau
 	st := stage2State{
@@ -2121,7 +2156,20 @@ func runStage2Refinement(
 	return st, stage2Accepted, nil
 }
 
-func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, row4col []int, u, v []float64, st *stage2State, hasPotCancel bool, ws *Workspace, disableSIMD bool) {
+func computeSquareDualShift(minU, maxU, minV, maxV, mLim float64) float64 {
+	deltaLo := max(-mLim-minU, maxV-mLim)
+	deltaHi := min(mLim-maxU, minV+mLim)
+	if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
+		return 0.5 * (deltaLo + deltaHi)
+	}
+	return 0.0
+}
+
+func finalizeStage2Duals(p stage2Problem, st *stage2State, hasPotCancel bool) {
+	m, n, scaleExp := p.m, p.n, p.scaleExp
+	unscaledCost := p.unscaledCost
+	row4col := p.row4col
+	u, v := p.u, p.v
 	if scaleExp > 0 || st.numDualPasses > 0 {
 		anyClamped := false
 		if st.numDualPasses > 0 {
@@ -2143,19 +2191,14 @@ func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, ro
 					minV = min(minV, vj)
 					maxV = max(maxV, vj)
 				}
-				mLim := math.Ldexp(math.MaxFloat64, -shiftExp)
-				deltaLo := max(-mLim-minU, maxV-mLim)
-				deltaHi := min(mLim-maxU, minV+mLim)
-				if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
-					shift = 0.5 * (deltaLo + deltaHi)
-				}
+				shift = computeSquareDualShift(minU, maxU, minV, maxV, math.Ldexp(math.MaxFloat64, -shiftExp))
 			}
 			for i := range m {
 				acc.reset()
 				acc.addScaled(st.uBase[i], scaleExp)
 				acc.addScaled(shift, shiftExp)
-				for p := range st.numDualPasses {
-					acc.addScaled(st.uDeltas[p*m+i], st.passShift[p])
+				for pass := range st.numDualPasses {
+					acc.addScaled(st.uDeltas[pass*m+i], st.passShift[pass])
 				}
 				scaled, _ := acc.eval()
 				clamped := clampFinite(scaled)
@@ -2172,10 +2215,10 @@ func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, ro
 				acc.reset()
 				acc.addScaled(st.vBase[j], scaleExp)
 				acc.addScaled(-shift, shiftExp)
-				for p := range st.numDualPasses {
-					acc.addScaled(st.vDeltas[p*n+j], st.passShift[p])
+				for pass := range st.numDualPasses {
+					acc.addScaled(st.vDeltas[pass*n+j], st.passShift[pass])
 					if st.vBonus != nil {
-						acc.addScaled(st.vBonus[p*n+j], st.passShift[p])
+						acc.addScaled(st.vBonus[pass*n+j], st.passShift[pass])
 					}
 				}
 				scaled, _ := acc.eval()
@@ -2201,12 +2244,7 @@ func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, ro
 					minV = min(minV, vj)
 					maxV = max(maxV, vj)
 				}
-				mLim := math.Ldexp(math.MaxFloat64, -scaleExp)
-				deltaLo := max(-mLim-minU, maxV-mLim)
-				deltaHi := min(mLim-maxU, minV+mLim)
-				if !(0.0 >= deltaLo && 0.0 <= deltaHi) {
-					shift = 0.5 * (deltaLo + deltaHi)
-				}
+				shift = computeSquareDualShift(minU, maxU, minV, maxV, math.Ldexp(math.MaxFloat64, -scaleExp))
 			}
 			for i := range m {
 				scaled := math.Ldexp(u[i]+shift, scaleExp)
@@ -2258,14 +2296,32 @@ func finalizeStage2Duals(m, n, scaleExp int, unscaledCost []float64, col4row, ro
 				u[i] = ui
 			}
 		} else if st.numDualPasses > 0 || hasPotCancel {
-			polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v, ws, disableSIMD)
+			polishStage2Duals(p)
 		}
 	} else if hasPotCancel {
-		polishStage2Duals(m, n, unscaledCost, col4row, row4col, u, v, ws, disableSIMD)
+		polishStage2Duals(p)
 	}
 }
 
-func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int, u, v []float64, ws *Workspace, disableSIMD bool) {
+func adjustStage2Dual(cur, delta float64) float64 {
+	sum, errTerm := twoSumAssign(cur, delta)
+	next := clampFinite(sum)
+	if errTerm < 0 && math.Abs(errTerm) >= 0x1p-60*math.Abs(next) && !math.IsInf(sum, 0) {
+		next = clampFinite(math.Nextafter(next, math.Inf(-1)))
+	}
+	return next
+}
+
+func rowNearTightLimit(ui, vMaxAbs float64) float64 {
+	return 0x1p-48*(math.Abs(ui)+vMaxAbs)*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+}
+
+func polishStage2Duals(p stage2Problem) {
+	m, n := p.m, p.n
+	unscaledCost := p.unscaledCost
+	col4row, row4col := p.col4row, p.row4col
+	u, v := p.u, p.v
+	ws, disableSIMD := p.ws, p.disableSIMD
 	var pi []float64
 	var rootToRow []float64
 	var scanBuf []int
@@ -2315,7 +2371,7 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 			ui := u[i]
 			rowSlice := unscaledCost[i*n : (i+1)*n]
 			if canFilter && !math.IsNaN(ui) && !math.IsInf(ui, 0) && math.Abs(ui) <= cancelDualFiniteCap {
-				rowLimit := 0x1p-48*(math.Abs(ui)+vMaxAbs)*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+				rowLimit := rowNearTightLimit(ui, vMaxAbs)
 				for pos := 0; pos < n && !needPolish; {
 					next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, ui, rowLimit, scanBuf, disableSIMD)
 					for k := range cnt {
@@ -2433,16 +2489,8 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 				continue
 			}
 			j := col4row[i]
-			uSum, uErr := twoSumAssign(u[i], delta)
-			newU := clampFinite(uSum)
-			if uErr < 0 && math.Abs(uErr) >= 0x1p-60*math.Abs(newU) && !math.IsInf(uSum, 0) {
-				newU = clampFinite(math.Nextafter(newU, math.Inf(-1)))
-			}
-			vSum, vErr := twoSumAssign(v[j], -delta)
-			newV := clampFinite(vSum)
-			if vErr < 0 && math.Abs(vErr) >= 0x1p-60*math.Abs(newV) && !math.IsInf(vSum, 0) {
-				newV = clampFinite(math.Nextafter(newV, math.Inf(-1)))
-			}
+			newU := adjustStage2Dual(u[i], delta)
+			newV := adjustStage2Dual(v[j], -delta)
 			if m < n && newV > 0 {
 				newV = 0
 				newU = clampFinite(unscaledCost[i*n+j])
@@ -2463,7 +2511,7 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 		worstJ := -1
 		rowSlice := unscaledCost[i*n : (i+1)*n]
 		if canFilter && math.Abs(ui) <= cancelDualFiniteCap {
-			rowLimit := 0x1p-48*(math.Abs(ui)+vMaxAbs)*(1.0+0x1p-47) + 8.0*math.SmallestNonzeroFloat64
+			rowLimit := rowNearTightLimit(ui, vMaxAbs)
 			for pos := 0; pos < n; {
 				next, cnt := simd.ScanNearTightRow64With(rowSlice, v, pos, ui, rowLimit, scanBuf, disableSIMD)
 				for k := range cnt {
@@ -2498,7 +2546,7 @@ func polishStage2Duals(m, n int, unscaledCost []float64, col4row, row4col []int,
 	}
 }
 
-func initSquareColReductionAndAssign(n int, cost, u, v []float64, col4row, row4col []int, disableSIMD, colReduced bool, done <-chan struct{}) (int, error) {
+func initSquareColReduction(n int, cost, u, v []float64, col4row, row4col []int, disableSIMD, colReduced bool, done <-chan struct{}) error {
 	u = u[:n]
 	v = v[:n]
 	col4row = col4row[:n]
@@ -2513,7 +2561,7 @@ func initSquareColReductionAndAssign(n int, cost, u, v []float64, col4row, row4c
 				if r0 > 0 {
 					select {
 					case <-done:
-						return 0, errContextCanceled
+						return errContextCanceled
 					default:
 					}
 				}
@@ -2522,10 +2570,9 @@ func initSquareColReductionAndAssign(n int, cost, u, v []float64, col4row, row4c
 		}
 	}
 
-	numFreeRows := n
 	for j, vj := range v {
 		if math.IsInf(vj, 1) {
-			return 0, ErrInfeasible
+			return ErrInfeasible
 		}
 		i := row4col[j]
 		if uint(i) >= uint(n) {
@@ -2533,7 +2580,6 @@ func initSquareColReductionAndAssign(n int, cost, u, v []float64, col4row, row4c
 		}
 		if col4row[i] == -1 {
 			col4row[i] = j
-			numFreeRows--
 		} else {
 			if col4row[i] >= 0 {
 				col4row[i] = -2 - col4row[i]
@@ -2541,7 +2587,7 @@ func initSquareColReductionAndAssign(n int, cost, u, v []float64, col4row, row4c
 			row4col[j] = -1
 		}
 	}
-	return numFreeRows, nil
+	return nil
 }
 
 // preprocessSquareJV executes Jonker-Volgenant (1987) Column Reduction (in row-major order),
@@ -2551,21 +2597,13 @@ func preprocessSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows,
 	if n <= 0 || len(u) < n || len(v) < n || len(col4row) < n || len(row4col) < n || len(freeRows) < n || len(auxRows) < n {
 		return 0, nil
 	}
-	if _, err := initSquareColReductionAndAssign(n, cost, u, v, col4row, row4col, disableSIMD, colReduced, done); err != nil {
+	if err := initSquareColReduction(n, cost, u, v, col4row, row4col, disableSIMD, colReduced, done); err != nil {
 		return 0, err
 	}
 	return finishSquareJVReduction(n, cost, u, v, col4row, row4col, freeRows, auxRows, disableSIMD, done)
 }
 
-func finishSquareJVReduction(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
-	u = u[:n]
-	v = v[:n]
-	col4row = col4row[:n]
-	row4col = row4col[:n]
-	freeRows = freeRows[:n]
-	auxRows = auxRows[:n]
-
-	// Apply Reduction Transfer on uniquely matched rows and collect unassigned rows into freeRows.
+func applySquareReductionTransfer(n int, cost, u, v []float64, col4row, freeRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
 	numFree := 0
 	for i, c := range col4row {
 		if done != nil && n > 256 && i&255 == 0 {
@@ -2591,176 +2629,172 @@ func finishSquareJVReduction(n int, cost, u, v []float64, col4row, row4col, free
 			}
 		}
 	}
+	return numFree, nil
+}
 
-	if numFree == 0 {
-		return 0, nil
+func initCollinearSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
+	r0 := freeRows[0]
+	row0 := cost[r0*n : (r0+1)*n]
+	jMin, jMax := 0, 0
+	cMin, cMax := row0[0], row0[0]
+	for j := 1; j < n; j++ {
+		if c := row0[j]; !math.IsInf(c, 0) {
+			if c < cMin || math.IsInf(cMin, 0) {
+				cMin = c
+				jMin = j
+			}
+			if c > cMax || math.IsInf(cMax, 0) {
+				cMax = c
+				jMax = j
+			}
+		}
+	}
+	for i := range n {
+		col4row[i] = -1
+		row4col[i] = -1
+		freeRows[i] = i
+		u[i] = cost[i*n+jMax] - cost[i*n+jMin]
+	}
+	for i := 1; i < n; i++ {
+		r := freeRows[i]
+		sr := u[r]
+		j := i - 1
+		for j >= 0 && u[freeRows[j]] < sr {
+			freeRows[j+1] = freeRows[j]
+			j--
+		}
+		freeRows[j+1] = r
+	}
+	clear(u)
+	for k := range n {
+		if done != nil && n > 256 && k&255 == 0 {
+			select {
+			case <-done:
+				return 0, errContextCanceled
+			default:
+			}
+		}
+		r := freeRows[k]
+		rowCost := cost[r*n : (r+1)*n]
+		bestJ := -1
+		bestC := math.Inf(1)
+		for j, c := range rowCost {
+			if row4col[j] == -1 && c < bestC {
+				bestC = c
+				bestJ = j
+			}
+		}
+		if bestJ == -1 {
+			for j := range n {
+				if row4col[j] == -1 {
+					bestJ = j
+					break
+				}
+			}
+		}
+		auxRows[k] = bestJ
+		row4col[bestJ] = r
+	}
+	v[auxRows[n-1]] = 0
+	for k := n - 1; k >= 1; k-- {
+		r := freeRows[k]
+		ck := auxRows[k]
+		ckPrev := auxRows[k-1]
+		diff := cost[r*n+ck] - cost[r*n+ckPrev]
+		if math.IsNaN(diff) || math.IsInf(diff, 0) || diff < 0 {
+			diff = 0
+		}
+		v[ckPrev] = v[ck] - diff
+	}
+	for j := range n {
+		row4col[j] = -1
+	}
+	return augmentingRowReduction(n, cost, u, v, col4row, row4col, freeRows, auxRows, n, disableSIMD, done)
+}
+
+func reinitRowDominatedSquareJV(n int, cost, u, v []float64, col4row, row4col, freeRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
+	// Non-collinear row-dominated matrix (1-2 cheap rows hid all other rows during
+	// column reduction): normalize row scales via row minima u[i] = min_j cost[i, j],
+	// then re-run column reduction and reduction transfer on (cost[i, j] - u[i]).
+	for i := range n {
+		if done != nil && n > 256 && i&255 == 0 {
+			select {
+			case <-done:
+				return 0, errContextCanceled
+			default:
+			}
+		}
+		rowCost := cost[i*n : (i+1)*n]
+		minRow := rowCost[0]
+		for _, c := range rowCost[1:] {
+			if c < minRow {
+				minRow = c
+			}
+		}
+		if math.IsInf(minRow, 1) {
+			return 0, ErrInfeasible
+		}
+		u[i] = minRow
+		col4row[i] = -1
+	}
+	u0 := u[0]
+	for j, c := range cost[:n] {
+		v[j] = c - u0
+		row4col[j] = 0
+	}
+	for i := 1; i < n; i++ {
+		if done != nil && n > 256 && i&255 == 0 {
+			select {
+			case <-done:
+				return 0, errContextCanceled
+			default:
+			}
+		}
+		ui := u[i]
+		rowCost := cost[i*n : (i+1)*n]
+		for j, c := range rowCost {
+			if r := c - ui; r < v[j] {
+				v[j] = r
+				row4col[j] = i
+			}
+		}
+	}
+	for j := range n {
+		i := row4col[j]
+		if col4row[i] == -1 {
+			col4row[i] = j
+		} else {
+			if col4row[i] >= 0 {
+				col4row[i] = -2 - col4row[i]
+			}
+			row4col[j] = -1
+		}
+	}
+	return applySquareReductionTransfer(n, cost, u, v, col4row, freeRows, disableSIMD, done)
+}
+
+func finishSquareJVReduction(n int, cost, u, v []float64, col4row, row4col, freeRows, auxRows []int, disableSIMD bool, done <-chan struct{}) (int, error) {
+	u = u[:n]
+	v = v[:n]
+	col4row = col4row[:n]
+	row4col = row4col[:n]
+	freeRows = freeRows[:n]
+	auxRows = auxRows[:n]
+
+	// Apply Reduction Transfer on uniquely matched rows and collect unassigned rows into freeRows.
+	numFree, err := applySquareReductionTransfer(n, cost, u, v, col4row, freeRows, disableSIMD, done)
+	if err != nil || numFree == 0 {
+		return 0, err
 	}
 	// When column reduction matches <= max(2, n/32) rows, almost all rows and columns
 	// remain unassigned because 1-2 rows dominated every column.
 	if numFree >= n-max(2, n/32) {
 		if isCollinearSquare(n, numFree, cost, freeRows) {
-			r0 := freeRows[0]
-			row0 := cost[r0*n : (r0+1)*n]
-			jMin, jMax := 0, 0
-			cMin, cMax := row0[0], row0[0]
-			for j := 1; j < n; j++ {
-				if c := row0[j]; !math.IsInf(c, 0) {
-					if c < cMin || math.IsInf(cMin, 0) {
-						cMin = c
-						jMin = j
-					}
-					if c > cMax || math.IsInf(cMax, 0) {
-						cMax = c
-						jMax = j
-					}
-				}
-			}
-			for i := range n {
-				col4row[i] = -1
-				row4col[i] = -1
-				freeRows[i] = i
-				u[i] = cost[i*n+jMax] - cost[i*n+jMin]
-			}
-			for i := 1; i < n; i++ {
-				r := freeRows[i]
-				sr := u[r]
-				j := i - 1
-				for j >= 0 && u[freeRows[j]] < sr {
-					freeRows[j+1] = freeRows[j]
-					j--
-				}
-				freeRows[j+1] = r
-			}
-			clear(u)
-			for k := range n {
-				if done != nil && n > 256 && k&255 == 0 {
-					select {
-					case <-done:
-						return 0, errContextCanceled
-					default:
-					}
-				}
-				r := freeRows[k]
-				rowCost := cost[r*n : (r+1)*n]
-				bestJ := -1
-				bestC := math.Inf(1)
-				for j, c := range rowCost {
-					if row4col[j] == -1 && c < bestC {
-						bestC = c
-						bestJ = j
-					}
-				}
-				if bestJ == -1 {
-					for j := range n {
-						if row4col[j] == -1 {
-							bestJ = j
-							break
-						}
-					}
-				}
-				auxRows[k] = bestJ
-				row4col[bestJ] = r
-			}
-			v[auxRows[n-1]] = 0
-			for k := n - 1; k >= 1; k-- {
-				r := freeRows[k]
-				ck := auxRows[k]
-				ckPrev := auxRows[k-1]
-				diff := cost[r*n+ck] - cost[r*n+ckPrev]
-				if math.IsNaN(diff) || math.IsInf(diff, 0) || diff < 0 {
-					diff = 0
-				}
-				v[ckPrev] = v[ck] - diff
-			}
-			for j := range n {
-				row4col[j] = -1
-			}
-			return augmentingRowReduction(n, cost, u, v, col4row, row4col, freeRows, auxRows, n, disableSIMD, done)
+			return initCollinearSquareJV(n, cost, u, v, col4row, row4col, freeRows, auxRows, disableSIMD, done)
 		}
-
-		// Non-collinear row-dominated matrix (1-2 cheap rows hid all other rows during
-		// column reduction): normalize row scales via row minima u[i] = min_j cost[i, j],
-		// then re-run column reduction and reduction transfer on (cost[i, j] - u[i]).
-		for i := range n {
-			if done != nil && n > 256 && i&255 == 0 {
-				select {
-				case <-done:
-					return 0, errContextCanceled
-				default:
-				}
-			}
-			rowCost := cost[i*n : (i+1)*n]
-			minRow := rowCost[0]
-			for _, c := range rowCost[1:] {
-				if c < minRow {
-					minRow = c
-				}
-			}
-			if math.IsInf(minRow, 1) {
-				return 0, ErrInfeasible
-			}
-			u[i] = minRow
-			col4row[i] = -1
-		}
-		u0 := u[0]
-		for j, c := range cost[:n] {
-			v[j] = c - u0
-			row4col[j] = 0
-		}
-		for i := 1; i < n; i++ {
-			if done != nil && n > 256 && i&255 == 0 {
-				select {
-				case <-done:
-					return 0, errContextCanceled
-				default:
-				}
-			}
-			ui := u[i]
-			rowCost := cost[i*n : (i+1)*n]
-			for j, c := range rowCost {
-				if r := c - ui; r < v[j] {
-					v[j] = r
-					row4col[j] = i
-				}
-			}
-		}
-		for j := range n {
-			i := row4col[j]
-			if col4row[i] == -1 {
-				col4row[i] = j
-			} else {
-				if col4row[i] >= 0 {
-					col4row[i] = -2 - col4row[i]
-				}
-				row4col[j] = -1
-			}
-		}
-		numFree = 0
-		for i := range n {
-			if done != nil && n > 256 && i&255 == 0 {
-				select {
-				case <-done:
-					return 0, errContextCanceled
-				default:
-				}
-			}
-			c := col4row[i]
-			if c == -1 {
-				freeRows[numFree] = i
-				numFree++
-			} else if c < -1 {
-				col4row[i] = -2 - c
-			} else {
-				rowCost := cost[i*n : (i+1)*n]
-				minRed := simd.MinReducedSkip64With(rowCost, v, c, disableSIMD)
-				if !math.IsInf(minRed, 1) {
-					u[i] = minRed
-					v[c] = rowCost[c] - minRed
-				}
-			}
-		}
-		if numFree == 0 {
-			return 0, nil
+		numFree, err = reinitRowDominatedSquareJV(n, cost, u, v, col4row, row4col, freeRows, disableSIMD, done)
+		if err != nil || numFree == 0 {
+			return 0, err
 		}
 	}
 	return augmentingRowReduction(n, cost, u, v, col4row, row4col, freeRows, auxRows, numFree, disableSIMD, done)

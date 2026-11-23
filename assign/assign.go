@@ -135,6 +135,22 @@ type Result struct {
 	V []float64
 }
 
+func finishEmptyResult(ctx context.Context, rows, cols int, cost2D [][]float64, sense Sense, opts []Option, use2D bool) (Result, error) {
+	res := emptyResult(rows, cols)
+	if len(opts) > 0 {
+		if cfg := ApplyOptions(opts...); cfg.Certified {
+			if cfg.cert == nil {
+				return Result{}, ErrCertificationFailed
+			}
+			if use2D {
+				return cfg.cert.cert2D(ctx, rows, cols, cost2D, sense, res, nil)
+			}
+			return cfg.cert.certFlat(ctx, rows, cols, nil, sense, res, nil)
+		}
+	}
+	return res, nil
+}
+
 // LinearSum solves the rectangular Linear Sum Assignment Problem on a 2D cost matrix under ctx.
 // It returns RowInd (sorted ascending), ColInd, the optimal Objective, and the dual potentials U, V.
 func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Option) (Result, error) {
@@ -148,16 +164,7 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 	}
 	rows := len(cost)
 	if rows == 0 {
-		res := emptyResult(0, 0)
-		if len(opts) > 0 {
-			if cfg := ApplyOptions(opts...); cfg.Certified {
-				if cfg.cert == nil {
-					return Result{}, ErrCertificationFailed
-				}
-				return cfg.cert.cert2D(ctx, 0, 0, nil, sense, res, nil)
-			}
-		}
-		return res, nil
+		return finishEmptyResult(ctx, 0, 0, nil, sense, opts, true)
 	}
 	cols := len(cost[0])
 	for i := 1; i < rows; i++ {
@@ -166,16 +173,7 @@ func LinearSum(ctx context.Context, cost [][]float64, sense Sense, opts ...Optio
 		}
 	}
 	if cols == 0 {
-		res := emptyResult(rows, 0)
-		if len(opts) > 0 {
-			if cfg := ApplyOptions(opts...); cfg.Certified {
-				if cfg.cert == nil {
-					return Result{}, ErrCertificationFailed
-				}
-				return cfg.cert.cert2D(ctx, rows, 0, cost, sense, res, nil)
-			}
-		}
-		return res, nil
+		return finishEmptyResult(ctx, rows, 0, cost, sense, opts, true)
 	}
 	if rows > (math.MaxInt/2)/cols {
 		return Result{}, ErrInvalidDimensions
@@ -214,16 +212,7 @@ func LinearSumFlat(ctx context.Context, rows, cols int, cost []float64, sense Se
 		return Result{}, ErrInvalidDimensions
 	}
 	if rows == 0 || cols == 0 {
-		res := emptyResult(rows, cols)
-		if len(opts) > 0 {
-			if cfg := ApplyOptions(opts...); cfg.Certified {
-				if cfg.cert == nil {
-					return Result{}, ErrCertificationFailed
-				}
-				return cfg.cert.certFlat(ctx, rows, cols, nil, sense, res, nil)
-			}
-		}
-		return res, nil
+		return finishEmptyResult(ctx, rows, cols, nil, sense, opts, false)
 	}
 
 	ws := AcquireWorkspace(rows, cols)

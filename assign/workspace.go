@@ -111,9 +111,9 @@ func ReleaseWorkspace(ws *Workspace) {
 
 func (ws *Workspace) ensureSparseCore(n, k int) {
 	need := n * k
-	ws.coreCol = growInt32(ws.coreCol, need)
-	ws.coreCost = growFloat64(ws.coreCost, need)
-	ws.coreDeg = growInt32(ws.coreDeg, n)
+	ws.coreCol = growSlice(ws.coreCol, need)
+	ws.coreCost = growSlice(ws.coreCost, need)
+	ws.coreDeg = growSlice(ws.coreDeg, n)
 	if cap(ws.dStamp) < n {
 		ws.dStamp = make([]int32, n)
 		ws.closedStamp = make([]int32, n)
@@ -135,31 +135,31 @@ func (ws *Workspace) ensureSparseCore(n, k int) {
 }
 
 func (ws *Workspace) ensure(m, n int) {
-	ws.u = growFloat64(ws.u, m)
-	ws.v = growFloat64(ws.v, n)
-	ws.d = growFloat64(ws.d, n)
-	ws.dQueue = growFloat64(ws.dQueue, n)
-	ws.pred = growInt(ws.pred, n)
-	ws.col4row = growInt(ws.col4row, m)
-	ws.row4col = growInt(ws.row4col, n)
-	ws.remaining = growInt(ws.remaining, n)
-	ws.freeRows = growInt(ws.freeRows, m)
-	ws.auxRows = growInt(ws.auxRows, m)
+	ws.u = growSlice(ws.u, m)
+	ws.v = growSlice(ws.v, n)
+	ws.d = growSlice(ws.d, n)
+	ws.dQueue = growSlice(ws.dQueue, n)
+	ws.pred = growSlice(ws.pred, n)
+	ws.col4row = growSlice(ws.col4row, m)
+	ws.row4col = growSlice(ws.row4col, n)
+	ws.remaining = growSlice(ws.remaining, n)
+	ws.freeRows = growSlice(ws.freeRows, m)
+	ws.auxRows = growSlice(ws.auxRows, m)
 	candCap := 2 * m
-	ws.candRow = growInt(ws.candRow, candCap)
-	ws.candCol = growInt(ws.candCol, candCap)
-	ws.candRC = growFloat64(ws.candRC, candCap)
-	ws.violRow = growInt(ws.violRow, candCap)
-	ws.violCol = growInt(ws.violCol, candCap)
-	ws.rowLimits = growFloat64(ws.rowLimits, m)
+	ws.candRow = growSlice(ws.candRow, candCap)
+	ws.candCol = growSlice(ws.candCol, candCap)
+	ws.candRC = growSlice(ws.candRC, candCap)
+	ws.violRow = growSlice(ws.violRow, candCap)
+	ws.violCol = growSlice(ws.violCol, candCap)
+	ws.rowLimits = growSlice(ws.rowLimits, m)
 	scanCap := max(cancelScanBufLen, 4*m)
-	ws.scanRow = growInt(ws.scanRow, scanCap)
-	ws.scanCol = growInt(ws.scanCol, scanCap)
-	ws.scanBuf = growInt(ws.scanBuf, cancelScanBufLen)
+	ws.scanRow = growSlice(ws.scanRow, scanCap)
+	ws.scanCol = growSlice(ws.scanCol, scanCap)
+	ws.scanBuf = growSlice(ws.scanBuf, cancelScanBufLen)
 }
 
 func (ws *Workspace) ensureWorkCost(size int) []float64 {
-	ws.workCost = growFloat64(ws.workCost, size)
+	ws.workCost = growSlice(ws.workCost, size)
 	return ws.workCost
 }
 
@@ -178,23 +178,9 @@ func (ws *Workspace) applyOptions(opts []Option) Options {
 	return cfg
 }
 
-func growFloat64(s []float64, n int) []float64 {
+func growSlice[T any](s []T, n int) []T {
 	if cap(s) < n {
-		return make([]float64, n)
-	}
-	return s[:n]
-}
-
-func growInt(s []int, n int) []int {
-	if cap(s) < n {
-		return make([]int, n)
-	}
-	return s[:n]
-}
-
-func growInt32(s []int32, n int) []int32 {
-	if cap(s) < n {
-		return make([]int32, n)
+		return make([]T, n)
 	}
 	return s[:n]
 }
