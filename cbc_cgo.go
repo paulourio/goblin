@@ -137,6 +137,250 @@ func validateCompiledForCBC(p *CompiledProblem) (*cbcMatrixData, bool) {
 // CBCAvailable reports whether the optional C++ COIN-OR CBC/CLP backend (-tags cbc with cgo enabled) is compiled in.
 func CBCAvailable() bool { return true }
 
+type cbcCutSet struct {
+	cols [][]int
+	vals [][]float64
+	rhs  []float64
+}
+
+func (cs cbcCutSet) count() int {
+	return min(len(cs.cols), min(len(cs.vals), len(cs.rhs)))
+}
+
+func (cs cbcCutSet) colValCount() int {
+	return min(len(cs.cols), len(cs.vals))
+}
+
+type cbcMatrixView struct {
+	colPtr32  []int32
+	rowIdx32  []int32
+	colVal    []float64
+	colLBClp  []float64
+	colUBClp  []float64
+	objMinClp []float64
+	rowLBClp  []float64
+	rowUBClp  []float64
+}
+
+func selectCBCMatrixView(p *CompiledProblem, cbc *cbcMatrixData, pc *cbcPrecond) cbcMatrixView {
+	if pc != nil && pc.active {
+		return cbcMatrixView{
+			colPtr32:  pc.colPtr32,
+			rowIdx32:  pc.rowIdx32,
+			colVal:    pc.colVal,
+			colLBClp:  pc.colLBClp,
+			colUBClp:  pc.colUBClp,
+			objMinClp: pc.objMin,
+			rowLBClp:  pc.rowLBClp,
+			rowUBClp:  pc.rowUBClp,
+		}
+	}
+	return cbcMatrixView{
+		colPtr32:  cbc.colPtr32,
+		rowIdx32:  cbc.rowIdx32,
+		colVal:    p.colVal,
+		colLBClp:  cbc.colLBClp,
+		colUBClp:  cbc.colUBClp,
+		objMinClp: p.objMin,
+		rowLBClp:  cbc.rowLBClp,
+		rowUBClp:  cbc.rowUBClp,
+	}
+}
+
+func cbcStatusResult(p *CompiledProblem, status Status, start time.Time, nodes, iters, cuts int) Result {
+	bestBound := 0.0
+	if isLimitStatus(status) {
+		bestBound = trivialDualBound(p.sense)
+	}
+	return Result{
+		modelID:    p.modelID,
+		Backend:    BackendCBC,
+		Status:     status,
+		BestBound:  bestBound,
+		Nodes:      nodes,
+		Iterations: iters,
+		CutsAdded:  cuts,
+		SolveTime:  time.Since(start),
+	}
+}
+
+func withCBCCancel(ctx context.Context, deadline time.Time, done <-chan struct{}, fn func(timeLimitSec float64, cancelPtr *C.int)) (timedOut bool) {
+	var cancelFlag C.int
+	var cancelPtr *C.int
+	timeLimitSec := 0.0
+	if !deadline.IsZero() {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return true
+		}
+		timeLimitSec = rem.Seconds()
+		cancelPtr = &cancelFlag
+		timer := time.AfterFunc(rem, func() {
+			atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
+		})
+		defer timer.Stop()
+	}
+	if done != nil && ctx != nil {
+		cancelPtr = &cancelFlag
+		stopCancel := context.AfterFunc(ctx, func() {
+			atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
+		})
+		defer stopCancel()
+	}
+	fn(timeLimitSec, cancelPtr)
+	return false
+}
+
+func runBudgetedGoLPProbe(
+	ctx context.Context,
+	p *CompiledProblem,
+	opt Options,
+	usedIters int,
+	lb, ub []float64,
+	deadline time.Time,
+	done <-chan struct{},
+) (LPResult, bool) {
+	if ctx != nil && ctx.Err() != nil {
+		return LPResult{}, true
+	}
+	if stopRequested(deadline, done) {
+		return LPResult{Status: StatusTimeLimit}, false
+	}
+	remIter := 0
+	if opt.MaxIter > 0 {
+		remIter = opt.MaxIter - usedIters
+		if remIter <= 0 {
+			return LPResult{Status: StatusIterationLimit}, false
+		}
+	}
+	lpRef := NewLPSolver(p, nil)
+	defer lpRef.Close()
+	lpRef.DisableSIMD = opt.DisableSIMD
+	lpRef.Deadline = deadline
+	lpRef.Done = done
+	if remIter > 0 {
+		lpRef.MaxIter = remIter
+	}
+	if lb != nil && ub != nil {
+		lpRef.SetStructuralBounds(lb, ub)
+	}
+	refRes := lpRef.Solve()
+	if ctx != nil && ctx.Err() != nil {
+		return LPResult{}, true
+	}
+	return refRes, false
+}
+
+func remainingCBCMIPBudget(opt Options, usedNodes, usedIters int) (remOpt Options, limitSt Status) {
+	remOpt = opt
+	if opt.MaxIter > 0 {
+		rem := opt.MaxIter - usedIters
+		if rem <= 0 {
+			return remOpt, StatusIterationLimit
+		}
+		remOpt.MaxIter = rem
+	}
+	if !opt.defaultMaxNodesUsed && opt.MaxNodes > 0 {
+		remNodes := opt.MaxNodes - usedNodes
+		if remNodes <= 0 {
+			return remOpt, StatusNodeLimit
+		}
+		remOpt.MaxNodes = remNodes
+	}
+	return remOpt, StatusNotSolved
+}
+
+type cbcLPFinalizeReq struct {
+	p                *CompiledProblem
+	lb, ub           []float64
+	cuts             cbcCutSet
+	status           Status
+	primal           []float64
+	duals            []float64
+	rc               []float64
+	totalIters       int
+	droppedTiny      bool
+	unresolvedCancel bool
+	fallback         func(acceptInfeasible bool) (LPResult, bool, bool)
+}
+
+func finalizeCBCLP(req *cbcLPFinalizeReq) (LPResult, bool) {
+	p := req.p
+	lb, ub := req.lb, req.ub
+	cuts := req.cuts
+	status := req.status
+	primal, duals, rc := req.primal, req.duals, req.rc
+	totalIters := req.totalIters
+	droppedTiny, unresolvedCancel := req.droppedTiny, req.unresolvedCancel
+	fallback := req.fallback
+	n := p.numVars
+	m := p.numConstraints + cuts.count()
+	if status == StatusUnbounded && !hasAnyInfiniteBound(lb, ub, n) {
+		status = StatusNumericalError
+	}
+	if status != StatusOptimal {
+		if !droppedTiny && status == StatusUnbounded {
+			if fbRes, handled, canceled := fallback(true); handled {
+				return fbRes, canceled
+			}
+			return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+		}
+		if !droppedTiny && status == StatusInfeasible &&
+			(unresolvedCancel || hasAnyInfiniteBound(lb, ub, n) || totalIters == 0 ||
+				hasCBCScalingRisk(p, lb, ub, cuts) || hasCBCPivotRiskTiny(p, lb, ub, cuts)) {
+			if fbRes, handled, canceled := fallback(true); handled {
+				return fbRes, canceled
+			}
+		}
+		if unresolvedCancel && status == StatusNumericalError {
+			if fbRes, handled, canceled := fallback(true); handled {
+				return fbRes, canceled
+			}
+		}
+		return LPResult{Status: status, Iterations: totalIters}, false
+	}
+
+	snapCBCBounds(primal, lb, ub, n)
+	objMin := evalLinearSum(0, p.objMin, primal, n)
+	if !cbcPrimalWithinTol(p, lb, ub, cuts, primal, false) {
+		if !droppedTiny {
+			if fbRes, handled, canceled := fallback(true); handled {
+				return fbRes, canceled
+			}
+		}
+		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+	}
+	if !cbcLPDualWithinTol(p, lb, ub, cuts, primal, duals, rc, objMin) {
+		if hasAnyInfiniteBound(lb, ub, n) || unresolvedCancel {
+			if fbRes, handled, canceled := fallback(unresolvedCancel); handled {
+				return fbRes, canceled
+			}
+		}
+		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+	}
+	userObj := p.EvaluateObjective(primal)
+	if math.IsNaN(userObj) || math.IsInf(userObj, 0) {
+		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+	}
+	if p.sense == Maximize {
+		for i := range m {
+			duals[i] = -duals[i]
+		}
+		for j := range n {
+			rc[j] = -rc[j]
+		}
+	}
+	return LPResult{
+		Status:       StatusOptimal,
+		ObjectiveMin: objMin,
+		Objective:    userObj,
+		Primal:       primal,
+		Dual:         duals[:p.numConstraints],
+		ReducedCosts: rc,
+		Iterations:   totalIters,
+	}, false
+}
+
 func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
 	if p == nil {
 		return Result{
@@ -149,43 +393,23 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	m := p.numConstraints
 	if n < 0 || m < 0 || n > math.MaxInt32 || m > math.MaxInt32 ||
 		len(p.varLB) != n || len(p.varUB) != n || len(p.rowLB) != m || len(p.rowUB) != m {
-		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    StatusNumericalError,
-			SolveTime: time.Since(start),
-		}
+		return cbcStatusResult(p, StatusNumericalError, start, 0, 0, 0)
 	}
 
 	for j := range n {
 		if p.varLB[j] > p.varUB[j] {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    StatusInfeasible,
-				SolveTime: time.Since(start),
-			}
+			return cbcStatusResult(p, StatusInfeasible, start, 0, 0, 0)
 		}
 	}
 
 	if n == 0 {
 		for i := range m {
 			if 0 < p.rowLB[i]-cbcFeasTol || 0 > p.rowUB[i]+cbcFeasTol {
-				return Result{
-					modelID:   p.modelID,
-					Backend:   BackendCBC,
-					Status:    StatusInfeasible,
-					SolveTime: time.Since(start),
-				}
+				return cbcStatusResult(p, StatusInfeasible, start, 0, 0, 0)
 			}
 		}
 		if math.IsNaN(p.objConstant) || math.IsInf(p.objConstant, 0) {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    StatusNumericalError,
-				SolveTime: time.Since(start),
-			}
+			return cbcStatusResult(p, StatusNumericalError, start, 0, 0, 0)
 		}
 		var duals, rc []float64
 		if !p.isMIP {
@@ -209,142 +433,72 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 
 	if m == 0 {
 		if len(p.objMin) != n || len(p.varCat) != n || len(p.objCoeffs) != n {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    StatusNumericalError,
-				SolveTime: time.Since(start),
-			}
+			return cbcStatusResult(p, StatusNumericalError, start, 0, 0, 0)
 		}
 		return solveUnconstrainedCBC(p, start)
 	}
 
 	cbc, validCBC := validateCompiledForCBC(p)
-	if !validCBC || hasUnrepresentableCBCFiniteBound(p.varLB, p.varUB, p.rowLB, p.rowUB, nil) {
-		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    StatusNumericalError,
-			SolveTime: time.Since(start),
-		}
-	}
-
-	senseSign := 1.0
-	if p.sense == Maximize {
-		senseSign = -1.0
+	if !validCBC || hasExtremeCBCBound(p.varLB, p.varUB, p.rowLB, p.rowUB, nil) {
+		return cbcStatusResult(p, StatusNumericalError, start, 0, 0, 0)
 	}
 
 	if hasEmptyInfeasibleRow(p) {
-		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    StatusInfeasible,
-			SolveTime: time.Since(start),
-		}
+		return cbcStatusResult(p, StatusInfeasible, start, 0, 0, 0)
 	}
 
 	if !p.isMIP {
-		rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, nil, nil, nil)
-		droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, nil, nil)
-		var pc cbcPrecond
-		if (rowCancel || objCancel) && !droppedTiny {
-			pc = preconditionCBC(p, p.varLB, p.varUB, nil, nil, nil, false, deadline, done)
-			if ctx != nil && ctx.Err() != nil {
-				return Result{}
-			}
-			if pc.timedOut {
-				return Result{
-					modelID:   p.modelID,
-					Backend:   BackendCBC,
-					Status:    StatusTimeLimit,
-					BestBound: trivialDualBound(p.sense),
-					SolveTime: time.Since(start),
-				}
-			}
-			if pc.infeasible {
-				return Result{
-					modelID:   p.modelID,
-					Backend:   BackendCBC,
-					Status:    StatusInfeasible,
-					SolveTime: time.Since(start),
-				}
-			}
-		}
+		return solveCBCLP(ctx, p, cbc, opt, start, deadline, done)
+	}
+	return solveCBCMIP(ctx, p, cbc, opt, start, deadline, done)
+}
 
-		colPtr32 := cbc.colPtr32
-		rowIdx32 := cbc.rowIdx32
-		colVal := p.colVal
-		colLBClp := cbc.colLBClp
-		colUBClp := cbc.colUBClp
-		objMinClp := p.objMin
-		rowLBClp := cbc.rowLBClp
-		rowUBClp := cbc.rowUBClp
-		if pc.active {
-			colPtr32 = pc.colPtr32
-			rowIdx32 = pc.rowIdx32
-			colVal = pc.colVal
-			colLBClp = pc.colLBClp
-			colUBClp = pc.colUBClp
-			objMinClp = pc.objMin
-			rowLBClp = pc.rowLBClp
-			rowUBClp = pc.rowUBClp
+func solveCBCLP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
+	n := p.numVars
+	m := p.numConstraints
+	noCuts := cbcCutSet{}
+	rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, noCuts)
+	droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, noCuts)
+	var pc cbcPrecond
+	if (rowCancel || objCancel) && !droppedTiny {
+		pc = preconditionCBC(p, p.varLB, p.varUB, noCuts, false, deadline, done)
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
 		}
+		if pc.timedOut {
+			return cbcStatusResult(p, StatusTimeLimit, start, 0, 0, 0)
+		}
+		if pc.infeasible {
+			return cbcStatusResult(p, StatusInfeasible, start, 0, 0, 0)
+		}
+	}
 
-		release, waitSt := acquireCBCSlot(ctx, deadline, done)
-		if release == nil {
-			if ctx != nil && ctx.Err() != nil {
-				return Result{}
-			}
-			bestBound := 0.0
-			if isLimitStatus(waitSt) {
-				bestBound = trivialDualBound(p.sense)
-			}
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    waitSt,
-				BestBound: bestBound,
-				SolveTime: time.Since(start),
-			}
+	mat := selectCBCMatrixView(p, cbc, &pc)
+	release, waitSt := acquireCBCSlot(ctx, deadline, done)
+	if release == nil {
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
 		}
-		primal := make([]float64, n)
-		duals := make([]float64, m)
-		rc := make([]float64, n)
-		var cRes C.GoblinResult
-		runLP := func(presolveFlag C.int, maxIt int) (timedOut bool) {
-			var cancelFlag C.int
-			var cancelPtr *C.int
-			timeLimitSec := 0.0
-			if !deadline.IsZero() {
-				rem := time.Until(deadline)
-				if rem <= 0 {
-					return true
-				}
-				timeLimitSec = rem.Seconds()
-				cancelPtr = &cancelFlag
-				timer := time.AfterFunc(rem, func() {
-					atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
-				})
-				defer timer.Stop()
-			}
-			if done != nil && ctx != nil {
-				cancelPtr = &cancelFlag
-				stopCancel := context.AfterFunc(ctx, func() {
-					atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
-				})
-				defer stopCancel()
-			}
+		return cbcStatusResult(p, waitSt, start, 0, 0, 0)
+	}
+
+	primal := make([]float64, n)
+	duals := make([]float64, m)
+	rc := make([]float64, n)
+	var cRes C.GoblinResult
+	runLP := func(presolveFlag C.int, maxIt int) (timedOut bool) {
+		return withCBCCancel(ctx, deadline, done, func(timeLimitSec float64, cancelPtr *C.int) {
 			C.goblin_solve_lp(
 				C.int(n),
 				C.int(m),
-				cInt32Ptr(colPtr32),
-				cInt32Ptr(rowIdx32),
-				cFloat64Ptr(colVal),
-				cFloat64Ptr(colLBClp),
-				cFloat64Ptr(colUBClp),
-				cFloat64Ptr(objMinClp),
-				cFloat64Ptr(rowLBClp),
-				cFloat64Ptr(rowUBClp),
+				cInt32Ptr(mat.colPtr32),
+				cInt32Ptr(mat.rowIdx32),
+				cFloat64Ptr(mat.colVal),
+				cFloat64Ptr(mat.colLBClp),
+				cFloat64Ptr(mat.colUBClp),
+				cFloat64Ptr(mat.objMinClp),
+				cFloat64Ptr(mat.rowLBClp),
+				cFloat64Ptr(mat.rowUBClp),
 				presolveFlag,
 				clampCInt(maxIt),
 				C.double(timeLimitSec),
@@ -355,232 +509,113 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				cFloat64Ptr(rc),
 			)
 			if pc.active && Status(cRes.status) == StatusOptimal {
-				pc.restoreLPPrimalDuals(p, nil, nil, primal, duals, rc)
+				pc.restoreLPPrimalDuals(p, noCuts, primal, duals, rc)
 			}
-			return false
+		})
+	}
+	totalIters := 0
+	timedOutBeforeCall := func() bool {
+		defer release()
+		if runLP(boolToCInt(opt.EnablePresolve), opt.MaxIter) {
+			return true
 		}
-		totalIters := 0
-		timedOutBeforeCall := func() bool {
-			defer release()
-			if runLP(boolToCInt(opt.EnablePresolve), opt.MaxIter) {
-				return true
-			}
-			totalIters = int(cRes.iterations)
-			if Status(cRes.status) == StatusOptimal {
-				snapCBCBounds(primal, p.varLB, p.varUB, n)
-				objMin := evalLinearSum(0, p.objMin, primal, n)
-				if cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, primal, false) &&
-					!cbcLPDualWithinTol(p, p.varLB, p.varUB, nil, nil, nil, primal, duals, rc, objMin) {
-					remIter := opt.MaxIter
-					if opt.MaxIter > 0 {
-						remIter = opt.MaxIter - totalIters
-						if remIter <= 0 {
-							cRes.status = C.int(StatusIterationLimit)
-							return false
-						}
-					}
-					if !runLP(-1, remIter) {
-						totalIters += int(cRes.iterations)
+		totalIters = int(cRes.iterations)
+		if Status(cRes.status) == StatusOptimal {
+			snapCBCBounds(primal, p.varLB, p.varUB, n)
+			objMin := evalLinearSum(0, p.objMin, primal, n)
+			if cbcPrimalWithinTol(p, p.varLB, p.varUB, noCuts, primal, false) &&
+				!cbcLPDualWithinTol(p, p.varLB, p.varUB, noCuts, primal, duals, rc, objMin) {
+				remIter := opt.MaxIter
+				if opt.MaxIter > 0 {
+					remIter = opt.MaxIter - totalIters
+					if remIter <= 0 {
+						cRes.status = C.int(StatusIterationLimit)
+						return false
 					}
 				}
-			}
-			return false
-		}()
-		if ctx != nil && ctx.Err() != nil {
-			return Result{}
-		}
-		if timedOutBeforeCall {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    StatusTimeLimit,
-				BestBound: trivialDualBound(p.sense),
-				SolveTime: time.Since(start),
+				if !runLP(-1, remIter) {
+					totalIters += int(cRes.iterations)
+				}
 			}
 		}
+		return false
+	}()
+	if ctx != nil && ctx.Err() != nil {
+		return Result{}
+	}
+	if timedOutBeforeCall {
+		return cbcStatusResult(p, StatusTimeLimit, start, 0, 0, 0)
+	}
 
-		status := Status(cRes.status)
-		if status == StatusUnbounded && !hasAnyInfiniteBound(p.varLB, p.varUB, n) {
-			status = StatusNumericalError
-		}
-		res := Result{
-			modelID:    p.modelID,
-			Backend:    BackendCBC,
-			Status:     status,
-			Iterations: totalIters,
-			SolveTime:  time.Since(start),
-		}
-		unresolvedCancel := (rowCancel || objCancel) && !droppedTiny && (!pc.active || pc.unresolved)
-		tryLPFallback := func(acceptInfeasible bool) (Result, bool) {
-			lpRef := NewLPSolver(p, nil)
-			lpRef.DisableSIMD = opt.DisableSIMD
-			lpRef.Deadline = deadline
-			lpRef.Done = done
-			if opt.MaxIter > 0 {
-				rem := opt.MaxIter - totalIters
-				if rem <= 0 {
-					lpRef.Close()
-					res.Status = StatusIterationLimit
-					res.BestBound = trivialDualBound(p.sense)
-					return res, true
-				}
-				lpRef.MaxIter = rem
+	unresolvedCancel := (rowCancel || objCancel) && !droppedTiny && (!pc.active || pc.unresolved)
+	lpRes, canceled := finalizeCBCLP(&cbcLPFinalizeReq{
+		p: p, lb: p.varLB, ub: p.varUB, cuts: noCuts,
+		status: Status(cRes.status), primal: primal, duals: duals, rc: rc,
+		totalIters: totalIters, droppedTiny: droppedTiny, unresolvedCancel: unresolvedCancel,
+		fallback: func(acceptInfeasible bool) (LPResult, bool, bool) {
+			refRes, isCanceled := runBudgetedGoLPProbe(ctx, p, opt, totalIters, nil, nil, deadline, done)
+			if isCanceled {
+				return LPResult{}, true, true
 			}
-			refRes := lpRef.Solve()
-			res.Iterations += refRes.Iterations
-			lpRef.Close()
-			if ctx != nil && ctx.Err() != nil {
-				return Result{}, true
-			}
+			totalIters += refRes.Iterations
 			if refRes.Status == StatusOptimal && !math.IsNaN(refRes.Objective) && !math.IsInf(refRes.Objective, 0) {
-				res.Status = StatusOptimal
-				res.Objective = refRes.Objective
-				res.BestBound = refRes.Objective
-				res.RootLPBound = refRes.Objective
-				res.RootCutBound = refRes.Objective
-				res.Values = refRes.Primal
-				res.Duals = refRes.Dual
-				res.ReducedCosts = refRes.ReducedCosts
-				return res, true
+				refRes.Iterations = totalIters
+				return refRes, true, false
 			}
 			if refRes.Status == StatusUnbounded || refRes.Status == StatusTimeLimit || refRes.Status == StatusIterationLimit ||
 				(acceptInfeasible && refRes.Status == StatusInfeasible) {
-				res.Status = refRes.Status
-				if isLimitStatus(res.Status) {
-					res.BestBound = trivialDualBound(p.sense)
-				}
-				return res, true
+				return LPResult{Status: refRes.Status, Iterations: totalIters}, true, false
 			}
-			return res, false
-		}
-		if status == StatusOptimal {
-			snapCBCBounds(primal, p.varLB, p.varUB, n)
-			objMin := evalLinearSum(0, p.objMin, primal, n)
-			if !cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, primal, false) {
-				if !droppedTiny {
-					if fbRes, handled := tryLPFallback(true); handled {
-						return fbRes
-					}
-				}
-				res.Status = StatusNumericalError
-				return res
-			}
-			if !cbcLPDualWithinTol(p, p.varLB, p.varUB, nil, nil, nil, primal, duals, rc, objMin) {
-				if hasAnyInfiniteBound(p.varLB, p.varUB, n) || unresolvedCancel {
-					if fbRes, handled := tryLPFallback(unresolvedCancel); handled {
-						return fbRes
-					}
-				}
-				res.Status = StatusNumericalError
-				return res
-			}
-			obj := p.EvaluateObjective(primal)
-			if math.IsNaN(obj) || math.IsInf(obj, 0) {
-				res.Status = StatusNumericalError
-				return res
-			}
-			if senseSign < 0 {
-				for i := range m {
-					duals[i] = -duals[i]
-				}
-				for j := range n {
-					rc[j] = -rc[j]
-				}
-			}
-			res.Objective = obj
-			res.BestBound = obj
-			res.RootLPBound = obj
-			res.RootCutBound = obj
-			res.Values = primal
-			res.Duals = duals
-			res.ReducedCosts = rc
-			return res
-		}
-		if !droppedTiny && status == StatusUnbounded {
-			if fbRes, handled := tryLPFallback(true); handled {
-				return fbRes
-			}
-			res.Status = StatusNumericalError
-			return res
-		}
-		if !droppedTiny && status == StatusInfeasible &&
-			(unresolvedCancel || hasAnyInfiniteBound(p.varLB, p.varUB, n) || totalIters == 0 ||
-				hasCBCScalingRisk(p, p.varLB, p.varUB, nil) || hasCBCPivotRiskTiny(p, p.varLB, p.varUB, nil, nil)) {
-			if fbRes, handled := tryLPFallback(true); handled {
-				return fbRes
-			}
-		}
-		if unresolvedCancel && status == StatusNumericalError {
-			if fbRes, handled := tryLPFallback(true); handled {
-				return fbRes
-			}
-		}
-		if isLimitStatus(res.Status) {
-			res.BestBound = trivialDualBound(p.sense)
-		}
-		return res
+			return LPResult{}, false, false
+		},
+	})
+	if canceled {
+		return Result{}
 	}
+	res := cbcStatusResult(p, lpRes.Status, start, 0, lpRes.Iterations, 0)
+	if lpRes.Status == StatusOptimal {
+		res.Objective = lpRes.Objective
+		res.BestBound = lpRes.Objective
+		res.RootLPBound = lpRes.Objective
+		res.RootCutBound = lpRes.Objective
+		res.Values = lpRes.Primal
+		res.Duals = lpRes.Dual
+		res.ReducedCosts = lpRes.ReducedCosts
+	}
+	return res
+}
 
-	if p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas {
-		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    StatusInfeasible,
-			SolveTime: time.Since(start),
-		}
+func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
+	n := p.numVars
+	m := p.numConstraints
+	noCuts := cbcCutSet{}
+	if p.exactOrig != nil && p.exactOrig.intEqInfeas {
+		return cbcStatusResult(p, StatusInfeasible, start, 0, 0, 0)
 	}
-	droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, nil, nil)
-	if !droppedTiny && !hasUnscalableCBCMIPObjective(p.objMin) && hasCBCPivotRiskTiny(p, p.varLB, p.varUB, nil, nil) {
+	droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, noCuts)
+	if !droppedTiny && !hasUnscalableCBCMIPObjective(p.objMin) && hasCBCPivotRiskTiny(p, p.varLB, p.varUB, noCuts) {
 		return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, 0, 0, 0)
 	}
-	rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, nil, nil, nil)
+	rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, noCuts)
 	var pc cbcPrecond
 	if (rowCancel || objCancel) && !droppedTiny && !hasUnscalableCBCMIPObjective(p.objMin) {
-		pc = preconditionCBC(p, p.varLB, p.varUB, nil, nil, nil, true, deadline, done)
+		pc = preconditionCBC(p, p.varLB, p.varUB, noCuts, true, deadline, done)
 		if ctx != nil && ctx.Err() != nil {
 			return Result{}
 		}
 		if pc.timedOut {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    StatusTimeLimit,
-				BestBound: trivialDualBound(p.sense),
-				SolveTime: time.Since(start),
-			}
+			return cbcStatusResult(p, StatusTimeLimit, start, 0, 0, 0)
 		}
 		if pc.infeasible {
-			return Result{
-				modelID:   p.modelID,
-				Backend:   BackendCBC,
-				Status:    StatusInfeasible,
-				SolveTime: time.Since(start),
-			}
+			return cbcStatusResult(p, StatusInfeasible, start, 0, 0, 0)
 		}
 		if !pc.active || pc.unresolved {
 			return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, 0, 0, 0)
 		}
 	}
 
-	colPtr32 := cbc.colPtr32
-	rowIdx32 := cbc.rowIdx32
-	colVal := p.colVal
-	colLBClp := cbc.colLBClp
-	colUBClp := cbc.colUBClp
-	objMinClp := p.objMin
-	rowLBClp := cbc.rowLBClp
-	rowUBClp := cbc.rowUBClp
+	mat := selectCBCMatrixView(p, cbc, &pc)
 	effRelGap := clampCBCGapTol(opt.RelGapTol)
-	if pc.active {
-		colPtr32 = pc.colPtr32
-		rowIdx32 = pc.rowIdx32
-		colVal = pc.colVal
-		colLBClp = pc.colLBClp
-		colUBClp = pc.colUBClp
-		objMinClp = pc.objMin
-		rowLBClp = pc.rowLBClp
-		rowUBClp = pc.rowUBClp
-	}
 	if (pc.hasFixedObj || p.objConstant != 0) && effRelGap > 0 {
 		off := math.Abs(pc.totalMinShift(p))
 		if math.IsNaN(off) || math.IsInf(off, 0) {
@@ -595,17 +630,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		if ctx != nil && ctx.Err() != nil {
 			return Result{}
 		}
-		bestBound := 0.0
-		if isLimitStatus(waitSt) {
-			bestBound = trivialDualBound(p.sense)
-		}
-		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    waitSt,
-			BestBound: bestBound,
-			SolveTime: time.Since(start),
-		}
+		return cbcStatusResult(p, waitSt, start, 0, 0, 0)
 	}
 
 	primal := make([]float64, n)
@@ -624,67 +649,40 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 
 	timedOutBeforeCall := func() bool {
 		defer release()
-		var cancelFlag C.int
-		var cancelPtr *C.int
-		timeLimitSec := 0.0
-		if !deadline.IsZero() {
-			rem := time.Until(deadline)
-			if rem <= 0 {
-				return true
-			}
-			timeLimitSec = rem.Seconds()
-			cancelPtr = &cancelFlag
-			timer := time.AfterFunc(rem, func() {
-				atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
-			})
-			defer timer.Stop()
-		}
-		if done != nil && ctx != nil {
-			cancelPtr = &cancelFlag
-			stopCancel := context.AfterFunc(ctx, func() {
-				atomic.StoreInt32((*int32)(unsafe.Pointer(&cancelFlag)), 1)
-			})
-			defer stopCancel()
-		}
-		C.goblin_solve_mip(
-			C.int(n),
-			C.int(m),
-			cInt32Ptr(colPtr32),
-			cInt32Ptr(rowIdx32),
-			cFloat64Ptr(colVal),
-			cFloat64Ptr(colLBClp),
-			cFloat64Ptr(colUBClp),
-			cFloat64Ptr(objMinClp),
-			cFloat64Ptr(rowLBClp),
-			cFloat64Ptr(rowUBClp),
-			C.int(len(cbc.intCols32)),
-			cInt32Ptr(cbc.intCols32),
-			boolToCInt(opt.EnablePresolve),
-			boolToCInt(opt.EnableCuts),
-			boolToCInt(opt.EnableHeuristics),
-			clampCInt(maxNodes),
-			clampCInt(cutPasses),
-			clampCInt(opt.MaxIter),
-			C.double(effRelGap),
-			C.double(clampCBCGapTol(opt.AbsGapTol)),
-			C.double(timeLimitSec),
-			cancelPtr,
-			&cRes,
-			cFloat64Ptr(primal),
-		)
-		return false
+		return withCBCCancel(ctx, deadline, done, func(timeLimitSec float64, cancelPtr *C.int) {
+			C.goblin_solve_mip(
+				C.int(n),
+				C.int(m),
+				cInt32Ptr(mat.colPtr32),
+				cInt32Ptr(mat.rowIdx32),
+				cFloat64Ptr(mat.colVal),
+				cFloat64Ptr(mat.colLBClp),
+				cFloat64Ptr(mat.colUBClp),
+				cFloat64Ptr(mat.objMinClp),
+				cFloat64Ptr(mat.rowLBClp),
+				cFloat64Ptr(mat.rowUBClp),
+				C.int(len(cbc.intCols32)),
+				cInt32Ptr(cbc.intCols32),
+				boolToCInt(opt.EnablePresolve),
+				boolToCInt(opt.EnableCuts),
+				boolToCInt(opt.EnableHeuristics),
+				clampCInt(maxNodes),
+				clampCInt(cutPasses),
+				clampCInt(opt.MaxIter),
+				C.double(effRelGap),
+				C.double(clampCBCGapTol(opt.AbsGapTol)),
+				C.double(timeLimitSec),
+				cancelPtr,
+				&cRes,
+				cFloat64Ptr(primal),
+			)
+		})
 	}()
 	if ctx != nil && ctx.Err() != nil {
 		return Result{}
 	}
 	if timedOutBeforeCall {
-		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    StatusTimeLimit,
-			BestBound: trivialDualBound(p.sense),
-			SolveTime: time.Since(start),
-		}
+		return cbcStatusResult(p, StatusTimeLimit, start, 0, 0, 0)
 	}
 	rawRootLP := float64(cRes.root_lp_min)
 	rawRootCut := float64(cRes.root_cut_min)
@@ -699,107 +697,22 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	}
 	if status == StatusUnbounded && len(cbc.intCols32) > 0 {
 		if !droppedTiny {
-			if stopRequested(deadline, done) || (ctx != nil && ctx.Err() != nil) {
-				if ctx != nil && ctx.Err() != nil {
-					return Result{}
-				}
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     StatusTimeLimit,
-					BestBound:  trivialDualBound(p.sense),
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
-			}
-			lpRelax := NewLPSolver(p, nil)
-			lpRelax.DisableSIMD = opt.DisableSIMD
-			lpRelax.Deadline = deadline
-			lpRelax.Done = done
-			if opt.MaxIter > 0 {
-				rem := opt.MaxIter - int(cRes.iterations)
-				if rem <= 0 {
-					lpRelax.Close()
-					return Result{
-						modelID:    p.modelID,
-						Backend:    BackendCBC,
-						Status:     StatusIterationLimit,
-						BestBound:  trivialDualBound(p.sense),
-						Nodes:      int(cRes.nodes),
-						Iterations: int(cRes.iterations),
-						CutsAdded:  int(cRes.cuts_added),
-						SolveTime:  time.Since(start),
-					}
-				}
-				lpRelax.MaxIter = rem
-			}
-			resRelax := lpRelax.Solve()
-			cRes.iterations += C.int(resRelax.Iterations)
-			lpRelax.Close()
-			if ctx != nil && ctx.Err() != nil {
+			resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, int(cRes.iterations), nil, nil, deadline, done)
+			if canceled {
 				return Result{}
 			}
+			cRes.iterations += C.int(resRelax.Iterations)
 			switch resRelax.Status {
 			case StatusOptimal:
 				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
-			case StatusInfeasible:
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     StatusInfeasible,
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
-			case StatusTimeLimit, StatusIterationLimit:
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     resRelax.Status,
-					BestBound:  trivialDualBound(p.sense),
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
+			case StatusInfeasible, StatusTimeLimit, StatusIterationLimit:
+				return cbcStatusResult(p, resRelax.Status, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
 			}
 		}
 		feasProb := p.zeroObjCopy()
-		feasOpts := opt
-		if opt.MaxIter > 0 {
-			rem := opt.MaxIter - int(cRes.iterations)
-			if rem <= 0 {
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     StatusIterationLimit,
-					BestBound:  trivialDualBound(p.sense),
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
-			}
-			feasOpts.MaxIter = rem
-		}
-		if !opt.defaultMaxNodesUsed && opt.MaxNodes > 0 {
-			remNodes := opt.MaxNodes - int(cRes.nodes)
-			if remNodes <= 0 {
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     StatusNodeLimit,
-					BestBound:  trivialDualBound(p.sense),
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
-			}
-			feasOpts.MaxNodes = remNodes
+		feasOpts, limitSt := remainingCBCMIPBudget(opt, int(cRes.nodes), int(cRes.iterations))
+		if limitSt != StatusNotSolved {
+			return cbcStatusResult(p, limitSt, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
 		}
 		feasRes := solveCBC(ctx, feasProb, feasOpts, start, deadline, done)
 		if ctx != nil && ctx.Err() != nil {
@@ -809,81 +722,27 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		if st == StatusOptimal {
 			st = StatusUnbounded
 		}
-		bestBound := 0.0
-		if isLimitStatus(st) {
-			bestBound = trivialDualBound(p.sense)
-		}
-		return Result{
-			modelID:    p.modelID,
-			Backend:    BackendCBC,
-			Status:     st,
-			BestBound:  bestBound,
-			Nodes:      int(cRes.nodes) + feasRes.Nodes,
-			Iterations: int(cRes.iterations) + feasRes.Iterations,
-			CutsAdded:  int(cRes.cuts_added) + feasRes.CutsAdded,
-			SolveTime:  time.Since(start),
-		}
+		return cbcStatusResult(
+			p, st, start,
+			int(cRes.nodes)+feasRes.Nodes,
+			int(cRes.iterations)+feasRes.Iterations,
+			int(cRes.cuts_added)+feasRes.CutsAdded,
+		)
 	}
 	if status == StatusInfeasible && !droppedTiny &&
-		(hasAnyInfiniteBound(p.varLB, p.varUB, n) || hasCBCScalingRisk(p, p.varLB, p.varUB, nil)) {
-		if stopRequested(deadline, done) || (ctx != nil && ctx.Err() != nil) {
-			if ctx != nil && ctx.Err() != nil {
-				return Result{}
-			}
-			return Result{
-				modelID:    p.modelID,
-				Backend:    BackendCBC,
-				Status:     StatusTimeLimit,
-				BestBound:  trivialDualBound(p.sense),
-				Nodes:      int(cRes.nodes),
-				Iterations: int(cRes.iterations),
-				CutsAdded:  int(cRes.cuts_added),
-				SolveTime:  time.Since(start),
-			}
-		}
-		lpRelax := NewLPSolver(p, nil)
-		lpRelax.DisableSIMD = opt.DisableSIMD
-		lpRelax.Deadline = deadline
-		lpRelax.Done = done
-		if opt.MaxIter > 0 {
-			rem := opt.MaxIter - int(cRes.iterations)
-			if rem <= 0 {
-				lpRelax.Close()
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     StatusIterationLimit,
-					BestBound:  trivialDualBound(p.sense),
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
-			}
-			lpRelax.MaxIter = rem
-		}
-		resRelax := lpRelax.Solve()
-		cRes.iterations += C.int(resRelax.Iterations)
-		lpRelax.Close()
-		if ctx != nil && ctx.Err() != nil {
+		(hasAnyInfiniteBound(p.varLB, p.varUB, n) || hasCBCScalingRisk(p, p.varLB, p.varUB, noCuts)) {
+		resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, int(cRes.iterations), nil, nil, deadline, done)
+		if canceled {
 			return Result{}
 		}
+		cRes.iterations += C.int(resRelax.Iterations)
 		switch resRelax.Status {
 		case StatusInfeasible:
 			// Root LP relaxation is Farkas-certified infeasible; preserve StatusInfeasible.
 		case StatusTimeLimit, StatusIterationLimit:
-			return Result{
-				modelID:    p.modelID,
-				Backend:    BackendCBC,
-				Status:     resRelax.Status,
-				BestBound:  trivialDualBound(p.sense),
-				Nodes:      int(cRes.nodes),
-				Iterations: int(cRes.iterations),
-				CutsAdded:  int(cRes.cuts_added),
-				SolveTime:  time.Since(start),
-			}
+			return cbcStatusResult(p, resRelax.Status, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
 		default:
-			if cRes.nodes == 0 || resRelax.Status == StatusUnbounded || hasCBCScalingRisk(p, p.varLB, p.varUB, nil) {
+			if cRes.nodes == 0 || resRelax.Status == StatusUnbounded || hasCBCScalingRisk(p, p.varLB, p.varUB, noCuts) {
 				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
 			}
 		}
@@ -891,7 +750,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	hasValidSol := len(primal) > 0 && cRes.has_sol != 0
 	if hasValidSol {
 		snapCBCBounds(primal, p.varLB, p.varUB, n)
-		if !cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, primal, true) {
+		if !cbcPrimalWithinTol(p, p.varLB, p.varUB, noCuts, primal, true) {
 			if polished, extraIt, ok := polishCBCMIPPrimal(
 				ctx, p, opt, int(cRes.iterations), status == StatusOptimal,
 				cRes.has_best_bound != 0, float64(cRes.best_bound_min), primal, deadline, done,
@@ -911,23 +770,20 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		}
 	}
 	if status == StatusOptimal && hasValidSol {
-		if mipSt, extraIt := verifyCBCMIPOptimality(ctx, p, opt, int(cRes.iterations), cRes.has_root_lp != 0, float64(cRes.root_lp_min), cRes.has_best_bound != 0, float64(cRes.best_bound_min), primal, deadline, done); mipSt != StatusOptimal {
+		if mipSt, extraIt := verifyCBCMIPOptimality(ctx, &cbcMIPVerifyReq{
+			p: p, opt: opt, baseIters: int(cRes.iterations),
+			hasRootLP: cRes.has_root_lp != 0, rootLPMin: float64(cRes.root_lp_min),
+			hasBestBound: cRes.has_best_bound != 0, bestBoundMin: float64(cRes.best_bound_min),
+			primal: primal, deadline: deadline, done: done,
+		}); mipSt != StatusOptimal {
 			cRes.iterations += C.int(extraIt)
 			if ctx != nil && ctx.Err() != nil {
 				return Result{}
 			}
 			if mipSt == StatusUnbounded {
-				return Result{
-					modelID:    p.modelID,
-					Backend:    BackendCBC,
-					Status:     StatusUnbounded,
-					Nodes:      int(cRes.nodes),
-					Iterations: int(cRes.iterations),
-					CutsAdded:  int(cRes.cuts_added),
-					SolveTime:  time.Since(start),
-				}
+				return cbcStatusResult(p, StatusUnbounded, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
 			}
-			if mipSt == StatusNumericalError && !droppedTiny && (pc.active || hasCBCScalingRisk(p, p.varLB, p.varUB, nil)) {
+			if mipSt == StatusNumericalError && !droppedTiny && (pc.active || hasCBCScalingRisk(p, p.varLB, p.varUB, noCuts)) {
 				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
 			}
 			status = mipSt
@@ -978,15 +834,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		res.BestBound = trivialDualBound(p.sense)
 	}
 	if res.Status == StatusOptimal && (!hasValidSol || math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) || math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0)) {
-		return Result{
-			modelID:    p.modelID,
-			Backend:    BackendCBC,
-			Status:     StatusNumericalError,
-			Nodes:      res.Nodes,
-			Iterations: res.Iterations,
-			CutsAdded:  res.CutsAdded,
-			SolveTime:  res.SolveTime,
-		}
+		return cbcStatusResult(p, StatusNumericalError, start, res.Nodes, res.Iterations, res.CutsAdded)
 	}
 	return res
 }
@@ -1122,13 +970,27 @@ type CBCLPSolver struct {
 	scratchUBClp    []float64
 	scratchCols32   []int32
 	scratchCutPairs []cbcCutTermPair
-	cutCols         [][]int
-	cutVals         [][]float64
-	cutRHS          []float64
+	cuts            cbcCutSet
 	numCut          int
 	invalidBounds   bool
 	invalidCut      bool
 	infeasibleCut   bool
+}
+
+func (s *CBCLPSolver) withHandleLocked(fn func(ptr *C.GoblinLPSolver)) bool {
+	if s == nil || s.handle == nil {
+		return false
+	}
+	cbcSem <- struct{}{}
+	defer releaseCBCSlot()
+	s.handle.mu.Lock()
+	defer s.handle.mu.Unlock()
+	defer runtime.KeepAlive(s)
+	if s.handle.ptr == nil {
+		return false
+	}
+	fn(s.handle.ptr)
+	return true
 }
 
 // NewCBCLPSolver creates a C++ OsiClpSolverInterface LP solver for p.
@@ -1233,16 +1095,9 @@ func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 		lbClp[j] = clampCBCBound(lb[j])
 		ubClp[j] = clampCBCBound(ub[j])
 	}
-	if s.handle != nil {
-		cbcSem <- struct{}{}
-		s.handle.mu.Lock()
-		if s.handle.ptr != nil {
-			C.goblin_lp_set_bounds(s.handle.ptr, C.int(n), cFloat64Ptr(lbClp), cFloat64Ptr(ubClp))
-		}
-		s.handle.mu.Unlock()
-		releaseCBCSlot()
-		runtime.KeepAlive(s)
-	}
+	s.withHandleLocked(func(ptr *C.GoblinLPSolver) {
+		C.goblin_lp_set_bounds(ptr, C.int(n), cFloat64Ptr(lbClp), cFloat64Ptr(ubClp))
+	})
 }
 
 // AddCut appends a linear inequality sum(val[k] * x[colIdx[k]]) <= rhs to the LP
@@ -1276,7 +1131,7 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 		return
 	}
 	if n == 0 {
-		s.cutRHS = append(s.cutRHS, rhs)
+		s.cuts.rhs = append(s.cuts.rhs, rhs)
 		s.numCut++
 		return
 	}
@@ -1324,31 +1179,26 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 	if len(cols32) > math.MaxInt32 {
 		return
 	}
-	cbcSem <- struct{}{}
-	s.handle.mu.Lock()
 	var added C.int
-	if s.handle.ptr != nil {
+	s.withHandleLocked(func(ptr *C.GoblinLPSolver) {
 		added = C.goblin_lp_add_cut(
-			s.handle.ptr,
+			ptr,
 			C.int(len(cols32)),
 			cInt32Ptr(cols32),
 			cFloat64Ptr(vals),
 			C.double(clampCBCBound(rhs)),
 		)
-	}
-	s.handle.mu.Unlock()
-	releaseCBCSlot()
+	})
 	if added != 0 {
 		colsInt := make([]int, len(cols32))
 		for i, c := range cols32 {
 			colsInt[i] = int(c)
 		}
-		s.cutCols = append(s.cutCols, colsInt)
-		s.cutVals = append(s.cutVals, vals)
-		s.cutRHS = append(s.cutRHS, rhs)
+		s.cuts.cols = append(s.cuts.cols, colsInt)
+		s.cuts.vals = append(s.cuts.vals, vals)
+		s.cuts.rhs = append(s.cuts.rhs, rhs)
 		s.numCut++
 	}
-	runtime.KeepAlive(s)
 }
 
 // Solve solves or warm-start resolves the current LP relaxation via COIN-OR CLP.
@@ -1382,7 +1232,7 @@ func (s *CBCLPSolver) Solve() LPResult {
 				return LPResult{Status: StatusInfeasible}
 			}
 		}
-		for _, rhs := range s.cutRHS {
+		for _, rhs := range s.cuts.rhs {
 			if 0 > rhs+cbcFeasTol {
 				return LPResult{Status: StatusInfeasible}
 			}
@@ -1399,15 +1249,15 @@ func (s *CBCLPSolver) Solve() LPResult {
 			ReducedCosts: []float64{},
 		}
 	}
-	if s.handle == nil || hasUnrepresentableCBCFiniteBound(s.curLB, s.curUB, p.rowLB, p.rowUB, s.cutRHS) {
+	if s.handle == nil || hasExtremeCBCBound(s.curLB, s.curUB, p.rowLB, p.rowUB, s.cuts.rhs) {
 		return LPResult{Status: StatusNumericalError}
 	}
 
-	rowCancel, objCancel := hasCBCCancellationRisk(p, s.curLB, s.curUB, s.cutCols, s.cutVals, s.cutRHS)
-	droppedTiny := hasCBCDroppedTiny(p, s.curLB, s.curUB, s.cutCols, s.cutVals)
+	rowCancel, objCancel := hasCBCCancellationRisk(p, s.curLB, s.curUB, s.cuts)
+	droppedTiny := hasCBCDroppedTiny(p, s.curLB, s.curUB, s.cuts)
 	var pc cbcPrecond
 	if (rowCancel || objCancel) && !droppedTiny {
-		pc = preconditionCBC(p, s.curLB, s.curUB, s.cutCols, s.cutVals, s.cutRHS, false, time.Time{}, nil)
+		pc = preconditionCBC(p, s.curLB, s.curUB, s.cuts, false, time.Time{}, nil)
 		if pc.infeasible {
 			return LPResult{Status: StatusInfeasible}
 		}
@@ -1417,13 +1267,10 @@ func (s *CBCLPSolver) Solve() LPResult {
 	duals := make([]float64, m)
 	rc := make([]float64, n)
 	var cRes C.GoblinResult
-
-	cbcSem <- struct{}{}
-	s.handle.mu.Lock()
-	hasPtr := s.handle.ptr != nil
 	totalIters := 0
-	if hasPtr {
-		solvePtr := s.handle.ptr
+
+	hasPtr := s.withHandleLocked(func(basePtr *C.GoblinLPSolver) {
+		solvePtr := basePtr
 		var tmpPtr *C.GoblinLPSolver
 		if pc.active {
 			tmpPtr = C.goblin_lp_new(
@@ -1440,17 +1287,18 @@ func (s *CBCLPSolver) Solve() LPResult {
 			)
 			if tmpPtr != nil {
 				allCutsOK := true
-				for e := range len(pc.cutRHS) {
-					cols32 := make([]int32, len(pc.cutCols[e]))
-					for k, c := range pc.cutCols[e] {
-						cols32[k] = int32(c)
+				for e := range len(pc.cuts.rhs) {
+					cols32 := s.scratchCols32[:0]
+					for _, c := range pc.cuts.cols[e] {
+						cols32 = append(cols32, int32(c))
 					}
+					s.scratchCols32 = cols32
 					if C.goblin_lp_add_cut(
 						tmpPtr,
 						C.int(len(cols32)),
 						cInt32Ptr(cols32),
-						cFloat64Ptr(pc.cutVals[e]),
-						C.double(clampCBCBound(pc.cutRHS[e])),
+						cFloat64Ptr(pc.cuts.vals[e]),
+						C.double(clampCBCBound(pc.cuts.rhs[e])),
 					) == 0 {
 						allCutsOK = false
 						break
@@ -1467,6 +1315,9 @@ func (s *CBCLPSolver) Solve() LPResult {
 				pc.active = false
 			}
 		}
+		if tmpPtr != nil {
+			defer C.goblin_lp_free(tmpPtr)
+		}
 		C.goblin_lp_solve(
 			solvePtr,
 			C.int(n),
@@ -1479,12 +1330,12 @@ func (s *CBCLPSolver) Solve() LPResult {
 		totalIters = int(cRes.iterations)
 		if Status(cRes.status) == StatusOptimal {
 			if pc.active {
-				pc.restoreLPPrimalDuals(p, s.cutCols, s.cutVals, primal, duals, rc)
+				pc.restoreLPPrimalDuals(p, s.cuts, primal, duals, rc)
 			}
 			snapCBCBounds(primal, s.curLB, s.curUB, n)
 			objMinTry := evalLinearSum(0, p.objMin, primal, n)
-			if cbcPrimalWithinTol(p, s.curLB, s.curUB, s.cutCols, s.cutVals, s.cutRHS, primal, false) &&
-				!cbcLPDualWithinTol(p, s.curLB, s.curUB, s.cutCols, s.cutVals, s.cutRHS, primal, duals, rc, objMinTry) {
+			if cbcPrimalWithinTol(p, s.curLB, s.curUB, s.cuts, primal, false) &&
+				!cbcLPDualWithinTol(p, s.curLB, s.curUB, s.cuts, primal, duals, rc, objMinTry) {
 				C.goblin_lp_tighten_dual_tol(solvePtr, 1e-16)
 				C.goblin_lp_solve(
 					solvePtr,
@@ -1496,134 +1347,41 @@ func (s *CBCLPSolver) Solve() LPResult {
 					cFloat64Ptr(rc),
 				)
 				if pc.active && Status(cRes.status) == StatusOptimal {
-					pc.restoreLPPrimalDuals(p, s.cutCols, s.cutVals, primal, duals, rc)
+					pc.restoreLPPrimalDuals(p, s.cuts, primal, duals, rc)
 				}
 				totalIters += int(cRes.iterations)
 			}
 		}
-		if tmpPtr != nil {
-			C.goblin_lp_free(tmpPtr)
-		}
-	}
-	s.handle.mu.Unlock()
-	releaseCBCSlot()
-	runtime.KeepAlive(s)
+	})
 	if !hasPtr {
 		return LPResult{Status: StatusNumericalError}
 	}
 
-	status := Status(cRes.status)
-	if status == StatusUnbounded && !hasAnyInfiniteBound(s.curLB, s.curUB, n) {
-		status = StatusNumericalError
-	}
 	unresolvedCancel := (rowCancel || objCancel) && !droppedTiny && (!pc.active || pc.unresolved)
-	tryGoFallback := func(acceptInfeasible bool) (LPResult, bool) {
-		lpRef := NewLPSolver(p, nil)
-		lpRef.SetStructuralBounds(s.curLB, s.curUB)
-		for e := range min(len(s.cutCols), min(len(s.cutVals), len(s.cutRHS))) {
-			lpRef.AddCut(s.cutCols[e], s.cutVals[e], s.cutRHS[e])
-		}
-		refRes := lpRef.Solve()
-		totalIters += refRes.Iterations
-		lpRef.Close()
-		if refRes.Status == StatusOptimal && !math.IsNaN(refRes.Objective) && !math.IsInf(refRes.Objective, 0) {
-			return LPResult{
-				Status:       StatusOptimal,
-				ObjectiveMin: refRes.ObjectiveMin,
-				Objective:    refRes.Objective,
-				Primal:       refRes.Primal,
-				Dual:         refRes.Dual,
-				ReducedCosts: refRes.ReducedCosts,
-				Iterations:   totalIters,
-			}, true
-		}
-		if refRes.Status == StatusUnbounded || (acceptInfeasible && refRes.Status == StatusInfeasible) {
-			return LPResult{
-				Status:     refRes.Status,
-				Iterations: totalIters,
-			}, true
-		}
-		return LPResult{}, false
-	}
-	if status != StatusOptimal {
-		if !droppedTiny && status == StatusUnbounded {
-			if fbRes, ok := tryGoFallback(true); ok {
-				return fbRes
+	lpRes, _ := finalizeCBCLP(&cbcLPFinalizeReq{
+		p: p, lb: s.curLB, ub: s.curUB, cuts: s.cuts,
+		status: Status(cRes.status), primal: primal, duals: duals, rc: rc,
+		totalIters: totalIters, droppedTiny: droppedTiny, unresolvedCancel: unresolvedCancel,
+		fallback: func(acceptInfeasible bool) (LPResult, bool, bool) {
+			lpRef := NewLPSolver(p, nil)
+			defer lpRef.Close()
+			lpRef.SetStructuralBounds(s.curLB, s.curUB)
+			for e := range s.cuts.count() {
+				lpRef.AddCut(s.cuts.cols[e], s.cuts.vals[e], s.cuts.rhs[e])
 			}
-			return LPResult{
-				Status:     StatusNumericalError,
-				Iterations: totalIters,
+			refRes := lpRef.Solve()
+			totalIters += refRes.Iterations
+			if refRes.Status == StatusOptimal && !math.IsNaN(refRes.Objective) && !math.IsInf(refRes.Objective, 0) {
+				refRes.Iterations = totalIters
+				return refRes, true, false
 			}
-		}
-		if !droppedTiny && status == StatusInfeasible &&
-			(unresolvedCancel || hasAnyInfiniteBound(s.curLB, s.curUB, n) || totalIters == 0 ||
-				hasCBCScalingRisk(p, s.curLB, s.curUB, s.cutVals) || hasCBCPivotRiskTiny(p, s.curLB, s.curUB, s.cutCols, s.cutVals)) {
-			if fbRes, ok := tryGoFallback(true); ok {
-				return fbRes
+			if refRes.Status == StatusUnbounded || (acceptInfeasible && refRes.Status == StatusInfeasible) {
+				return LPResult{Status: refRes.Status, Iterations: totalIters}, true, false
 			}
-		}
-		if unresolvedCancel && status == StatusNumericalError {
-			if fbRes, ok := tryGoFallback(true); ok {
-				return fbRes
-			}
-		}
-		return LPResult{
-			Status:     status,
-			Iterations: totalIters,
-		}
-	}
-
-	snapCBCBounds(primal, s.curLB, s.curUB, n)
-	objMin := evalLinearSum(0, p.objMin, primal, n)
-	if !cbcPrimalWithinTol(p, s.curLB, s.curUB, s.cutCols, s.cutVals, s.cutRHS, primal, false) {
-		if !droppedTiny {
-			if fbRes, ok := tryGoFallback(true); ok {
-				return fbRes
-			}
-		}
-		return LPResult{
-			Status:     StatusNumericalError,
-			Iterations: totalIters,
-		}
-	}
-	if !cbcLPDualWithinTol(p, s.curLB, s.curUB, s.cutCols, s.cutVals, s.cutRHS, primal, duals, rc, objMin) {
-		if hasAnyInfiniteBound(s.curLB, s.curUB, n) || unresolvedCancel {
-			if fbRes, ok := tryGoFallback(unresolvedCancel); ok {
-				return fbRes
-			}
-		}
-		return LPResult{
-			Status:     StatusNumericalError,
-			Iterations: totalIters,
-		}
-	}
-
-	userObj := p.EvaluateObjective(primal)
-	if math.IsNaN(userObj) || math.IsInf(userObj, 0) {
-		return LPResult{
-			Status:     StatusNumericalError,
-			Iterations: totalIters,
-		}
-	}
-
-	if p.sense == Maximize {
-		for i := range m {
-			duals[i] = -duals[i]
-		}
-		for j := range n {
-			rc[j] = -rc[j]
-		}
-	}
-
-	return LPResult{
-		Status:       StatusOptimal,
-		ObjectiveMin: objMin,
-		Objective:    userObj,
-		Primal:       primal,
-		Dual:         duals[:p.numConstraints],
-		ReducedCosts: rc,
-		Iterations:   totalIters,
-	}
+			return LPResult{}, false, false
+		},
+	})
+	return lpRes
 }
 
 func hasAnyInfiniteBound(lb, ub []float64, n int) bool {
@@ -1663,7 +1421,7 @@ func canRecedeNegLP(p *CompiledProblem, lb, ub []float64) (anyNeg, contNeg bool)
 	return anyNeg, contNeg
 }
 
-func hasUnrepresentableCBCFiniteBound(colLB, colUB, rowLB, rowUB, cutRHS []float64) bool {
+func hasExtremeCBCBound(colLB, colUB, rowLB, rowUB, cutRHS []float64) bool {
 	for _, s := range [][]float64{colLB, colUB, rowLB, rowUB, cutRHS} {
 		for _, v := range s {
 			if !math.IsInf(v, 0) && math.Abs(v) >= 1e29 {
@@ -1718,29 +1476,14 @@ func polishCBCMIPPrimal(
 		ubFix[col] = rv
 	}
 
-	lpFixed := NewLPSolver(p, nil)
-	lpFixed.DisableSIMD = opt.DisableSIMD
-	lpFixed.Deadline = deadline
-	lpFixed.Done = done
-	if opt.MaxIter > 0 {
-		rem := opt.MaxIter - baseIters
-		if rem <= 0 {
-			lpFixed.Close()
-			return nil, 0, false
-		}
-		lpFixed.MaxIter = rem
-	}
-	lpFixed.SetStructuralBounds(lbFix, ubFix)
-	resFix := lpFixed.Solve()
+	resFix, canceled := runBudgetedGoLPProbe(ctx, p, opt, baseIters, lbFix, ubFix, deadline, done)
 	extraIters := resFix.Iterations
-	lpFixed.Close()
-
-	if resFix.Status != StatusOptimal || len(resFix.Primal) < n {
+	if canceled || resFix.Status != StatusOptimal || len(resFix.Primal) < n {
 		return nil, extraIters, false
 	}
 	polished := slices.Clone(resFix.Primal[:n])
 	snapCBCBounds(polished, p.varLB, p.varUB, n)
-	if !cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, polished, true) {
+	if !cbcPrimalWithinTol(p, p.varLB, p.varUB, cbcCutSet{}, polished, true) {
 		return nil, extraIters, false
 	}
 	polishedMin := evalLinearSum(0, p.objMin, polished, n)
@@ -1772,37 +1515,10 @@ func fallbackCBCMIPToGo(
 	if opt.defaultCutPassesUsed {
 		goOpt.MaxCutPasses = defaultMaxCutPasses
 	}
-	if goOpt.MaxIter > 0 {
-		rem := goOpt.MaxIter - cIters
-		if rem <= 0 {
-			return Result{
-				modelID:    p.modelID,
-				Backend:    BackendCBC,
-				Status:     StatusIterationLimit,
-				BestBound:  trivialDualBound(p.sense),
-				Nodes:      cNodes,
-				Iterations: cIters,
-				CutsAdded:  cCuts,
-				SolveTime:  time.Since(start),
-			}
-		}
-		goOpt.MaxIter = rem
-	}
-	if goOpt.MaxNodes > 0 {
-		remNodes := goOpt.MaxNodes - cNodes
-		if remNodes <= 0 {
-			return Result{
-				modelID:    p.modelID,
-				Backend:    BackendCBC,
-				Status:     StatusNodeLimit,
-				BestBound:  trivialDualBound(p.sense),
-				Nodes:      cNodes,
-				Iterations: cIters,
-				CutsAdded:  cCuts,
-				SolveTime:  time.Since(start),
-			}
-		}
-		goOpt.MaxNodes = remNodes
+	var limitSt Status
+	goOpt, limitSt = remainingCBCMIPBudget(goOpt, cNodes, cIters)
+	if limitSt != StatusNotSolved {
+		return cbcStatusResult(p, limitSt, start, cNodes, cIters, cCuts)
 	}
 	goRes := solveCompensatedEngine(ctx, p, goOpt, BackendCBC, start, deadline, done)
 	if ctx != nil && ctx.Err() != nil {
@@ -1815,19 +1531,27 @@ func fallbackCBCMIPToGo(
 	return goRes
 }
 
-func verifyCBCMIPOptimality(
-	ctx context.Context,
-	p *CompiledProblem,
-	opt Options,
-	baseIters int,
-	hasRootLP bool,
-	rootLPMin float64,
-	hasBestBound bool,
-	bestBoundMin float64,
-	primal []float64,
-	deadline time.Time,
-	done <-chan struct{},
-) (Status, int) {
+type cbcMIPVerifyReq struct {
+	p            *CompiledProblem
+	opt          Options
+	baseIters    int
+	hasRootLP    bool
+	rootLPMin    float64
+	hasBestBound bool
+	bestBoundMin float64
+	primal       []float64
+	deadline     time.Time
+	done         <-chan struct{}
+}
+
+func verifyCBCMIPOptimality(ctx context.Context, req *cbcMIPVerifyReq) (Status, int) {
+	p := req.p
+	opt := req.opt
+	baseIters := req.baseIters
+	hasRootLP, rootLPMin := req.hasRootLP, req.rootLPMin
+	hasBestBound, bestBoundMin := req.hasBestBound, req.bestBoundMin
+	primal := req.primal
+	deadline, done := req.deadline, req.done
 	n := p.numVars
 	curMin := evalLinearSum(0, p.objMin, primal, n)
 	if math.IsNaN(curMin) || math.IsInf(curMin, 0) {
@@ -1876,21 +1600,6 @@ func verifyCBCMIPOptimality(
 
 	extraIters := 0
 	if needFixedLP {
-		if stopRequested(deadline, done) || (ctx != nil && ctx.Err() != nil) {
-			return StatusTimeLimit, 0
-		}
-		lpFixed := NewLPSolver(p, nil)
-		lpFixed.DisableSIMD = opt.DisableSIMD
-		lpFixed.Deadline = deadline
-		lpFixed.Done = done
-		if opt.MaxIter > 0 {
-			rem := opt.MaxIter - baseIters - extraIters
-			if rem <= 0 {
-				lpFixed.Close()
-				return StatusIterationLimit, extraIters
-			}
-			lpFixed.MaxIter = rem
-		}
 		lbFix := slices.Clone(p.varLB)
 		ubFix := slices.Clone(p.varUB)
 		for _, col := range p.intCols {
@@ -1898,22 +1607,19 @@ func verifyCBCMIPOptimality(
 			lbFix[col] = v
 			ubFix[col] = v
 		}
-		lpFixed.SetStructuralBounds(lbFix, ubFix)
-		resFix := lpFixed.Solve()
+		resFix, canceled := runBudgetedGoLPProbe(ctx, p, opt, baseIters+extraIters, lbFix, ubFix, deadline, done)
 		extraIters += resFix.Iterations
-		lpFixed.Close()
-		switch resFix.Status {
-		case StatusUnbounded:
-			return StatusUnbounded, extraIters
-		case StatusTimeLimit:
+		if canceled {
 			return StatusTimeLimit, extraIters
-		case StatusIterationLimit:
-			return StatusIterationLimit, extraIters
+		}
+		switch resFix.Status {
+		case StatusUnbounded, StatusTimeLimit, StatusIterationLimit:
+			return resFix.Status, extraIters
 		case StatusOptimal:
 			if resFix.ObjectiveMin < curMin-gapTol {
 				if len(resFix.Primal) == n &&
 					(!hasBestBound || resFix.ObjectiveMin >= bestBoundMin-gapTol) &&
-					cbcPrimalWithinTol(p, p.varLB, p.varUB, nil, nil, nil, resFix.Primal, true) {
+					cbcPrimalWithinTol(p, p.varLB, p.varUB, cbcCutSet{}, resFix.Primal, true) {
 					copy(primal, resFix.Primal)
 					curMin = evalLinearSum(0, p.objMin, primal, n)
 				} else {
@@ -1926,33 +1632,14 @@ func verifyCBCMIPOptimality(
 	}
 
 	if needRelaxLP {
-		if stopRequested(deadline, done) || (ctx != nil && ctx.Err() != nil) {
-			return StatusTimeLimit, extraIters
-		}
-		lpRelax := NewLPSolver(p, nil)
-		lpRelax.DisableSIMD = opt.DisableSIMD
-		lpRelax.Deadline = deadline
-		lpRelax.Done = done
-		if opt.MaxIter > 0 {
-			rem := opt.MaxIter - baseIters - extraIters
-			if rem <= 0 {
-				lpRelax.Close()
-				return StatusIterationLimit, extraIters
-			}
-			lpRelax.MaxIter = rem
-		}
-		resRelax := lpRelax.Solve()
+		resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, baseIters+extraIters, nil, nil, deadline, done)
 		extraIters += resRelax.Iterations
-		lpRelax.Close()
-		switch resRelax.Status {
-		case StatusUnbounded:
-			return StatusUnbounded, extraIters
-		case StatusTimeLimit:
+		if canceled {
 			return StatusTimeLimit, extraIters
-		case StatusIterationLimit:
-			return StatusIterationLimit, extraIters
-		case StatusNumericalError:
-			return StatusNumericalError, extraIters
+		}
+		switch resRelax.Status {
+		case StatusUnbounded, StatusTimeLimit, StatusIterationLimit, StatusNumericalError:
+			return resRelax.Status, extraIters
 		case StatusOptimal:
 			if resRelax.ObjectiveMin > curMin+gapTol {
 				return StatusNumericalError, extraIters
@@ -1965,7 +1652,7 @@ func verifyCBCMIPOptimality(
 	return StatusOptimal, extraIters
 }
 
-func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64, cutRHS, primal []float64, checkInt bool) bool {
+func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, primal []float64, checkInt bool) bool {
 	n := p.numVars
 	if len(primal) < n || len(lb) < n || len(ub) < n {
 		return false
@@ -1989,8 +1676,8 @@ func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 			// so residual tolerance never scales up on non-integer noise within integrality tol.
 			if math.Abs(rv-lj) <= 1e-3 || math.Abs(rv-uj) <= 1e-3 {
 				if snappedLB == nil {
-					snappedLB = append([]float64(nil), lb...)
-					snappedUB = append([]float64(nil), ub...)
+					snappedLB = slices.Clone(lb)
+					snappedUB = slices.Clone(ub)
 					effLB = snappedLB
 					effUB = snappedUB
 				}
@@ -2026,9 +1713,9 @@ func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 			return false
 		}
 	}
-	for e := range min(len(cutCols), min(len(cutVals), len(cutRHS))) {
-		rhs := cutRHS[e]
-		cols, vals := cutCols[e], cutVals[e]
+	for e := range cuts.count() {
+		rhs := cuts.rhs[e]
+		cols, vals := cuts.cols[e], cuts.vals[e]
 		res, rTolRes, ok := evalSparseRowResidualAndTol(cols, vals, primal, effLB, effUB, rhs, 1e-4, 1e-6)
 		if !ok {
 			return false
@@ -2044,10 +1731,10 @@ func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 	return true
 }
 
-func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64, cutRHS, primal, yMin, rcMin []float64, objMin float64) bool {
+func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, primal, yMin, rcMin []float64, objMin float64) bool {
 	n := p.numVars
 	baseM := p.numConstraints
-	numExtra := min(len(cutCols), min(len(cutVals), len(cutRHS)))
+	numExtra := cuts.count()
 	m := baseM + numExtra
 	if len(yMin) < m || math.IsNaN(objMin) || math.IsInf(objMin, 0) {
 		return false
@@ -2093,10 +1780,10 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 		colRows = append(colRows[:0], p.rowIdx[st:en]...)
 		colVals = append(colVals[:0], p.colVal[st:en]...)
 		for e := range numExtra {
-			for k, c := range cutCols[e] {
+			for k, c := range cuts.cols[e] {
 				if c == j {
 					colRows = append(colRows, baseM+e)
-					colVals = append(colVals, cutVals[e][k])
+					colVals = append(colVals, cuts.vals[e][k])
 					break
 				}
 			}
@@ -2166,21 +1853,30 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 	slackNoise := max(1e-7, 1e-7*maxDual)
 	compGap := 0.0
 
-	rowRes := make([]float64, baseM)
-	rowTols := make([]float64, baseM)
-	for i := range baseM {
+	rowDataAt := func(i int) (cols []int, vals []float64, rhs float64, sense ConstraintSense) {
+		if i < baseM {
+			st, en := p.rowPtr[i], p.rowPtr[i+1]
+			return p.colIdx[st:en], p.rowVal[st:en], p.rowRHS[i], p.rowSense[i]
+		}
+		e := i - baseM
+		return cuts.cols[e], cuts.vals[e], cuts.rhs[e], LessEqual
+	}
+
+	rowRes := make([]float64, m)
+	rowTols := make([]float64, m)
+	for i := range m {
 		yi := yMin[i]
 		if yi == 0 {
 			continue
 		}
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		res, rTol, ok := evalSparseRowResidualAndTol(p.colIdx[st:en], p.rowVal[st:en], primal, lb, ub, p.rowRHS[i], 1e-4, 1e-6)
+		cols, vals, rhs, sense := rowDataAt(i)
+		res, rTol, ok := evalSparseRowResidualAndTol(cols, vals, primal, lb, ub, rhs, 1e-4, 1e-6)
 		if !ok {
 			return false
 		}
 		rowRes[i] = res
 		rowTols[i] = rTol
-		switch p.rowSense[i] {
+		switch sense {
 		case LessEqual:
 			if res < -10.0*rTol {
 				if rel := math.Abs(yi) / maxDual; rel > maxBasisDualRel {
@@ -2196,38 +1892,15 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 		}
 	}
 
-	cutRes := make([]float64, numExtra)
-	cutTols := make([]float64, numExtra)
-	for e := range numExtra {
-		yi := yMin[baseM+e]
-		if yi == 0 {
-			continue
-		}
-		rhs := cutRHS[e]
-		res, rTol, ok := evalSparseRowResidualAndTol(cutCols[e], cutVals[e], primal, lb, ub, rhs, 1e-4, 1e-6)
-		if !ok {
-			return false
-		}
-		cutRes[e] = res
-		cutTols[e] = rTol
-		if res < -10.0*rTol {
-			if rel := math.Abs(yi) / maxDual; rel > maxBasisDualRel {
-				maxBasisDualRel = rel
-			}
-		}
-	}
-
-	for i := range baseM {
+	for i := range m {
 		yi := yMin[i]
 		if yi == 0 {
 			continue
 		}
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		cols := p.colIdx[st:en]
-		vals := p.rowVal[st:en]
+		cols, vals, _, sense := rowDataAt(i)
 		res := rowRes[i]
 		rTol := rowTols[i]
-		switch p.rowSense[i] {
+		switch sense {
 		case LessEqual:
 			rSignTol := signTol
 			if rowSlackUnbounded(cols, vals, true) {
@@ -2249,26 +1922,6 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cutCols [][]int, c
 			}
 			if yi > slackNoise && res > rTol {
 				compGap += (yi - slackNoise) * (res - rTol)
-			}
-		}
-	}
-	for e := range numExtra {
-		yi := yMin[baseM+e]
-		if yi == 0 {
-			continue
-		}
-		rSignTol := signTol
-		if rowSlackUnbounded(cutCols[e], cutVals[e], true) {
-			rSignTol = combineDualNoiseTol(0, 0, math.Ldexp(math.Abs(yi), -32), maxBasisDualRel, 64.0)
-		}
-		if yi > rSignTol {
-			return false
-		}
-		if yi < -slackNoise {
-			res := cutRes[e]
-			rTol := cutTols[e]
-			if res < -rTol {
-				compGap += (-yi - slackNoise) * (-res - rTol)
 			}
 		}
 	}
@@ -2362,13 +2015,10 @@ type cbcPrecond struct {
 	colLBClp       []float64
 	colUBClp       []float64
 	workLB         []float64
-	workUB         []float64
 	objMin         []float64
 	rowLBClp       []float64
 	rowUBClp       []float64
-	cutCols        [][]int
-	cutVals        [][]float64
-	cutRHS         []float64
+	cuts           cbcCutSet
 	fixedCols      []bool
 	fixedHi        []float64
 	fixedMid       []float64
@@ -2469,8 +2119,7 @@ func sparseExprCancelStats(cols []int, vals, lb, ub []float64, varCat []VarCateg
 	return posSum, negSum, hasPosInf, hasNegInf, limbs
 }
 
-func sparseExprHasCancelRisk(cols []int, vals, lb, ub []float64, varCat []VarCategory, rhsLB, rhsUB, threshold, infScale float64) bool {
-	posSum, negSum, hasPosInf, hasNegInf, limbs := sparseExprCancelStats(cols, vals, lb, ub, varCat, rhsLB, rhsUB)
+func evalCancelRisk(posSum, negSum float64, hasPosInf, hasNegInf bool, limbs int, threshold, infScale float64) bool {
 	if limbs < 3 {
 		return false
 	}
@@ -2484,6 +2133,11 @@ func sparseExprHasCancelRisk(cols []int, vals, lb, ub []float64, varCat []VarCat
 		negSum = max(negSum, posSum)
 	}
 	return posSum >= threshold && negSum >= threshold
+}
+
+func sparseExprHasCancelRisk(cols []int, vals, lb, ub []float64, varCat []VarCategory, rhsLB, rhsUB, threshold, infScale float64) bool {
+	posSum, negSum, hasPosInf, hasNegInf, limbs := sparseExprCancelStats(cols, vals, lb, ub, varCat, rhsLB, rhsUB)
+	return evalCancelRisk(posSum, negSum, hasPosInf, hasNegInf, limbs, threshold, infScale)
 }
 
 func denseObjHasCancelRisk(obj []float64, objConstMin float64, lb, ub []float64, varCat []VarCategory, threshold, infScale float64) bool {
@@ -2514,22 +2168,10 @@ func denseObjHasCancelRisk(obj []float64, objConstMin float64, lb, ub []float64,
 			negSum = satAddNonNeg(negSum, -objConstMin)
 		}
 	}
-	if limbs < 3 {
-		return false
-	}
-	if hasPosInf && hasNegInf && infScale >= threshold {
-		return true
-	}
-	if hasPosInf && negSum >= threshold {
-		posSum = max(posSum, negSum)
-	}
-	if hasNegInf && posSum >= threshold {
-		negSum = max(negSum, posSum)
-	}
-	return posSum >= threshold && negSum >= threshold
+	return evalCancelRisk(posSum, negSum, hasPosInf, hasNegInf, limbs, threshold, infScale)
 }
 
-func problemImpliedScaleHint(p *CompiledProblem, lb, ub []float64, cutVals [][]float64, cutRHS []float64) (maxFin float64, hasSmallCoeff bool) {
+func problemImpliedScaleHint(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) (maxFin float64, hasSmallCoeff bool) {
 	n := min(p.numVars, min(len(lb), len(ub)))
 	if ac := math.Abs(p.objConstant); !math.IsInf(ac, 0) && ac > maxFin {
 		maxFin = ac
@@ -2562,12 +2204,12 @@ func problemImpliedScaleHint(p *CompiledProblem, lb, ub []float64, cutVals [][]f
 			hasSmallCoeff = true
 		}
 	}
-	for _, r := range cutRHS {
+	for _, r := range cuts.rhs {
 		if !math.IsInf(r, 0) && math.Abs(r) > maxFin {
 			maxFin = math.Abs(r)
 		}
 	}
-	for _, cvs := range cutVals {
+	for _, cvs := range cuts.vals {
 		for _, v := range cvs {
 			av := math.Abs(v)
 			if av > maxFin {
@@ -2581,7 +2223,7 @@ func problemImpliedScaleHint(p *CompiledProblem, lb, ub []float64, cutVals [][]f
 	return maxFin, hasSmallCoeff
 }
 
-func hasCBCCancellationRisk(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64, cutRHS []float64) (rowCancel, objCancel bool) {
+func hasCBCCancellationRisk(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) (rowCancel, objCancel bool) {
 	if p == nil || p.numVars == 0 {
 		return false, false
 	}
@@ -2597,8 +2239,8 @@ func hasCBCCancellationRisk(p *CompiledProblem, lb, ub []float64, cutCols [][]in
 			}
 		}
 		if !rc {
-			for e := range min(len(cutCols), min(len(cutVals), len(cutRHS))) {
-				if sparseExprHasCancelRisk(cutCols[e], cutVals[e], bLB, bUB, p.varCat, math.Inf(-1), cutRHS[e], cbcCancelMagThreshold, infScale) {
+			for e := range cuts.count() {
+				if sparseExprHasCancelRisk(cuts.cols[e], cuts.vals[e], bLB, bUB, p.varCat, math.Inf(-1), cuts.rhs[e], cbcCancelMagThreshold, infScale) {
 					rc = true
 					break
 				}
@@ -2610,13 +2252,13 @@ func hasCBCCancellationRisk(p *CompiledProblem, lb, ub []float64, cutCols [][]in
 	if rowCancel || objCancel || !hasAnyInfiniteBound(lb, ub, n) {
 		return rowCancel, objCancel
 	}
-	maxFin, hasSmallCoeff := problemImpliedScaleHint(p, lb, ub, cutVals, cutRHS)
+	maxFin, hasSmallCoeff := problemImpliedScaleHint(p, lb, ub, cuts)
 	if maxFin < cbcCancelMagThreshold && !(hasSmallCoeff && maxFin > 0) {
 		return false, false
 	}
 	tLB := slices.Clone(lb[:n])
 	tUB := slices.Clone(ub[:n])
-	infeas, _ := tightenContinuousBoundsCBC(p, nil, cutCols, cutVals, cutRHS, tLB, tUB, cbcPrecondMaxTightenPasses, time.Time{}, nil)
+	infeas, _ := tightenContinuousBoundsCBC(p, nil, cuts, tLB, tUB, cbcPrecondMaxTightenPasses, time.Time{}, nil)
 	if infeas {
 		return true, false
 	}
@@ -2661,7 +2303,7 @@ func hasUnscalableCBCMIPObjective(objMin []float64) bool {
 	return maxAbsObj >= 1e35 && math.Ldexp(maxAbsObj, -objExp) >= 1e40
 }
 
-func hasCBCDroppedTiny(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64) bool {
+func hasCBCDroppedTiny(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) bool {
 	n := min(p.numVars, min(len(lb), len(ub)))
 	objExp := 0
 	if p.isMIP {
@@ -2696,16 +2338,16 @@ func hasCBCDroppedTiny(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cu
 			}
 		}
 	}
-	return hasCBCTinyMatrixCoeffRisk(p, lb, ub, cutCols, cutVals, 1e-18, 1e-8)
+	return hasCBCTinyMatrixCoeffRisk(p, lb, ub, cuts, 1e-18, 1e-8)
 }
 
-func hasCBCPivotRiskTiny(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64) bool {
-	return hasCBCTinyMatrixCoeffRisk(p, lb, ub, cutCols, cutVals, 1e-11, 1e-7)
+func hasCBCPivotRiskTiny(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) bool {
+	return hasCBCTinyMatrixCoeffRisk(p, lb, ub, cuts, 1e-11, 1e-7)
 }
 
 // hasCBCTinyMatrixCoeffRisk reports whether any constraint or cut contains non-zero
 // coefficients at or below coefThresh whose active domain bound contribution reaches sumThresh.
-func hasCBCTinyMatrixCoeffRisk(p *CompiledProblem, lb, ub []float64, cutCols [][]int, cutVals [][]float64, coefThresh, sumThresh float64) bool {
+func hasCBCTinyMatrixCoeffRisk(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, coefThresh, sumThresh float64) bool {
 	n := min(p.numVars, min(len(lb), len(ub)))
 	var rowSum []float64
 	for j := range n {
@@ -2732,14 +2374,14 @@ func hasCBCTinyMatrixCoeffRisk(p *CompiledProblem, lb, ub []float64, cutCols [][
 			}
 		}
 	}
-	for e := range min(len(cutCols), len(cutVals)) {
+	for e := range cuts.colValCount() {
 		cutSum := 0.0
-		for k := range min(len(cutCols[e]), len(cutVals[e])) {
-			c := cutCols[e][k]
+		for k := range min(len(cuts.cols[e]), len(cuts.vals[e])) {
+			c := cuts.cols[e][k]
 			if uint(c) >= uint(n) || (lb[c] >= ub[c] && lb[c] == 0) {
 				continue
 			}
-			if av := math.Abs(cutVals[e][k]); av > 0 && av <= coefThresh {
+			if av := math.Abs(cuts.vals[e][k]); av > 0 && av <= coefThresh {
 				infB := math.IsInf(lb[c], 0) || math.IsInf(ub[c], 0) || math.Abs(lb[c]) >= 1e30 || math.Abs(ub[c]) >= 1e30
 				if infB {
 					return true
@@ -2755,7 +2397,7 @@ func hasCBCTinyMatrixCoeffRisk(p *CompiledProblem, lb, ub []float64, cutCols [][
 	return false
 }
 
-func hasCBCScalingRisk(p *CompiledProblem, lb, ub []float64, cutVals [][]float64) bool {
+func hasCBCScalingRisk(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) bool {
 	n := min(p.numVars, min(len(lb), len(ub)))
 	for j := range n {
 		if lb[j] >= ub[j] && lb[j] == 0 {
@@ -2770,7 +2412,7 @@ func hasCBCScalingRisk(p *CompiledProblem, lb, ub []float64, cutVals [][]float64
 			}
 		}
 	}
-	for _, cvs := range cutVals {
+	for _, cvs := range cuts.vals {
 		for _, v := range cvs {
 			if av := math.Abs(v); av >= 1e7 || (av > 0 && av <= 1e-7) {
 				return true
@@ -2802,6 +2444,88 @@ func divExactFromWide(w *wideDotAcc, a float64) (qVal, qLo, qHi float64, exact, 
 		return 0, 0, 0, false, false
 	}
 	return val, val - eb, val + eb, false, true
+}
+
+func checkRowDirFeasibleCBC(cols []int, vals []float64, rhs, rowFeasTol float64, lb, ub []float64, n, kLim int, isUpper bool) bool {
+	var w wideDotAcc
+	w.addVal(rhs)
+	for k := range kLim {
+		col := cols[k]
+		if uint(col) >= uint(n) {
+			continue
+		}
+		a := vals[k]
+		if a == 0 {
+			continue
+		}
+		if (a > 0) == isUpper {
+			w.addProd(-a, lb[col])
+		} else {
+			w.addProd(-a, ub[col])
+		}
+	}
+	top, rem, ok := w.finishDD()
+	if !ok {
+		return false
+	}
+	if isUpper {
+		return top+rem < -rowFeasTol
+	}
+	return top+rem > rowFeasTol
+}
+
+func tightenRowDirBoundsCBC(cols []int, vals []float64, rhs, rowFeasTol float64, varCat []VarCategory, lb, ub []float64, n, kLim, infCount int, isUpper bool) (infeas, changed bool) {
+	for k := range kLim {
+		col := cols[k]
+		if uint(col) >= uint(n) {
+			continue
+		}
+		a := vals[k]
+		if math.Abs(a) <= cbcPrecondMinSafeCoeff || lb[col] >= ub[col] {
+			continue
+		}
+		if infCount == 1 {
+			useLB := (a > 0) == isUpper
+			if (useLB && !math.IsInf(lb[col], -1)) || (!useLB && !math.IsInf(ub[col], 1)) {
+				continue
+			}
+		}
+		var w wideDotAcc
+		w.addVal(rhs)
+		for t := range kLim {
+			if t == k {
+				continue
+			}
+			c := cols[t]
+			if uint(c) >= uint(n) {
+				continue
+			}
+			at := vals[t]
+			if at == 0 {
+				continue
+			}
+			if (at > 0) == isUpper {
+				if !math.IsInf(lb[c], -1) {
+					w.addProd(-at, lb[c])
+				}
+			} else if !math.IsInf(ub[c], 1) {
+				w.addProd(-at, ub[c])
+			}
+		}
+		q, qLo, qHi, exact, qOK := divExactFromWide(&w, a)
+		if !qOK {
+			continue
+		}
+		isInt := len(varCat) > col && varCat[col] != Continuous
+		infeasBnd, chg := applyQuotientBoundCBC((a > 0) == isUpper, isInt, q, qLo, qHi, exact, math.Abs(a), rowFeasTol, lb, ub, col)
+		if infeasBnd {
+			return true, false
+		}
+		if chg {
+			changed = true
+		}
+	}
+	return false, changed
 }
 
 func tightenRowSliceCBC(cols []int, vals []float64, rhs float64, sense ConstraintSense, varCat []VarCategory, lb, ub []float64, n int) (infeas, changed bool) {
@@ -2849,145 +2573,33 @@ func tightenRowSliceCBC(cols []int, vals []float64, rhs float64, sense Constrain
 	}
 	rowFeasTol := max(cbcFeasTol, 1e-12*rowScale)
 
-	if hasUpper && minInfCount == 0 {
-		var sw wideDotAcc
-		sw.addVal(rhs)
-		for k := range kLim {
-			col := cols[k]
-			if uint(col) >= uint(n) {
-				continue
-			}
-			a := vals[k]
-			if a > 0 {
-				sw.addProd(-a, lb[col])
-			} else if a < 0 {
-				sw.addProd(-a, ub[col])
-			}
-		}
-		if sTop, sRem, sOK := sw.finishDD(); sOK && sTop+sRem < -rowFeasTol {
-			return true, false
-		}
+	if hasUpper && minInfCount == 0 && checkRowDirFeasibleCBC(cols, vals, rhs, rowFeasTol, lb, ub, n, kLim, true) {
+		return true, false
 	}
-	if hasLower && maxInfCount == 0 {
-		var dw wideDotAcc
-		dw.addVal(rhs)
-		for k := range kLim {
-			col := cols[k]
-			if uint(col) >= uint(n) {
-				continue
-			}
-			a := vals[k]
-			if a > 0 {
-				dw.addProd(-a, ub[col])
-			} else if a < 0 {
-				dw.addProd(-a, lb[col])
-			}
-		}
-		if dTop, dRem, dOK := dw.finishDD(); dOK && dTop+dRem > rowFeasTol {
-			return true, false
-		}
+	if hasLower && maxInfCount == 0 && checkRowDirFeasibleCBC(cols, vals, rhs, rowFeasTol, lb, ub, n, kLim, false) {
+		return true, false
 	}
-
 	if hasUpper && minInfCount <= 1 {
-		for k := range kLim {
-			col := cols[k]
-			if uint(col) >= uint(n) {
-				continue
-			}
-			a := vals[k]
-			if math.Abs(a) <= cbcPrecondMinSafeCoeff || lb[col] >= ub[col] {
-				continue
-			}
-			if minInfCount == 1 {
-				if (a > 0 && !math.IsInf(lb[col], -1)) || (a < 0 && !math.IsInf(ub[col], 1)) {
-					continue
-				}
-			}
-			var w wideDotAcc
-			w.addVal(rhs)
-			for t := range kLim {
-				if t == k {
-					continue
-				}
-				c := cols[t]
-				if uint(c) >= uint(n) {
-					continue
-				}
-				at := vals[t]
-				if at > 0 && !math.IsInf(lb[c], -1) {
-					w.addProd(-at, lb[c])
-				} else if at < 0 && !math.IsInf(ub[c], 1) {
-					w.addProd(-at, ub[c])
-				}
-			}
-			q, qLo, qHi, exact, qOK := divExactFromWide(&w, a)
-			if !qOK {
-				continue
-			}
-			isInt := len(varCat) > col && varCat[col] != Continuous
-			infeasBnd, chg := applyQuotientBoundCBC(a > 0, isInt, q, qLo, qHi, exact, math.Abs(a), rowFeasTol, lb, ub, col)
-			if infeasBnd {
-				return true, false
-			}
-			if chg {
-				changed = true
-			}
+		infU, chgU := tightenRowDirBoundsCBC(cols, vals, rhs, rowFeasTol, varCat, lb, ub, n, kLim, minInfCount, true)
+		if infU {
+			return true, false
 		}
+		changed = changed || chgU
 	}
-
 	if hasLower && maxInfCount <= 1 {
-		for k := range kLim {
-			col := cols[k]
-			if uint(col) >= uint(n) {
-				continue
-			}
-			a := vals[k]
-			if math.Abs(a) <= cbcPrecondMinSafeCoeff || lb[col] >= ub[col] {
-				continue
-			}
-			if maxInfCount == 1 {
-				if (a > 0 && !math.IsInf(ub[col], 1)) || (a < 0 && !math.IsInf(lb[col], -1)) {
-					continue
-				}
-			}
-			var w wideDotAcc
-			w.addVal(rhs)
-			for t := range kLim {
-				if t == k {
-					continue
-				}
-				c := cols[t]
-				if uint(c) >= uint(n) {
-					continue
-				}
-				at := vals[t]
-				if at > 0 && !math.IsInf(ub[c], 1) {
-					w.addProd(-at, ub[c])
-				} else if at < 0 && !math.IsInf(lb[c], -1) {
-					w.addProd(-at, lb[c])
-				}
-			}
-			q, qLo, qHi, exact, qOK := divExactFromWide(&w, a)
-			if !qOK {
-				continue
-			}
-			isInt := len(varCat) > col && varCat[col] != Continuous
-			infeasBnd, chg := applyQuotientBoundCBC(a < 0, isInt, q, qLo, qHi, exact, math.Abs(a), rowFeasTol, lb, ub, col)
-			if infeasBnd {
-				return true, false
-			}
-			if chg {
-				changed = true
-			}
+		infL, chgL := tightenRowDirBoundsCBC(cols, vals, rhs, rowFeasTol, varCat, lb, ub, n, kLim, maxInfCount, false)
+		if infL {
+			return true, false
 		}
+		changed = changed || chgL
 	}
 	return false, changed
 }
 
-func tightenContinuousBoundsCBC(p *CompiledProblem, varCat []VarCategory, cutCols [][]int, cutVals [][]float64, cutRHS, lb, ub []float64, maxPasses int, deadline time.Time, done <-chan struct{}) (infeas, timedOut bool) {
+func tightenContinuousBoundsCBC(p *CompiledProblem, varCat []VarCategory, cuts cbcCutSet, lb, ub []float64, maxPasses int, deadline time.Time, done <-chan struct{}) (infeas, timedOut bool) {
 	n := min(p.numVars, min(len(lb), len(ub)))
 	m := p.numConstraints
-	numExtra := min(len(cutCols), min(len(cutVals), len(cutRHS)))
+	numExtra := cuts.count()
 	for range maxPasses {
 		if stopRequested(deadline, done) {
 			return false, true
@@ -3010,7 +2622,7 @@ func tightenContinuousBoundsCBC(p *CompiledProblem, varCat []VarCategory, cutCol
 			if (e&63 == 0) && stopRequested(deadline, done) {
 				return false, true
 			}
-			infCut, chgCut := tightenRowSliceCBC(cutCols[e], cutVals[e], cutRHS[e], LessEqual, varCat, lb, ub, n)
+			infCut, chgCut := tightenRowSliceCBC(cuts.cols[e], cuts.vals[e], cuts.rhs[e], LessEqual, varCat, lb, ub, n)
 			if infCut {
 				return true, false
 			}
@@ -3330,15 +2942,11 @@ func buildCBCEqRREFBasis(wRows []cbcWorkRow, exclude []bool, scaleLB, scaleUB []
 	return basis
 }
 
-func cloneWideDotAcc(src *wideDotAcc) wideDotAcc {
-	return *src
-}
-
 func evalShiftedConstMin(fixedW *wideDotAcc, baseConstMin float64) float64 {
 	if fixedW == nil || (fixedW.isEmpty() && !fixedW.nonFin) {
 		return baseConstMin
 	}
-	w := cloneWideDotAcc(fixedW)
+	w := *fixedW
 	w.addVal(baseConstMin)
 	return w.finish(math.NaN())
 }
@@ -3379,22 +2987,144 @@ func rowBoundsFromSense(sense ConstraintSense, rhs float64) (rLB, rUB float64) {
 	}
 }
 
+func eliminateFixedColsInRow(origCols []int, origVals []float64, origRHS float64, anyFixed bool, fixedCols []bool, workLB []float64, n int) (cols []int, vals []float64, rhs float64, changed bool) {
+	hasFix := false
+	if anyFixed {
+		for _, col := range origCols {
+			if uint(col) < uint(n) && fixedCols[col] {
+				hasFix = true
+				break
+			}
+		}
+	}
+	if hasFix {
+		var w wideDotAcc
+		w.addVal(origRHS)
+		remCount := 0
+		for k, col := range origCols {
+			if uint(col) >= uint(n) {
+				continue
+			}
+			if fixedCols[col] {
+				w.addProd(-origVals[k], workLB[col])
+			} else {
+				remCount++
+			}
+		}
+		top, rem, ok := w.finishDD()
+		if ok && math.Abs(top) < 1e29 && math.Abs(rem) <= cbcPrecondRemTol {
+			newCols := make([]int, 0, remCount)
+			newVals := make([]float64, 0, remCount)
+			for k, col := range origCols {
+				if uint(col) < uint(n) && !fixedCols[col] {
+					newCols = append(newCols, col)
+					newVals = append(newVals, origVals[k])
+				}
+			}
+			return newCols, newVals, top, true
+		}
+	}
+	return slices.Clone(origCols), slices.Clone(origVals), origRHS, false
+}
+
+func hasWorkCancelRisk(
+	p *CompiledProblem,
+	workObjMin []float64,
+	curConstMin float64,
+	wRows []cbcWorkRow,
+	wCuts cbcCutSet,
+	effLB, effUB []float64,
+	threshold, infScale float64,
+) bool {
+	if denseObjHasCancelRisk(workObjMin, curConstMin, effLB, effUB, p.varCat, threshold, infScale) {
+		return true
+	}
+	for i := range wRows {
+		rLB, rUB := rowBoundsFromSense(wRows[i].sense, wRows[i].rhs)
+		if sparseExprHasCancelRisk(wRows[i].cols, wRows[i].vals, effLB, effUB, p.varCat, rLB, rUB, threshold, infScale) {
+			return true
+		}
+	}
+	for e := range wCuts.count() {
+		if sparseExprHasCancelRisk(wCuts.cols[e], wCuts.vals[e], effLB, effUB, p.varCat, math.Inf(-1), wCuts.rhs[e], threshold, infScale) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildEqBasisDualFixups(b *cbcEqBasisRow, isObj bool, dstRow int, mu float64) ([]cbcDualFixup, bool) {
+	stepFixups := make([]cbcDualFixup, 0, len(b.combRows))
+	for t, eqR := range b.combRows {
+		effMu := mu * b.combWeights[t]
+		if math.IsNaN(effMu) || math.IsInf(effMu, 0) {
+			return nil, false
+		}
+		if effMu != 0 {
+			stepFixups = append(stepFixups, cbcDualFixup{isObj: isObj, eqRow: eqR, dstRow: dstRow, mu: effMu})
+		}
+	}
+	return stepFixups, true
+}
+
+func reduceSparseRowByEqBasis(
+	cols []int,
+	vals []float64,
+	rhs float64,
+	dstRow int,
+	skipSelfRow int,
+	eqBasis []cbcEqBasisRow,
+	effLB, effUB []float64,
+) (newCols []int, newVals []float64, newRHS float64, fixups []cbcDualFixup, reduced bool) {
+	oldNorm := sparseRowPotentialNorm(cols, vals, effLB, effUB, rhs)
+	candCols := cols
+	candVals := vals
+	candRHS := rhs
+	var candFixups []cbcDualFixup
+	for bIdx := range eqBasis {
+		b := &eqBasis[bIdx]
+		if skipSelfRow >= 0 && slices.Contains(b.combRows, skipSelfRow) {
+			continue
+		}
+		pos, found := slices.BinarySearch(candCols, b.pivCol)
+		if !found {
+			continue
+		}
+		mu := candVals[pos] / b.pivVal
+		if math.IsNaN(mu) || math.IsInf(mu, 0) || mu == 0 {
+			continue
+		}
+		mCols, mVals, mRHS, mOK := mergeRowLinearComb(candCols, candVals, candRHS, b.cols, b.vals, b.rhs, mu)
+		if !mOK {
+			continue
+		}
+		stepFixups, valid := buildEqBasisDualFixups(b, false, dstRow, mu)
+		if !valid {
+			continue
+		}
+		candCols, candVals, candRHS = mCols, mVals, mRHS
+		candFixups = append(candFixups, stepFixups...)
+	}
+	if len(candFixups) > 0 && sparseRowPotentialNorm(candCols, candVals, effLB, effUB, candRHS) <= cbcPrecondNormShrinkRatio*oldNorm {
+		return candCols, candVals, candRHS, candFixups, true
+	}
+	return cols, vals, rhs, nil, false
+}
+
 // preconditionCBC eliminates IEEE-754 cancellation from fixed columns, continuous implied-fixed
 // MIP domains, and equality-coupled rows or objectives using Shewchuk expansions before passing
 // the reduced matrix to COIN-OR CLP or CBC.
 func preconditionCBC(
 	p *CompiledProblem,
 	lb, ub []float64,
-	cutCols [][]int,
-	cutVals [][]float64,
-	cutRHS []float64,
+	cuts cbcCutSet,
 	isMIP bool,
 	deadline time.Time,
 	done <-chan struct{},
 ) cbcPrecond {
 	n := p.numVars
 	baseM := p.numConstraints
-	numExtra := min(len(cutCols), min(len(cutVals), len(cutRHS)))
+	numExtra := cuts.count()
 	baseConstMin := p.objConstMin()
 
 	scaleLB := slices.Clone(lb[:n])
@@ -3403,7 +3133,7 @@ func preconditionCBC(
 	if isMIP {
 		varCat = p.varCat
 	}
-	infeas, timedOut := tightenContinuousBoundsCBC(p, varCat, cutCols, cutVals, cutRHS, scaleLB, scaleUB, cbcPrecondMaxTightenPasses, deadline, done)
+	infeas, timedOut := tightenContinuousBoundsCBC(p, varCat, cuts, scaleLB, scaleUB, cbcPrecondMaxTightenPasses, deadline, done)
 	if timedOut {
 		return cbcPrecond{timedOut: true}
 	}
@@ -3445,15 +3175,7 @@ func preconditionCBC(
 		}
 	}
 
-	infScale, _ := problemImpliedScaleHint(p, scaleLB, scaleUB, cutVals, cutRHS)
-	for j := range n {
-		if !math.IsInf(scaleLB[j], 0) && math.Abs(scaleLB[j]) > infScale {
-			infScale = math.Abs(scaleLB[j])
-		}
-		if !math.IsInf(scaleUB[j], 0) && math.Abs(scaleUB[j]) > infScale {
-			infScale = math.Abs(scaleUB[j])
-		}
-	}
+	infScale, _ := problemImpliedScaleHint(p, scaleLB, scaleUB, cuts)
 
 	colHasTiny := make([]bool, n)
 	for j := range n {
@@ -3469,10 +3191,10 @@ func preconditionCBC(
 		}
 	}
 	for e := range numExtra {
-		for k := range min(len(cutCols[e]), len(cutVals[e])) {
-			c := cutCols[e][k]
+		for k := range min(len(cuts.cols[e]), len(cuts.vals[e])) {
+			c := cuts.cols[e][k]
 			if uint(c) < uint(n) {
-				if av := math.Abs(cutVals[e][k]); av > 0 && av <= cbcPrecondMinSafeCoeff {
+				if av := math.Abs(cuts.vals[e][k]); av > 0 && av <= cbcPrecondMinSafeCoeff {
 					colHasTiny[c] = true
 				}
 			}
@@ -3492,106 +3214,25 @@ func preconditionCBC(
 	modified := false
 	for i := range baseM {
 		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		origCols := p.colIdx[st:en]
-		origVals := p.rowVal[st:en]
-		hasFixInRow := false
-		if anyFixed {
-			for _, col := range origCols {
-				if fixedCols[col] {
-					hasFixInRow = true
-					break
-				}
-			}
-		}
-		if hasFixInRow {
-			var w wideDotAcc
-			w.addVal(p.rowRHS[i])
-			remCount := 0
-			for k, col := range origCols {
-				if fixedCols[col] {
-					w.addProd(-origVals[k], workLB[col])
-				} else {
-					remCount++
-				}
-			}
-			top, rem, ok := w.finishDD()
-			if ok && math.Abs(top) < 1e29 && math.Abs(rem) <= cbcPrecondRemTol {
-				newCols := make([]int, 0, remCount)
-				newVals := make([]float64, 0, remCount)
-				for k, col := range origCols {
-					if !fixedCols[col] {
-						newCols = append(newCols, col)
-						newVals = append(newVals, origVals[k])
-					}
-				}
-				wRows[i] = cbcWorkRow{
-					sense: p.rowSense[i],
-					rhs:   top,
-					cols:  newCols,
-					vals:  newVals,
-				}
-				modified = true
-				continue
-			}
-		}
-		wRows[i] = cbcWorkRow{
-			sense: p.rowSense[i],
-			rhs:   p.rowRHS[i],
-			cols:  slices.Clone(origCols),
-			vals:  slices.Clone(origVals),
+		rCols, rVals, rRHS, chg := eliminateFixedColsInRow(p.colIdx[st:en], p.rowVal[st:en], p.rowRHS[i], anyFixed, fixedCols, workLB, n)
+		wRows[i] = cbcWorkRow{sense: p.rowSense[i], rhs: rRHS, cols: rCols, vals: rVals}
+		if chg {
+			modified = true
 		}
 	}
 
-	wCutCols := make([][]int, numExtra)
-	wCutVals := make([][]float64, numExtra)
-	wCutRHS := make([]float64, numExtra)
+	wCuts := cbcCutSet{
+		cols: make([][]int, numExtra),
+		vals: make([][]float64, numExtra),
+		rhs:  make([]float64, numExtra),
+	}
 	for e := range numExtra {
-		kLim := min(len(cutCols[e]), len(cutVals[e]))
-		origCols := cutCols[e][:kLim]
-		origVals := cutVals[e][:kLim]
-		hasFixInCut := false
-		if anyFixed {
-			for _, col := range origCols {
-				if uint(col) < uint(n) && fixedCols[col] {
-					hasFixInCut = true
-					break
-				}
-			}
+		kLim := min(len(cuts.cols[e]), len(cuts.vals[e]))
+		cCols, cVals, cRHS, chg := eliminateFixedColsInRow(cuts.cols[e][:kLim], cuts.vals[e][:kLim], cuts.rhs[e], anyFixed, fixedCols, workLB, n)
+		wCuts.cols[e], wCuts.vals[e], wCuts.rhs[e] = cCols, cVals, cRHS
+		if chg {
+			modified = true
 		}
-		if hasFixInCut {
-			var w wideDotAcc
-			w.addVal(cutRHS[e])
-			remCount := 0
-			for k, col := range origCols {
-				if uint(col) >= uint(n) {
-					continue
-				}
-				if fixedCols[col] {
-					w.addProd(-origVals[k], workLB[col])
-				} else {
-					remCount++
-				}
-			}
-			top, rem, ok := w.finishDD()
-			if ok && math.Abs(top) < 1e29 && math.Abs(rem) <= cbcPrecondRemTol {
-				newCols := make([]int, 0, remCount)
-				newVals := make([]float64, 0, remCount)
-				for k, col := range origCols {
-					if uint(col) < uint(n) && !fixedCols[col] {
-						newCols = append(newCols, col)
-						newVals = append(newVals, origVals[k])
-					}
-				}
-				wCutCols[e] = newCols
-				wCutVals[e] = newVals
-				wCutRHS[e] = top
-				modified = true
-				continue
-			}
-		}
-		wCutCols[e] = slices.Clone(origCols)
-		wCutVals[e] = slices.Clone(origVals)
-		wCutRHS[e] = cutRHS[e]
 	}
 
 	workObjMin := slices.Clone(p.objMin)
@@ -3609,24 +3250,7 @@ func preconditionCBC(
 	}
 
 	curConstMin := evalShiftedConstMin(&fixedObjW, baseConstMin)
-	needEqBasis := denseObjHasCancelRisk(workObjMin, curConstMin, effLB, effUB, p.varCat, cbcCancelMagThreshold, infScale)
-	if !needEqBasis {
-		for i := range baseM {
-			rLB, rUB := rowBoundsFromSense(wRows[i].sense, wRows[i].rhs)
-			if sparseExprHasCancelRisk(wRows[i].cols, wRows[i].vals, effLB, effUB, p.varCat, rLB, rUB, cbcCancelMagThreshold, infScale) {
-				needEqBasis = true
-				break
-			}
-		}
-	}
-	if !needEqBasis {
-		for e := range numExtra {
-			if sparseExprHasCancelRisk(wCutCols[e], wCutVals[e], effLB, effUB, p.varCat, math.Inf(-1), wCutRHS[e], cbcCancelMagThreshold, infScale) {
-				needEqBasis = true
-				break
-			}
-		}
-	}
+	needEqBasis := hasWorkCancelRisk(p, workObjMin, curConstMin, wRows, wCuts, effLB, effUB, cbcCancelMagThreshold, infScale)
 
 	var dualFixups []cbcDualFixup
 	if needEqBasis {
@@ -3642,56 +3266,13 @@ func preconditionCBC(
 				anyCancelEq = true
 			}
 		}
-		reduceRowByBasis := func(rIdx int, eqBasis []cbcEqBasisRow) bool {
-			oldNorm := sparseRowPotentialNorm(wRows[rIdx].cols, wRows[rIdx].vals, effLB, effUB, wRows[rIdx].rhs)
-			candCols := wRows[rIdx].cols
-			candVals := wRows[rIdx].vals
-			candRHS := wRows[rIdx].rhs
-			var candFixups []cbcDualFixup
-			for bIdx := range eqBasis {
-				b := &eqBasis[bIdx]
-				if slices.Contains(b.combRows, rIdx) {
-					continue
-				}
-				pos, found := slices.BinarySearch(candCols, b.pivCol)
-				if !found {
-					continue
-				}
-				mu := candVals[pos] / b.pivVal
-				if math.IsNaN(mu) || math.IsInf(mu, 0) || mu == 0 {
-					continue
-				}
-				mCols, mVals, mRHS, mOK := mergeRowLinearComb(candCols, candVals, candRHS, b.cols, b.vals, b.rhs, mu)
-				if !mOK {
-					continue
-				}
-				stepFixups := make([]cbcDualFixup, 0, len(b.combRows))
-				valid := true
-				for t, eqR := range b.combRows {
-					effMu := mu * b.combWeights[t]
-					if math.IsNaN(effMu) || math.IsInf(effMu, 0) {
-						valid = false
-						break
-					}
-					if effMu != 0 {
-						stepFixups = append(stepFixups, cbcDualFixup{isObj: false, eqRow: eqR, dstRow: rIdx, mu: effMu})
-					}
-				}
-				if !valid {
-					continue
-				}
-				candCols, candVals, candRHS = mCols, mVals, mRHS
-				candFixups = append(candFixups, stepFixups...)
-			}
-			if len(candFixups) > 0 && sparseRowPotentialNorm(candCols, candVals, effLB, effUB, candRHS) <= cbcPrecondNormShrinkRatio*oldNorm {
-				wRows[rIdx].cols = candCols
-				wRows[rIdx].vals = candVals
-				wRows[rIdx].rhs = candRHS
-				dualFixups = append(dualFixups, candFixups...)
+		reduceWorkRow := func(rIdx int, eqBasis []cbcEqBasisRow) {
+			rCols, rVals, rRHS, fxs, ok := reduceSparseRowByEqBasis(wRows[rIdx].cols, wRows[rIdx].vals, wRows[rIdx].rhs, rIdx, rIdx, eqBasis, effLB, effUB)
+			if ok {
+				wRows[rIdx].cols, wRows[rIdx].vals, wRows[rIdx].rhs = rCols, rVals, rRHS
+				dualFixups = append(dualFixups, fxs...)
 				modified = true
-				return true
 			}
-			return false
 		}
 
 		if anyCancelEq {
@@ -3699,7 +3280,7 @@ func preconditionCBC(
 			if len(cleanBasis) > 0 {
 				for rIdx := range baseM {
 					if cancelEqRow[rIdx] {
-						reduceRowByBasis(rIdx, cleanBasis)
+						reduceWorkRow(rIdx, cleanBasis)
 					}
 				}
 			}
@@ -3710,7 +3291,7 @@ func preconditionCBC(
 			if denseObjHasCancelRisk(workObjMin, curConstMin, effLB, effUB, p.varCat, cbcCancelMagThreshold, infScale) {
 				oldNorm := denseObjPotentialNorm(workObjMin, curConstMin, effLB, effUB)
 				candObj := slices.Clone(workObjMin)
-				candFixedW := cloneWideDotAcc(&fixedObjW)
+				candFixedW := fixedObjW
 				candHasFixed := hasFixedObj
 				var candFixups []cbcDualFixup
 				for bIdx := range eqBasis {
@@ -3744,18 +3325,8 @@ func preconditionCBC(
 					if !valid {
 						continue
 					}
-					stepFixups := make([]cbcDualFixup, 0, len(b.combRows))
-					for t, eqR := range b.combRows {
-						effMu := mu * b.combWeights[t]
-						if math.IsNaN(effMu) || math.IsInf(effMu, 0) {
-							valid = false
-							break
-						}
-						if effMu != 0 {
-							stepFixups = append(stepFixups, cbcDualFixup{isObj: true, eqRow: eqR, mu: effMu})
-						}
-					}
-					if !valid {
+					stepFixups, okFx := buildEqBasisDualFixups(b, true, 0, mu)
+					if !okFx {
 						continue
 					}
 					for k, c := range b.cols {
@@ -3788,55 +3359,17 @@ func preconditionCBC(
 				if !sparseExprHasCancelRisk(wRows[rIdx].cols, wRows[rIdx].vals, effLB, effUB, p.varCat, rLB, rUB, cbcCancelMagThreshold, infScale) {
 					continue
 				}
-				reduceRowByBasis(rIdx, eqBasis)
+				reduceWorkRow(rIdx, eqBasis)
 			}
 
 			for e := range numExtra {
-				if !sparseExprHasCancelRisk(wCutCols[e], wCutVals[e], effLB, effUB, p.varCat, math.Inf(-1), wCutRHS[e], cbcCancelMagThreshold, infScale) {
+				if !sparseExprHasCancelRisk(wCuts.cols[e], wCuts.vals[e], effLB, effUB, p.varCat, math.Inf(-1), wCuts.rhs[e], cbcCancelMagThreshold, infScale) {
 					continue
 				}
-				oldNorm := sparseRowPotentialNorm(wCutCols[e], wCutVals[e], effLB, effUB, wCutRHS[e])
-				candCols := wCutCols[e]
-				candVals := wCutVals[e]
-				candRHS := wCutRHS[e]
-				var candFixups []cbcDualFixup
-				for bIdx := range eqBasis {
-					b := &eqBasis[bIdx]
-					pos, found := slices.BinarySearch(candCols, b.pivCol)
-					if !found {
-						continue
-					}
-					mu := candVals[pos] / b.pivVal
-					if math.IsNaN(mu) || math.IsInf(mu, 0) || mu == 0 {
-						continue
-					}
-					mCols, mVals, mRHS, mOK := mergeRowLinearComb(candCols, candVals, candRHS, b.cols, b.vals, b.rhs, mu)
-					if !mOK {
-						continue
-					}
-					stepFixups := make([]cbcDualFixup, 0, len(b.combRows))
-					valid := true
-					for t, eqR := range b.combRows {
-						effMu := mu * b.combWeights[t]
-						if math.IsNaN(effMu) || math.IsInf(effMu, 0) {
-							valid = false
-							break
-						}
-						if effMu != 0 {
-							stepFixups = append(stepFixups, cbcDualFixup{isObj: false, eqRow: eqR, dstRow: baseM + e, mu: effMu})
-						}
-					}
-					if !valid {
-						continue
-					}
-					candCols, candVals, candRHS = mCols, mVals, mRHS
-					candFixups = append(candFixups, stepFixups...)
-				}
-				if len(candFixups) > 0 && sparseRowPotentialNorm(candCols, candVals, effLB, effUB, candRHS) <= cbcPrecondNormShrinkRatio*oldNorm {
-					wCutCols[e] = candCols
-					wCutVals[e] = candVals
-					wCutRHS[e] = candRHS
-					dualFixups = append(dualFixups, candFixups...)
+				cCols, cVals, cRHS, fxs, ok := reduceSparseRowByEqBasis(wCuts.cols[e], wCuts.vals[e], wCuts.rhs[e], baseM+e, -1, eqBasis, effLB, effUB)
+				if ok {
+					wCuts.cols[e], wCuts.vals[e], wCuts.rhs[e] = cCols, cVals, cRHS
+					dualFixups = append(dualFixups, fxs...)
 					modified = true
 				}
 			}
@@ -3853,24 +3386,7 @@ func preconditionCBC(
 	}
 
 	curConstMin = evalShiftedConstMin(&fixedObjW, baseConstMin)
-	unresolved := denseObjHasCancelRisk(workObjMin, curConstMin, effLB, effUB, p.varCat, cbcUnresolvedCancelFloor, infScale)
-	if !unresolved {
-		for i := range baseM {
-			rLB, rUB := rowBoundsFromSense(wRows[i].sense, wRows[i].rhs)
-			if sparseExprHasCancelRisk(wRows[i].cols, wRows[i].vals, effLB, effUB, p.varCat, rLB, rUB, cbcUnresolvedCancelFloor, infScale) {
-				unresolved = true
-				break
-			}
-		}
-	}
-	if !unresolved {
-		for e := range numExtra {
-			if sparseExprHasCancelRisk(wCutCols[e], wCutVals[e], effLB, effUB, p.varCat, math.Inf(-1), wCutRHS[e], cbcUnresolvedCancelFloor, infScale) {
-				unresolved = true
-				break
-			}
-		}
-	}
+	unresolved := hasWorkCancelRisk(p, workObjMin, curConstMin, wRows, wCuts, effLB, effUB, cbcUnresolvedCancelFloor, infScale)
 
 	if !modified {
 		return cbcPrecond{unresolved: unresolved}
@@ -3945,13 +3461,10 @@ func preconditionCBC(
 		colLBClp:       colLBClp,
 		colUBClp:       colUBClp,
 		workLB:         workLB,
-		workUB:         workUB,
 		objMin:         workObjMin,
 		rowLBClp:       rowLBClp,
 		rowUBClp:       rowUBClp,
-		cutCols:        wCutCols,
-		cutVals:        wCutVals,
-		cutRHS:         wCutRHS,
+		cuts:           wCuts,
 		fixedCols:      fixedCols,
 		fixedHi:        fixedHi,
 		fixedMid:       fixedMid,
@@ -3977,16 +3490,10 @@ func (pc *cbcPrecond) addFixedObjOffset(val float64) float64 {
 
 func (pc *cbcPrecond) totalMinShift(p *CompiledProblem) float64 {
 	baseConst := p.objConstMin()
-	if !pc.active || !pc.hasFixedObj {
+	if !pc.active {
 		return baseConst
 	}
-	if pc.fixedObjNonFin || math.IsNaN(baseConst) || math.IsInf(baseConst, 0) {
-		return math.NaN()
-	}
-	var w wideDotAcc
-	seedWideDotAcc(&w, pc.fixedHi, pc.fixedMid, pc.fixedLo)
-	w.addVal(baseConst)
-	return w.finish(math.NaN())
+	return pc.addFixedObjOffset(baseConst)
 }
 
 func (pc *cbcPrecond) userBoundFromReducedMin(p *CompiledProblem, redMin, clampFullMin float64, hasValidSol bool) (float64, bool) {
@@ -4024,10 +3531,10 @@ func (pc *cbcPrecond) userBoundFromReducedMin(p *CompiledProblem, redMin, clampF
 	return p.userObjFromShiftedMin(fullMin), true
 }
 
-func (pc *cbcPrecond) restoreLPPrimalDuals(p *CompiledProblem, cutCols [][]int, cutVals [][]float64, primal, duals, rc []float64) {
+func (pc *cbcPrecond) restoreLPPrimalDuals(p *CompiledProblem, cuts cbcCutSet, primal, duals, rc []float64) {
 	n := p.numVars
 	baseM := p.numConstraints
-	numExtra := min(len(cutCols), len(cutVals))
+	numExtra := cuts.colValCount()
 	for j, fixed := range pc.fixedCols {
 		if fixed && j < len(primal) {
 			primal[j] = pc.workLB[j]
@@ -4056,10 +3563,10 @@ func (pc *cbcPrecond) restoreLPPrimalDuals(p *CompiledProblem, cutCols [][]int, 
 		colRows = append(colRows[:0], p.rowIdx[st:en]...)
 		colVals = append(colVals[:0], p.colVal[st:en]...)
 		for e := range numExtra {
-			for k := range min(len(cutCols[e]), len(cutVals[e])) {
-				if cutCols[e][k] == j {
+			for k := range min(len(cuts.cols[e]), len(cuts.vals[e])) {
+				if cuts.cols[e][k] == j {
 					colRows = append(colRows, baseM+e)
-					colVals = append(colVals, cutVals[e][k])
+					colVals = append(colVals, cuts.vals[e][k])
 					break
 				}
 			}
