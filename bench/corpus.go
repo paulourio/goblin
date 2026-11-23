@@ -43,6 +43,30 @@ func trialSeed(base uint64, trial int) uint64 {
 	return base + uint64(trial)*1009
 }
 
+func stdPuLPCorpusCase(id, desc string, sense gb.Sense, integer, floatObj bool) CorpusCase {
+	return CorpusCase{
+		ID:          id,
+		Tier:        "tier1_canonical",
+		Description: desc,
+		Model:       buildPuLPStdProblem(id, sense, integer, floatObj),
+		BuildTrial: func(trial int) *gb.Model {
+			return buildPuLPStdProblemTrial(id, sense, integer, floatObj, trial)
+		},
+	}
+}
+
+func seededCorpusCase(id, tier, desc string, baseSeed uint64, build func(seed uint64) *gb.Model) CorpusCase {
+	return CorpusCase{
+		ID:          id,
+		Tier:        tier,
+		Description: desc,
+		Model:       build(baseSeed),
+		BuildTrial: func(trial int) *gb.Model {
+			return build(trialSeed(baseSeed, trial))
+		},
+	}
+}
+
 // BuildCorpus constructs the deterministic 3-tier benchmark suite covering
 // canonical PuLP unit tests (Tier 1, N <= 15), p90 target workloads (Tier 2, 15 <= N <= 50),
 // and large tail workloads (Tier 3, 100 <= N <= 1000).
@@ -53,42 +77,10 @@ func BuildCorpus() []CorpusCase {
 	// Tier 1: Canonical & Edge-Case Suite (N <= 22)
 	// =========================================================================
 	cases = append(cases,
-		CorpusCase{
-			ID:          "t1_std_lp",
-			Tier:        "tier1_canonical",
-			Description: "PuLP canonical continuous LP (3 vars, 3 rows)",
-			Model:       buildPuLPStdProblem("t1_std_lp", gb.Minimize, false, false),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildPuLPStdProblemTrial("t1_std_lp", gb.Minimize, false, false, trial)
-			},
-		},
-		CorpusCase{
-			ID:          "t1_std_lp_max",
-			Tier:        "tier1_canonical",
-			Description: "PuLP canonical continuous LP maximize (3 vars, 3 rows)",
-			Model:       buildPuLPStdProblem("t1_std_lp_max", gb.Maximize, false, false),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildPuLPStdProblemTrial("t1_std_lp_max", gb.Maximize, false, false, trial)
-			},
-		},
-		CorpusCase{
-			ID:          "t1_std_mip",
-			Tier:        "tier1_canonical",
-			Description: "PuLP canonical mixed-integer problem (3 vars, 3 rows)",
-			Model:       buildPuLPStdProblem("t1_std_mip", gb.Minimize, true, false),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildPuLPStdProblemTrial("t1_std_mip", gb.Minimize, true, false, trial)
-			},
-		},
-		CorpusCase{
-			ID:          "t1_mip_float_obj",
-			Tier:        "tier1_canonical",
-			Description: "PuLP test_mip_floats_objective (3 vars, 3 rows, obj=64.95)",
-			Model:       buildPuLPStdProblem("t1_mip_float_obj", gb.Minimize, true, true),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildPuLPStdProblemTrial("t1_mip_float_obj", gb.Minimize, true, true, trial)
-			},
-		},
+		stdPuLPCorpusCase("t1_std_lp", "PuLP canonical continuous LP (3 vars, 3 rows)", gb.Minimize, false, false),
+		stdPuLPCorpusCase("t1_std_lp_max", "PuLP canonical continuous LP maximize (3 vars, 3 rows)", gb.Maximize, false, false),
+		stdPuLPCorpusCase("t1_std_mip", "PuLP canonical mixed-integer problem (3 vars, 3 rows)", gb.Minimize, true, false),
+		stdPuLPCorpusCase("t1_mip_float_obj", "PuLP test_mip_floats_objective (3 vars, 3 rows, obj=64.95)", gb.Minimize, true, true),
 		CorpusCase{
 			ID:          "t1_whiskas",
 			Tier:        "tier1_canonical",
@@ -103,15 +95,10 @@ func BuildCorpus() []CorpusCase {
 			Model:       buildFurnitureProblem(),
 			BuildTrial:  buildFurnitureProblemTrial,
 		},
-		CorpusCase{
-			ID:          "t1_knapsack_12",
-			Tier:        "tier1_canonical",
-			Description: "Mixed 0-1 and integer knapsack (12 vars, 3 rows)",
-			Model:       buildMixedKnapsack("t1_knapsack_12", 12, 3, 101),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMixedKnapsack("t1_knapsack_12", 12, 3, trialSeed(101, trial))
-			},
-		},
+		seededCorpusCase("t1_knapsack_12", "tier1_canonical",
+			"Mixed 0-1 and integer knapsack (12 vars, 3 rows)", 101,
+			func(seed uint64) *gb.Model { return buildMixedKnapsack("t1_knapsack_12", 12, 3, seed) },
+		),
 		CorpusCase{
 			ID:          "t1_infeasible_mip",
 			Tier:        "tier1_canonical",
@@ -132,216 +119,106 @@ func BuildCorpus() []CorpusCase {
 				return buildMADAllocation("t1_mad_g2_i4", 2, 4, 6, trialSeed(109, effTrial))
 			},
 		},
-		CorpusCase{
-			ID:          "t1_mad_rand_g2_i4",
-			Tier:        "tier1_canonical",
-			Description: "26-var unstructured random-weight MAD allocation (G=2 groups, I=4 items, T=6 periods)",
-			Model:       BuildMADRandom("t1_mad_rand_g2_i4", 2, 4, 6, 7000),
-			BuildTrial: func(trial int) *gb.Model {
-				return BuildMADRandom("t1_mad_rand_g2_i4", 2, 4, 6, trialSeed(7000, trial))
-			},
-		},
+		seededCorpusCase("t1_mad_rand_g2_i4", "tier1_canonical",
+			"26-var unstructured random-weight MAD allocation (G=2 groups, I=4 items, T=6 periods)", 7000,
+			func(seed uint64) *gb.Model { return BuildMADRandom("t1_mad_rand_g2_i4", 2, 4, 6, seed) },
+		),
 	)
 
 	// =========================================================================
 	// Tier 2: Target p90 Workload (15 <= N <= 84, mostly 0-1 & Integer + Continuous)
 	// =========================================================================
 	cases = append(cases,
-		CorpusCase{
-			ID:          "t2_mkp_30",
-			Tier:        "tier2_p90",
-			Description: "30-var mixed 0-1 & general integer multidimensional knapsack (6 rows)",
-			Model:       buildMixedKnapsack("t2_mkp_30", 30, 6, 201),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMixedKnapsack("t2_mkp_30", 30, 6, trialSeed(201, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_mkp_50",
-			Tier:        "tier2_p90",
-			Description: "50-var mixed 0-1 & general integer multidimensional knapsack (8 rows)",
-			Model:       buildMixedKnapsack("t2_mkp_50", 50, 8, 202),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMixedKnapsack("t2_mkp_50", 50, 8, trialSeed(202, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_cflp_36",
-			Tier:        "tier2_p90",
-			Description: "36-var Capacitated Facility Location (6 binary open + 30 mixed flows)",
-			Model:       buildFacilityLocation("t2_cflp_36", 6, 5, 203),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildFacilityLocation("t2_cflp_36", 6, 5, trialSeed(203, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_cflp_49",
-			Tier:        "tier2_p90",
-			Description: "49-var Capacitated Facility Location (7 binary open + 42 mixed flows)",
-			Model:       buildFacilityLocation("t2_cflp_49", 7, 6, 204),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildFacilityLocation("t2_cflp_49", 7, 6, trialSeed(204, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_gap_45",
-			Tier:        "tier2_p90",
-			Description: "45-var Generalized Assignment with integer overtime (5 agents, 8 tasks)",
-			Model:       buildGeneralizedAssignment("t2_gap_45", 5, 8, 205),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildGeneralizedAssignment("t2_gap_45", 5, 8, trialSeed(205, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_lotsizing_48",
-			Tier:        "tier2_p90",
-			Description: "48-var Capacitated Lot-Sizing (16 periods: binary setup + int prod + cont inv)",
-			Model:       buildLotSizing("t2_lotsizing_48", 16, 206),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildLotSizing("t2_lotsizing_48", 16, trialSeed(206, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_binpack_44",
-			Tier:        "tier2_p90",
-			Description: "44-var Bin Packing with general integer slack (4 bins, 10 items)",
-			Model:       buildBinPacking("t2_binpack_44", 4, 10, 207),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildBinPacking("t2_binpack_44", 4, 10, trialSeed(207, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_setcover_50",
-			Tier:        "tier2_p90",
-			Description: "50-var Set Covering with 0-1 selection and integer penalty slacks (20 rows)",
-			Model:       buildSetCovering("t2_setcover_50", 50, 20, 208),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildSetCovering("t2_setcover_50", 50, 20, trialSeed(208, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_mad_g2_i8",
-			Tier:        "tier2_p90",
-			Description: "34-var MAD group-item allocation (G=2 groups, I=8 items, T=6 periods)",
-			Model:       buildMADAllocation("t2_mad_g2_i8", 2, 8, 6, 209),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t2_mad_g2_i8", 2, 8, 6, trialSeed(209, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_mad_g3_i9",
-			Tier:        "tier2_p90",
-			Description: "54-var MAD group-item allocation (G=3 groups, I=9 items, T=6 periods)",
-			Model:       buildMADAllocation("t2_mad_g3_i9", 3, 9, 6, 210),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t2_mad_g3_i9", 3, 9, 6, trialSeed(210, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_mad_g4_i12",
-			Tier:        "tier2_p90",
-			Description: "84-var MAD group-item allocation (G=4 groups, I=12 items, T=6 periods)",
-			Model:       buildMADAllocation("t2_mad_g4_i12", 4, 12, 6, 211),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t2_mad_g4_i12", 4, 12, 6, trialSeed(211, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_mad_rand_g2_i8",
-			Tier:        "tier2_p90",
-			Description: "34-var unstructured random-weight MAD allocation (G=2 groups, I=8 items, T=6 periods)",
-			Model:       BuildMADRandom("t2_mad_rand_g2_i8", 2, 8, 6, 7001),
-			BuildTrial: func(trial int) *gb.Model {
-				return BuildMADRandom("t2_mad_rand_g2_i8", 2, 8, 6, trialSeed(7001, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t2_mad_rand_g3_i9",
-			Tier:        "tier2_p90",
-			Description: "54-var unstructured random-weight MAD allocation (G=3 groups, I=9 items, T=6 periods)",
-			Model:       BuildMADRandom("t2_mad_rand_g3_i9", 3, 9, 6, 7002),
-			BuildTrial: func(trial int) *gb.Model {
-				return BuildMADRandom("t2_mad_rand_g3_i9", 3, 9, 6, trialSeed(7002, trial))
-			},
-		},
+		seededCorpusCase("t2_mkp_30", "tier2_p90",
+			"30-var mixed 0-1 & general integer multidimensional knapsack (6 rows)", 201,
+			func(seed uint64) *gb.Model { return buildMixedKnapsack("t2_mkp_30", 30, 6, seed) },
+		),
+		seededCorpusCase("t2_mkp_50", "tier2_p90",
+			"50-var mixed 0-1 & general integer multidimensional knapsack (8 rows)", 202,
+			func(seed uint64) *gb.Model { return buildMixedKnapsack("t2_mkp_50", 50, 8, seed) },
+		),
+		seededCorpusCase("t2_cflp_36", "tier2_p90",
+			"36-var Capacitated Facility Location (6 binary open + 30 mixed flows)", 203,
+			func(seed uint64) *gb.Model { return buildFacilityLocation("t2_cflp_36", 6, 5, seed) },
+		),
+		seededCorpusCase("t2_cflp_49", "tier2_p90",
+			"49-var Capacitated Facility Location (7 binary open + 42 mixed flows)", 204,
+			func(seed uint64) *gb.Model { return buildFacilityLocation("t2_cflp_49", 7, 6, seed) },
+		),
+		seededCorpusCase("t2_gap_45", "tier2_p90",
+			"45-var Generalized Assignment with integer overtime (5 agents, 8 tasks)", 205,
+			func(seed uint64) *gb.Model { return buildGeneralizedAssignment("t2_gap_45", 5, 8, seed) },
+		),
+		seededCorpusCase("t2_lotsizing_48", "tier2_p90",
+			"48-var Capacitated Lot-Sizing (16 periods: binary setup + int prod + cont inv)", 206,
+			func(seed uint64) *gb.Model { return buildLotSizing("t2_lotsizing_48", 16, seed) },
+		),
+		seededCorpusCase("t2_binpack_44", "tier2_p90",
+			"44-var Bin Packing with general integer slack (4 bins, 10 items)", 207,
+			func(seed uint64) *gb.Model { return buildBinPacking("t2_binpack_44", 4, 10, seed) },
+		),
+		seededCorpusCase("t2_setcover_50", "tier2_p90",
+			"50-var Set Covering with 0-1 selection and integer penalty slacks (20 rows)", 208,
+			func(seed uint64) *gb.Model { return buildSetCovering("t2_setcover_50", 50, 20, seed) },
+		),
+		seededCorpusCase("t2_mad_g2_i8", "tier2_p90",
+			"34-var MAD group-item allocation (G=2 groups, I=8 items, T=6 periods)", 209,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t2_mad_g2_i8", 2, 8, 6, seed) },
+		),
+		seededCorpusCase("t2_mad_g3_i9", "tier2_p90",
+			"54-var MAD group-item allocation (G=3 groups, I=9 items, T=6 periods)", 210,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t2_mad_g3_i9", 3, 9, 6, seed) },
+		),
+		seededCorpusCase("t2_mad_g4_i12", "tier2_p90",
+			"84-var MAD group-item allocation (G=4 groups, I=12 items, T=6 periods)", 211,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t2_mad_g4_i12", 4, 12, 6, seed) },
+		),
+		seededCorpusCase("t2_mad_rand_g2_i8", "tier2_p90",
+			"34-var unstructured random-weight MAD allocation (G=2 groups, I=8 items, T=6 periods)", 7001,
+			func(seed uint64) *gb.Model { return BuildMADRandom("t2_mad_rand_g2_i8", 2, 8, 6, seed) },
+		),
+		seededCorpusCase("t2_mad_rand_g3_i9", "tier2_p90",
+			"54-var unstructured random-weight MAD allocation (G=3 groups, I=9 items, T=6 periods)", 7002,
+			func(seed uint64) *gb.Model { return BuildMADRandom("t2_mad_rand_g3_i9", 3, 9, 6, seed) },
+		),
 	)
 
 	// =========================================================================
 	// Tier 3: Large Tail Workload (100 <= N <= 4036)
 	// =========================================================================
 	cases = append(cases,
-		CorpusCase{
-			ID:          "t3_mkp_200",
-			Tier:        "tier3_large",
-			Description: "200-var mixed 0-1/integer/continuous multidimensional knapsack (8 rows)",
-			Model:       buildMixedKnapsack("t3_mkp_200", 200, 8, 301),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMixedKnapsack("t3_mkp_200", 200, 8, trialSeed(301, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_cflp_300",
-			Tier:        "tier3_large",
-			Description: "300-var Capacitated Facility Location (15 binary facilities, 19 customers)",
-			Model:       buildFacilityLocation("t3_cflp_300", 15, 19, 302),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildFacilityLocation("t3_cflp_300", 15, 19, trialSeed(302, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_lotsizing_504",
-			Tier:        "tier3_large",
-			Description: "504-var Multi-Item Capacitated Lot-Sizing (42 items x 4 periods x 3 vars)",
-			Model:       buildMultiItemLotSizing("t3_lotsizing_504", 42, 4, 303),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMultiItemLotSizing("t3_lotsizing_504", 42, 4, trialSeed(303, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_sched_1000",
-			Tier:        "tier3_large",
-			Description: "1000-var Block Resource Allocation & Scheduling (50 blocks x 20 vars, 100 rows)",
-			Model:       buildBlockScheduling("t3_sched_1000", 50, 20, 304),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildBlockScheduling("t3_sched_1000", 50, 20, trialSeed(304, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_mad_g5_i20",
-			Tier:        "tier3_large",
-			Description: "145-var MAD group-item allocation (G=5 groups, I=20 items, T=6 periods)",
-			Model:       buildMADAllocation("t3_mad_g5_i20", 5, 20, 6, 305),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t3_mad_g5_i20", 5, 20, 6, trialSeed(305, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_mad_g6_i30",
-			Tier:        "tier3_large",
-			Description: "234-var MAD group-item allocation (G=6 groups, I=30 items, T=6 periods)",
-			Model:       buildMADAllocation("t3_mad_g6_i30", 6, 30, 6, 306),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t3_mad_g6_i30", 6, 30, 6, trialSeed(306, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_mad_g10_i100",
-			Tier:        "tier3_large",
-			Description: "1090-var MAD group-item allocation (G=10 groups, I=100 items, T=6 periods)",
-			Model:       buildMADAllocation("t3_mad_g10_i100", 10, 100, 6, 307),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t3_mad_g10_i100", 10, 100, 6, trialSeed(307, trial))
-			},
-		},
-		CorpusCase{
-			ID:          "t3_mad_g4_i1000",
-			Tier:        "tier3_large",
-			Description: "4036-var MAD group-item allocation (G=4 groups, I=1000 items, T=6 periods)",
-			Model:       buildMADAllocation("t3_mad_g4_i1000", 4, 1000, 6, 308),
-			BuildTrial: func(trial int) *gb.Model {
-				return buildMADAllocation("t3_mad_g4_i1000", 4, 1000, 6, trialSeed(308, trial))
-			},
-		},
+		seededCorpusCase("t3_mkp_200", "tier3_large",
+			"200-var mixed 0-1/integer/continuous multidimensional knapsack (8 rows)", 301,
+			func(seed uint64) *gb.Model { return buildMixedKnapsack("t3_mkp_200", 200, 8, seed) },
+		),
+		seededCorpusCase("t3_cflp_300", "tier3_large",
+			"300-var Capacitated Facility Location (15 binary facilities, 19 customers)", 302,
+			func(seed uint64) *gb.Model { return buildFacilityLocation("t3_cflp_300", 15, 19, seed) },
+		),
+		seededCorpusCase("t3_lotsizing_504", "tier3_large",
+			"504-var Multi-Item Capacitated Lot-Sizing (42 items x 4 periods x 3 vars)", 303,
+			func(seed uint64) *gb.Model { return buildMultiItemLotSizing("t3_lotsizing_504", 42, 4, seed) },
+		),
+		seededCorpusCase("t3_sched_1000", "tier3_large",
+			"1000-var Block Resource Allocation & Scheduling (50 blocks x 20 vars, 100 rows)", 304,
+			func(seed uint64) *gb.Model { return buildBlockScheduling("t3_sched_1000", 50, 20, seed) },
+		),
+		seededCorpusCase("t3_mad_g5_i20", "tier3_large",
+			"145-var MAD group-item allocation (G=5 groups, I=20 items, T=6 periods)", 305,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t3_mad_g5_i20", 5, 20, 6, seed) },
+		),
+		seededCorpusCase("t3_mad_g6_i30", "tier3_large",
+			"234-var MAD group-item allocation (G=6 groups, I=30 items, T=6 periods)", 306,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t3_mad_g6_i30", 6, 30, 6, seed) },
+		),
+		seededCorpusCase("t3_mad_g10_i100", "tier3_large",
+			"1090-var MAD group-item allocation (G=10 groups, I=100 items, T=6 periods)", 307,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t3_mad_g10_i100", 10, 100, 6, seed) },
+		),
+		seededCorpusCase("t3_mad_g4_i1000", "tier3_large",
+			"4036-var MAD group-item allocation (G=4 groups, I=1000 items, T=6 periods)", 308,
+			func(seed uint64) *gb.Model { return buildMADAllocation("t3_mad_g4_i1000", 4, 1000, 6, seed) },
+		),
 	)
 
 	return cases

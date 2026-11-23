@@ -168,8 +168,9 @@ func GenerateAssignMatrix(c AssignCorpusCase, trial int) []float64 {
 	return cost
 }
 
-// BuildAssignCorpus constructs the deterministic 22-family, 3-tier Linear Sum Assignment corpus.
-func BuildAssignCorpus() []AssignCorpusCase {
+// AssignCorpusSpecs returns the deterministic 22-family, 3-tier Linear Sum Assignment
+// corpus definitions and per-trial seeds without generating or hashing Trial-0 matrices.
+func AssignCorpusSpecs() []AssignCorpusCase {
 	raw := []AssignCorpusCase{
 		// Tier 1: Small / Micro Suite (N <= 32, 11 trials)
 		{
@@ -406,10 +407,18 @@ func BuildAssignCorpus() []AssignCorpusCase {
 			seeds[k] = assignTrialSeed(raw[i].BaseSeed, k)
 		}
 		raw[i].TrialSeeds = seeds
-		mat0 := GenerateAssignMatrix(raw[i], 0)
-		raw[i].Trial0SHA = MatrixSHA256(mat0)
 	}
 	return raw
+}
+
+// BuildAssignCorpus constructs the deterministic 22-family, 3-tier Linear Sum Assignment
+// corpus including canonical Trial-0 matrix SHA-256 digests.
+func BuildAssignCorpus() []AssignCorpusCase {
+	cases := AssignCorpusSpecs()
+	for i := range cases {
+		cases[i].Trial0SHA = MatrixSHA256(GenerateAssignMatrix(cases[i], 0))
+	}
+	return cases
 }
 
 // WriteAssignCorpusManifest writes testdata/assign_corpus/manifest.json containing all

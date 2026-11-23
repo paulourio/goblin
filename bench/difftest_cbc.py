@@ -20,7 +20,6 @@ variable, `cbc` on PATH, or `third_party/Cbc/dist/bin/cbc`.
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import math
 import os
@@ -32,23 +31,17 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-# Support running directly from the workspace with the sibling PuLP checkout and virtualenv.
-_GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
-_CBC_DIST_DIR = os.path.join(_GOBLIN_ROOT, "third_party", "Cbc", "dist")
-for _cand_site in sorted(
-    glob.glob(
-        os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
-    )
-):
-    if _cand_site not in sys.path:
-        sys.path.insert(0, _cand_site)
-_VENDORED_PULP = os.path.join(_REPO_ROOT, "pulp")
-if (
-    os.path.isdir(os.path.join(_VENDORED_PULP, "pulp"))
-    and _VENDORED_PULP not in sys.path
-):
-    sys.path.insert(0, _VENDORED_PULP)
+# Disable bytecode emission before importing local helpers (pre-commit forbids __pycache__).
+sys.dont_write_bytecode = True
+
+from _bench_common import (
+    CBC_DIST_DIR,
+    GOBLIN_ROOT,
+    bootstrap_venv,
+    prepend_cbc_lib_dir,
+)
+
+bootstrap_venv(include_pulp=True)
 
 import pulp
 
@@ -64,11 +57,7 @@ MODES: dict[str, list[str]] = {
 def make_cbc(options: list[str] | None = None) -> Any:
     """Return a single-threaded CBC solver with a 60 s time limit."""
     opts = options or []
-    cbc_lib_dir = os.path.join(_CBC_DIST_DIR, "lib")
-    if os.path.isdir(cbc_lib_dir):
-        ld = os.environ.get("LD_LIBRARY_PATH", "")
-        if cbc_lib_dir not in ld.split(":"):
-            os.environ["LD_LIBRARY_PATH"] = f"{cbc_lib_dir}:{ld}" if ld else cbc_lib_dir
+    prepend_cbc_lib_dir()
 
     bundled = getattr(pulp, "PULP_CBC_CMD", None)
     if bundled is not None:
@@ -81,7 +70,7 @@ def make_cbc(options: list[str] | None = None) -> Any:
     candidates = [
         os.environ.get("CBC_BIN", ""),
         shutil.which("cbc") or "",
-        os.path.join(_CBC_DIST_DIR, "bin", "cbc"),
+        os.path.join(CBC_DIST_DIR, "bin", "cbc"),
     ]
     for cand in candidates:
         if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
@@ -411,7 +400,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parent.parent
     rng = random.Random(args.seed)
     refs: dict[str, dict[str, Any]] = {}
     with tempfile.TemporaryDirectory(prefix="goblin_difftest_") as tmp:
@@ -436,13 +424,15 @@ def main() -> None:
         for mode, flags in MODES.items():
             out = subprocess.run(
                 ["go", "run", "./cmd/goblin-difftest", "-in", str(inst_path), *flags],
-                cwd=root,
+                cwd=GOBLIN_ROOT,
                 check=True,
                 capture_output=True,
                 text=True,
             ).stdout
             tally: dict[str, int] = {}
             for line in out.splitlines():
+                if not line.strip():
+                    continue
                 got = json.loads(line)
                 verdict = classify(refs[got["id"]], got)
                 key = verdict if verdict in ("ok", "cbc-defect") else "goblin-failure"

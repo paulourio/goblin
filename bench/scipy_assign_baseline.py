@@ -17,80 +17,24 @@ Measures in warm state across K randomized trial instances per family:
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import json
 import os
-import platform
 import statistics
-import subprocess
 import sys
 import time
-from datetime import UTC, datetime
 from typing import Any
 
-# Support running directly from the workspace with the sibling PuLP virtualenv.
-_GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
-for _cand_site in sorted(
-    glob.glob(
-        os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
-    )
-):
-    if _cand_site not in sys.path:
-        sys.path.insert(0, _cand_site)
+# Disable bytecode emission before importing local helpers (pre-commit forbids __pycache__).
+sys.dont_write_bytecode = True
+
+from _bench_common import bootstrap_venv, cpu_affinity, repo_provenance
+
+bootstrap_venv()
 
 import numpy as np
 import scipy
 from scipy.optimize import linear_sum_assignment
-
-
-def _cpu_affinity() -> str:
-    """Return the CPUs allowed for the current process compressed into ranges."""
-    if not hasattr(os, "sched_getaffinity"):
-        return "unknown"
-    cpus = sorted(os.sched_getaffinity(0))
-    ranges: list[str] = []
-    start = prev = cpus[0]
-    for c in [*cpus[1:], -1]:
-        if c != prev + 1:
-            ranges.append(str(start) if start == prev else f"{start}-{prev}")
-            start = c
-        prev = c
-    return ",".join(ranges)
-
-
-def _repo_provenance() -> dict[str, Any]:
-    git_commit = "unknown"
-    git_dirty = True
-    try:
-        git_commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=_GOBLIN_ROOT, text=True, timeout=5
-        ).strip()
-        st = subprocess.check_output(
-            ["git", "status", "--porcelain", "--", ".", ":(exclude)bench/results"],
-            cwd=_GOBLIN_ROOT,
-            text=True,
-            timeout=5,
-        ).strip()
-        git_dirty = len(st) > 0
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-    fp = subprocess.check_output(
-        ["go", "run", "./cmd/goblin-bench", "-print-fingerprint"],
-        cwd=_GOBLIN_ROOT,
-        text=True,
-        timeout=30,
-    ).strip()
-
-    return {
-        "git_commit": git_commit,
-        "git_dirty": git_dirty,
-        "source_fingerprint": fp,
-        "uname_release": platform.uname().release,
-        "measured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
 
 
 def _splitmix64_vec(seed: int, count: int, start_idx: int = 0) -> Any:
@@ -274,7 +218,7 @@ def benchmark_case(
         "trials": trials,
         "scipy_version": str(scipy.__version__),
         "numpy_version": str(np.__version__),
-        "cpu_affinity": _cpu_affinity(),
+        "cpu_affinity": cpu_affinity(),
         "git_commit": prov.get("git_commit", ""),
         "git_dirty": bool(prov.get("git_dirty", True)),
         "source_fingerprint": prov.get("source_fingerprint", ""),
@@ -322,7 +266,7 @@ def main() -> None:
             f"manifest not found at {manifest_path}; run `go run ./cmd/goblin-bench -generate-corpus` first"
         )
 
-    prov = _repo_provenance()
+    prov = repo_provenance()
     with open(manifest_path, "r", encoding="utf-8") as fh:
         manifest = json.load(fh)
 
@@ -330,7 +274,7 @@ def main() -> None:
     _warm_scipy()
 
     print(
-        f"=== SCIPY ({scipy.__version__}) WARM-STATE LSAP BASELINE (CPU={_cpu_affinity()}) ==="
+        f"=== SCIPY ({scipy.__version__}) WARM-STATE LSAP BASELINE (CPU={cpu_affinity()}) ==="
     )
     print(
         f"{'Problem ID':<20} | {'Shape':>11} | {'Prep (ms)':>10} | {'Solve (ms)':>10} | {'Total (ms)':>10} | {'Canonical Obj':>15}"

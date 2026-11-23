@@ -30,7 +30,7 @@ for arg in "$@"; do
         --mad-time=*) MAD_TIME="${arg#*=}" ;;
         --verify-log=*) VERIFY_LOG_ONLY="${arg#*=}" ;;
         *)
-            echo "usage: $0 [--formal] [--phase=assign|mad|all] [--concurrency=4] [--workers=6] [--assign-time=5m] [--sparse-time=10m] [--mad-time=20m]" >&2
+            echo "usage: $0 [--formal] [--phase=assign|mad|all] [--concurrency=5] [--workers=6] [--assign-time=5m] [--sparse-time=10m] [--mad-time=20m] [--verify-log=PATH]" >&2
             exit 2
             ;;
     esac
@@ -145,11 +145,15 @@ echo "  Logs:        ${LOG_DIR}"
 
 declare -A PID_TO_TARGET=()
 FAILURES=0
+INTERRUPTED=0
 
 cleanup() {
+    INTERRUPTED=1
     for pid in "${!PID_TO_TARGET[@]}"; do
         kill -INT "${pid}" 2>/dev/null || true
     done
+    wait 2>/dev/null || true
+    exit 130
 }
 trap cleanup INT TERM
 
@@ -179,19 +183,20 @@ wait_one() {
 
 cd "${GOBLIN_ROOT}"
 for spec in "${JOBS[@]}"; do
+    if [[ "${INTERRUPTED}" -ne 0 ]]; then
+        break
+    fi
     while [[ "${#PID_TO_TARGET[@]}" -ge "${CONCURRENCY}" ]]; do
         wait_one
     done
     IFS='|' read -r pkg target dur <<< "${spec}"
     echo "  [START] ${target} (${pkg}, -fuzztime=${dur}, -parallel=${WORKERS_PER_TARGET})"
-    (
-        GOEXPERIMENT=simd go test \
-            -run='^$' \
-            -fuzz="^${target}$" \
-            -fuzztime="${dur}" \
-            -parallel="${WORKERS_PER_TARGET}" \
-            "${pkg}" > "${LOG_DIR}/${target}.log" 2>&1
-    ) &
+    GOEXPERIMENT=simd go test \
+        -run='^$' \
+        -fuzz="^${target}$" \
+        -fuzztime="${dur}" \
+        -parallel="${WORKERS_PER_TARGET}" \
+        "${pkg}" > "${LOG_DIR}/${target}.log" 2>&1 &
     PID_TO_TARGET[$!]="${target}"
 done
 

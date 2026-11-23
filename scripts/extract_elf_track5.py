@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import struct
 import subprocess
@@ -20,6 +19,21 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+# Disable bytecode emission before importing local modules (pre-commit forbids __pycache__).
+sys.dont_write_bytecode = True
+
+from _elf_common import (
+    build_go_test_elf,
+    format_lean_chunks,
+    format_lean_match_map,
+    parse_elf64_sections,
+    parse_lean_match_body,
+    read_module_path,
+    resolve_repo_root,
+    sign_extend,
+    strip_module_prefixes,
+)
 
 RE_OBJDUMP_TEXT = re.compile(r"^TEXT\s+(\S+)\(SB\)")
 RE_OBJDUMP_INSN = re.compile(r"^\s*\S+\s+0x([0-9a-fA-F]+)\s+([0-9a-fA-F]{8})\s+(.*)$")
@@ -240,42 +254,6 @@ VERIFY_SPECS: tuple[VerifySpec, ...] = (
 )
 
 
-def resolve_repo_root(explicit_root: Path | None) -> Path:
-    """Locate the repository root containing go.mod and formal/lakefile.toml."""
-    root = (
-        explicit_root.resolve()
-        if explicit_root is not None
-        else Path(__file__).resolve().parent.parent
-    )
-    if not (root / "go.mod").is_file():
-        msg = f"missing go.mod under repository root {root}"
-        raise FileNotFoundError(msg)
-    return root
-
-
-def read_module_path(repo_root: Path) -> str:
-    """Read the canonical Go module path from go.mod."""
-    for line in (repo_root / "go.mod").read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("module "):
-            return stripped.split()[1].strip()
-    msg = "module directive missing in go.mod"
-    raise ValueError(msg)
-
-
-def strip_module_prefixes(name: str, module_path: str) -> str:
-    """Remove Go module slash and dot prefixes from linker symbol names."""
-    return name.replace(f"{module_path}/", "").replace(f"{module_path}.", "")
-
-
-def sign_extend(value: int, bits: int) -> int:
-    """Sign-extend an unsigned bitfield of width `bits` to a Python int."""
-    mask = (1 << bits) - 1
-    masked = value & mask
-    sign_bit = 1 << (bits - 1)
-    return masked - (1 << bits) if (masked & sign_bit) else masked
-
-
 def is_supported_arm64_word(word: int) -> bool:
     """Return True when `word` decodes cleanly under Track5A/Track5D ASTs."""
     is64 = ((word >> 31) & 1) == 1
@@ -417,46 +395,13 @@ def build_arm64_test_elf(
     repo_root: Path, out_elf: Path, go_pkg: str, noinline: bool
 ) -> None:
     """Compile a static Linux arm64 test ELF binary for `go_pkg` with `-trimpath`."""
-    env = os.environ.copy()
-    env.update({"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"})
-    cmd = ["go", "test", "-c", "-trimpath"]
-    if noinline:
-        cmd.append("-gcflags=-l")
-    cmd.extend(["-o", str(out_elf), go_pkg])
-    proc = subprocess.run(
-        cmd,
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+    build_go_test_elf(
+        repo_root,
+        out_elf,
+        go_pkg,
+        {"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"},
+        ("-gcflags=-l",) if noinline else (),
     )
-    if proc.returncode != 0:
-        msg = f"command {' '.join(cmd)} failed:\n{proc.stderr}\n{proc.stdout}"
-        raise RuntimeError(msg)
-
-
-def parse_elf64_sections(data: bytes) -> dict[str, tuple[int, int, int]]:
-    """Parse little-endian ELF64 section headers into name -> (vaddr, offset, size)."""
-    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
-        msg = "expected little-endian ELF64 binary"
-        raise ValueError(msg)
-    e_shoff = struct.unpack_from("<Q", data, 40)[0]
-    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", data, 58)
-    raw_secs: list[tuple[int, int, int, int]] = []
-    for i in range(e_shnum):
-        off = e_shoff + i * e_shentsize
-        sh_name, _sh_type, _sh_flags, sh_addr, sh_offset, sh_size = struct.unpack_from(
-            "<IIQQQQ", data, off
-        )
-        raw_secs.append((sh_name, sh_addr, sh_offset, sh_size))
-    str_off = raw_secs[e_shstrndx][2]
-    sections: dict[str, tuple[int, int, int]] = {}
-    for sh_name, sh_addr, sh_offset, sh_size in raw_secs:
-        end = data.find(b"\x00", str_off + sh_name)
-        name = data[str_off + sh_name : end].decode("utf-8", errors="replace")
-        sections[name] = (sh_addr, sh_offset, sh_size)
-    return sections
 
 
 def read_elf64_u64(
@@ -494,7 +439,9 @@ def parse_elf_nm_symbols(
             addr = int(parts[0], 16)
         except ValueError:
             continue
-        by_addr.setdefault(addr, []).append(strip_module_prefixes(parts[2], module_path))
+        by_addr.setdefault(addr, []).append(
+            strip_module_prefixes(parts[2], module_path)
+        )
     return by_addr
 
 
@@ -590,11 +537,11 @@ def verify_adrp_targets(
     return len(actual_rodata), len(actual_data_syms)
 
 
-def verify_fallback_callees(
-    repo_root: Path, elf_path: Path, module_path: str
-) -> None:
+def verify_fallback_callees(repo_root: Path, elf_path: Path, module_path: str) -> None:
     """Verify internal fallback callees have zero allocating runtime calls (A4)."""
-    sym_regex = "|".join(re.escape(s.rsplit(".", maxsplit=1)[-1]) for s in FALLBACK_CALLEES)
+    sym_regex = "|".join(
+        re.escape(s.rsplit(".", maxsplit=1)[-1]) for s in FALLBACK_CALLEES
+    )
     routines = extract_routines_objdump(repo_root, elf_path, sym_regex, module_path)
     for sym in FALLBACK_CALLEES:
         if sym not in routines:
@@ -604,8 +551,7 @@ def verify_fallback_callees(
         for idx, word in enumerate(routine.words):
             if not is_supported_arm64_word(word):
                 msg = (
-                    f"fallback callee {sym}[{idx}]: unsupported ARM64 word "
-                    f"0x{word:08x}"
+                    f"fallback callee {sym}[{idx}]: unsupported ARM64 word 0x{word:08x}"
                 )
                 raise ValueError(msg)
             if (word & 0xFFFFFC1F) == 0xD65F0000 and ((word >> 5) & 0x1F) != 30:
@@ -728,11 +674,7 @@ def format_lean_routine(
             f"({len(words)} insns) for `{routine.symbol}` in {chunk_size}-word chunks. -/"
         )
         lines.append(f"def {lean_prefix}Chunks : List (List UInt32) := [")
-        chunks = [words[i : i + chunk_size] for i in range(0, len(words), chunk_size)]
-        for c_idx, chunk in enumerate(chunks):
-            comma = "," if c_idx + 1 < len(chunks) else ""
-            hex_list = ", ".join(f"0x{w:08x}" for w in chunk)
-            lines.append(f"  [{hex_list}]{comma}")
+        lines.extend(format_lean_chunks(words, chunk_size, 8))
         lines.append("]")
         lines.append(
             f"def {lean_prefix}Words : Array UInt32 := ⟨{lean_prefix}Chunks.flatten⟩"
@@ -750,19 +692,16 @@ def format_lean_routine(
             lines.append(f"  {hex_list}{comma}")
         lines.append("]")
 
-    if not routine.targets:
-        lines.append(f"def {lean_prefix}Targets (_ : Nat) : Option String := none")
-    else:
-        grouped: dict[str, list[int]] = {}
-        for idx in sorted(routine.targets):
-            sym = routine.targets[idx]
-            grouped.setdefault(sym, []).append(idx)
-        lines.append(f"def {lean_prefix}Targets (idx : Nat) : Option String :=")
-        lines.append("  match idx with")
-        for sym, indices in grouped.items():
-            pat = " | ".join(str(i) for i in indices)
-            lines.append(f'  | {pat} => some "{sym}"')
-        lines.append("  | _ => none")
+    lines.extend(
+        format_lean_match_map(
+            f"{lean_prefix}Targets",
+            "idx",
+            "String",
+            routine.targets,
+            "{}",
+            '"{}"',
+        )
+    )
 
     return "\n".join(lines)
 
@@ -785,14 +724,8 @@ def parse_lean_routines(lean_path: Path) -> dict[str, RoutineBinary]:
     routines: dict[str, RoutineBinary] = {}
     for prefix, words in parsed_words.items():
         targets: dict[int, str] = {}
-        match_pat = re.compile(
-            rf"def\s+{re.escape(prefix)}Targets\s*\([^)]*\)\s*:\s*Option\s+String\s*:=\s*"
-            r"match\s+\w+\s+with(.*?)\|\s*_\s*=>\s*none",
-            re.DOTALL,
-        )
-        m_match = match_pat.search(content)
-        if m_match is not None:
-            body = m_match.group(1)
+        body = parse_lean_match_body(content, f"{prefix}Targets", "String")
+        if body is not None:
             for arm in re.finditer(r"\|\s*([0-9|\s]+)=>\s*some\s+\"([^\"]+)\"", body):
                 sym = arm.group(2)
                 for idx_tok in re.findall(r"\d+", arm.group(1)):

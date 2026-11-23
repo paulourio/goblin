@@ -38,8 +38,10 @@ JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)"
 CBC_REV="c1c171ec"
 CLP_REV="9390927"
 if [ -f "${THIRD_PARTY}/VERSIONS" ]; then
-    CBC_REV="$(awk -F= '/^Cbc=/{print $2}' "${THIRD_PARTY}/VERSIONS" | tr -d '[:space:]')"
-    CLP_REV="$(awk -F= '/^Clp=/{print $2}' "${THIRD_PARTY}/VERSIONS" | tr -d '[:space:]')"
+    CBC_REV_FILE="$(awk -F= '/^Cbc=/{print $2}' "${THIRD_PARTY}/VERSIONS" | tr -d '[:space:]')"
+    CLP_REV_FILE="$(awk -F= '/^Clp=/{print $2}' "${THIRD_PARTY}/VERSIONS" | tr -d '[:space:]')"
+    CBC_REV="${CBC_REV_FILE:-${CBC_REV}}"
+    CLP_REV="${CLP_REV_FILE:-${CLP_REV}}"
 fi
 
 if [ "${CLEAN}" -eq 1 ]; then

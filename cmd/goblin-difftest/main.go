@@ -94,64 +94,76 @@ func run() int {
 	enc := jsontext.NewEncoder(out)
 
 	if *assignMode {
-		var assignOpts []assign.Option
+		if code := runAssignLoop(sc, enc, *noSIMD); code != 0 {
+			return code
+		}
+	} else {
+		opts := []gb.Option{
+			gb.WithTimeLimit(*timeLimit),
+			gb.WithPresolve(!*noPresolve),
+			gb.WithCuts(!*noCuts),
+			gb.WithHeuristics(!*noHeur),
+		}
+		switch strings.ToLower(strings.TrimSpace(*backendFlag)) {
+		case "go", "":
+			opts = append(opts, gb.WithPureGo())
+		case "cbc":
+			if !gb.CBCAvailable() {
+				fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built without -tags cbc (or with CGO_ENABLED=0)")
+				return 1
+			}
+			opts = append(opts, gb.WithCBC())
+		default:
+			fmt.Fprintf(os.Stderr, "unknown -backend %q (expected 'go' or 'cbc')\n", *backendFlag)
+			return exitCodeUsage
+		}
 		if *noSIMD {
-			assignOpts = append(assignOpts, assign.WithoutSIMD())
-		} else {
-			assignOpts = append(assignOpts, assign.WithSIMD(true))
+			opts = append(opts, gb.WithoutSIMD())
 		}
-		for sc.Scan() {
-			var line struct {
-				ID    string `json:"id"`
-				Rows  int    `json:"rows"`
-				Cols  int    `json:"cols"`
-				Sense int    `json:"sense"`
-				Cost  []any  `json:"cost"`
-			}
-			if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return 1
-			}
-			ar := solveAssign(line.ID, line.Rows, line.Cols, line.Sense, line.Cost, assignOpts...)
-			if err := json.MarshalEncode(enc, &ar); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return 1
-			}
+		if code := runMILPLoop(sc, enc, opts); code != 0 {
+			return code
 		}
-		if err := sc.Err(); err != nil {
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := out.Flush(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func runAssignLoop(sc *bufio.Scanner, enc *jsontext.Encoder, noSIMD bool) int {
+	var assignOpts []assign.Option
+	if noSIMD {
+		assignOpts = append(assignOpts, assign.WithoutSIMD())
+	} else {
+		assignOpts = append(assignOpts, assign.WithSIMD(true))
+	}
+	for sc.Scan() {
+		var line struct {
+			ID    string `json:"id"`
+			Rows  int    `json:"rows"`
+			Cols  int    `json:"cols"`
+			Sense int    `json:"sense"`
+			Cost  []any  `json:"cost"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		if err := out.Flush(); err != nil {
+		ar := solveAssign(line.ID, line.Rows, line.Cols, line.Sense, line.Cost, assignOpts...)
+		if err := json.MarshalEncode(enc, &ar); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		return 0
 	}
+	return 0
+}
 
-	opts := []gb.Option{
-		gb.WithTimeLimit(*timeLimit),
-		gb.WithPresolve(!*noPresolve),
-		gb.WithCuts(!*noCuts),
-		gb.WithHeuristics(!*noHeur),
-	}
-	switch strings.ToLower(strings.TrimSpace(*backendFlag)) {
-	case "go", "":
-		opts = append(opts, gb.WithPureGo())
-	case "cbc":
-		if !gb.CBCAvailable() {
-			fmt.Fprintln(os.Stderr, "CBC backend requested (-backend cbc), but binary was built without -tags cbc (or with CGO_ENABLED=0)")
-			return 1
-		}
-		opts = append(opts, gb.WithCBC())
-	default:
-		fmt.Fprintf(os.Stderr, "unknown -backend %q (expected 'go' or 'cbc')\n", *backendFlag)
-		return exitCodeUsage
-	}
-	if *noSIMD {
-		opts = append(opts, gb.WithoutSIMD())
-	}
-
+func runMILPLoop(sc *bufio.Scanner, enc *jsontext.Encoder, opts []gb.Option) int {
 	for sc.Scan() {
 		var line struct {
 			ID  string         `json:"id"`
@@ -167,25 +179,12 @@ func run() int {
 			return 1
 		}
 	}
-	if err := sc.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	if err := out.Flush(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
 	return 0
 }
 
 func solve(id string, raw jsontext.Value, opts ...gb.Option) result {
 	r := result{ID: id, BViol: finitePtr(-1), RViol: finitePtr(-1), IViol: finitePtr(-1)}
-	doc, err := format.ParsePuLPJSON(raw)
-	if err != nil {
-		r.Err = err.Error()
-		return r
-	}
-	m, err := format.BuildModelFromPuLPJSON(doc)
+	m, err := format.FromPuLPJSONBytes(raw)
 	if err != nil {
 		r.Err = err.Error()
 		return r

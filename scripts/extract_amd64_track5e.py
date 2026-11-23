@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import struct
@@ -21,8 +20,25 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+# Disable bytecode emission before importing local modules (pre-commit forbids __pycache__).
+sys.dont_write_bytecode = True
+
+from _elf_common import (
+    build_go_test_elf,
+    cstr,
+    format_lean_chunks,
+    format_lean_match_map,
+    parse_elf64_sections,
+    parse_lean_match_body,
+    read_module_path,
+    resolve_repo_root,
+    sign_extend,
+    strip_module_prefixes,
+)
+
 RE_OBJDUMP_TEXT = re.compile(r"^TEXT\s+(\S+)\(SB\)")
 RE_OBJDUMP_INSN = re.compile(r"^\s*\S+\s+0x([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(.*)$")
+RE_GNU_OBJDUMP_INSN = re.compile(r"^\s*([0-9a-f]+):\t([0-9a-f ]+?)\t")
 
 RE_LEAN_BYTE_CHUNKS = re.compile(
     r"def\s+(\w+)ByteChunks\s*:\s*List\s*\(List\s+UInt8\)\s*:=\s*\[(.*?)\]\s*\n"
@@ -79,48 +95,6 @@ VERIFY_SPECS: tuple[VerifySpec, ...] = (
         "internal/simd.initReducedRow64AVX512",
     ),
 )
-
-
-def resolve_repo_root(explicit_root: Path | None) -> Path:
-    """Locate the repository root containing go.mod."""
-    root = (
-        explicit_root.resolve()
-        if explicit_root is not None
-        else Path(__file__).resolve().parent.parent
-    )
-    if not (root / "go.mod").is_file():
-        msg = f"missing go.mod under repository root {root}"
-        raise FileNotFoundError(msg)
-    return root
-
-
-def read_module_path(repo_root: Path) -> str:
-    """Read the canonical Go module path from go.mod."""
-    for line in (repo_root / "go.mod").read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("module "):
-            return stripped.split()[1].strip()
-    msg = "module directive missing in go.mod"
-    raise ValueError(msg)
-
-
-def strip_module_prefixes(name: str, module_path: str) -> str:
-    """Remove Go module slash and dot prefixes from linker symbol names."""
-    return name.replace(f"{module_path}/", "").replace(f"{module_path}.", "")
-
-
-def _cstr(buf: bytes, offset: int) -> str:
-    """Extract a NUL-terminated UTF-8 string from an ELF string table."""
-    end = buf.index(0, offset)
-    return buf[offset:end].decode("utf-8", errors="replace")
-
-
-def _sign_extend(value: int, bits: int) -> int:
-    """Sign-extend an unsigned bitfield to a Python int."""
-    mask = (1 << bits) - 1
-    masked = value & mask
-    sign_bit = 1 << (bits - 1)
-    return masked - (1 << bits) if (masked & sign_bit) else masked
 
 
 def _decode_modrm_len(data: bytes, pos: int) -> tuple[int, bool, int | None]:
@@ -198,12 +172,9 @@ def decode_amd64_insn_span(data: bytes, offset: int) -> DecodedSpan:
             raise ValueError(msg)
         vmap = data[pos + 1] & 0x1F
         op = data[pos + 3]
-        if vmap == 1 and op in (0x59, 0x5C, 0x5D, 0x6E, 0x6F, 0x7F, 0xDB):
-            mlen, is_rip, disp_off = _decode_modrm_len(data, pos + 4)
-            return DecodedSpan(
-                offset, 4 + mlen, "rip_rodata" if is_rip else "vex3", disp_off
-            )
-        if vmap == 2 and op in (0x19, 0x59):
+        if (vmap == 1 and op in (0x59, 0x5C, 0x5D, 0x6E, 0x6F, 0x7F, 0xDB)) or (
+            vmap == 2 and op in (0x19, 0x59)
+        ):
             mlen, is_rip, disp_off = _decode_modrm_len(data, pos + 4)
             return DecodedSpan(
                 offset, 4 + mlen, "rip_rodata" if is_rip else "vex3", disp_off
@@ -224,7 +195,9 @@ def decode_amd64_insn_span(data: bytes, offset: int) -> DecodedSpan:
             raise ValueError(msg)
         emap = data[pos + 1] & 0x07
         op = data[pos + 4]
-        if emap == 1 and op in (0x59, 0x5C, 0x5D, 0x6F, 0x7F, 0xDB):
+        if (emap == 1 and op in (0x59, 0x5C, 0x5D, 0x6F, 0x7F, 0xDB)) or (
+            emap == 2 and op in (0x19, 0x38, 0x39, 0x59, 0x64)
+        ):
             mlen, is_rip, disp_off = _decode_modrm_len(data, pos + 5)
             return DecodedSpan(
                 offset, 5 + mlen, "rip_rodata" if is_rip else "evex", disp_off
@@ -236,11 +209,6 @@ def decode_amd64_insn_span(data: bytes, offset: int) -> DecodedSpan:
                 raise ValueError(msg)
             return DecodedSpan(
                 offset, 5 + mlen + 1, "rip_rodata" if is_rip else "evex", disp_off
-            )
-        if emap == 2 and op in (0x19, 0x38, 0x39, 0x59, 0x64):
-            mlen, is_rip, disp_off = _decode_modrm_len(data, pos + 5)
-            return DecodedSpan(
-                offset, 5 + mlen, "rip_rodata" if is_rip else "evex", disp_off
             )
         msg = f"unsupported EVEX map={emap} opcode=0x{op:02x} at 0x{offset:x}"
         raise ValueError(msg)
@@ -280,7 +248,7 @@ def decode_amd64_insn_span(data: bytes, offset: int) -> DecodedSpan:
         if pos >= n:
             msg = f"truncated rel8 branch at 0x{offset:x}"
             raise ValueError(msg)
-        rel = _sign_extend(data[pos], 8)
+        rel = sign_extend(data[pos], 8)
         next_off = pos + 1
         return DecodedSpan(offset, next_off - offset, "jcc", None, next_off + rel)
     if op == 0xE8:
@@ -391,52 +359,18 @@ def normalize_amd64_routine(routine: Amd64RoutineBinary) -> bytes:
 
 def build_amd64_simd_test_elf(repo_root: Path, out_elf: Path, go_pkg: str) -> None:
     """Compile a deterministic static Linux amd64 GOEXPERIMENT=simd test binary."""
-    env = os.environ.copy()
-    env.update(
+    build_go_test_elf(
+        repo_root,
+        out_elf,
+        go_pkg,
         {
             "CGO_ENABLED": "0",
             "GOOS": "linux",
             "GOARCH": "amd64",
             "GOAMD64": "v1",
             "GOEXPERIMENT": "simd",
-        }
+        },
     )
-    cmd = ["go", "test", "-c", "-trimpath", "-o", str(out_elf), go_pkg]
-    proc = subprocess.run(
-        cmd,
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        msg = f"command {' '.join(cmd)} failed:\n{proc.stderr}\n{proc.stdout}"
-        raise RuntimeError(msg)
-
-
-def _parse_elf64_sections(
-    elf_bytes: bytes,
-) -> dict[str, tuple[int, int, int]]:
-    """Return {section_name: (sh_addr, sh_offset, sh_size)} from ELF64."""
-    if elf_bytes[:4] != b"\x7fELF" or elf_bytes[4] != 2 or elf_bytes[5] != 1:
-        msg = "expected 64-bit little-endian ELF binary"
-        raise ValueError(msg)
-    e_shoff = struct.unpack_from("<Q", elf_bytes, 40)[0]
-    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", elf_bytes, 58)
-    raw_secs: list[tuple[int, int, int, int]] = []
-    for i in range(e_shnum):
-        off = e_shoff + i * e_shentsize
-        sh_name, _sh_type, _sh_flags, sh_addr, sh_offset, sh_size = struct.unpack_from(
-            "<IIQQQQ", elf_bytes, off
-        )
-        raw_secs.append((sh_name, sh_addr, sh_offset, sh_size))
-    _, _, str_off, str_size = raw_secs[e_shstrndx]
-    shstr = elf_bytes[str_off : str_off + str_size]
-    return {
-        _cstr(shstr, sh_name): (sh_addr, sh_offset, sh_size)
-        for sh_name, sh_addr, sh_offset, sh_size in raw_secs
-    }
 
 
 def _parse_elf64_symtab(
@@ -454,7 +388,7 @@ def _parse_elf64_symtab(
         )
         if st_name == 0:
             continue
-        name = _cstr(strtab, st_name)
+        name = cstr(strtab, st_name)
         if name:
             by_name[name] = (st_value, st_size)
             by_addr.setdefault(st_value, []).append(name)
@@ -558,7 +492,7 @@ def _cross_check_go_objdump(
             gnu_spans: list[tuple[int, int]] = []
             g_base: int | None = None
             for line in gproc.stdout.splitlines():
-                mg = re.match(r"^\s*([0-9a-f]+):\t([0-9a-f ]+?)\t", line)
+                mg = RE_GNU_OBJDUMP_INSN.match(line)
                 if mg is not None:
                     gaddr = int(mg.group(1), 16)
                     if g_base is None:
@@ -582,7 +516,7 @@ def extract_amd64_routines(
 ) -> dict[str, Amd64RoutineBinary]:
     """Extract target amd64 functions directly from ELF64 .text and .rodata."""
     elf_bytes = elf_path.read_bytes()
-    sections = _parse_elf64_sections(elf_bytes)
+    sections = parse_elf64_sections(elf_bytes)
     by_name, by_addr = _parse_elf64_symtab(elf_bytes, sections)
     text_addr, text_off, text_size = sections[".text"]
     ro_addr, ro_off, ro_size = sections[".rodata"]
@@ -661,41 +595,31 @@ def format_lean_routine(
         ),
         f"def {lean_prefix}ByteChunks : List (List UInt8) := [",
     ]
-    chunks = [raw[i : i + chunk_size] for i in range(0, len(raw), chunk_size)]
-    for idx, chunk in enumerate(chunks):
-        comma = "," if idx + 1 < len(chunks) else ""
-        hex_list = ", ".join(f"0x{b:02x}" for b in chunk)
-        lines.append(f"  [{hex_list}]{comma}")
+    lines.extend(format_lean_chunks(raw, chunk_size, 2))
     lines.append("]")
     lines.append(
         f"def {lean_prefix}Bytes : Array UInt8 := ⟨{lean_prefix}ByteChunks.flatten⟩"
     )
-
-    if not routine.targets:
-        lines.append(f"def {lean_prefix}Targets (_ : Nat) : Option String := none")
-    else:
-        grouped: dict[str, list[int]] = {}
-        for off in sorted(routine.targets):
-            grouped.setdefault(routine.targets[off], []).append(off)
-        lines.append(f"def {lean_prefix}Targets (off : Nat) : Option String :=")
-        lines.append("  match off with")
-        for sym, offsets in grouped.items():
-            pat = " | ".join(f"0x{o:x}" for o in offsets)
-            lines.append(f'  | {pat} => some "{sym}"')
-        lines.append("  | _ => none")
-
-    if not routine.rodata:
-        lines.append(f"def {lean_prefix}Rodata (_ : Nat) : Option (BitVec 64) := none")
-    else:
-        grouped_ro: dict[int, list[int]] = {}
-        for off in sorted(routine.rodata):
-            grouped_ro.setdefault(routine.rodata[off], []).append(off)
-        lines.append(f"def {lean_prefix}Rodata (off : Nat) : Option (BitVec 64) :=")
-        lines.append("  match off with")
-        for val64, offsets in grouped_ro.items():
-            pat = " | ".join(f"0x{o:x}" for o in offsets)
-            lines.append(f"  | {pat} => some 0x{val64:016x}#64")
-        lines.append("  | _ => none")
+    lines.extend(
+        format_lean_match_map(
+            f"{lean_prefix}Targets",
+            "off",
+            "String",
+            routine.targets,
+            "0x{:x}",
+            '"{}"',
+        )
+    )
+    lines.extend(
+        format_lean_match_map(
+            f"{lean_prefix}Rodata",
+            "off",
+            "(BitVec 64)",
+            routine.rodata,
+            "0x{:x}",
+            "0x{:016x}#64",
+        )
+    )
 
     return "\n".join(lines)
 
@@ -712,31 +636,21 @@ def parse_lean_track5e(lean_path: Path) -> dict[str, Amd64RoutineBinary]:
     routines: dict[str, Amd64RoutineBinary] = {}
     for prefix, raw in parsed_bytes.items():
         targets: dict[int, str] = {}
-        tgt_pat = re.compile(
-            rf"def\s+{re.escape(prefix)}Targets\s*\([^)]*\)\s*:\s*Option\s+String\s*:=\s*"
-            r"match\s+\w+\s+with(.*?)\|\s*_\s*=>\s*none",
-            re.DOTALL,
-        )
-        m_tgt = tgt_pat.search(content)
-        if m_tgt is not None:
+        tgt_body = parse_lean_match_body(content, f"{prefix}Targets", "String")
+        if tgt_body is not None:
             for arm in re.finditer(
-                r"\|\s*([0-9a-fA-Fx|\s]+)=>\s*some\s+\"([^\"]+)\"", m_tgt.group(1)
+                r"\|\s*([0-9a-fA-Fx|\s]+)=>\s*some\s+\"([^\"]+)\"", tgt_body
             ):
                 sym = arm.group(2)
                 for tok in re.findall(r"0x[0-9a-fA-F]+|\d+", arm.group(1)):
                     targets[int(tok, 0)] = sym
 
         rodata: dict[int, int] = {}
-        ro_pat = re.compile(
-            rf"def\s+{re.escape(prefix)}Rodata\s*\([^)]*\)\s*:\s*Option\s*\(BitVec\s+64\)\s*:=\s*"
-            r"match\s+\w+\s+with(.*?)\|\s*_\s*=>\s*none",
-            re.DOTALL,
-        )
-        m_ro = ro_pat.search(content)
-        if m_ro is not None:
+        ro_body = parse_lean_match_body(content, f"{prefix}Rodata", r"\(BitVec\s+64\)")
+        if ro_body is not None:
             for arm in re.finditer(
                 r"\|\s*([0-9a-fA-Fx|\s]+)=>\s*some\s+(0x[0-9a-fA-F]+)#64",
-                m_ro.group(1),
+                ro_body,
             ):
                 val64 = int(arm.group(2), 16)
                 for tok in re.findall(r"0x[0-9a-fA-F]+|\d+", arm.group(1)):

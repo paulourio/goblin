@@ -92,10 +92,6 @@ func durationsMS(d []time.Duration) []float64 {
 // both fields alongside the source hash so downstream checks reject stale or
 // mixed-commit telemetry before rendering markdown tables. Always pin runs to a
 // single core.
-func gitProvenance() (commit string, dirty bool) {
-	return gitProvenanceCtx(context.Background())
-}
-
 func gitProvenanceCtx(ctx context.Context) (commit string, dirty bool) {
 	out, err := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
 	if err != nil {
@@ -145,20 +141,65 @@ func cpuModelName() string {
 	return "unknown"
 }
 
+func extractGOAMD64(settings []debug.BuildSetting, goArch string) string {
+	for _, s := range settings {
+		if s.Key == "GOAMD64" {
+			return s.Value
+		}
+	}
+	if goArch == "amd64" {
+		return "v1"
+	}
+	return goArch
+}
+
 func goAMD64Level() string {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "unknown"
 	}
-	for _, s := range bi.Settings {
-		if s.Key == "GOAMD64" {
-			return s.Value
-		}
+	return extractGOAMD64(bi.Settings, runtime.GOARCH)
+}
+
+type runProvenance struct {
+	gitCommit   string
+	gitDirty    bool
+	fingerprint string
+	cpuModel    string
+	goAMD64     string
+	cpuAffinity string
+	goVersion   string
+	kernelRel   string
+	measuredAt  string
+}
+
+func collectRunProvenance(ctx context.Context) (runProvenance, error) {
+	gitCommit, gitDirty := gitProvenanceCtx(ctx)
+	fingerprint, err := bench.SourceFingerprint(".")
+	if err != nil {
+		return runProvenance{}, fmt.Errorf("source fingerprint: %w", err)
 	}
-	if runtime.GOARCH == "amd64" {
-		return "v1"
+	return runProvenance{
+		gitCommit:   gitCommit,
+		gitDirty:    gitDirty,
+		fingerprint: fingerprint,
+		cpuModel:    cpuModelName(),
+		goAMD64:     goAMD64Level(),
+		cpuAffinity: cpuAffinity(),
+		goVersion:   runtime.Version(),
+		kernelRel:   unameRelease(),
+		measuredAt:  time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func tierTrialCounts(tier string, defaultTrials int) (nTrials, warmup int) {
+	nTrials = defaultTrials
+	warmup = 2
+	if tier == "tier3_large" {
+		nTrials = min(nTrials, tier3MaxTrials)
+		warmup = 1
 	}
-	return runtime.GOARCH
+	return nTrials, warmup
 }
 
 func loadTrialPayloads(corpusDir, id string, nTrials int) ([][]byte, error) {
@@ -280,7 +321,14 @@ func syncAllDocs(corpusDir, pyPath, scalarPath, simdPath, reportPath string, che
 		}
 	}
 	targets := []string{"README.md", "docs/benchmarks.md", "bench/results/final_report.md"}
+	cleanReport := ""
+	if reportPath != "" {
+		cleanReport = filepath.Clean(reportPath)
+	}
 	for _, path := range targets {
+		if cleanReport != "" && filepath.Clean(path) == cleanReport {
+			continue
+		}
 		if _, err := os.Stat(path); err == nil {
 			if err := bench.SyncMarkdownFile(path, tb, checkOnly); err != nil {
 				return err
@@ -320,17 +368,32 @@ func writeJSONReport(path string, v any, label string) {
 	fmt.Printf("\nSaved %stelemetry to %s\n", label, path)
 }
 
-func buildAssignResult(
-	ac bench.AssignCorpusCase,
-	simdActive bool,
-	trialObjs []float64,
-	tPrep, tSolve, tTotal []time.Duration,
-	gitCommit string,
-	gitDirty bool,
-	fingerprint, kernelRel, measuredAt string,
-) bench.AssignBenchResult {
-	solveMeanMS, solveSDMS := meanSDDurationMS(tSolve)
-	totalMeanMS, totalSDMS := meanSDDurationMS(tTotal)
+type assignTrialAcc struct {
+	tPrep  []time.Duration
+	tSolve []time.Duration
+	tTotal []time.Duration
+	objs   []float64
+}
+
+func newAssignTrialAcc(n int) assignTrialAcc {
+	return assignTrialAcc{
+		tPrep:  make([]time.Duration, 0, n),
+		tSolve: make([]time.Duration, 0, n),
+		tTotal: make([]time.Duration, 0, n),
+		objs:   make([]float64, 0, n),
+	}
+}
+
+func (a *assignTrialAcc) record(prepD, solveD, totalD time.Duration, obj float64) {
+	a.tPrep = append(a.tPrep, prepD)
+	a.tSolve = append(a.tSolve, solveD)
+	a.tTotal = append(a.tTotal, totalD)
+	a.objs = append(a.objs, obj)
+}
+
+func buildAssignResult(ac bench.AssignCorpusCase, simdActive bool, acc *assignTrialAcc, prov runProvenance) bench.AssignBenchResult {
+	solveMeanMS, solveSDMS := meanSDDurationMS(acc.tSolve)
+	totalMeanMS, totalSDMS := meanSDDurationMS(acc.tTotal)
 	return bench.AssignBenchResult{
 		ID:                ac.ID,
 		Tier:              ac.Tier,
@@ -340,26 +403,26 @@ func buildAssignResult(
 		Family:            ac.Family,
 		SIMDEnabled:       simdActive,
 		SIMDTier:          simd.ActiveSIMDTierWith(!simdActive),
-		CPUModel:          cpuModelName(),
-		GOAMD64:           goAMD64Level(),
-		Objective:         trialObjs[0],
-		TrialObjectives:   trialObjs,
-		TPrepMS:           medianDurationMS(tPrep),
-		TSolveMS:          medianDurationMS(tSolve),
-		TTotalMS:          medianDurationMS(tTotal),
+		CPUModel:          prov.cpuModel,
+		GOAMD64:           prov.goAMD64,
+		Objective:         acc.objs[0],
+		TrialObjectives:   acc.objs,
+		TPrepMS:           medianDurationMS(acc.tPrep),
+		TSolveMS:          medianDurationMS(acc.tSolve),
+		TTotalMS:          medianDurationMS(acc.tTotal),
 		TSolveMeanMS:      solveMeanMS,
 		TSolveSDMS:        solveSDMS,
 		TTotalMeanMS:      totalMeanMS,
 		TTotalSDMS:        totalSDMS,
-		TSolveTrialsMS:    durationsMS(tSolve),
-		TTotalTrialsMS:    durationsMS(tTotal),
-		GitCommit:         gitCommit,
-		GitDirty:          gitDirty,
-		GoVersion:         runtime.Version(),
-		SourceFingerprint: fingerprint,
-		CPUAffinity:       cpuAffinity(),
-		UnameRelease:      kernelRel,
-		MeasuredAt:        measuredAt,
+		TSolveTrialsMS:    durationsMS(acc.tSolve),
+		TTotalTrialsMS:    durationsMS(acc.tTotal),
+		GitCommit:         prov.gitCommit,
+		GitDirty:          prov.gitDirty,
+		GoVersion:         prov.goVersion,
+		SourceFingerprint: prov.fingerprint,
+		CPUAffinity:       prov.cpuAffinity,
+		UnameRelease:      prov.kernelRel,
+		MeasuredAt:        prov.measuredAt,
 	}
 }
 
@@ -385,26 +448,23 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 		}
 	}
 
-	assignCases := bench.BuildAssignCorpus()
+	assignCases := bench.AssignCorpusSpecs()
 	results := make(map[string]bench.AssignBenchResult, len(assignCases))
 	var scalarResults map[string]bench.AssignBenchResult
 	if paired {
 		scalarResults = make(map[string]bench.AssignBenchResult, len(assignCases))
 	}
-	gitCommit, gitDirty := gitProvenance()
-	kernelRel := unameRelease()
-	measuredAt := time.Now().UTC().Format(time.RFC3339)
-	fingerprint, err := bench.SourceFingerprint(".")
+	ctx := context.Background()
+	prov, err := collectRunProvenance(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	if gitDirty && (outPath != "" || pairedScalarOut != "") {
+	if prov.gitDirty && (outPath != "" || pairedScalarOut != "") {
 		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
 	}
 
 	// Warm up workspace pool and solver paths before timed trials.
-	ctx := context.Background()
 	ws := assign.AcquireWorkspace(warmAssignMaxDim, warmAssignMaxDim)
 	assign.ReleaseWorkspace(ws)
 	for range 5 {
@@ -425,8 +485,8 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 
 	simdActive := simd.UsingHardwareSIMDWith(noSIMD)
 	fmt.Printf("=== GOBLIN ASSIGN WARM-STATE BENCHMARK SUITE (SIMD=%v, Tier=%s/%s, GOAMD64=%s, Paired=%v) ===\n",
-		simdActive, simd.ActiveSIMDTierWith(noSIMD), simd.HardwareSIMDTier(), goAMD64Level(), paired)
-	fmt.Printf("CPU: %s\n\n", cpuModelName())
+		simdActive, simd.ActiveSIMDTierWith(noSIMD), simd.HardwareSIMDTier(), prov.goAMD64, paired)
+	fmt.Printf("CPU: %s\n\n", prov.cpuModel)
 	fmt.Printf("%-18s | %9s | %10s %10s | %10s %10s | %8s | %7s\n",
 		"Problem ID", "Shape",
 		"SciPySolve", "GoSolve",
@@ -438,27 +498,11 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 	simdOpts := []assign.Option{assign.WithSIMD(true)}
 
 	for _, ac := range assignCases {
-		nTrials := defaultTrials
-		if ac.Tier == "tier3_large" {
-			nTrials = min(nTrials, tier3MaxTrials)
-		}
-		warmup := 2
-		if ac.Tier == "tier3_large" {
-			warmup = 1
-		}
-
-		tPrep := make([]time.Duration, 0, nTrials)
-		tSolve := make([]time.Duration, 0, nTrials)
-		tTotal := make([]time.Duration, 0, nTrials)
-		trialObjs := make([]float64, 0, nTrials)
-
-		var scPrep, scSolve, scTotal []time.Duration
-		var scObjs []float64
+		nTrials, warmup := tierTrialCounts(ac.Tier, defaultTrials)
+		mainAcc := newAssignTrialAcc(nTrials)
+		var scAcc assignTrialAcc
 		if paired {
-			scPrep = make([]time.Duration, 0, nTrials)
-			scSolve = make([]time.Duration, 0, nTrials)
-			scTotal = make([]time.Duration, 0, nTrials)
-			scObjs = make([]float64, 0, nTrials)
+			scAcc = newAssignTrialAcc(nTrials)
 		}
 
 		runOne := func(trialIdx int, opts []assign.Option) (prepD, solveD, totalD time.Duration, obj float64) {
@@ -481,10 +525,7 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 			if !paired {
 				pD, sD, totD, obj := runOne(trialIdx, assignOpts)
 				if i >= warmup {
-					tPrep = append(tPrep, pD)
-					tSolve = append(tSolve, sD)
-					tTotal = append(tTotal, totD)
-					trialObjs = append(trialObjs, obj)
+					mainAcc.record(pD, sD, totD, obj)
 				}
 				continue
 			}
@@ -498,22 +539,16 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 				pSc, sSc, totSc, objSc = runOne(trialIdx, scalarOpts)
 			}
 			if i >= warmup {
-				scPrep = append(scPrep, pSc)
-				scSolve = append(scSolve, sSc)
-				scTotal = append(scTotal, totSc)
-				scObjs = append(scObjs, objSc)
-				tPrep = append(tPrep, pSm)
-				tSolve = append(tSolve, sSm)
-				tTotal = append(tTotal, totSm)
-				trialObjs = append(trialObjs, objSm)
+				scAcc.record(pSc, sSc, totSc, objSc)
+				mainAcc.record(pSm, sSm, totSm, objSm)
 			}
 		}
 
-		r := buildAssignResult(ac, simdActive, trialObjs, tPrep, tSolve, tTotal, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt)
+		r := buildAssignResult(ac, simdActive, &mainAcc, prov)
 		results[ac.ID] = r
 		displayRes := r
 		if paired {
-			sr := buildAssignResult(ac, false, scObjs, scPrep, scSolve, scTotal, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt)
+			sr := buildAssignResult(ac, false, &scAcc, prov)
 			scalarResults[ac.ID] = sr
 			displayRes = sr
 		}
@@ -680,6 +715,114 @@ type milpJobResult struct {
 	scalarCanon  gb.Result
 }
 
+type milpTrialSample struct {
+	compiled *gb.CompiledProblem
+	res      gb.Result
+	dParse   time.Duration
+	dBuild   time.Duration
+	dCompile time.Duration
+	dSolve   time.Duration
+	dTotal   time.Duration
+	dMPS     time.Duration
+}
+
+type milpTrialAcc struct {
+	tParse, tBuild, tCompile, tMPS, tSolve, tTotal []time.Duration
+	objs                                           []float64
+	statuses                                       []string
+	compiledTrials                                 []*gb.CompiledProblem
+	canonCompiled                                  *gb.CompiledProblem
+	canonRes                                       gb.Result
+	lpTimes                                        []time.Duration
+	canonRootLP                                    gb.LPResult
+}
+
+func newMILPTrialAcc(n int) milpTrialAcc {
+	return milpTrialAcc{
+		tParse:         make([]time.Duration, 0, n),
+		tBuild:         make([]time.Duration, 0, n),
+		tCompile:       make([]time.Duration, 0, n),
+		tMPS:           make([]time.Duration, 0, n),
+		tSolve:         make([]time.Duration, 0, n),
+		tTotal:         make([]time.Duration, 0, n),
+		objs:           make([]float64, 0, n),
+		statuses:       make([]string, 0, n),
+		compiledTrials: make([]*gb.CompiledProblem, 0, n),
+	}
+}
+
+func (a *milpTrialAcc) record(trialIdx int, s milpTrialSample) {
+	if trialIdx == 0 {
+		a.canonCompiled = s.compiled
+		a.canonRes = s.res
+	}
+	a.compiledTrials = append(a.compiledTrials, s.compiled)
+	a.objs = append(a.objs, s.res.Objective)
+	a.statuses = append(a.statuses, s.res.Status.String())
+	a.tParse = append(a.tParse, s.dParse)
+	a.tBuild = append(a.tBuild, s.dBuild)
+	a.tCompile = append(a.tCompile, s.dCompile)
+	a.tSolve = append(a.tSolve, s.dSolve)
+	a.tTotal = append(a.tTotal, s.dTotal)
+	a.tMPS = append(a.tMPS, s.dMPS)
+}
+
+func runMILPTrialPass(rawBytes []byte, mpsBuf *bytes.Buffer, opts []gb.Option) milpTrialSample {
+	t0 := time.Now()
+	model, err := format.FromPuLPJSONBytes(rawBytes)
+	if err != nil {
+		panic(err)
+	}
+	t1 := time.Now()
+	t2 := t1
+	compiled := model.Compile()
+	t3 := time.Now()
+	res, err := gb.SolveCompiled(context.Background(), compiled, opts...)
+	if err != nil {
+		panic(err)
+	}
+	t4 := time.Now()
+	mpsBuf.Reset()
+	if err := format.WriteMPS(compiled, mpsBuf); err != nil {
+		panic(err)
+	}
+	t5 := time.Now()
+	return milpTrialSample{
+		compiled: compiled,
+		res:      res,
+		dParse:   t1.Sub(t0),
+		dBuild:   t2.Sub(t1),
+		dCompile: t3.Sub(t2),
+		dSolve:   t4.Sub(t3),
+		dTotal:   t4.Sub(t0),
+		dMPS:     t5.Sub(t4),
+	}
+}
+
+func solveRootLPOne(cp *gb.CompiledProblem, backend gb.Backend, noSIMD bool) (time.Duration, gb.LPResult) {
+	var dt time.Duration
+	var lpRes gb.LPResult
+	if backend == gb.BackendCBC {
+		t0 := time.Now()
+		lpSolver := gb.NewCBCLPSolver(cp)
+		lpRes = lpSolver.Solve()
+		dt = time.Since(t0)
+		lpSolver.Close()
+	} else {
+		t0 := time.Now()
+		ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
+		lpSolver := gb.NewLPSolver(cp, ws)
+		lpSolver.DisableSIMD = noSIMD
+		lpRes = lpSolver.Solve()
+		gb.ReleaseWorkspace(ws)
+		dt = time.Since(t0)
+	}
+	if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
+		panic(fmt.Sprintf("root LP relaxation failed on %s (backend=%v, noSIMD=%v): status=%v", cp.Name(), backend, noSIMD, lpRes.Status))
+	}
+	return dt, lpRes
+}
+
 func measureRootLPRelaxation(
 	canonicalCompiled *gb.CompiledProblem,
 	compiledTrials []*gb.CompiledProblem,
@@ -694,26 +837,7 @@ func measureRootLPRelaxation(
 		if i >= warmup {
 			cp = compiledTrials[i-warmup]
 		}
-		var dt time.Duration
-		var lpRes gb.LPResult
-		if backend == gb.BackendCBC {
-			t0 := time.Now()
-			lpSolver := gb.NewCBCLPSolver(cp)
-			lpRes = lpSolver.Solve()
-			dt = time.Since(t0)
-			lpSolver.Close()
-		} else {
-			t0 := time.Now()
-			ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
-			lpSolver := gb.NewLPSolver(cp, ws)
-			lpSolver.DisableSIMD = noSIMD
-			lpRes = lpSolver.Solve()
-			gb.ReleaseWorkspace(ws)
-			dt = time.Since(t0)
-		}
-		if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
-			panic(fmt.Sprintf("root LP relaxation failed on %s (backend=%v): status=%v", cp.Name(), backend, lpRes.Status))
-		}
+		dt, lpRes := solveRootLPOne(cp, backend, noSIMD)
 		if i >= warmup {
 			if i == warmup {
 				canonicalRootLP = lpRes
@@ -731,113 +855,37 @@ func benchSingleCorpusCase(
 	simdActive bool,
 	baseOpts []gb.Option,
 	mpsBuf *bytes.Buffer,
-	gitCommit string,
-	gitDirty bool,
-	fingerprint string,
-	kernelRel string,
-	measuredAt string,
+	prov runProvenance,
 ) (bench.ProblemBenchResult, gb.Result) {
-	nTrials := cfg.trials
-	if c.Tier == "tier3_large" {
-		nTrials = min(nTrials, tier3MaxTrials)
-	}
-	warmup := 2
-	if c.Tier == "tier3_large" {
-		warmup = 1
-	}
-
+	nTrials, warmup := tierTrialCounts(c.Tier, cfg.trials)
 	trialPayloads, err := loadTrialPayloads(cfg.corpusDir, c.ID, nTrials)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "missing %s: %v\n", c.ID, err)
 		os.Exit(1)
 	}
 
-	tParse := make([]time.Duration, 0, nTrials)
-	tBuild := make([]time.Duration, 0, nTrials)
-	tCompile := make([]time.Duration, 0, nTrials)
-	tMPS := make([]time.Duration, 0, nTrials)
-	tSolve := make([]time.Duration, 0, nTrials)
-	tTotal := make([]time.Duration, 0, nTrials)
-	trialObjs := make([]float64, 0, nTrials)
-	trialStatuses := make([]string, 0, nTrials)
-	compiledTrials := make([]*gb.CompiledProblem, 0, nTrials)
-
-	var canonicalRes gb.Result
-	var canonicalCompiled *gb.CompiledProblem
-
+	acc := newMILPTrialAcc(nTrials)
 	for i := range warmup + nTrials {
 		rawBytes := trialPayloads[0]
 		if i >= warmup {
 			rawBytes = trialPayloads[i-warmup]
 		}
-
-		t0 := time.Now()
-		model, err := format.FromPuLPJSONBytes(rawBytes)
-		if err != nil {
-			panic(err)
-		}
-		t1 := time.Now()
-		t2 := t1
-		compiled := model.Compile()
-		t3 := time.Now()
-		res, err := gb.SolveCompiled(context.Background(), compiled, baseOpts...)
-		if err != nil {
-			panic(err)
-		}
-		t4 := time.Now()
-
-		mpsBuf.Reset()
-		if err := format.WriteMPS(compiled, mpsBuf); err != nil {
-			panic(err)
-		}
-		t5 := time.Now()
-
+		sample := runMILPTrialPass(rawBytes, mpsBuf, baseOpts)
 		if i >= warmup {
-			trialIdx := i - warmup
-			if trialIdx == 0 {
-				canonicalCompiled = compiled
-				canonicalRes = res
-			}
-			compiledTrials = append(compiledTrials, compiled)
-			trialObjs = append(trialObjs, res.Objective)
-			trialStatuses = append(trialStatuses, res.Status.String())
-			tParse = append(tParse, t1.Sub(t0))
-			tBuild = append(tBuild, t2.Sub(t1))
-			tCompile = append(tCompile, t3.Sub(t2))
-			tSolve = append(tSolve, t4.Sub(t3))
-			tTotal = append(tTotal, t4.Sub(t0))
-			tMPS = append(tMPS, t5.Sub(t4))
+			acc.record(i-warmup, sample)
 		}
 	}
 
-	lpTimes, canonicalRootLP := measureRootLPRelaxation(canonicalCompiled, compiledTrials, warmup, nTrials, backend, cfg.noSIMD)
-	res := buildMILPBenchResult(
-		c, backend, simdActive,
-		canonicalCompiled, canonicalRes, compiledTrials,
-		trialObjs, trialStatuses,
-		tParse, tBuild, tCompile, tMPS, tSolve, tTotal,
-		lpTimes, canonicalRootLP,
-		cfg.noSIMD, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
-	)
-	return res, canonicalRes
+	acc.lpTimes, acc.canonRootLP = measureRootLPRelaxation(acc.canonCompiled, acc.compiledTrials, warmup, nTrials, backend, cfg.noSIMD)
+	return buildMILPBenchResult(c, backend, simdActive, cfg.noSIMD, &acc, prov), acc.canonRes
 }
 
 func buildMILPBenchResult(
 	c bench.CorpusCase,
 	backend gb.Backend,
-	simdActive bool,
-	canonicalCompiled *gb.CompiledProblem,
-	canonicalRes gb.Result,
-	compiledTrials []*gb.CompiledProblem,
-	trialObjs []float64,
-	trialStatuses []string,
-	tParse, tBuild, tCompile, tMPS, tSolve, tTotal []time.Duration,
-	lpTimes []time.Duration,
-	canonicalRootLP gb.LPResult,
-	noSIMD bool,
-	gitCommit string,
-	gitDirty bool,
-	fingerprint, kernelRel, measuredAt string,
+	simdActive, noSIMD bool,
+	acc *milpTrialAcc,
+	prov runProvenance,
 ) bench.ProblemBenchResult {
 	cpTrials := 3
 	if c.Tier == "tier3_large" {
@@ -845,7 +893,7 @@ func buildMILPBenchResult(
 	}
 	cpTimeout := cpTimeoutMS * time.Millisecond
 
-	cp4 := runCheckpoint(compiledTrials, cpTrials,
+	cp4 := runCheckpoint(acc.compiledTrials, cpTrials,
 		gb.WithBackend(backend),
 		gb.WithSIMD(!noSIMD),
 		gb.WithPresolve(false),
@@ -857,7 +905,7 @@ func buildMILPBenchResult(
 		gb.WithTimeLimit(cpTimeout),
 	)
 
-	cp5 := runCheckpoint(compiledTrials, cpTrials,
+	cp5 := runCheckpoint(acc.compiledTrials, cpTrials,
 		gb.WithBackend(backend),
 		gb.WithSIMD(!noSIMD),
 		gb.WithPresolve(true),
@@ -869,7 +917,7 @@ func buildMILPBenchResult(
 		gb.WithTimeLimit(cpTimeout),
 	)
 
-	cp6 := runCheckpoint(compiledTrials, cpTrials,
+	cp6 := runCheckpoint(acc.compiledTrials, cpTrials,
 		gb.WithBackend(backend),
 		gb.WithSIMD(!noSIMD),
 		gb.WithPresolve(true),
@@ -883,54 +931,54 @@ func buildMILPBenchResult(
 	)
 
 	cp7 := bench.CheckpointMetrics{
-		Status:     canonicalRes.Status.String(),
-		Objective:  canonicalRes.Objective,
-		BestBound:  canonicalRes.BestBound,
-		Nodes:      canonicalRes.Nodes,
-		Iterations: canonicalRes.Iterations,
-		CutsAdded:  canonicalRes.CutsAdded,
-		TimeMS:     medianDurationMS(tSolve),
+		Status:     acc.canonRes.Status.String(),
+		Objective:  acc.canonRes.Objective,
+		BestBound:  acc.canonRes.BestBound,
+		Nodes:      acc.canonRes.Nodes,
+		Iterations: acc.canonRes.Iterations,
+		CutsAdded:  acc.canonRes.CutsAdded,
+		TimeMS:     medianDurationMS(acc.tSolve),
 	}
 
 	simdTierStr := ""
 	if backend == gb.BackendGo {
 		simdTierStr = simd.ActiveSIMDTierWith(noSIMD)
 	}
-	goMeanMS, goSDMS := meanSDDurationMS(tTotal)
+	goMeanMS, goSDMS := meanSDDurationMS(acc.tTotal)
 	return bench.ProblemBenchResult{
 		ID:                c.ID,
 		Tier:              c.Tier,
-		NumVars:           canonicalCompiled.NumVars(),
-		NumConstraints:    canonicalCompiled.NumConstraints(),
-		IsMIP:             canonicalCompiled.IsMIP(),
+		NumVars:           acc.canonCompiled.NumVars(),
+		NumConstraints:    acc.canonCompiled.NumConstraints(),
+		IsMIP:             acc.canonCompiled.IsMIP(),
 		Backend:           backend.String(),
 		SIMDEnabled:       simdActive,
 		SIMDTier:          simdTierStr,
-		CPUModel:          cpuModelName(),
-		GOAMD64:           goAMD64Level(),
-		TrialObjectives:   trialObjs,
-		TrialStatuses:     trialStatuses,
-		TParseMS:          medianDurationMS(tParse),
-		TBuildMS:          medianDurationMS(tBuild),
-		TCompileMS:        medianDurationMS(tCompile),
-		TMPSWriteMS:       medianDurationMS(tMPS),
-		TSolveMS:          medianDurationMS(tSolve),
-		TTotalMS:          medianDurationMS(tTotal),
+		CPUModel:          prov.cpuModel,
+		GOAMD64:           prov.goAMD64,
+		TrialObjectives:   acc.objs,
+		TrialStatuses:     acc.statuses,
+		TParseMS:          medianDurationMS(acc.tParse),
+		TBuildMS:          medianDurationMS(acc.tBuild),
+		TCompileMS:        medianDurationMS(acc.tCompile),
+		TMPSWriteMS:       medianDurationMS(acc.tMPS),
+		TSolveMS:          medianDurationMS(acc.tSolve),
+		TTotalMS:          medianDurationMS(acc.tTotal),
 		TTotalMeanMS:      goMeanMS,
 		TTotalSDMS:        goSDMS,
-		TSolveTrialsMS:    durationsMS(tSolve),
-		TTotalTrialsMS:    durationsMS(tTotal),
-		GitCommit:         gitCommit,
-		GitDirty:          gitDirty,
-		GoVersion:         runtime.Version(),
-		SourceFingerprint: fingerprint,
-		CPUAffinity:       cpuAffinity(),
-		UnameRelease:      kernelRel,
-		MeasuredAt:        measuredAt,
-		RootLPTimeMS:      medianDurationMS(lpTimes),
-		RootLPIters:       canonicalRootLP.Iterations,
-		RootLPObj:         canonicalRootLP.Objective,
-		RootLPStatus:      canonicalRootLP.Status.String(),
+		TSolveTrialsMS:    durationsMS(acc.tSolve),
+		TTotalTrialsMS:    durationsMS(acc.tTotal),
+		GitCommit:         prov.gitCommit,
+		GitDirty:          prov.gitDirty,
+		GoVersion:         prov.goVersion,
+		SourceFingerprint: prov.fingerprint,
+		CPUAffinity:       prov.cpuAffinity,
+		UnameRelease:      prov.kernelRel,
+		MeasuredAt:        prov.measuredAt,
+		RootLPTimeMS:      medianDurationMS(acc.lpTimes),
+		RootLPIters:       acc.canonRootLP.Iterations,
+		RootLPObj:         acc.canonRootLP.Objective,
+		RootLPStatus:      acc.canonRootLP.Status.String(),
 		CP4Baseline:       cp4,
 		CP5Presolve:       cp5,
 		CP6Cuts:           cp6,
@@ -942,145 +990,41 @@ func benchPairedCorpusCase(
 	c bench.CorpusCase,
 	cfg milpSuiteConfig,
 	mpsBuf *bytes.Buffer,
-	gitCommit string,
-	gitDirty bool,
-	fingerprint, kernelRel, measuredAt string,
+	prov runProvenance,
 ) (simdBench, scalarBench bench.ProblemBenchResult, simdCanon, scalarCanon gb.Result) {
-	nTrials := cfg.trials
-	if c.Tier == "tier3_large" {
-		nTrials = min(nTrials, tier3MaxTrials)
-	}
-	warmup := 2
-	if c.Tier == "tier3_large" {
-		warmup = 1
-	}
-
+	nTrials, warmup := tierTrialCounts(c.Tier, cfg.trials)
 	trialPayloads, err := loadTrialPayloads(cfg.corpusDir, c.ID, nTrials)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "missing %s: %v\n", c.ID, err)
 		os.Exit(1)
 	}
 
-	type trialSample struct {
-		compiled *gb.CompiledProblem
-		res      gb.Result
-		dParse   time.Duration
-		dBuild   time.Duration
-		dCompile time.Duration
-		dSolve   time.Duration
-		dTotal   time.Duration
-		dMPS     time.Duration
-	}
-
-	runPass := func(rawBytes []byte, opts []gb.Option) trialSample {
-		t0 := time.Now()
-		model, pErr := format.FromPuLPJSONBytes(rawBytes)
-		if pErr != nil {
-			panic(pErr)
-		}
-		t1 := time.Now()
-		t2 := t1
-		compiled := model.Compile()
-		t3 := time.Now()
-		res, sErr := gb.SolveCompiled(context.Background(), compiled, opts...)
-		if sErr != nil {
-			panic(sErr)
-		}
-		t4 := time.Now()
-		mpsBuf.Reset()
-		if wErr := format.WriteMPS(compiled, mpsBuf); wErr != nil {
-			panic(wErr)
-		}
-		t5 := time.Now()
-		return trialSample{
-			compiled: compiled,
-			res:      res,
-			dParse:   t1.Sub(t0),
-			dBuild:   t2.Sub(t1),
-			dCompile: t3.Sub(t2),
-			dSolve:   t4.Sub(t3),
-			dTotal:   t4.Sub(t0),
-			dMPS:     t5.Sub(t4),
-		}
-	}
-
 	scalarOpts := []gb.Option{gb.WithPureGo(), gb.WithoutSIMD()}
 	simdOpts := []gb.Option{gb.WithPureGo(), gb.WithSIMD(true)}
-
-	type accBuf struct {
-		tParse, tBuild, tCompile, tMPS, tSolve, tTotal []time.Duration
-		objs                                           []float64
-		statuses                                       []string
-		compiledTrials                                 []*gb.CompiledProblem
-		canonCompiled                                  *gb.CompiledProblem
-		canonRes                                       gb.Result
-	}
-	newAcc := func() accBuf {
-		return accBuf{
-			tParse:         make([]time.Duration, 0, nTrials),
-			tBuild:         make([]time.Duration, 0, nTrials),
-			tCompile:       make([]time.Duration, 0, nTrials),
-			tMPS:           make([]time.Duration, 0, nTrials),
-			tSolve:         make([]time.Duration, 0, nTrials),
-			tTotal:         make([]time.Duration, 0, nTrials),
-			objs:           make([]float64, 0, nTrials),
-			statuses:       make([]string, 0, nTrials),
-			compiledTrials: make([]*gb.CompiledProblem, 0, nTrials),
-		}
-	}
-	scAcc := newAcc()
-	smAcc := newAcc()
-	record := func(dst *accBuf, trialIdx int, s trialSample) {
-		if trialIdx == 0 {
-			dst.canonCompiled = s.compiled
-			dst.canonRes = s.res
-		}
-		dst.compiledTrials = append(dst.compiledTrials, s.compiled)
-		dst.objs = append(dst.objs, s.res.Objective)
-		dst.statuses = append(dst.statuses, s.res.Status.String())
-		dst.tParse = append(dst.tParse, s.dParse)
-		dst.tBuild = append(dst.tBuild, s.dBuild)
-		dst.tCompile = append(dst.tCompile, s.dCompile)
-		dst.tSolve = append(dst.tSolve, s.dSolve)
-		dst.tTotal = append(dst.tTotal, s.dTotal)
-		dst.tMPS = append(dst.tMPS, s.dMPS)
-	}
+	scAcc := newMILPTrialAcc(nTrials)
+	smAcc := newMILPTrialAcc(nTrials)
 
 	for i := range warmup + nTrials {
 		rawBytes := trialPayloads[0]
 		if i >= warmup {
 			rawBytes = trialPayloads[i-warmup]
 		}
-		var sSc, sSm trialSample
+		var sSc, sSm milpTrialSample
 		if i%2 == 0 {
-			sSc = runPass(rawBytes, scalarOpts)
-			sSm = runPass(rawBytes, simdOpts)
+			sSc = runMILPTrialPass(rawBytes, mpsBuf, scalarOpts)
+			sSm = runMILPTrialPass(rawBytes, mpsBuf, simdOpts)
 		} else {
-			sSm = runPass(rawBytes, simdOpts)
-			sSc = runPass(rawBytes, scalarOpts)
+			sSm = runMILPTrialPass(rawBytes, mpsBuf, simdOpts)
+			sSc = runMILPTrialPass(rawBytes, mpsBuf, scalarOpts)
 		}
 		if i >= warmup {
-			record(&scAcc, i-warmup, sSc)
-			record(&smAcc, i-warmup, sSm)
+			scAcc.record(i-warmup, sSc)
+			smAcc.record(i-warmup, sSm)
 		}
 	}
 
-	scLP := make([]time.Duration, 0, nTrials)
-	smLP := make([]time.Duration, 0, nTrials)
-	var scRootRes, smRootRes gb.LPResult
-	runOneLP := func(cp *gb.CompiledProblem, noSIMD bool) (time.Duration, gb.LPResult) {
-		t0 := time.Now()
-		ws := gb.AcquireWorkspace(cp.NumVars(), cp.NumConstraints())
-		lpSolver := gb.NewLPSolver(cp, ws)
-		lpSolver.DisableSIMD = noSIMD
-		lpRes := lpSolver.Solve()
-		gb.ReleaseWorkspace(ws)
-		dt := time.Since(t0)
-		if lpRes.Status != gb.StatusOptimal && lpRes.Status != gb.StatusInfeasible && lpRes.Status != gb.StatusUnbounded {
-			panic(fmt.Sprintf("paired root LP relaxation failed on %s (noSIMD=%v): status=%v", cp.Name(), noSIMD, lpRes.Status))
-		}
-		return dt, lpRes
-	}
+	scAcc.lpTimes = make([]time.Duration, 0, nTrials)
+	smAcc.lpTimes = make([]time.Duration, 0, nTrials)
 	for i := range warmup + nTrials {
 		cpSc, cpSm := scAcc.canonCompiled, smAcc.canonCompiled
 		if i >= warmup {
@@ -1090,32 +1034,24 @@ func benchPairedCorpusCase(
 		var dSc, dSm time.Duration
 		var rSc, rSm gb.LPResult
 		if i%2 == 0 {
-			dSc, rSc = runOneLP(cpSc, true)
-			dSm, rSm = runOneLP(cpSm, false)
+			dSc, rSc = solveRootLPOne(cpSc, gb.BackendGo, true)
+			dSm, rSm = solveRootLPOne(cpSm, gb.BackendGo, false)
 		} else {
-			dSm, rSm = runOneLP(cpSm, false)
-			dSc, rSc = runOneLP(cpSc, true)
+			dSm, rSm = solveRootLPOne(cpSm, gb.BackendGo, false)
+			dSc, rSc = solveRootLPOne(cpSc, gb.BackendGo, true)
 		}
 		if i >= warmup {
 			if i == warmup {
-				scRootRes = rSc
-				smRootRes = rSm
+				scAcc.canonRootLP = rSc
+				smAcc.canonRootLP = rSm
 			}
-			scLP = append(scLP, dSc)
-			smLP = append(smLP, dSm)
+			scAcc.lpTimes = append(scAcc.lpTimes, dSc)
+			smAcc.lpTimes = append(smAcc.lpTimes, dSm)
 		}
 	}
 
-	scalarBench = buildMILPBenchResult(
-		c, gb.BackendGo, false, scAcc.canonCompiled, scAcc.canonRes, scAcc.compiledTrials,
-		scAcc.objs, scAcc.statuses, scAcc.tParse, scAcc.tBuild, scAcc.tCompile, scAcc.tMPS, scAcc.tSolve, scAcc.tTotal,
-		scLP, scRootRes, true, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
-	)
-	simdBench = buildMILPBenchResult(
-		c, gb.BackendGo, true, smAcc.canonCompiled, smAcc.canonRes, smAcc.compiledTrials,
-		smAcc.objs, smAcc.statuses, smAcc.tParse, smAcc.tBuild, smAcc.tCompile, smAcc.tMPS, smAcc.tSolve, smAcc.tTotal,
-		smLP, smRootRes, false, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
-	)
+	scalarBench = buildMILPBenchResult(c, gb.BackendGo, false, true, &scAcc, prov)
+	simdBench = buildMILPBenchResult(c, gb.BackendGo, true, false, &smAcc, prov)
 	return simdBench, scalarBench, smAcc.canonRes, scAcc.canonRes
 }
 
@@ -1163,23 +1099,20 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 	if paired {
 		scalarResults = make(map[string]bench.ProblemBenchResult, len(cases))
 	}
-	gitCommit, gitDirty := gitProvenance()
-	kernelRel := unameRelease()
-	measuredAt := time.Now().UTC().Format(time.RFC3339)
-	fingerprint, err := bench.SourceFingerprint(".")
+	prov, err := collectRunProvenance(context.Background())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "source fingerprint: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	if gitDirty && (cfg.outPath != "" || cfg.pairedScalarOut != "") {
+	if prov.gitDirty && (cfg.outPath != "" || cfg.pairedScalarOut != "") {
 		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
 	}
 
 	simdActive := backend == gb.BackendGo && simd.UsingHardwareSIMDWith(cfg.noSIMD)
 	nWorkers := max(1, cfg.workers)
 	fmt.Printf("=== GOBLIN WARM-STATE MULTI-TRIAL BENCHMARK SUITE (Backend=%s, SIMD=%v, Tier=%s/%s, GOAMD64=%s, Paired=%v, Workers=%d) ===\n",
-		backend, simdActive, simd.ActiveSIMDTierWith(cfg.noSIMD), simd.HardwareSIMDTier(), goAMD64Level(), paired, nWorkers)
-	fmt.Printf("CPU: %s\n\n", cpuModelName())
+		backend, simdActive, simd.ActiveSIMDTierWith(cfg.noSIMD), simd.HardwareSIMDTier(), prov.goAMD64, paired, nWorkers)
+	fmt.Printf("CPU: %s\n\n", prov.cpuModel)
 	fmt.Printf("%-18s | %5s %4s | %8s %8s | %8s %8s | %9s %9s | %7s | %7s\n",
 		"Problem ID", "Vars", "Rows",
 		"PyPrep", "GoPrep",
@@ -1206,9 +1139,7 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 
 			for idx := range jobCh {
 				if paired {
-					smRes, scRes, smCanon, scCanon := benchPairedCorpusCase(
-						cases[idx], cfg, &mpsBuf, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
-					)
+					smRes, scRes, smCanon, scCanon := benchPairedCorpusCase(cases[idx], cfg, &mpsBuf, prov)
 					jobResults[idx] = milpJobResult{
 						idx:          idx,
 						res:          smRes,
@@ -1218,9 +1149,7 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 					}
 					continue
 				}
-				res, canonicalRes := benchSingleCorpusCase(
-					cases[idx], cfg, backend, simdActive, baseOpts, &mpsBuf, gitCommit, gitDirty, fingerprint, kernelRel, measuredAt,
-				)
+				res, canonicalRes := benchSingleCorpusCase(cases[idx], cfg, backend, simdActive, baseOpts, &mpsBuf, prov)
 				jobResults[idx] = milpJobResult{
 					idx:          idx,
 					res:          res,
@@ -1463,18 +1392,44 @@ func readBinaryBuildMeta(binPath string) (goVer, goOS, goArch, goAMD64 string, e
 			goOS = s.Value
 		case "GOARCH":
 			goArch = s.Value
-		case "GOAMD64":
-			goAMD64 = s.Value
 		}
 	}
-	if goAMD64 == "" {
-		if goArch == "amd64" {
-			goAMD64 = "v1"
-		} else {
-			goAMD64 = goArch
+	return bi.GoVersion, goOS, goArch, extractGOAMD64(bi.Settings, goArch), nil
+}
+
+func parseNMSymbolStats(nmOut string, entry *bench.BinarySizeEntry) {
+	for line := range strings.SplitSeq(nmOut, "\n") {
+		m := reNMLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		sz, errSz := strconv.ParseInt(m[1], 10, 64)
+		if errSz != nil {
+			continue
+		}
+		typ := m[2]
+		sym := m[3]
+		isGoblinPkg := strings.HasPrefix(sym, "github.com/paulourio/goblin")
+		if (typ == "T" || typ == "t") && isGoblinPkg {
+			entry.GoblinTextBytes += sz
+		}
+		if strings.Contains(sym, "math/big") {
+			entry.MathBigSyms++
+			entry.MathBigBytes += sz
+		}
+		if strings.Contains(sym, "encoding/json") {
+			entry.EncodingJSONSyms++
+			entry.EncodingJSONBytes += sz
+		}
+		if isGoblinPkg && reVIPRSym.MatchString(sym) {
+			entry.VIPRSyms++
+			entry.VIPRBytes += sz
+		}
+		if isGoblinPkg && reCertSym.MatchString(sym) {
+			entry.CertSyms++
+			entry.CertBytes += sz
 		}
 	}
-	return bi.GoVersion, goOS, goArch, goAMD64, nil
 }
 
 func measureBinarySizeSuite(ctx context.Context) (map[string]bench.BinarySizeEntry, error) {
@@ -1485,14 +1440,11 @@ func measureBinarySizeSuite(ctx context.Context) (map[string]bench.BinarySizeEnt
 	if _, err := os.Stat(filepath.Join(absRoot, "go.mod")); err != nil {
 		return nil, fmt.Errorf("missing go.mod in %s: %w", absRoot, err)
 	}
-	gitCommit, gitDirty := gitProvenanceCtx(ctx)
-	kernelRel := unameRelease()
-	measuredAt := time.Now().UTC().Format(time.RFC3339)
-	fingerprint, err := bench.SourceFingerprint(".")
+	prov, err := collectRunProvenance(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("source fingerprint: %w", err)
+		return nil, err
 	}
-	if gitDirty {
+	if prov.gitDirty {
 		fmt.Fprintln(os.Stderr, "warning: working tree is dirty; binary size telemetry will be marked git_dirty=true")
 	}
 
@@ -1579,50 +1531,18 @@ func measureBinarySizeSuite(ctx context.Context) (map[string]bench.BinarySizeEnt
 			StrippedBytes:     stripBytes,
 			SIMDRawBytes:      simdRawBytes,
 			SIMDStrippedBytes: simdStripBytes,
-			GitCommit:         gitCommit,
-			GitDirty:          gitDirty,
+			GitCommit:         prov.gitCommit,
+			GitDirty:          prov.gitDirty,
 			DefaultGoVersion:  defVer,
 			SIMDGoVersion:     simdVer,
 			GOOS:              goOS,
 			GOARCH:            goArch,
 			GOAMD64:           goAMD64,
-			SourceFingerprint: fingerprint,
-			UnameRelease:      kernelRel,
-			MeasuredAt:        measuredAt,
+			SourceFingerprint: prov.fingerprint,
+			UnameRelease:      prov.kernelRel,
+			MeasuredAt:        prov.measuredAt,
 		}
-
-		for line := range strings.SplitSeq(string(nmRaw), "\n") {
-			m := reNMLine.FindStringSubmatch(line)
-			if m == nil {
-				continue
-			}
-			sz, errSz := strconv.ParseInt(m[1], 10, 64)
-			if errSz != nil {
-				continue
-			}
-			typ := m[2]
-			sym := m[3]
-			isGoblinPkg := strings.HasPrefix(sym, "github.com/paulourio/goblin")
-			if (typ == "T" || typ == "t") && isGoblinPkg {
-				entry.GoblinTextBytes += sz
-			}
-			if strings.Contains(sym, "math/big") {
-				entry.MathBigSyms++
-				entry.MathBigBytes += sz
-			}
-			if strings.Contains(sym, "encoding/json") {
-				entry.EncodingJSONSyms++
-				entry.EncodingJSONBytes += sz
-			}
-			if isGoblinPkg && reVIPRSym.MatchString(sym) {
-				entry.VIPRSyms++
-				entry.VIPRBytes += sz
-			}
-			if isGoblinPkg && reCertSym.MatchString(sym) {
-				entry.CertSyms++
-				entry.CertBytes += sz
-			}
-		}
+		parseNMSymbolStats(string(nmRaw), &entry)
 
 		results[sp.id] = entry
 		fmt.Printf("%-24s | %8.1f / %7.1fK | %8.1f / %7.1fK | %8.1f K | %5d %5d %5d %5d\n",

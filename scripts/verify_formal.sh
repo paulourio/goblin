@@ -33,33 +33,37 @@ check_verified() {
     fi
 }
 
-check_subcmd_pos_neg() {
+check_pos_neg() {
     local exe="$1"
     local subcmd="$2"
-    local pos_json="$3"
-    local neg_json="$4"
-    local expect_re="$5"
-    local label="${6:-${subcmd}}"
+    local label="$3"
+    local pos_json="$4"
+    local neg_json="$5"
+    local expect_re="$6"
+    local -a cmd=("${exe}")
+    if [ -n "${subcmd}" ]; then
+        cmd+=("${subcmd}")
+    fi
     local out jsonl_out
 
-    out="$(printf '%s\n' "${pos_json}" | "${exe}" "${subcmd}" -)"
+    out="$(printf '%s\n' "${pos_json}" | "${cmd[@]}" -)"
     if ! printf '%s\n' "${out}" | grep -Eq "${expect_re}"; then
         printf 'ERROR: %s %s positive CLI check failed: %s\n' "${exe}" "${label}" "${out}" >&2
         exit 1
     fi
 
-    jsonl_out="$(printf '%s\n' "${pos_json}" | "${exe}" "${subcmd}" --jsonl)"
+    jsonl_out="$(printf '%s\n' "${pos_json}" | "${cmd[@]}" --jsonl)"
     if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":true'; then
         printf 'ERROR: %s %s --jsonl positive check failed: %s\n' "${exe}" "${label}" "${jsonl_out}" >&2
         exit 1
     fi
 
-    if printf '%s\n' "${neg_json}" | "${exe}" "${subcmd}" - >/dev/null 2>&1; then
+    if printf '%s\n' "${neg_json}" | "${cmd[@]}" - >/dev/null 2>&1; then
         printf 'ERROR: %s %s accepted negative payload.\n' "${exe}" "${label}" >&2
         exit 1
     fi
 
-    jsonl_out="$(printf '%s\n' "${neg_json}" | "${exe}" "${subcmd}" --jsonl)"
+    jsonl_out="$(printf '%s\n' "${neg_json}" | "${cmd[@]}" --jsonl)"
     if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":false'; then
         printf 'ERROR: %s %s --jsonl accepted negative payload: %s\n' "${exe}" "${label}" "${jsonl_out}" >&2
         exit 1
@@ -68,38 +72,23 @@ check_subcmd_pos_neg() {
     printf '  [OK] %s %s (CLI + --jsonl positive and negative)\n' "$(basename "${exe}")" "${label}"
 }
 
+check_subcmd_pos_neg() {
+    local exe="$1"
+    local subcmd="$2"
+    local pos_json="$3"
+    local neg_json="$4"
+    local expect_re="$5"
+    local label="${6:-${subcmd}}"
+    check_pos_neg "${exe}" "${subcmd}" "${label}" "${pos_json}" "${neg_json}" "${expect_re}"
+}
+
 check_stdin_pos_neg() {
     local exe="$1"
     local label="$2"
     local pos_json="$3"
     local neg_json="$4"
     local expect_re="$5"
-    local out jsonl_out
-
-    out="$(printf '%s\n' "${pos_json}" | "${exe}" -)"
-    if ! printf '%s\n' "${out}" | grep -Eq "${expect_re}"; then
-        printf 'ERROR: %s (%s) positive CLI check failed: %s\n' "${exe}" "${label}" "${out}" >&2
-        exit 1
-    fi
-
-    jsonl_out="$(printf '%s\n' "${pos_json}" | "${exe}" --jsonl)"
-    if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":true'; then
-        printf 'ERROR: %s (%s) --jsonl positive check failed: %s\n' "${exe}" "${label}" "${jsonl_out}" >&2
-        exit 1
-    fi
-
-    if printf '%s\n' "${neg_json}" | "${exe}" - >/dev/null 2>&1; then
-        printf 'ERROR: %s (%s) accepted negative payload.\n' "${exe}" "${label}" >&2
-        exit 1
-    fi
-
-    jsonl_out="$(printf '%s\n' "${neg_json}" | "${exe}" --jsonl)"
-    if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":false'; then
-        printf 'ERROR: %s (%s) --jsonl accepted negative payload: %s\n' "${exe}" "${label}" "${jsonl_out}" >&2
-        exit 1
-    fi
-
-    printf '  [OK] %s %s (CLI + --jsonl positive and negative)\n' "$(basename "${exe}")" "${label}"
+    check_pos_neg "${exe}" "" "${label}" "${pos_json}" "${neg_json}" "${expect_re}"
 }
 
 check_neg_cli_and_jsonl() {
@@ -107,21 +96,17 @@ check_neg_cli_and_jsonl() {
     local label="$2"
     local subcmd="$3"
     local neg_json="$4"
+    local -a cmd=("${exe}")
+    if [ -n "${subcmd}" ]; then
+        cmd+=("${subcmd}")
+    fi
     local jsonl_out
 
-    if [ -n "${subcmd}" ]; then
-        if printf '%s\n' "${neg_json}" | "${exe}" "${subcmd}" - >/dev/null 2>&1; then
-            printf 'ERROR: %s %s (%s) accepted negative payload.\n' "${exe}" "${subcmd}" "${label}" >&2
-            exit 1
-        fi
-        jsonl_out="$(printf '%s\n' "${neg_json}" | "${exe}" "${subcmd}" --jsonl)"
-    else
-        if printf '%s\n' "${neg_json}" | "${exe}" - >/dev/null 2>&1; then
-            printf 'ERROR: %s (%s) accepted negative payload.\n' "${exe}" "${label}" >&2
-            exit 1
-        fi
-        jsonl_out="$(printf '%s\n' "${neg_json}" | "${exe}" --jsonl)"
+    if printf '%s\n' "${neg_json}" | "${cmd[@]}" - >/dev/null 2>&1; then
+        printf 'ERROR: %s %s accepted negative payload.\n' "${exe}" "${label}" >&2
+        exit 1
     fi
+    jsonl_out="$(printf '%s\n' "${neg_json}" | "${cmd[@]}" --jsonl)"
 
     if ! printf '%s\n' "${jsonl_out}" | grep -q '"ok":false'; then
         printf 'ERROR: %s (%s) --jsonl accepted negative payload: %s\n' "${exe}" "${label}" "${jsonl_out}" >&2

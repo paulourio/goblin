@@ -276,6 +276,9 @@ func readJSON(path string, dst any) error {
 	return nil
 }
 
+func isZeroPair(syms int, bytes int64) bool { return syms == 0 && bytes == 0 }
+func isPosPair(syms int, bytes int64) bool  { return syms > 0 && bytes > 0 }
+
 // ValidateBinarySizeTelemetry checks that all four canonical binary-size profiles are present with
 // positive byte counts and satisfy the linker dead-code-elimination zero-leakage invariants.
 func ValidateBinarySizeTelemetry(binMap map[string]BinarySizeEntry) error {
@@ -304,26 +307,26 @@ func ValidateBinarySizeTelemetry(binMap map[string]BinarySizeEntry) error {
 		}
 		switch id {
 		case "assign_default":
-			if bs.MathBigSyms != 0 || bs.MathBigBytes != 0 || bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 ||
-				bs.VIPRSyms != 0 || bs.VIPRBytes != 0 || bs.CertSyms != 0 || bs.CertBytes != 0 {
+			if !isZeroPair(bs.MathBigSyms, bs.MathBigBytes) || !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
+				!isZeroPair(bs.VIPRSyms, bs.VIPRBytes) || !isZeroPair(bs.CertSyms, bs.CertBytes) {
 				return fmt.Errorf("assign_default linker DCE violation: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want all 0",
 					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
 			}
 		case "assign_certified":
-			if bs.MathBigSyms != 0 || bs.MathBigBytes != 0 || bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 ||
-				bs.VIPRSyms != 0 || bs.VIPRBytes != 0 || bs.CertSyms <= 0 || bs.CertBytes <= 0 {
+			if !isZeroPair(bs.MathBigSyms, bs.MathBigBytes) || !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
+				!isZeroPair(bs.VIPRSyms, bs.VIPRBytes) || !isPosPair(bs.CertSyms, bs.CertBytes) {
 				return fmt.Errorf("assign_certified symbol invariant failed: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want 0/0/0 and cert>0",
 					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
 			}
 		case "goblin_default":
-			if bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 || bs.VIPRSyms != 0 || bs.VIPRBytes != 0 ||
-				bs.CertSyms != 0 || bs.CertBytes != 0 {
+			if !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
+				!isZeroPair(bs.VIPRSyms, bs.VIPRBytes) || !isZeroPair(bs.CertSyms, bs.CertBytes) {
 				return fmt.Errorf("goblin_default linker DCE violation: json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want all 0",
 					bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
 			}
 		case "goblin_certified_vipr":
-			if bs.EncodingJSONSyms != 0 || bs.EncodingJSONBytes != 0 || bs.VIPRSyms <= 0 || bs.VIPRBytes <= 0 ||
-				bs.CertSyms <= 0 || bs.CertBytes <= 0 {
+			if !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
+				!isPosPair(bs.VIPRSyms, bs.VIPRBytes) || !isPosPair(bs.CertSyms, bs.CertBytes) {
 				return fmt.Errorf("goblin_certified_vipr symbol invariant failed: json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want json=0 and vipr,cert>0",
 					bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
 			}
@@ -348,6 +351,14 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 		return fmt.Errorf("simd telemetry has %d entries, corpus has %d", len(tb.SIMD), len(cases))
 	}
 
+	milpMaps := []struct {
+		label string
+		m     map[string]ProblemBenchResult
+	}{
+		{"scalar", tb.Scalar},
+		{"simd", tb.SIMD},
+	}
+
 	var mismatches []string
 	for _, c := range cases {
 		compiled := c.Model.Compile()
@@ -364,20 +375,20 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 			return fmt.Errorf("python baseline dimension mismatch for %q: got (%d, %d), want (%d, %d)",
 				c.ID, py.NumVars, py.NumConstraints, compiled.NumVars(), compiled.NumConstraints())
 		}
-		for label, m := range map[string]map[string]ProblemBenchResult{"scalar": tb.Scalar, "simd": tb.SIMD} {
-			r, ok := m[c.ID]
+		for _, item := range milpMaps {
+			r, ok := item.m[c.ID]
 			if !ok {
-				return fmt.Errorf("missing %q in %s telemetry", c.ID, label)
+				return fmt.Errorf("missing %q in %s telemetry", c.ID, item.label)
 			}
 			if r.NumVars != compiled.NumVars() || r.NumConstraints != compiled.NumConstraints() {
 				return fmt.Errorf("%s telemetry dimension mismatch for %q: got (%d, %d), want (%d, %d)",
-					label, c.ID, r.NumVars, r.NumConstraints, compiled.NumVars(), compiled.NumConstraints())
+					item.label, c.ID, r.NumVars, r.NumConstraints, compiled.NumVars(), compiled.NumConstraints())
 			}
 		}
 		mismatches = append(mismatches, CheckParity(tb, c.ID)...)
 	}
 
-	assignCases := BuildAssignCorpus()
+	assignCases := AssignCorpusSpecs()
 	assignManifest := filepath.Join(filepath.Dir(corpusDir), "assign_corpus", "manifest.json")
 	if _, err := os.Stat(assignManifest); err != nil {
 		return fmt.Errorf("missing assign corpus manifest %s: %w", assignManifest, err)
@@ -391,6 +402,15 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 	if len(tb.AssignSIMD) != len(assignCases) {
 		return fmt.Errorf("assign simd telemetry has %d entries, assign corpus has %d", len(tb.AssignSIMD), len(assignCases))
 	}
+
+	assignMaps := []struct {
+		label string
+		m     map[string]AssignBenchResult
+	}{
+		{"assign_scalar", tb.AssignScalar},
+		{"assign_simd", tb.AssignSIMD},
+	}
+
 	for _, ac := range assignCases {
 		sp, ok := tb.SciPyAssign[ac.ID]
 		if !ok {
@@ -400,14 +420,14 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 			return fmt.Errorf("scipy assign dimension mismatch for %q: got (%d, %d), want (%d, %d)",
 				ac.ID, sp.Rows, sp.Cols, ac.Rows, ac.Cols)
 		}
-		for label, m := range map[string]map[string]AssignBenchResult{"assign_scalar": tb.AssignScalar, "assign_simd": tb.AssignSIMD} {
-			r, ok := m[ac.ID]
+		for _, item := range assignMaps {
+			r, ok := item.m[ac.ID]
 			if !ok {
-				return fmt.Errorf("missing %q in %s telemetry", ac.ID, label)
+				return fmt.Errorf("missing %q in %s telemetry", ac.ID, item.label)
 			}
 			if r.Rows != ac.Rows || r.Cols != ac.Cols {
 				return fmt.Errorf("%s telemetry dimension mismatch for %q: got (%d, %d), want (%d, %d)",
-					label, ac.ID, r.Rows, r.Cols, ac.Rows, ac.Cols)
+					item.label, ac.ID, r.Rows, r.Cols, ac.Rows, ac.Cols)
 			}
 		}
 		mismatches = append(mismatches, CheckAssignParity(tb, ac.ID)...)
@@ -740,16 +760,19 @@ func medianMinMax(vals []float64) (med, minV, maxV float64) {
 	return med, cp[0], cp[n-1]
 }
 
+var tCrit975Table = [...]float64{
+	0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+	2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
+}
+
 // tCrit975 returns the two-sided 95% Student-t critical value for df degrees of freedom,
 // using exact tabulated values for df <= 20 and a 4-term Cornish-Fisher expansion for df >= 21.
 func tCrit975(df int) float64 {
-	table := []float64{0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
-		2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086}
 	if df <= 0 {
 		return math.Inf(1)
 	}
-	if df < len(table) {
-		return table[df]
+	if df < len(tCrit975Table) {
+		return tCrit975Table[df]
 	}
 	z := zCrit975
 	z2 := z * z
@@ -768,44 +791,7 @@ func tCrit975(df int) float64 {
 	return z + g1*inv + g2*inv2 + g3*inv3 + g4*inv4
 }
 
-// familyClusteredRatio returns the equal-family geometric mean over per-family geometric means
-// and its two-sided 95% Student-t_{F-1} confidence interval on family log-means.
-func familyClusteredRatio(famGMs []float64) (gm, lo, hi float64) {
-	var logs []float64
-	for _, g := range famGMs {
-		if g > 0 && !math.IsNaN(g) && !math.IsInf(g, 0) {
-			logs = append(logs, math.Log(g))
-		}
-	}
-	f := len(logs)
-	if f == 0 {
-		return math.NaN(), math.NaN(), math.NaN()
-	}
-	mean := 0.0
-	for _, v := range logs {
-		mean += v
-	}
-	mean /= float64(f)
-	if f < minPairedSamples {
-		return math.Exp(mean), math.Inf(-1), math.Inf(1)
-	}
-	ss := 0.0
-	for _, v := range logs {
-		ss += (v - mean) * (v - mean)
-	}
-	half := tCrit975(f-1) * math.Sqrt(ss/float64(f-1)) / math.Sqrt(float64(f))
-	return math.Exp(mean), math.Exp(mean - half), math.Exp(mean + half)
-}
-
-// pairedRatio returns the geometric-mean ratio a[k]/b[k] over paired trials and its 95%
-// t-interval computed on the log ratios.
-func pairedRatio(a, b []float64) (gm, lo, hi float64, n int) {
-	var logs []float64
-	for k := range min(len(a), len(b)) {
-		if a[k] > 0 && b[k] > 0 {
-			logs = append(logs, math.Log(a[k]/b[k]))
-		}
-	}
+func logMeanTCI(logs []float64) (gm, lo, hi float64, n int) {
 	n = len(logs)
 	if n == 0 {
 		return math.NaN(), math.NaN(), math.NaN(), 0
@@ -824,6 +810,39 @@ func pairedRatio(a, b []float64) (gm, lo, hi float64, n int) {
 	}
 	half := tCrit975(n-1) * math.Sqrt(ss/float64(n-1)) / math.Sqrt(float64(n))
 	return math.Exp(mean), math.Exp(mean - half), math.Exp(mean + half), n
+}
+
+// familyClusteredRatio returns the equal-family geometric mean over per-family geometric means
+// and its two-sided 95% Student-t_{F-1} confidence interval on family log-means.
+func familyClusteredRatio(famGMs []float64) (gm, lo, hi float64) {
+	var logs []float64
+	for _, g := range famGMs {
+		if g > 0 && !math.IsNaN(g) && !math.IsInf(g, 0) {
+			logs = append(logs, math.Log(g))
+		}
+	}
+	gm, lo, hi, _ = logMeanTCI(logs)
+	return gm, lo, hi
+}
+
+// pairedRatio returns the geometric-mean ratio a[k]/b[k] over paired trials and its 95%
+// t-interval computed on the log ratios.
+func pairedRatio(a, b []float64) (gm, lo, hi float64, n int) {
+	var logs []float64
+	for k := range min(len(a), len(b)) {
+		if a[k] > 0 && b[k] > 0 {
+			logs = append(logs, math.Log(a[k]/b[k]))
+		}
+	}
+	return logMeanTCI(logs)
+}
+
+func pairedRatioOrFallback(aTrials, bTrials []float64, aMed, bMed float64) float64 {
+	r, _, _, _ := pairedRatio(aTrials, bTrials)
+	if math.IsNaN(r) {
+		return aMed / max(bMed, geoMeanMinFloor)
+	}
+	return r
 }
 
 func formatCP45(cp CheckpointMetrics) string {
@@ -882,10 +901,10 @@ func affinityList(set map[string]bool) string {
 // >= 32) can occur; below it both builds run the same scalar kernels.
 const simdReachSize = 32
 
-// simdVerdict classifies one paired scalar/SIMD comparison. Instances below simdReachSize
+// simdVerdict classifies one paired scalar/SIMD comparison. Unreachable instances
 // are negative controls: an interval excluding 1 there is noise, never a SIMD effect.
-func simdVerdict(size int, lo, hi float64, n int) (reach, verdict string) {
-	if size < simdReachSize {
+func simdVerdict(reachable bool, lo, hi float64, n int) (reach, verdict string) {
+	if !reachable {
 		if n >= minPairedSamples && (lo > 1 || hi < 1) {
 			return "no (control)", "identical source; interval excludes 1 (build/run effect)"
 		}
@@ -902,6 +921,59 @@ func simdVerdict(size int, lo, hi float64, n int) (reach, verdict string) {
 	return "possible", "no detectable effect"
 }
 
+type simdTally struct {
+	controls        int
+	controlsFlagged int
+	reachable       int
+	faster          int
+	slower          int
+}
+
+func (t *simdTally) observe(reachable bool, scalarTrials, simdTrials []float64) {
+	_, lo, hi, n := pairedRatio(scalarTrials, simdTrials)
+	if n < minPairedSamples {
+		return
+	}
+	if !reachable {
+		t.controls++
+		if lo > 1 || hi < 1 {
+			t.controlsFlagged++
+		}
+		return
+	}
+	t.reachable++
+	switch {
+	case lo > 1:
+		t.faster++
+	case hi < 1:
+		t.slower++
+	}
+}
+
+type subsetSpec[T any] struct {
+	label  string
+	filter func(T) bool
+}
+
+type docgenCorpus struct {
+	cases       []CorpusCase
+	assignCases []AssignCorpusCase
+}
+
+func (dc *docgenCorpus) milp() []CorpusCase {
+	if dc.cases == nil {
+		dc.cases = BuildCorpus()
+	}
+	return dc.cases
+}
+
+func (dc *docgenCorpus) assign() []AssignCorpusCase {
+	if dc.assignCases == nil {
+		dc.assignCases = AssignCorpusSpecs()
+	}
+	return dc.assignCases
+}
+
 // cbcBackendDescription states which CBC build and flag mapping produced goblin_cbc.json.
 const cbcBackendDescription = "COIN-OR CBC/CLP `devel` (commit `c1c171ec`, vendored in `third_party/Cbc` and built with `-O3 -DNDEBUG`), linked in-process through `cgo` when built with `-tags cbc` (`gb.WithCBC()`). " +
 	"Both Python `PuLP + CBC` and in-process `BackendCBC` run the same `c1c171ec` solver stack at matching `1e-6` relative and absolute MIP gap tolerances; untouched default settings map `MaxCutPasses` to `passC = 30` and `MaxNodes` to unlimited on `BackendCBC`, while honoring explicit `WithMaxNodes` and `WithMaxCutPasses` overrides."
@@ -911,48 +983,51 @@ const cbcBackendDescription = "COIN-OR CBC/CLP `devel` (commit `c1c171ec`, vendo
 // All headline timings use the default pure-Go scalar backend (`goblin` default). The
 // GOEXPERIMENT=simd build is compared to it only in SIMD_EFFECT_TABLE, with paired statistics.
 func RenderBlock(blockName string, tb *TelemetryBundle) (string, error) {
-	cases := BuildCorpus()
+	return renderBlockWith(blockName, tb, &docgenCorpus{})
+}
+
+func renderBlockWith(blockName string, tb *TelemetryBundle, dc *docgenCorpus) (string, error) {
 	var b bytes.Buffer
 
 	switch blockName {
 	case "TIER_SUMMARY_TABLE":
-		renderTierSummaryTable(&b, cases, tb)
+		renderTierSummaryTable(&b, dc.milp(), tb)
 	case "README_MILP_SUMMARY_TABLE":
-		renderReadmeMILPSummaryTable(&b, cases, tb)
+		renderReadmeMILPSummaryTable(&b, dc.milp(), tb)
 	case "SIMD_EFFECT_TABLE":
-		renderSIMDEffectTable(&b, cases, tb)
+		renderSIMDEffectTable(&b, dc.milp(), tb)
 	case "SIMD_SUMMARY":
-		renderSIMDSummary(&b, cases, tb)
+		renderSIMDSummary(&b, dc.milp(), tb)
 	case "MAD_PIPELINE_TABLE":
-		renderMADPipelineTable(&b, cases, tb)
+		renderMADPipelineTable(&b, dc.milp(), tb)
 	case "README_MAD_SUMMARY_TABLE":
-		renderReadmeMADSummaryTable(&b, cases, tb)
+		renderReadmeMADSummaryTable(&b, dc.milp(), tb)
 	case "MAD_CBC_GAP_TABLE":
-		renderMADCBCGapTable(&b, cases, tb)
+		renderMADCBCGapTable(&b, dc.milp(), tb)
 	case "NON_MAD_CBC_GAP_TABLE":
 		renderNonMADCBCGapTable(&b, tb)
 	case "MAD_STATS_TABLE":
-		renderMADStatsTable(&b, cases, tb)
+		renderMADStatsTable(&b, dc.milp(), tb)
 	case "MAD_CHECKPOINT_TABLE":
-		renderCheckpointTable(&b, cases, tb, true)
+		renderCheckpointTable(&b, dc.milp(), tb, true)
 	case "FULL_CHECKPOINT_TABLE":
-		renderCheckpointTable(&b, cases, tb, false)
+		renderCheckpointTable(&b, dc.milp(), tb, false)
 	case "FULL_PIPELINE_TABLE":
-		renderFullPipelineTable(&b, cases, tb)
+		renderFullPipelineTable(&b, dc.milp(), tb)
 	case "PROVENANCE":
-		if err := renderProvenance(&b, cases, tb); err != nil {
+		if err := renderProvenance(&b, dc.milp(), dc.assign(), tb); err != nil {
 			return "", err
 		}
 	case "ASSIGN_TIER_SUMMARY_TABLE":
-		renderAssignTierSummaryTable(&b, tb)
+		renderAssignTierSummaryTable(&b, dc.assign(), tb)
 	case "README_ASSIGN_SUMMARY_TABLE":
-		renderReadmeAssignSummaryTable(&b, tb)
+		renderReadmeAssignSummaryTable(&b, dc.assign(), tb)
 	case "ASSIGN_PIPELINE_TABLE":
-		renderAssignPipelineTable(&b, tb)
+		renderAssignPipelineTable(&b, dc.assign(), tb)
 	case "ASSIGN_SIMD_SUMMARY":
-		renderAssignSIMDSummary(&b, tb)
+		renderAssignSIMDSummary(&b, dc.assign(), tb)
 	case "ASSIGN_SIMD_TABLE":
-		renderAssignSIMDTable(&b, tb)
+		renderAssignSIMDTable(&b, dc.assign(), tb)
 	case "BINARY_SIZE_TABLE":
 		if err := renderBinarySizeTable(&b, tb); err != nil {
 			return "", err
@@ -1058,11 +1133,7 @@ func summarizeTierSubset(cases []CorpusCase, filter func(CorpusCase) bool, tb *T
 }
 
 func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
-	type groupSpec struct {
-		label  string
-		filter func(c CorpusCase) bool
-	}
-	groups := []groupSpec{
+	groups := []subsetSpec[CorpusCase]{
 		{"Tier 1: Canonical micro-models (`N <= 26`, spawn-dominated)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
 		{"Tier 2: Target p90 MILPs (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
 		{"Tier 3: Large tail MILPs (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
@@ -1090,11 +1161,7 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 }
 
 func renderReadmeMILPSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
-	type groupSpec struct {
-		label  string
-		filter func(c CorpusCase) bool
-	}
-	groups := []groupSpec{
+	groups := []subsetSpec[CorpusCase]{
 		{"Tier 1: Micro-models (`N <= 26`, spawn-dominated)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
 		{"Tier 2: Medium MILPs (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
 		{"Tier 3: Large MILPs (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
@@ -1121,41 +1188,22 @@ func renderSIMDEffectTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBun
 		sm := tb.SIMD[c.ID]
 		size := sm.NumVars + sm.NumConstraints
 		gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-		reach, verdict := simdVerdict(size, lo, hi, n)
+		reach, verdict := simdVerdict(size >= simdReachSize, lo, hi, n)
 		fmt.Fprintf(b, "| `%s` | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %.3f | %.3f | %d |\n",
 			c.ID, size, reach, verdict, gm, lo, hi, sc.TSolveMS, sm.TSolveMS, n)
 	}
 }
 
 func renderSIMDSummary(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
-	var controls, controlsFlagged, reachable, faster, slower int
+	var tally simdTally
 	for _, c := range cases {
 		sm := tb.SIMD[c.ID]
-		size := sm.NumVars + sm.NumConstraints
-		_, lo, hi, n := pairedRatio(tb.Scalar[c.ID].TSolveTrialsMS, sm.TSolveTrialsMS)
-		if n < minPairedSamples {
-			continue
-		}
-		excludesOne := lo > 1 || hi < 1
-		if size < simdReachSize {
-			controls++
-			if excludesOne {
-				controlsFlagged++
-			}
-			continue
-		}
-		reachable++
-		switch {
-		case lo > 1:
-			faster++
-		case hi < 1:
-			slower++
-		}
+		tally.observe(sm.NumVars+sm.NumConstraints >= simdReachSize, tb.Scalar[c.ID].TSolveTrialsMS, sm.TSolveTrialsMS)
 	}
 	fmt.Fprintf(b, "- **Negative controls** (`n + m < %d`, no AVX2 kernel can run): %d of %d have a 95%% interval excluding 1. Observed shifts on these micro-models reflect binary code layout and run-to-run variance under `GOEXPERIMENT=simd`, not vector execution.\n",
-		simdReachSize, controlsFlagged, controls)
+		simdReachSize, tally.controlsFlagged, tally.controls)
 	fmt.Fprintf(b, "- **Instances where AVX2 can run**: %d faster, %d slower, %d with no detectable effect, out of %d.\n",
-		faster, slower, reachable-faster-slower, reachable)
+		tally.faster, tally.slower, tally.reachable-tally.faster-tally.slower, tally.reachable)
 }
 
 func familyTrialRatioRange(py PythonBaselineEntry, sc ProblemBenchResult) (gm, minR, maxR float64) {
@@ -1231,10 +1279,7 @@ func renderMADCBCGapTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBund
 		sc := tb.Scalar[c.ID]
 		gb := tb.Goblin[c.ID]
 		lpRatio := sc.RootLPTimeMS / max(gb.RootLPTimeMS, geoMeanMinFloor)
-		totRatio, _, _, _ := pairedRatio(sc.TTotalTrialsMS, gb.TTotalTrialsMS)
-		if math.IsNaN(totRatio) {
-			totRatio = sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
-		}
+		totRatio := pairedRatioOrFallback(sc.TTotalTrialsMS, gb.TTotalTrialsMS, sc.TTotalMS, gb.TTotalMS)
 		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ ($%d \\times %d$) | **%.2fx** | %.2f | %.2f | %.2fx | %.2f (%d / %d) | %.2f (%d / %d) | %.3f (%d) | %.3f (%d) |\n",
 			c.ID,
 			g, i, sc.NumVars, sc.NumConstraints,
@@ -1258,10 +1303,7 @@ func renderNonMADCBCGapTable(b *bytes.Buffer, tb *TelemetryBundle) {
 			continue
 		}
 		gb := tb.Goblin[id]
-		totRatio, _, _, _ := pairedRatio(sc.TTotalTrialsMS, gb.TTotalTrialsMS)
-		if math.IsNaN(totRatio) {
-			totRatio = sc.TTotalMS / max(gb.TTotalMS, geoMeanMinFloor)
-		}
+		totRatio := pairedRatioOrFallback(sc.TTotalTrialsMS, gb.TTotalTrialsMS, sc.TTotalMS, gb.TTotalMS)
 		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | **%.2fx** | $%.2f \\pm %.2f$ | $%.2f \\pm %.2f$ | %.2f (%d / %d) | %.2f (%d / %d) | %s | %s |\n",
 			id,
 			sc.NumVars, sc.NumConstraints,
@@ -1341,7 +1383,7 @@ func renderFullPipelineTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryB
 	}
 }
 
-func renderProvenance(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) error {
+func renderProvenance(b *bytes.Buffer, cases []CorpusCase, assignCases []AssignCorpusCase, tb *TelemetryBundle) error {
 	pv, err := telemetryProvenance(tb)
 	if err != nil {
 		return err
@@ -1356,7 +1398,7 @@ func renderProvenance(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) 
 		}
 	}
 	var anySciPy SciPyAssignEntry
-	for _, ac := range BuildAssignCorpus() {
+	for _, ac := range assignCases {
 		anySciPy = tb.SciPyAssign[ac.ID]
 	}
 	mipFloorMed, _, _ := medianMinMax(mipFloors)
@@ -1445,13 +1487,8 @@ func summarizeAssignTierSubset(assignCases []AssignCorpusCase, filter func(Assig
 	return st
 }
 
-func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
-	assignCases := BuildAssignCorpus()
-	type assignGroupSpec struct {
-		label  string
-		filter func(c AssignCorpusCase) bool
-	}
-	groups := []assignGroupSpec{
+func renderAssignTierSummaryTable(b *bytes.Buffer, assignCases []AssignCorpusCase, tb *TelemetryBundle) {
+	groups := []subsetSpec[AssignCorpusCase]{
 		{"Tier 1: Micro/Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
 		{"Tier 2: Medium / Target p90 (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
 		{"Tier 3: Large Tail (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
@@ -1476,13 +1513,8 @@ func renderAssignTierSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	}
 }
 
-func renderReadmeAssignSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
-	assignCases := BuildAssignCorpus()
-	type assignGroupSpec struct {
-		label  string
-		filter func(c AssignCorpusCase) bool
-	}
-	groups := []assignGroupSpec{
+func renderReadmeAssignSummaryTable(b *bytes.Buffer, assignCases []AssignCorpusCase, tb *TelemetryBundle) {
+	groups := []subsetSpec[AssignCorpusCase]{
 		{"Tier 1: Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
 		{"Tier 2: Medium (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
 		{"Tier 3: Large (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
@@ -1501,17 +1533,13 @@ func renderReadmeAssignSummaryTable(b *bytes.Buffer, tb *TelemetryBundle) {
 	}
 }
 
-func renderAssignPipelineTable(b *bytes.Buffer, tb *TelemetryBundle) {
-	assignCases := BuildAssignCorpus()
+func renderAssignPipelineTable(b *bytes.Buffer, assignCases []AssignCorpusCase, tb *TelemetryBundle) {
 	b.WriteString("| Problem ID | Shape ($m \\times n$) | Family | Paired `SciPy Solve / goblin` | GoSolve Med (ms) | SciPySolve Med (ms) | GoTotal Med (ms) | SciPyTotal Med (ms) | Go Solve Mean $\\pm$ SD (ms) | SciPy Solve Mean $\\pm$ SD (ms) | Trial 0 Obj | Parity |\n")
 	b.WriteString("| :--- | :---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
 	for _, ac := range assignCases {
 		sp := tb.SciPyAssign[ac.ID]
 		sc := tb.AssignScalar[ac.ID]
-		solveRatio, _, _, _ := pairedRatio(sp.TSolveTrialsMS, sc.TSolveTrialsMS)
-		if math.IsNaN(solveRatio) {
-			solveRatio = sp.TSolveMedianMS / max(sc.TSolveMS, geoMeanMinFloor)
-		}
+		solveRatio := pairedRatioOrFallback(sp.TSolveTrialsMS, sc.TSolveTrialsMS, sp.TSolveMedianMS, sc.TSolveMS)
 		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | `%s` | **%.2fx** | %s | %s | %s | %s | $%s \\pm %s$ | $%s \\pm %s$ | %.2f | %s |\n",
 			ac.ID, ac.Rows, ac.Cols, ac.Family,
 			solveRatio,
@@ -1537,52 +1565,26 @@ func assignSIMDReachable(ac AssignCorpusCase) bool {
 	return ac.Rows*ac.Cols >= simdReachSize
 }
 
-func renderAssignSIMDSummary(b *bytes.Buffer, tb *TelemetryBundle) {
-	assignCases := BuildAssignCorpus()
-	var controls, controlsFlagged, reachable, faster, slower int
+func renderAssignSIMDSummary(b *bytes.Buffer, assignCases []AssignCorpusCase, tb *TelemetryBundle) {
+	var tally simdTally
 	for _, ac := range assignCases {
-		sc := tb.AssignScalar[ac.ID]
-		sm := tb.AssignSIMD[ac.ID]
-		_, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-		if n < minPairedSamples {
-			continue
-		}
-		excludesOne := lo > 1 || hi < 1
-		if !assignSIMDReachable(ac) {
-			controls++
-			if excludesOne {
-				controlsFlagged++
-			}
-			continue
-		}
-		reachable++
-		switch {
-		case lo > 1:
-			faster++
-		case hi < 1:
-			slower++
-		}
+		tally.observe(assignSIMDReachable(ac), tb.AssignScalar[ac.ID].TSolveTrialsMS, tb.AssignSIMD[ac.ID].TSolveTrialsMS)
 	}
 	fmt.Fprintf(b, "- **Negative controls** (`max(rows, cols) < %d` with no `>= 8x8` tall transpose and either fused square `Minimize` non-sparse path or `rows * cols < %d`, so no AVX2 kernel runs): %d of %d have a 95%% interval excluding 1.\n",
-		simdReachSize, simdReachSize, controlsFlagged, controls)
+		simdReachSize, simdReachSize, tally.controlsFlagged, tally.controls)
 	fmt.Fprintf(b, "- **Instances where AVX2 kernels run** (`max(rows, cols) >= %d`, tall `rows > cols` with `>= 8x8`, or fallback `AllAbsLE64`/`ValidateAndNegate64` at `rows * cols >= %d`): %d faster, %d slower, %d with no detectable effect, out of %d.\n",
-		simdReachSize, simdReachSize, faster, slower, reachable-faster-slower, reachable)
+		simdReachSize, simdReachSize, tally.faster, tally.slower, tally.reachable-tally.faster-tally.slower, tally.reachable)
 }
 
-func renderAssignSIMDTable(b *bytes.Buffer, tb *TelemetryBundle) {
-	assignCases := BuildAssignCorpus()
+func renderAssignSIMDTable(b *bytes.Buffer, assignCases []AssignCorpusCase, tb *TelemetryBundle) {
 	b.WriteString("| Problem ID | Shape ($m \\times n$) | `max(m, n)` | AVX2 kernels reachable | Verdict | Paired `scalar / SIMD` GeoMean [95% CI] | Scalar Solve (ms) | SIMD Solve (ms) | Trials |\n")
 	b.WriteString("| :--- | :---: | ---: | :---: | :--- | ---: | ---: | ---: | ---: |\n")
 	for _, ac := range assignCases {
 		sc := tb.AssignScalar[ac.ID]
 		sm := tb.AssignSIMD[ac.ID]
 		size := max(sm.Rows, sm.Cols)
-		effSize := size
-		if assignSIMDReachable(ac) && effSize < simdReachSize {
-			effSize = simdReachSize
-		}
 		gm, lo, hi, n := pairedRatio(sc.TSolveTrialsMS, sm.TSolveTrialsMS)
-		reach, verdict := simdVerdict(effSize, lo, hi, n)
+		reach, verdict := simdVerdict(assignSIMDReachable(ac), lo, hi, n)
 		fmt.Fprintf(b, "| `%s` | $%d \\times %d$ | %d | %s | %s | %.2fx [%.2fx-%.2fx] | %s | %s | %d |\n",
 			ac.ID, ac.Rows, ac.Cols, size, reach, verdict, gm, lo, hi,
 			formatAssignMS(sc.TSolveMS), formatAssignMS(sm.TSolveMS), n)
@@ -1629,6 +1631,7 @@ func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
 	const beginPrefix = "<!-- BEGIN GENERATED:"
 	const markerSuffix = " -->"
 
+	var dc docgenCorpus
 	out := content
 	searchFrom := 0
 	for {
@@ -1652,7 +1655,7 @@ func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
 		}
 		bodyEnd := bodyStart + endRel
 
-		rendered, err := RenderBlock(blockName, tb)
+		rendered, err := renderBlockWith(blockName, tb, &dc)
 		if err != nil {
 			return "", err
 		}

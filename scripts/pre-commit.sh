@@ -80,9 +80,12 @@ if [ -n "${bad_artifacts}" ]; then
     fail "Forbidden cache or build artifacts found in working tree."
 fi
 
+GREP_EXCLUDES=(--exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake)
+
 # Ensure no CRLF line endings in source or documentation files.
-if grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >/dev/null 2>&1; then
-    grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake $'\r' . >&2 || true
+crlf_matches="$(grep -rnI "${GREP_EXCLUDES[@]}" $'\r' . || true)"
+if [ -n "${crlf_matches}" ]; then
+    printf '%s\n' "${crlf_matches}" >&2
     fail "Files with CRLF line endings detected. Normalize to LF."
 fi
 
@@ -92,13 +95,17 @@ unprefixed_import='"gob'"lin"'(/|")'
 unaliased_root_import='^[[:space:]]*"github\.com/paulourio/gob'"lin"'"'
 unaliased_pkg_qual='gob'"lin"'\.[A-Z]'
 forbidden_pattern="(${legacy_pkg}|${unprefixed_import}|${unaliased_root_import}|${unaliased_pkg_qual})"
-if grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >/dev/null 2>&1; then
-    grep -rnI --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -E "${forbidden_pattern}" . >&2 || true
+legacy_matches="$(grep -rnI "${GREP_EXCLUDES[@]}" -E "${forbidden_pattern}" . || true)"
+if [ -n "${legacy_matches}" ]; then
+    printf '%s\n' "${legacy_matches}" >&2
     fail "Forbidden legacy identifier or unprefixed module import detected."
 fi
-if [ -n "${HOME:-}" ] && grep -rnIF --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >/dev/null 2>&1; then
-    grep -rnIF --exclude=.git --exclude-dir=.git --exclude-dir=.cache --exclude-dir=third_party --exclude-dir=.lake -- "${HOME}" . >&2 || true
-    fail "Hardcoded home directory path detected."
+if [ -n "${HOME:-}" ]; then
+    home_matches="$(grep -rnIF "${GREP_EXCLUDES[@]}" -- "${HOME}" . || true)"
+    if [ -n "${home_matches}" ]; then
+        printf '%s\n' "${home_matches}" >&2
+        fail "Hardcoded home directory path detected."
+    fi
 fi
 
 # 2. Go Formatting Gate
@@ -134,14 +141,14 @@ if [ "${HAS_CBC}" -eq 1 ]; then
 fi
 
 run_python_lint() {
-    ruff check --no-cache bench/
-    ruff format --check --no-cache bench/
+    ruff check --no-cache bench/ scripts/
+    ruff format --check --no-cache bench/ scripts/
     if command -v mypy >/dev/null 2>&1; then
-        mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/
+        mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/ scripts/
     elif command -v uvx >/dev/null 2>&1; then
-        uvx --no-config mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/
+        uvx --no-config mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/ scripts/
     else
-        echo "Neither 'mypy' nor 'uvx' is available in PATH to type-check bench/." >&2
+        echo "Neither 'mypy' nor 'uvx' is available in PATH to type-check bench/ and scripts/." >&2
         return 1
     fi
 }
@@ -168,17 +175,18 @@ import ast, pathlib, re, subprocess, sys, tempfile
 
 qg = sys.argv[1]
 root = pathlib.Path(".")
+SKIP_DIRS = {".git", ".cache", "third_party", ".lake"}
 go_c_files = sorted(
     p for ext in ("*.go", "*.cpp", "*.h")
     for p in root.rglob(ext)
-    if "third_party" not in p.parts and ".lake" not in p.parts
+    if not (SKIP_DIRS & set(p.parts))
 )
-py_files = sorted(p for p in root.rglob("*.py") if "third_party" not in p.parts and ".lake" not in p.parts)
-sh_files = sorted(p for p in root.rglob("*.sh") if "third_party" not in p.parts and ".lake" not in p.parts)
+py_files = sorted(p for p in root.rglob("*.py") if not (SKIP_DIRS & set(p.parts)))
+sh_files = sorted(p for p in root.rglob("*.sh") if not (SKIP_DIRS & set(p.parts)))
 
 def extract_go_c(path: pathlib.Path) -> str:
     blocks, cur, in_block = [], [], False
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         s = line.strip()
         if s.startswith("/*"):
             in_block = True
@@ -206,8 +214,21 @@ def extract_go_c(path: pathlib.Path) -> str:
         blocks.append("\n".join(cur))
     return "\n\n".join(blocks)
 
+def extract_hash_comments(src: str) -> list[str]:
+    blocks, cur = [], []
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("#") and not s.startswith("#!"):
+            cur.append(re.sub(r"^#\s?", "", s))
+        elif cur:
+            blocks.append("\n".join(cur))
+            cur = []
+    if cur:
+        blocks.append("\n".join(cur))
+    return blocks
+
 def extract_py(path: pathlib.Path) -> str:
-    src = path.read_text()
+    src = path.read_text(encoding="utf-8")
     tree = ast.parse(src)
     docs = [
         ast.get_docstring(n)
@@ -215,30 +236,11 @@ def extract_py(path: pathlib.Path) -> str:
         if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         and ast.get_docstring(n)
     ]
-    cur = []
-    for line in src.splitlines():
-        s = line.strip()
-        if s.startswith("#") and not s.startswith("#!"):
-            cur.append(re.sub(r"^#\s?", "", s))
-        elif cur:
-            docs.append("\n".join(cur))
-            cur = []
-    if cur:
-        docs.append("\n".join(cur))
+    docs.extend(extract_hash_comments(src))
     return "\n\n".join(docs)
 
 def extract_sh(path: pathlib.Path) -> str:
-    docs, cur = [], []
-    for line in path.read_text().splitlines():
-        s = line.strip()
-        if s.startswith("#") and not s.startswith("#!"):
-            cur.append(re.sub(r"^#\s?", "", s))
-        elif cur:
-            docs.append("\n".join(cur))
-            cur = []
-    if cur:
-        docs.append("\n".join(cur))
-    return "\n\n".join(docs)
+    return "\n\n".join(extract_hash_comments(path.read_text(encoding="utf-8")))
 
 with tempfile.TemporaryDirectory() as tmpdir:
     extracted = []
@@ -251,7 +253,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         if not txt.strip():
             continue
         out_p = pathlib.Path(tmpdir) / (str(p).replace("/", "__") + ".md")
-        out_p.write_text(txt + "\n")
+        out_p.write_text(txt + "\n", encoding="utf-8")
         extracted.append(str(out_p))
     res = subprocess.run([qg, "--profile", "rfc", "--level", "strict", "--format", "compact"] + extracted)
     if res.returncode != 0:

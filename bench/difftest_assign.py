@@ -12,7 +12,6 @@ feasibility status, objective value, and primal validity.
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import math
 import os
@@ -23,15 +22,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-_GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
-for _cand_site in sorted(
-    glob.glob(
-        os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
-    )
-):
-    if _cand_site not in sys.path:
-        sys.path.insert(0, _cand_site)
+# Disable bytecode emission before importing local helpers (pre-commit forbids __pycache__).
+sys.dont_write_bytecode = True
+
+from _bench_common import GOBLIN_ROOT, bootstrap_venv
+
+bootstrap_venv()
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -84,10 +80,10 @@ def generate_instance(rng: random.Random, idx: int) -> dict[str, Any]:
             for _ in range(cols):
                 cost.append(round(rng.uniform(-5.0, 15.0) * s, 5))
     else:
-        forbid = "-Inf" if maximize else "+Inf"
+        forbid_val = float("-inf") if maximize else float("inf")
         for _ in range(rows * cols):
             if rng.random() < 0.35:
-                cost.append(float("-inf") if forbid == "-Inf" else float("inf"))
+                cost.append(forbid_val)
             else:
                 cost.append(float(rng.randint(-30, 150)))
 
@@ -188,7 +184,7 @@ def main() -> None:
                 run_env.pop("GOEXPERIMENT", None)
             proc = subprocess.run(
                 cmd,
-                cwd=_GOBLIN_ROOT,
+                cwd=GOBLIN_ROOT,
                 env=run_env,
                 capture_output=True,
                 text=True,

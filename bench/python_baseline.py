@@ -17,7 +17,6 @@ import hashlib
 import importlib.metadata
 import json
 import os
-import platform
 import shutil
 import statistics
 import subprocess
@@ -25,26 +24,20 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import UTC, datetime
 from typing import Any
 
-# Support running directly from the workspace with the sibling PuLP virtualenv.
-_GOBLIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_REPO_ROOT = os.path.abspath(os.path.join(_GOBLIN_ROOT, ".."))
-_CBC_DIST_DIR = os.path.join(_GOBLIN_ROOT, "third_party", "Cbc", "dist")
-for _cand_site in sorted(
-    glob.glob(
-        os.path.join(_REPO_ROOT, "pulp", ".venv", "lib", "python*", "site-packages")
-    )
-):
-    if _cand_site not in sys.path:
-        sys.path.insert(0, _cand_site)
-_VENDORED_PULP = os.path.join(_REPO_ROOT, "pulp")
-if (
-    os.path.isdir(os.path.join(_VENDORED_PULP, "pulp"))
-    and _VENDORED_PULP not in sys.path
-):
-    sys.path.insert(0, _VENDORED_PULP)
+# Disable bytecode emission before importing local helpers (pre-commit forbids __pycache__).
+sys.dont_write_bytecode = True
+
+from _bench_common import (
+    CBC_DIST_DIR,
+    bootstrap_venv,
+    cpu_affinity,
+    prepend_cbc_lib_dir,
+    repo_provenance,
+)
+
+bootstrap_venv(include_pulp=True)
 
 import pulp
 
@@ -83,7 +76,7 @@ def _file_sha256_short(path: str) -> str:
 def _detect_cbc_version(cbc_path: str) -> str:
     if not cbc_path or not os.path.isfile(cbc_path):
         return "unknown"
-    cbc_lib_dir = os.path.join(_CBC_DIST_DIR, "lib")
+    cbc_lib_dir = os.path.join(CBC_DIST_DIR, "lib")
     env = dict(os.environ)
     if os.path.isdir(cbc_lib_dir):
         ld = env.get("LD_LIBRARY_PATH", "")
@@ -102,39 +95,6 @@ def _detect_cbc_version(cbc_path: str) -> str:
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"[python_baseline] CBC version probe failed: {exc}", file=sys.stderr)
     return "unknown"
-
-
-def _repo_provenance() -> dict[str, Any]:
-    git_commit = "unknown"
-    git_dirty = True
-    try:
-        git_commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=_GOBLIN_ROOT, text=True, timeout=5
-        ).strip()
-        st = subprocess.check_output(
-            ["git", "status", "--porcelain", "--", ".", ":(exclude)bench/results"],
-            cwd=_GOBLIN_ROOT,
-            text=True,
-            timeout=5,
-        ).strip()
-        git_dirty = len(st) > 0
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-    fp = subprocess.check_output(
-        ["go", "run", "./cmd/goblin-bench", "-print-fingerprint"],
-        cwd=_GOBLIN_ROOT,
-        text=True,
-        timeout=30,
-    ).strip()
-
-    return {
-        "git_commit": git_commit,
-        "git_dirty": git_dirty,
-        "source_fingerprint": fp,
-        "uname_release": platform.uname().release,
-        "measured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
 
 
 def _extract_solve_status(solve_ret: Any, prob: Any) -> tuple[int, str]:
@@ -156,16 +116,12 @@ def _extract_solve_status(solve_ret: Any, prob: Any) -> tuple[int, str]:
 
 
 def _make_cbc_solver(mip: bool = True) -> tuple[Any, str]:
-    cbc_lib_dir = os.path.join(_CBC_DIST_DIR, "lib")
-    if os.path.isdir(cbc_lib_dir):
-        ld = os.environ.get("LD_LIBRARY_PATH", "")
-        if cbc_lib_dir not in ld.split(":"):
-            os.environ["LD_LIBRARY_PATH"] = f"{cbc_lib_dir}:{ld}" if ld else cbc_lib_dir
+    prepend_cbc_lib_dir()
 
     mip_opts = ["ratioGap=1e-6", "allowableGap=1e-6"] if mip else []
     candidates = [
         os.environ.get("CBC_BIN", ""),
-        os.path.join(_CBC_DIST_DIR, "bin", "cbc"),
+        os.path.join(CBC_DIST_DIR, "bin", "cbc"),
         shutil.which("cbc") or "",
     ]
     for cand in candidates:
@@ -194,72 +150,36 @@ def _cleanup_worker() -> None:
         _WORKER_TMPDIR = None
 
 
-_SPAWN_FLOOR_MIP_MODEL: dict[str, Any] = {
-    "parameters": {"name": "spawn_floor_mip", "sense": 1, "status": 0, "sol_status": 0},
-    "objective": {"name": "obj", "coefficients": [{"name": "x", "value": 1}]},
-    "variables": [
-        {
-            "name": "x",
-            "cat": "Integer",
-            "lowBound": 0,
-            "upBound": 10,
-            "varValue": None,
-            "dj": None,
-        }
-    ],
-    "constraints": [
-        {
-            "name": "c",
-            "sense": 1,
-            "coefficients": [{"name": "x", "value": 1}],
-            "pi": None,
-            "constant": -1,
-        }
-    ],
-    "sos1": [],
-    "sos2": [],
-}
-
-_SPAWN_FLOOR_LP_MODEL: dict[str, Any] = {
-    "parameters": {"name": "spawn_floor_lp", "sense": 1, "status": 0, "sol_status": 0},
-    "objective": {"name": "obj", "coefficients": [{"name": "x", "value": 1}]},
-    "variables": [
-        {
-            "name": "x",
-            "cat": "Continuous",
-            "lowBound": 0,
-            "upBound": 10,
-            "varValue": None,
-            "dj": None,
-        }
-    ],
-    "constraints": [
-        {
-            "name": "c",
-            "sense": 1,
-            "coefficients": [{"name": "x", "value": 1}],
-            "pi": None,
-            "constant": -1,
-        }
-    ],
-    "sos1": [],
-    "sos2": [],
-}
+def _spawn_floor_model(name: str, cat: str) -> dict[str, Any]:
+    return {
+        "parameters": {"name": name, "sense": 1, "status": 0, "sol_status": 0},
+        "objective": {"name": "obj", "coefficients": [{"name": "x", "value": 1}]},
+        "variables": [
+            {
+                "name": "x",
+                "cat": cat,
+                "lowBound": 0,
+                "upBound": 10,
+                "varValue": None,
+                "dj": None,
+            }
+        ],
+        "constraints": [
+            {
+                "name": "c",
+                "sense": 1,
+                "coefficients": [{"name": "x", "value": 1}],
+                "pi": None,
+                "constant": -1,
+            }
+        ],
+        "sos1": [],
+        "sos2": [],
+    }
 
 
-def _cpu_affinity() -> str:
-    """Return the CPUs allowed for the current process compressed into ranges."""
-    if not hasattr(os, "sched_getaffinity"):
-        return "unknown"
-    cpus = sorted(os.sched_getaffinity(0))
-    ranges: list[str] = []
-    start = prev = cpus[0]
-    for c in [*cpus[1:], -1]:
-        if c != prev + 1:
-            ranges.append(str(start) if start == prev else f"{start}-{prev}")
-            start = c
-        prev = c
-    return ",".join(ranges)
+_SPAWN_FLOOR_MIP_MODEL = _spawn_floor_model("spawn_floor_mip", "Integer")
+_SPAWN_FLOOR_LP_MODEL = _spawn_floor_model("spawn_floor_lp", "Continuous")
 
 
 def _measure_spawn_floor(
@@ -337,12 +257,12 @@ def benchmark_single_json(
     json_path: str, warmup: int = 2, trials: int = 11
 ) -> dict[str, Any]:
     if _WORKER_MIP_SOLVER is None:
-        _init_worker(json_path, _repo_provenance())
+        _init_worker(json_path, repo_provenance())
 
     pid = os.path.splitext(os.path.basename(json_path))[0]
     if pid.startswith("t3_"):
         trials = min(trials, 5)
-        warmup = max(1, min(warmup, 1))
+        warmup = 1
     else:
         warmup = max(2, warmup)
 
@@ -458,7 +378,7 @@ def benchmark_single_json(
         "cbc_sha256": _WORKER_CBC_SHA256,
         "cbc_spawn_floor_ms": _WORKER_SPAWN_FLOOR_MS,
         "cbc_lp_spawn_floor_ms": _WORKER_LP_SPAWN_FLOOR_MS,
-        "cpu_affinity": _cpu_affinity(),
+        "cpu_affinity": cpu_affinity(),
         "git_commit": _WORKER_PROVENANCE.get("git_commit", ""),
         "git_dirty": bool(_WORKER_PROVENANCE.get("git_dirty", True)),
         "source_fingerprint": _WORKER_PROVENANCE.get("source_fingerprint", ""),
@@ -497,7 +417,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    prov = _repo_provenance()
+    prov = repo_provenance()
     json_files = sorted(glob.glob(os.path.join(args.corpus_dir, "*.json")))
     warmup_json = json_files[0] if json_files else ""
     for jf in json_files:
