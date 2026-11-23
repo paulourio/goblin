@@ -9,44 +9,7 @@ import GoblinFormal.Common.Basic
 
 namespace GoblinFormal.Track2A
 
-/-! ### Rat and FinSum algebraic helpers -/
-
-private theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
-    a + c ≤ b + d :=
-  Rat.le_trans (Rat.add_le_add_right.mpr hab) (Rat.add_le_add_left.mpr hcd)
-
-private theorem rat_div_le_iff {a b c : Rat} (hc : 0 < c) :
-    a / c ≤ b ↔ a ≤ b * c := by
-  constructor
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hc)
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)] at hm
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt (Rat.inv_pos.mpr hc))
-    rw [Rat.mul_assoc, Rat.mul_inv_cancel c (Rat.ne_of_gt hc), Rat.mul_one] at hm
-    simpa [Rat.div_def] using hm
-
-private theorem rat_le_div_iff {a b c : Rat} (hc : 0 < c) :
-    a ≤ b / c ↔ a * c ≤ b := by
-  constructor
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hc)
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)] at hm
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt (Rat.inv_pos.mpr hc))
-    rw [Rat.mul_assoc, Rat.mul_inv_cancel c (Rat.ne_of_gt hc), Rat.mul_one] at hm
-    simpa [Rat.div_def] using hm
-
-private theorem rat_lt_of_lt_of_le {a b c : Rat} (hab : a < b) (hbc : b ≤ c) : a < c :=
-  Rat.lt_iff_le_and_not_ge.mpr
-    ⟨Rat.le_trans (Rat.le_of_lt hab) hbc, fun hca => (Rat.not_le.mpr hab) (Rat.le_trans hbc hca)⟩
-
-private theorem rat_lt_of_le_of_lt {a b c : Rat} (hab : a ≤ b) (hbc : b < c) : a < c :=
-  Rat.lt_iff_le_and_not_ge.mpr
-    ⟨Rat.le_trans hab (Rat.le_of_lt hbc), fun hca => (Rat.not_le.mpr hbc) (Rat.le_trans hca hab)⟩
-
-private theorem rat_mul_sub (a b c : Rat) : a * (b - c) = a * b - a * c := by
-  rw [Rat.sub_eq_add_neg, Rat.mul_add, Rat.mul_neg, ← Rat.sub_eq_add_neg]
+/-! ### Rat algebraic helpers -/
 
 private theorem rat_div_neg_eq_neg_div_pos (a b : Rat) :
     a / (-b) = (-a) / b := by
@@ -56,27 +19,9 @@ private theorem rat_div_neg_eq_neg_div_pos (a b : Rat) :
   · subst hb
     simp
   · apply Rat.inv_eq_of_mul_eq_one
-    have hnb : -b ≠ 0 := fun h => hb (by
-      have := congrArg Neg.neg h
-      simpa using this)
     have hmul : (-b) * (-b⁻¹) = b * b⁻¹ := by
       rw [Rat.neg_mul, Rat.mul_neg, Rat.neg_neg]
     rw [hmul, Rat.mul_inv_cancel b hb]
-
-private theorem rat_neg_div_neg (a b : Rat) :
-    (-a) / (-b) = a / b := by
-  rw [rat_div_neg_eq_neg_div_pos, Rat.neg_neg]
-
-theorem finSum_split_at {n : Nat} (f : Fin n → Rat) (k : Fin n) :
-    finSum n f = finSum n (fun j => if j = k then 0 else f j) + f k := by
-  have heq : ∀ j : Fin n,
-      f j = (if j = k then 0 else f j) + (if j = k then f k else 0) := by
-    intro j
-    by_cases hj : j = k
-    · subst hj
-      simp [Rat.zero_add]
-    · simp [hj, Rat.add_zero]
-  rw [finSum_congr heq, finSum_add, finSum_single]
 
 /-! ### 1. Integer Equality GCD Infeasibility & divCeil -/
 
@@ -561,10 +506,6 @@ theorem canSkipTermSpec_implies_strict
         intro hne
         apply hint_frac
         simp [hi, hne]
-
-private theorem rat_eq_num_of_den_one {b : Rat} (hden : b.den = 1) : b = (b.num : Rat) := by
-  conv => lhs; rw [← Rat.num_divInt_den b, hden]
-  rw [Rat.divInt_ofNat, Rat.mkRat_one]
 
 private theorem int_lt_rat_imp_le_floor {b : Rat} {q : Rat} (hden : b.den = 1) (hlt : b < q) :
     b ≤ (q.floor : Rat) := by
@@ -3344,16 +3285,6 @@ private theorem invCount_eq_pairSum {G : Nat} (v : Fin G → Rat) :
     · simp [h1, h2]
     · simp [h1, h2]
   · simp [h1]
-
-private theorem foldl_add_congr {α : Type} (xs : List α) (f g : α → Nat)
-    (h : ∀ x ∈ xs, f x = g x) :
-    ∀ init, xs.foldl (fun acc x => acc + f x) init = xs.foldl (fun acc x => acc + g x) init := by
-  induction xs with
-  | nil => intro init; rfl
-  | cons x rest ih =>
-    intro init
-    simp only [List.foldl_cons, h x (List.mem_cons_self ..)]
-    exact ih (fun y hy => h y (List.mem_cons_of_mem _ hy)) _
 
 private theorem foldl_add_init {α : Type} (xs : List α) (f : α → Nat) (init : Nat) :
     xs.foldl (fun acc x => acc + f x) init = init + xs.foldl (fun acc x => acc + f x) 0 := by

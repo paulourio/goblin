@@ -1,8 +1,10 @@
+import Apps.Common
 import GoblinFormal.Common.Json
 import GoblinFormal.Track5A
 import GoblinFormal.Track5B
 import GoblinFormal.Track5D
 
+open Apps.Common
 open GoblinFormal
 open GoblinFormal.Track5A
 open GoblinFormal.Track5B
@@ -107,26 +109,44 @@ private def decodeTargets (obj : JsonVal) : Except String (Array (Nat × String)
 private def targetsFn (ts : Array (Nat × String)) (idx : Nat) : Option String :=
   (ts.find? (fun p => p.1 == idx)).map Prod.snd
 
-private def verifyCfgSafety (prog : Array Arm64Insn) (ext : Nat → Option String) : Except String Unit := do
+private def checkNoUnknownInsns (prog : Array Arm64Insn) : Except String Unit := do
   for i in [0:prog.size] do
     match prog[i]! with
     | .unknown w => throw s!"unknown ARM64 instruction word at idx {i}: {w}"
     | _ => pure ()
+
+private def verifyCfgSafety (prog : Array Arm64Insn) (ext : Nat → Option String) : Except String Unit := do
+  checkNoUnknownInsns prog
   checkZeroGC prog ext
   let _ ← checkStackGuard prog ext
   let _ ← checkPanicBoundsReachability prog ext
 
 private def verifyFramelessLeafSafety (prog : Array Arm64Insn) : Except String Unit := do
-  for i in [0:prog.size] do
-    match prog[i]! with
-    | .unknown w => throw s!"unknown ARM64 instruction word at idx {i}: {w}"
-    | _ => pure ()
+  checkNoUnknownInsns prog
   if !checkFramelessLeaf prog then
     throw "frameless leaf safety check failed (external call, non-X30 RET, or invalid instruction)"
 
+private def verifyRoutineMatch (words : Array UInt32) (ext : Nat → Option String)
+    (symOpt : Option String) (forceCfg : Bool) (allowDefaultCfg : Bool) : Except String Unit := do
+  let sym ← match symOpt with
+    | some s => pure s
+    | none => throw "missing required JSON field 'symbol'"
+  let exp ← match lookupExpectedRoutine sym with
+    | some r => pure r
+    | none => throw s!"unsupported ARM64 routine symbol '{sym}'"
+  if forceCfg || (allowDefaultCfg && exp.defaultCfgCheck) then
+    let prog := if exp.useTrack5D then decodeArm64ProgCfg words else decodeArm64Prog words
+    if exp.isFramelessLeaf then
+      verifyFramelessLeafSafety prog
+    else
+      verifyCfgSafety prog ext
+  if exp.useTrack5D then
+    arm64ProgramMatchesD exp.words exp.targets words ext
+  else
+    arm64ProgramMatches exp.words exp.targets words ext
+
 private def verifyJsonVal (json : JsonVal) : Except String Unit := do
-  let wordsVal ← json.getField "words"
-  let wordsArr ← wordsVal.asArray
+  let wordsArr ← json.getArray "words"
   let words ← decodeUInt32Words wordsArr
   let targets ← decodeTargets json
   let ext := targetsFn targets
@@ -137,37 +157,10 @@ private def verifyJsonVal (json : JsonVal) : Except String Unit := do
     | none => pure none
     | some sv => some <$> sv.asString
   match modeOpt with
-  | some "cfg" =>
-    verifyCfgSafety (decodeArm64ProgCfg words) ext
-  | some "match" =>
-    let sym ← match symOpt with
-      | some s => pure s
-      | none => throw "missing required JSON field 'symbol'"
-    let exp ← match lookupExpectedRoutine sym with
-      | some r => pure r
-      | none => throw s!"unsupported ARM64 routine symbol '{sym}'"
-    if exp.useTrack5D then
-      arm64ProgramMatchesD exp.words exp.targets words ext
-    else
-      arm64ProgramMatches exp.words exp.targets words ext
-  | some "match-and-cfg" | none =>
-    let sym ← match symOpt with
-      | some s => pure s
-      | none => throw "missing required JSON field 'symbol'"
-    let exp ← match lookupExpectedRoutine sym with
-      | some r => pure r
-      | none => throw s!"unsupported ARM64 routine symbol '{sym}'"
-    let runCfg := modeOpt == some "match-and-cfg" || exp.defaultCfgCheck
-    if runCfg then
-      let prog := if exp.useTrack5D then decodeArm64ProgCfg words else decodeArm64Prog words
-      if exp.isFramelessLeaf then
-        verifyFramelessLeafSafety prog
-      else
-        verifyCfgSafety prog ext
-    if exp.useTrack5D then
-      arm64ProgramMatchesD exp.words exp.targets words ext
-    else
-      arm64ProgramMatches exp.words exp.targets words ext
+  | some "cfg" => verifyCfgSafety (decodeArm64ProgCfg words) ext
+  | some "match" => verifyRoutineMatch words ext symOpt false false
+  | some "match-and-cfg" => verifyRoutineMatch words ext symOpt true true
+  | none => verifyRoutineMatch words ext symOpt false true
   | some other =>
     throw s!"unsupported mode '{other}' (expected 'match', 'cfg', or 'match-and-cfg')"
 
@@ -175,40 +168,15 @@ private def verifyJsonRequest (raw : String) : Except String Unit := do
   let json ← parseJsonStrict raw
   verifyJsonVal json
 
-private def readInput (arg : String) : IO (Except IO.Error String) := do
-  if arg == "-" then
-    try
-      .ok <$> (← IO.getStdin).readToEnd
-    catch e =>
-      pure (.error e)
-  else
-    try
-      .ok <$> IO.FS.readFile ⟨arg⟩
-    catch e =>
-      pure (.error e)
+private def batchFmt : BatchFormat := {
+  readErr := fun arg err => s!"REJECTED: failed to read batch input '{arg}': {err}"
+  parseErr := fun _ msg => s!"REJECTED: invalid batch JSON: {msg}"
+  emptyErr := fun _ => "REJECTED: batch array must be non-empty"
+  itemErr := fun i msg => s!"REJECTED: batch item {i}: {msg}"
+}
 
-private def runBatch (arg : String) : IO UInt32 := do
-  match ← readInput arg with
-  | .error err =>
-    IO.eprintln s!"REJECTED: failed to read batch input '{arg}': {err}"
-    return 1
-  | .ok raw =>
-    match parseJsonStrict raw >>= JsonVal.asArray with
-    | .error msg =>
-      IO.eprintln s!"REJECTED: invalid batch JSON: {msg}"
-      return 1
-    | .ok items =>
-      if items.isEmpty then
-        IO.eprintln "REJECTED: batch array must be non-empty"
-        return 1
-      for i in [:items.size] do
-        match verifyJsonVal items[i]! with
-        | .ok () => pure ()
-        | .error msg =>
-          IO.eprintln s!"REJECTED: batch item {i}: {msg}"
-          return 1
-      IO.println s!"VERIFIED ({items.size} items)"
-      return 0
+private def runBatch (arg : String) : IO UInt32 :=
+  runBatchWith batchFmt arg verifyJsonVal
 
 private def usageText : String :=
   "usage: bin-check [--help] [--batch <requests.json | -> | <request.json | ->]"
@@ -230,18 +198,19 @@ def main (args : List String) : IO UInt32 := do
     if arg.startsWith "-" && arg != "-" then
       IO.eprintln s!"ERROR: unknown flag '{arg}'"
       return 1
-    match ← readInput arg with
-    | .error err =>
-      IO.eprintln s!"REJECTED: failed to read input: {err}"
-      return 1
-    | .ok raw =>
-      match verifyJsonRequest raw with
-      | .ok () =>
-        IO.println "VERIFIED"
-        return 0
-      | .error msg =>
-        IO.eprintln s!"REJECTED: {msg}"
+    let raw ←
+      try
+        Apps.Common.readInput arg
+      catch err =>
+        IO.eprintln s!"REJECTED: failed to read input: {err}"
         return 1
+    match verifyJsonRequest raw with
+    | .ok () =>
+      IO.println "VERIFIED"
+      return 0
+    | .error msg =>
+      IO.eprintln s!"REJECTED: {msg}"
+      return 1
   | other :: _ =>
     IO.eprintln s!"ERROR: unexpected arguments starting with '{other}'"
     return 1

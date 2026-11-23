@@ -7,11 +7,14 @@ explicitly named AVX-512 functions).
 -/
 
 import Std.Data.HashMap
+import Apps.Common
 import GoblinFormal.Common.Json
 import GoblinFormal.Track5C
 
 open GoblinFormal
 open GoblinFormal.Track5C
+
+namespace Apps.SimdCfgCheck
 
 private def printUsage : IO Unit :=
   IO.println "usage: simd-cfg-check [--batch <batch.json | inline-json | ->] | <cfg.json | inline-json | ->"
@@ -115,19 +118,17 @@ private def verifySimdCfgBatchJson (raw : String) : Except String (Nat × Nat) :
 
 private def readArgInput (arg : String) : IO (Except String String) := do
   let trimmed := arg.trimAscii.toString
-  if trimmed == "-" then
-    try
-      return .ok (← (← IO.getStdin).readToEnd)
-    catch err =>
-      return .error s!"read stdin: {err}"
-  else if trimmed.startsWith "{" || trimmed.startsWith "[" then
+  if trimmed.startsWith "{" || trimmed.startsWith "[" then
     return .ok trimmed
-  else
-    try
-      return .ok (← IO.FS.readFile arg)
-    catch err =>
-      return .error s!"read '{arg}': {err}"
+  try
+    return .ok (← Apps.Common.readInput (if trimmed == "-" then "-" else arg))
+  catch err =>
+    let label := if trimmed == "-" then "read stdin" else s!"read '{arg}'"
+    return .error s!"{label}: {err}"
 
+end Apps.SimdCfgCheck
+
+open Apps.SimdCfgCheck in
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] =>

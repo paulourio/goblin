@@ -9,32 +9,13 @@ import GoblinFormal.Common.Json
 
 namespace GoblinFormal.Track2B
 
-/-! ### Basic Rat and finSum helpers -/
-
-private theorem rat_lt_of_lt_of_le {a b c : Rat} (hab : a < b) (hbc : b ≤ c) : a < c :=
-  Rat.lt_iff_le_and_not_ge.mpr
-    ⟨Rat.le_trans (Rat.le_of_lt hab) hbc, fun h => Rat.not_le.mpr hab (Rat.le_trans hbc h)⟩
-
-private theorem rat_neg_nonneg {a : Rat} (ha : a ≤ 0) : 0 ≤ -a := by
-  simpa using Rat.neg_le_neg ha
-
-private theorem rat_sub_zero (a : Rat) : a - 0 = a := by
-  rw [Rat.sub_eq_add_neg, Rat.neg_zero, Rat.add_zero]
-
-private theorem rat_zero_sub (a : Rat) : 0 - a = -a := by
-  rw [Rat.sub_eq_add_neg, Rat.zero_add]
+/-! ### Track 2B-specific Rat and finSum helpers -/
 
 private theorem rat_zero_div (a : Rat) : 0 / a = 0 := by
   rw [Rat.div_def, Rat.zero_mul]
 
 private theorem rat_neg_div (a b : Rat) : (-a) / b = -(a / b) := by
   rw [Rat.div_def, Rat.div_def, Rat.neg_mul]
-
-private theorem rat_sub_mul (a b c : Rat) : (a - b) * c = a * c - b * c := by
-  rw [Rat.sub_eq_add_neg, Rat.add_mul, Rat.neg_mul, ← Rat.sub_eq_add_neg]
-
-private theorem rat_mul_sub (a b c : Rat) : a * (b - c) = a * b - a * c := by
-  rw [Rat.sub_eq_add_neg, Rat.mul_add, Rat.mul_neg, ← Rat.sub_eq_add_neg]
 
 private theorem rat_mul_right_comm (a b c : Rat) : a * b * c = a * c * b := by
   rw [Rat.mul_assoc, Rat.mul_comm b c, ← Rat.mul_assoc]
@@ -56,27 +37,6 @@ private theorem rat_neg_eq_neg_sub_sub (a b : Rat) : -b = -a - (b - a) := by
   rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg, Rat.neg_add, Rat.neg_neg, Rat.add_comm (-b) a,
     ← Rat.add_assoc, Rat.neg_add_cancel, Rat.zero_add]
 
-private theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
-    a + c ≤ b + d :=
-  Rat.le_trans (Rat.add_le_add_right.mpr hab) (Rat.add_le_add_left.mpr hcd)
-
-private theorem rat_sub_le_sub {a b c d : Rat} (hab : a ≤ b) (hdc : d ≤ c) :
-    a - c ≤ b - d := by
-  rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg]
-  exact rat_add_le_add hab (Rat.neg_le_neg hdc)
-
-private theorem rat_mul_le_mul_of_nonpos_right {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    b * c ≤ a * c := by
-  have hc' : 0 ≤ -c := rat_neg_nonneg hc
-  have h := Rat.mul_le_mul_of_nonneg_right hab hc'
-  rw [Rat.mul_neg, Rat.mul_neg, Rat.neg_le_neg_iff] at h
-  exact h
-
-private theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    c * b ≤ c * a := by
-  rw [Rat.mul_comm c b, Rat.mul_comm c a]
-  exact rat_mul_le_mul_of_nonpos_right hab hc
-
 private theorem rat_div_nonneg {a b : Rat} (ha : 0 ≤ a) (hb : 0 ≤ b) : 0 ≤ a / b := by
   rw [Rat.div_def]
   by_cases hb0 : b = 0
@@ -84,29 +44,6 @@ private theorem rat_div_nonneg {a b : Rat} (ha : 0 ≤ a) (hb : 0 ≤ b) : 0 ≤
     simp
   · have hbpos : 0 < b := Rat.lt_of_le_of_ne hb (Ne.symm hb0)
     exact Rat.mul_nonneg ha (Rat.le_of_lt (Rat.inv_pos.mpr hbpos))
-
-private theorem rat_div_le_iff {a b c : Rat} (hb : 0 < b) : a / b ≤ c ↔ a ≤ c * b := by
-  constructor
-  · intro h
-    have h1 := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hb)
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hb)] at h1
-  · intro h
-    apply Rat.le_of_mul_le_mul_right _ hb
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hb)]
-
-private theorem rat_le_div_iff {a b c : Rat} (hc : 0 < c) : a ≤ b / c ↔ a * c ≤ b := by
-  constructor
-  · intro h
-    have h1 := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hc)
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)] at h1
-  · intro h
-    apply Rat.le_of_mul_le_mul_right _ hc
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)]
-
-private theorem rat_div_le_div_of_nonneg {a b c : Rat} (hab : a ≤ b) (hc : 0 < c) :
-    a / c ≤ b / c := by
-  rw [rat_div_le_iff hc, Rat.div_mul_cancel (Rat.ne_of_gt hc)]
-  exact hab
 
 private theorem rat_add_div (a b c : Rat) : (a + b) / c = a / c + b / c := by
   simp [Rat.div_def, Rat.add_mul]
@@ -116,72 +53,6 @@ private theorem rat_sub_div (a b c : Rat) : (a - b) / c = a / c - b / c := by
 
 private theorem rat_div_self {a : Rat} (ha : a ≠ 0) : a / a = 1 := by
   rw [Rat.div_def, Rat.mul_inv_cancel _ ha]
-
-private theorem rat_le_min_iff {a b c : Rat} : a ≤ min b c ↔ a ≤ b ∧ a ≤ c := by
-  rw [Rat.min_def]
-  split
-  · next h => exact ⟨fun h1 => ⟨h1, Rat.le_trans h1 h⟩, fun h1 => h1.1⟩
-  · next h =>
-    have hlt : c ≤ b := Rat.le_of_lt (Rat.not_le.mp h)
-    exact ⟨fun h1 => ⟨Rat.le_trans h1 hlt, h1⟩, fun h1 => h1.2⟩
-
-private theorem rat_le_max_left {a b : Rat} : a ≤ max a b := by
-  rw [Rat.max_def]
-  split
-  · assumption
-  · exact Rat.le_refl
-
-private theorem rat_le_max_right {a b : Rat} : b ≤ max a b := by
-  rw [Rat.max_def]
-  split
-  · exact Rat.le_refl
-  · next h => exact Rat.le_of_lt (Rat.not_le.mp h)
-
-private theorem rat_abs_le_iff {a b : Rat} : a.abs ≤ b ↔ -b ≤ a ∧ a ≤ b := by
-  rcases Rat.le_total (a := 0) (b := a) with ha | ha
-  · rw [Rat.abs_of_nonneg ha]
-    constructor
-    · intro hab
-      have hnb : -b ≤ 0 := by simpa using Rat.neg_le_neg (Rat.le_trans ha hab)
-      exact ⟨Rat.le_trans hnb ha, hab⟩
-    · exact And.right
-  · rw [Rat.abs_of_nonpos ha]
-    constructor
-    · intro hnab
-      have hba : -b ≤ a := Rat.neg_le_iff.mp hnab
-      have hb0 : 0 ≤ b := Rat.le_trans (rat_neg_nonneg ha) hnab
-      exact ⟨hba, Rat.le_trans ha hb0⟩
-    · intro h
-      exact Rat.neg_le_iff.mpr h.1
-
-private theorem rat_le_abs (a : Rat) : a ≤ a.abs :=
-  (rat_abs_le_iff.mp Rat.le_refl).2
-
-private theorem rat_abs_mul (a b : Rat) : (a * b).abs = a.abs * b.abs := by
-  rcases Rat.le_total (a := 0) (b := a) with ha | ha <;>
-    rcases Rat.le_total (a := 0) (b := b) with hb | hb
-  · rw [Rat.abs_of_nonneg ha, Rat.abs_of_nonneg hb, Rat.abs_of_nonneg (Rat.mul_nonneg ha hb)]
-  · have hab : a * b ≤ 0 := by simpa [Rat.mul_zero] using Rat.mul_le_mul_of_nonneg_left hb ha
-    rw [Rat.abs_of_nonneg ha, Rat.abs_of_nonpos hb, Rat.abs_of_nonpos hab, Rat.mul_neg]
-  · have hab : a * b ≤ 0 := by simpa [Rat.zero_mul] using Rat.mul_le_mul_of_nonneg_right ha hb
-    rw [Rat.abs_of_nonpos ha, Rat.abs_of_nonneg hb, Rat.abs_of_nonpos hab, Rat.neg_mul]
-  · have hab : 0 ≤ a * b := by
-      have ha' := rat_neg_nonneg ha
-      have hb' := rat_neg_nonneg hb
-      simpa [Rat.neg_mul, Rat.mul_neg, Rat.neg_neg] using Rat.mul_nonneg ha' hb'
-    rw [Rat.abs_of_nonpos ha, Rat.abs_of_nonpos hb, Rat.abs_of_nonneg hab,
-      Rat.neg_mul, Rat.mul_neg, Rat.neg_neg]
-
-private theorem finSum_swap {m n : Nat} (f : Fin m → Fin n → Rat) :
-    finSum m (fun i => finSum n (fun j => f i j)) =
-      finSum n (fun j => finSum m (fun i => f i j)) := by
-  induction m with
-  | zero =>
-    simp only [finSum_zero_n]
-    exact (finSum_zero n).symm
-  | succ m ih =>
-    simp only [finSum_succ]
-    rw [ih (fun i j => f i.castSucc j), ← finSum_add]
 
 private theorem finSum_div (n : Nat) (f : Fin n → Rat) (c : Rat) :
     finSum n f / c = finSum n (fun i => f i / c) := by
@@ -438,7 +309,7 @@ theorem gmi_cut_sound {mI mC : Nat}
       exact Rat.le_trans h3 h4
     have hdiv1 : 1 ≤ Spos / f0 := by
       conv => lhs; rw [← rat_div_self (Rat.ne_of_gt hf0_pos)]
-      exact rat_div_le_div_of_nonneg hSpos_ge hf0_pos
+      exact rat_div_le_div_of_pos hSpos_ge hf0_pos
     have hdiv2 : 0 ≤ Sneg / (1 - f0) := rat_div_nonneg hSneg_nonneg (Rat.le_of_lt h1mf0_pos)
     simpa [Rat.add_zero] using rat_add_le_add hdiv1 hdiv2
   · have hK_rat : (1 : Rat) ≤ (K : Rat) := by simpa using (Rat.intCast_le_intCast.mpr hK1)
@@ -457,7 +328,7 @@ theorem gmi_cut_sound {mI mC : Nat}
     have hdiv1 : 0 ≤ Spos / f0 := rat_div_nonneg hSpos_nonneg (Rat.le_of_lt hf0_pos)
     have hdiv2 : 1 ≤ Sneg / (1 - f0) := by
       conv => lhs; rw [← rat_div_self (Rat.ne_of_gt h1mf0_pos)]
-      exact rat_div_le_div_of_nonneg hSneg_ge h1mf0_pos
+      exact rat_div_le_div_of_pos hSneg_ge h1mf0_pos
     simpa [Rat.zero_add] using rat_add_le_add hdiv1 hdiv2
 
 /-- Upward coefficient weakening (modeling `nextUp` in `separateGMICutsEx`) preserves GMI soundness. -/
@@ -877,7 +748,7 @@ theorem cmir_safe_rounded_sound {mI mC : Nat}
     have hcoeff : -(max (-(cmirSignedCoeff (useLowerC k) (aC k))) 0 / delta) ≤
         cmirSignedCoeff (useLowerC k) (aC k) / delta := by
       rw [← rat_neg_div]
-      apply rat_div_le_div_of_nonneg _ hdelta
+      apply rat_div_le_div_of_pos _ hdelta
       have h1 := Rat.neg_le_neg (rat_le_max_left (a := -(cmirSignedCoeff (useLowerC k) (aC k))) (b := 0))
       simpa [Rat.neg_neg] using h1
     rw [← Rat.neg_mul]
@@ -897,7 +768,7 @@ theorem cmir_safe_rounded_sound {mI mC : Nat}
       exact Rat.mul_le_mul_of_nonneg_right (halpha j) (hyI_prop j).1
     have h2 : finSum mI (fun j => cmirSignedCoeff (useLowerI j) (aI j) * yI j) / delta ≤
         cmirShiftedRHS aI lI uI useLowerI aC lC uC useLowerC rhs / delta + sCont := by
-      have hd := rat_div_le_div_of_nonneg hshifted_le hdelta
+      have hd := rat_div_le_div_of_pos hshifted_le hdelta
       rw [rat_add_div] at hd
       have hsub := Rat.le_trans (Rat.add_le_add_left.mpr hcont_drop) hd
       have h4 := (Rat.le_sub_iff).mpr (by simpa [Rat.sub_eq_add_neg, Rat.add_comm (-sCont)] using hsub)
@@ -1260,9 +1131,6 @@ private theorem guardExcB_ok {α : Type} {c : Bool} {msg : String} {k : Except S
   cases c
   · simp at h
   · exact ⟨rfl, h⟩
-
-private theorem rat_eq_intCast_of_den_eq_one (r : Rat) (h : r.den = 1) : r = (r.num : Rat) :=
-  Rat.ext (by simp) (by simpa using h)
 
 /-- Sum of coefficients for column `c` in a sparse term list (handling duplicates). -/
 def sparseTermsCoeff : List SparseTerm → Nat → Rat
@@ -1673,13 +1541,13 @@ theorem checkCMIRCertificate_sound
         | none => simp [hub] at hb
         | some u =>
           simp only [hub, beq_iff_eq] at hb
-          exact ⟨by simp [hasUI, hub], ⟨u.num, by simp only [uIFn, hub, Option.getD_some]; exact rat_eq_intCast_of_den_eq_one u hb⟩⟩
+          exact ⟨by simp [hasUI, hub], ⟨u.num, by simp only [uIFn, hub, Option.getD_some]; exact rat_eq_num_of_den_one hb⟩⟩
       · simp only [hu, ↓reduceIte] at hb ⊢
         cases hlb : lbI[j.val]! with
         | none => simp [hlb] at hb
         | some l =>
           simp only [hlb, beq_iff_eq] at hb
-          exact ⟨by simp [hasLI, hlb], ⟨l.num, by simp only [lIFn, hlb, Option.getD_some]; exact rat_eq_intCast_of_den_eq_one l hb⟩⟩
+          exact ⟨by simp [hasLI, hlb], ⟨l.num, by simp only [lIFn, hlb, Option.getD_some]; exact rat_eq_num_of_den_one hb⟩⟩
   have hxC' : ∀ k : Fin aC.size, (hasLC k = true → lCFn k ≤ xC k) ∧ (hasUC k = true → xC k ≤ uCFn k) ∧
       (if useLowerC[k.val]! then hasLC k = true else hasUC k = true) := by
     intro k

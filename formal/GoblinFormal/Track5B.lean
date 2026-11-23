@@ -418,14 +418,6 @@ private theorem pcIdx_writeGpr_any (s : Arm64State) (r : BitVec 5) (v : BitVec 6
     (writeGpr s r v).pcIdx = s.pcIdx := by
   unfold writeGpr; split <;> rfl
 
-private theorem status_writeGprSP_any (s : Arm64State) (r : BitVec 5) (v : BitVec 64) :
-    (writeGprSP s r v).status = s.status := by
-  unfold writeGprSP; split <;> rfl
-
-private theorem pcIdx_writeGprSP_any (s : Arm64State) (r : BitVec 5) (v : BitVec 64) :
-    (writeGprSP s r v).pcIdx = s.pcIdx := by
-  unfold writeGprSP; split <;> rfl
-
 private theorem status_writeFp_any (s : Arm64State) (r : BitVec 5) (v : BitVec 64) :
     (writeFp s r v).status = s.status := rfl
 
@@ -460,7 +452,7 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
     dsimp only
     split
     · simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any]; exact ⟨trivial, trivial⟩
-    · simp only [advancePc, status_writeGprSP_any, pcIdx_writeGprSP_any]; exact ⟨trivial, trivial⟩
+    · simp only [advancePc, status_writeGprSP, pcIdx_writeGprSP]; exact ⟨trivial, trivial⟩
   | addSubReg _ _ _ _ _ _ _ _ =>
     unfold execArm64Insn
     dsimp only
@@ -470,13 +462,13 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
     dsimp only
     split
     · simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any]; exact ⟨trivial, trivial⟩
-    · simp only [advancePc, status_writeGprSP_any, pcIdx_writeGprSP_any]; exact ⟨trivial, trivial⟩
+    · simp only [advancePc, status_writeGprSP, pcIdx_writeGprSP]; exact ⟨trivial, trivial⟩
   | logicalImm _ _ _ _ _ =>
     unfold execArm64Insn
     dsimp only
     split
     · simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any]; exact ⟨trivial, trivial⟩
-    · simp only [advancePc, status_writeGprSP_any, pcIdx_writeGprSP_any]; exact ⟨trivial, trivial⟩
+    · simp only [advancePc, status_writeGprSP, pcIdx_writeGprSP]; exact ⟨trivial, trivial⟩
   | logicalReg _ _ _ _ _ _ _ _ =>
     unfold execArm64Insn
     dsimp only
@@ -485,7 +477,7 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
     unfold execArm64Insn
     dsimp only
     split <;> split <;> try split
-    all_goals simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any, status_writeGprSP_any, pcIdx_writeGprSP_any, status_writeFp_any, pcIdx_writeFp_any]
+    all_goals simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any, status_writeGprSP, pcIdx_writeGprSP, status_writeFp_any, pcIdx_writeFp_any]
     all_goals exact ⟨trivial, trivial⟩
   | ldrStrUImm _ _ _ _ _ _ =>
     unfold execArm64Insn
@@ -497,7 +489,7 @@ private theorem execArm64Insn_linear (progLen : Nat) (ext : Nat → Option Strin
     unfold execArm64Insn
     dsimp only
     split <;> try split <;> try split <;> try split
-    all_goals simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any, status_writeGprSP_any, pcIdx_writeGprSP_any, status_writeFp_any, pcIdx_writeFp_any]
+    all_goals simp only [advancePc, status_writeGpr_any, pcIdx_writeGpr_any, status_writeGprSP, pcIdx_writeGprSP, status_writeFp_any, pcIdx_writeFp_any]
     all_goals exact ⟨trivial, trivial⟩
   | ldrStrReg _ _ _ _ _ _ _ _ _ =>
     unfold execArm64Insn
@@ -2610,9 +2602,6 @@ def lookup32 (rs : List (BitVec 64)) (r : BitVec 5) : BitVec 64 := rs.getD r.toN
 def regListOf (f : BitVec 5 → BitVec 64) : List (BitVec 64) :=
   (List.range 32).map fun i => f (BitVec.ofNat 5 i)
 
-private theorem regListOf_length (f : BitVec 5 → BitVec 64) : (regListOf f).length = 32 := by
-  simp [regListOf]
-
 private theorem lookup32_regListOf (f : BitVec 5 → BitVec 64) (r : BitVec 5) :
     lookup32 (regListOf f) r = f r := by
   have hr : r.toNat < 32 := r.isLt
@@ -2717,8 +2706,6 @@ def isPureNonStoreInsn : Arm64Insn → Bool
 private theorem advancePc_mem (s : Arm64State) : (advancePc s).mem = s.mem := rfl
 private theorem writeGpr_mem (s : Arm64State) (r : BitVec 5) (v : BitVec 64) : (writeGpr s r v).mem = s.mem := by
   unfold writeGpr; split <;> rfl
-private theorem writeGprSP_mem (s : Arm64State) (r : BitVec 5) (v : BitVec 64) : (writeGprSP s r v).mem = s.mem := by
-  unfold writeGprSP; split <;> rfl
 private theorem writeFp_mem (s : Arm64State) (r : BitVec 5) (v : BitVec 64) : (writeFp s r v).mem = s.mem := rfl
 
 private theorem jumpRel_mem (progLen : Nat) (ext : Nat → Option String) (isLink : Bool) (s : Arm64State) (imm : Int) :
@@ -2751,7 +2738,7 @@ private theorem pairLoadStep_mem (s : Arm64State) (isFP : Bool) (rt rt2 : BitVec
 private theorem mode_mem (s1 : Arm64State) (mode : MemIndexMode) (rn : BitVec 5) (v : BitVec 64)
     {m : BitVec 64 → BitVec 8} (h : s1.mem = m) :
     (match mode with | .offset => s1 | .post | .pre => writeGprSP s1 rn v).mem = m := by
-  cases mode <;> simp only [writeGprSP_mem, h]
+  cases mode <;> simp only [mem_writeGprSP, h]
 
 private theorem execArm64Insn_pure_mem (progLen : Nat) (ext : Nat → Option String)
     (insn : Arm64Insn) (s : Arm64State) (h : isPureNonStoreInsn insn = true) :
@@ -2784,16 +2771,16 @@ private theorem execArm64Insn_pure_mem (progLen : Nat) (ext : Nat → Option Str
   case tbz _ _ _ _ => exact if_jump_adv_mem _ _ _ _ _
   case addSubImm _ _ setFlags _ _ _ =>
     unfold execArm64Insn; dsimp only; rw [advancePc_mem]
-    cases setFlags <;> simp only [↓reduceIte, Bool.false_eq_true, writeGpr_mem, writeGprSP_mem]
+    cases setFlags <;> simp only [↓reduceIte, Bool.false_eq_true, writeGpr_mem, mem_writeGprSP]
   case addSubExt _ _ setFlags _ _ _ _ _ =>
     unfold execArm64Insn; dsimp only; rw [advancePc_mem]
-    cases setFlags <;> simp only [↓reduceIte, Bool.false_eq_true, writeGpr_mem, writeGprSP_mem]
+    cases setFlags <;> simp only [↓reduceIte, Bool.false_eq_true, writeGpr_mem, mem_writeGprSP]
   case addSubReg _ _ setFlags _ _ _ _ _ =>
     unfold execArm64Insn; dsimp only; rw [advancePc_mem]
     cases setFlags <;> simp only [↓reduceIte, Bool.false_eq_true, writeGpr_mem]
   case logicalImm _ opc _ _ _ =>
     unfold execArm64Insn; dsimp only; rw [advancePc_mem]
-    by_cases h3 : (opc == 3) = true <;> simp only [h3, ↓reduceIte, Bool.false_eq_true, writeGpr_mem, writeGprSP_mem]
+    by_cases h3 : (opc == 3) = true <;> simp only [h3, ↓reduceIte, Bool.false_eq_true, writeGpr_mem, mem_writeGprSP]
   case logicalReg _ _ opc _ _ _ _ _ =>
     unfold execArm64Insn; dsimp only; rw [advancePc_mem]
     by_cases h3 : (opc == 3) = true <;> simp only [h3, ↓reduceIte, Bool.false_eq_true, writeGpr_mem]
@@ -2884,7 +2871,7 @@ private theorem stepStoreOverlay_sound (progLen : Nat) (ext : Nat → Option Str
           (if isFP then (c.toArm64 base).fpRegs rt else readGpr (c.toArm64 base) rt) hAlEq
         unfold execArm64Insn; dsimp only; simp only [Bool.false_eq_true, ↓reduceIte]
         have hMemEq : (c.toArm64 base).mem = evalWordOverlay base c.ws := rfl
-        rw [hMemEq, hW, toArm64_ofArm64]; intro a; rw [advancePc_mem, writeGprSP_mem]
+        rw [hMemEq, hW, toArm64_ofArm64]; intro a; rw [advancePc_mem, mem_writeGprSP]
       · split at h <;> try contradiction
         cases h; rename_i hAl
         have hAlEq : _ = 0#64 := of_decide_eq_true hAl
@@ -2892,7 +2879,7 @@ private theorem stepStoreOverlay_sound (progLen : Nat) (ext : Nat → Option Str
           (if isFP then (c.toArm64 base).fpRegs rt else readGpr (c.toArm64 base) rt) hAlEq
         unfold execArm64Insn; dsimp only; simp only [Bool.false_eq_true, ↓reduceIte]
         have hMemEq : (c.toArm64 base).mem = evalWordOverlay base c.ws := rfl
-        rw [hMemEq, hW, toArm64_ofArm64]; intro a; rw [advancePc_mem, writeGprSP_mem]
+        rw [hMemEq, hW, toArm64_ofArm64]; intro a; rw [advancePc_mem, mem_writeGprSP]
     · contradiction
   case ldrStrReg isLoad isSigned isFP sz extK scale rt rn rm =>
     cases isLoad

@@ -2,8 +2,10 @@
 Apps.ViprCheck: standalone CLI verifier for Mini-VIPR rational MILP branch-and-bound certificates.
 -/
 
+import Apps.Common
 import GoblinFormal.Track4
 
+open Apps.Common
 open GoblinFormal
 open GoblinFormal.Track4
 
@@ -11,33 +13,6 @@ namespace Apps.ViprCheck
 
 private def usageText : String :=
   "usage: vipr-check [--jsonl | --batch <array.json | ->] [<certificate.json | ->]"
-
-private def hexDigit (n : Nat) : Char :=
-  if n < 10 then Char.ofNat ('0'.toNat + n)
-  else Char.ofNat ('a'.toNat + (n - 10))
-
-private def jsonQuote (s : String) : String :=
-  let body := s.foldl (fun acc c =>
-    if c == '"' then acc ++ "\\\""
-    else if c == '\\' then acc ++ "\\\\"
-    else if c == '\n' then acc ++ "\\n"
-    else if c == '\r' then acc ++ "\\r"
-    else if c == '\t' then acc ++ "\\t"
-    else if c.toNat < 0x20 then
-      let b := c.toNat
-      acc.push '\\' |>.push 'u' |>.push '0' |>.push '0'
-        |>.push (hexDigit (b / 16)) |>.push (hexDigit (b % 16))
-    else acc.push c) ""
-  "\"" ++ body ++ "\""
-
-private def ratObjJson (r : Rat) : String :=
-  "{\"num\":\"" ++ toString r.num ++ "\",\"den\":\"" ++ toString r.den ++ "\"}"
-
-private def readInput (path : String) : IO String := do
-  if path == "-" then
-    (← IO.getStdin).readToEnd
-  else
-    IO.FS.readFile path
 
 /-- Pinpoints the failing step or root check when `checkMiniVIPR cert` returns `false`. -/
 private def diagnoseFailure (cert : MiniVIPRCert) : String := Id.run do
@@ -83,11 +58,6 @@ private def diagnosePresolveFailure (cert : VIPRWithPresolveCert) : String := Id
     return "presolve final instance does not match reduced Mini-VIPR instance"
   return diagnoseFailure cert.reduced
 
-private def hasNonNullField (jv : JsonVal) (key : String) : Bool :=
-  match jv.getField? key with
-  | none | some .null => false
-  | some _ => true
-
 private def verifyCertVal (jv : JsonVal) : Except String MiniVIPRCert := do
   if hasNonNullField jv "orig" then
     let envCert ← decodeVIPRWithPresolveCert jv
@@ -111,44 +81,14 @@ private def formatJsonlOk (cert : MiniVIPRCert) : String :=
   | _ =>
     "{\"ok\":true,\"detail\":\"VERIFIED\"}"
 
-private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) : IO UInt32 := do
-  let line ← stdin.getLine
-  if line.isEmpty then
-    return 0
-  let trimmed := line.trimAscii.toString
-  if !trimmed.isEmpty then
-    let resp :=
-      match parseJsonStrict trimmed >>= verifyCertVal with
-      | .ok cert => formatJsonlOk cert
-      | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
-    stdout.putStr resp
-    stdout.putStr "\n"
-    stdout.flush
-  runJsonlLoop stdin stdout
+private def batchFmt : BatchFormat := {
+  readErr := fun path err => s!"ERROR: read '{path}': {err}"
+  parseErr := fun path msg => s!"ERROR: parse batch JSON '{path}': {msg}"
+  emptyErr := fun path => s!"ERROR: empty batch JSON '{path}'"
+}
 
-private def runBatch (path : String) : IO UInt32 := do
-  let raw ←
-    try
-      readInput path
-    catch err =>
-      IO.eprintln s!"ERROR: read '{path}': {err}"
-      return 1
-  match parseJsonStrict raw >>= JsonVal.asArray with
-  | .error msg =>
-    IO.eprintln s!"ERROR: parse batch JSON '{path}': {msg}"
-    return 1
-  | .ok items =>
-    if items.isEmpty then
-      IO.eprintln s!"ERROR: empty batch JSON '{path}'"
-      return 1
-    for i in [:items.size] do
-      match verifyCertVal items[i]! with
-      | .ok _ => pure ()
-      | .error msg =>
-        IO.eprintln s!"BATCH FAIL at index {i}: {msg}"
-        return 1
-    IO.println s!"VERIFIED ({items.size} items)"
-    return 0
+private def runBatch (path : String) : IO UInt32 :=
+  runBatchWith batchFmt path (fun item => verifyCertVal item *> .ok ())
 
 end Apps.ViprCheck
 
@@ -158,7 +98,8 @@ def main (args : List String) : IO UInt32 := do
     IO.println Apps.ViprCheck.usageText
     return 0
   | ["--jsonl"] =>
-    Apps.ViprCheck.runJsonlLoop (← IO.getStdin) (← IO.getStdout)
+    Apps.Common.runJsonlLoop (← IO.getStdin) (← IO.getStdout) fun jv =>
+      Apps.ViprCheck.formatJsonlOk <$> Apps.ViprCheck.verifyCertVal jv
   | ["--batch", path] =>
     Apps.ViprCheck.runBatch path
   | ["--batch"] =>
@@ -170,7 +111,7 @@ def main (args : List String) : IO UInt32 := do
       return 1
     let raw ←
       try
-        Apps.ViprCheck.readInput path
+        Apps.Common.readInput path
       catch err =>
         IO.eprintln s!"ERROR: read '{path}': {err}"
         return 1

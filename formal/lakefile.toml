@@ -14,6 +14,10 @@ defaultTargets = [
 [[lean_lib]]
 name = "GoblinFormal"
 
+[[lean_lib]]
+name = "Apps"
+roots = ["Apps.Common"]
+
 [[lean_exe]]
 name = "lsap-check"
 root = "Apps.LsapCheck"

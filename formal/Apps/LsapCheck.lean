@@ -5,8 +5,10 @@ checkLSAPForbiddenTranspose, checkLSAPForbiddenTransposeSafe,
 checkHallInfeasible, checkHallInfeasibleTranspose).
 -/
 
+import Apps.Common
 import GoblinFormal.Track1
 
+open Apps.Common
 open GoblinFormal
 open GoblinFormal.Track1
 
@@ -48,27 +50,6 @@ private def usageText : String :=
   "  --batch <path>  Verify non-empty JSON array of certificates from file or '-'\n" ++
   "  -h, --help      Show this help message"
 
-private def hexDigit (n : Nat) : Char :=
-  if n < 10 then Char.ofNat ('0'.toNat + n)
-  else Char.ofNat ('a'.toNat + (n - 10))
-
-private def jsonQuote (s : String) : String :=
-  let body := s.foldl (fun acc c =>
-    if c == '"' then acc ++ "\\\""
-    else if c == '\\' then acc ++ "\\\\"
-    else if c == '\n' then acc ++ "\\n"
-    else if c == '\r' then acc ++ "\\r"
-    else if c == '\t' then acc ++ "\\t"
-    else if c.toNat < 0x20 then
-      let b := c.toNat
-      acc.push '\\' |>.push 'u' |>.push '0' |>.push '0'
-        |>.push (hexDigit (b / 16)) |>.push (hexDigit (b % 16))
-    else acc.push c) ""
-  "\"" ++ body ++ "\""
-
-private def ratObjJson (r : Rat) : String :=
-  "{\"num\":\"" ++ toString r.num ++ "\",\"den\":\"" ++ toString r.den ++ "\"}"
-
 private def parseRatString (s : String) : Except String Rat :=
   (JsonVal.str s).asRat
 
@@ -99,13 +80,7 @@ private def parseArgs : List String → ParsedArgs → Except String ParsedArgs
       | none => parseArgs rest { acc with filePath := some arg }
 
 private def asRatOrBits (v : JsonVal) : Except String Rat :=
-  match v.getField? "bits" with
-  | some bv => do
-    let bits ← bv.asUInt64
-    match float64BitsToRat bits with
-    | some r => .ok r
-    | none => .error "non-finite float64 bits (Inf/NaN)"
-  | none => v.asRat
+  asRatOrBitsWith JsonVal.asUInt64 v
 
 private def asOptCostCell (v : JsonVal) (negate bitsEncoding : Bool) : Except String (Option Rat) :=
   if bitsEncoding then
@@ -139,7 +114,7 @@ private def asOptCostCell (v : JsonVal) (negate bitsEncoding : Bool) : Except St
       | none => some <$> asRatOrBits v
     | _ => some <$> asRatOrBits v
 
-private def parseRatArray (v : JsonVal) (expectedLen : Nat) (bitsEncoding : Bool) (label : String) :
+private def parseSizedRatArray (v : JsonVal) (expectedLen : Nat) (bitsEncoding : Bool) (label : String) :
     Except String (Array Rat) := do
   let arr ← v.asArray
   if arr.size != expectedLen then
@@ -181,25 +156,15 @@ private def parseDistinctFinArray (v : JsonVal) (expectedLen : Nat) (bound : Nat
         throw s!"{label}: index {x} out of range [0, {bound})"
     .ok out
 
-private def parseCostEncoding (root : JsonVal) : Except String Bool := do
-  match root.getField? "cost_encoding" with
-  | none | some .null => .ok false
+private def parseEncodingFlag (root : JsonVal) (field : String) : Except String Bool := do
+  match optNonNullField? root field with
+  | none => .ok false
   | some ev =>
     let s ← ev.asString
     let low := s.toLower
     if low == "rat" || low == "default" then .ok false
     else if low == "bits" then .ok true
-    else .error s!"invalid cost_encoding '{s}' (expected 'rat' or 'bits')"
-
-private def parseDualEncoding (root : JsonVal) : Except String Bool := do
-  match root.getField? "dual_encoding" with
-  | none | some .null => .ok false
-  | some ev =>
-    let s ← ev.asString
-    let low := s.toLower
-    if low == "rat" || low == "default" then .ok false
-    else if low == "bits" then .ok true
-    else .error s!"invalid dual_encoding '{s}' (expected 'rat' or 'bits')"
+    else .error s!"invalid {field} '{s}' (expected 'rat' or 'bits')"
 
 private def parseFlatCostMatrix (v : JsonVal) (rows cols : Nat) (negate bitsEncoding : Bool) :
     Except String (Array (Option Rat)) := do
@@ -273,13 +238,6 @@ private def parseMode (root : JsonVal) (override : Option Mode) : Except String 
         let b ← sv.asBool
         .ok (if b then .safe else .exact)
 
-private def effectivePrintBound (root : JsonVal) (cliFlag : Bool) : Except String Bool := do
-  if cliFlag then
-    return true
-  match root.getField? "printBound" with
-  | none | some .null => return false
-  | some pv => pv.asBool
-
 private def parsePrimalPairs (root : JsonVal) (rows cols : Nat) :
     Except String (Array (Fin rows) × Array (Fin cols)) := do
   let k := min rows cols
@@ -347,32 +305,19 @@ private def parseHallMask (root : JsonVal) (rows cols : Nat) : Except String (Ar
         throw "Hall witness side='cols' requires rows > cols"
     else
       throw s!"invalid Hall witness side '{s}' (expected 'rows' or 'cols')"
-  if rowSide then
-    match root.getField? "row_mask" with
-    | some mv => parseBoolMask mv rows "row_mask"
-    | none =>
-      match root.getField? "mask" with
-      | some mv => parseBoolMask mv rows "mask"
-      | none =>
-        match root.getField? "row_subset" with
-        | some sv => parseSubsetMask sv rows "row_subset"
-        | none =>
-          match root.getField? "subset" with
-          | some sv => parseSubsetMask sv rows "subset"
-          | none => .error "missing Hall witness ('subset', 'row_subset', 'row_mask', or 'mask')"
+  let (sidePrefix, dim) := if rowSide then ("row", rows) else ("col", cols)
+  let maskKey := s!"{sidePrefix}_mask"
+  let subsetKey := s!"{sidePrefix}_subset"
+  if let some mv := root.getField? maskKey then
+    parseBoolMask mv dim maskKey
+  else if let some mv := root.getField? "mask" then
+    parseBoolMask mv dim "mask"
+  else if let some sv := root.getField? subsetKey then
+    parseSubsetMask sv dim subsetKey
+  else if let some sv := root.getField? "subset" then
+    parseSubsetMask sv dim "subset"
   else
-    match root.getField? "col_mask" with
-    | some mv => parseBoolMask mv cols "col_mask"
-    | none =>
-      match root.getField? "mask" with
-      | some mv => parseBoolMask mv cols "mask"
-      | none =>
-        match root.getField? "col_subset" with
-        | some sv => parseSubsetMask sv cols "col_subset"
-        | none =>
-          match root.getField? "subset" with
-          | some sv => parseSubsetMask sv cols "subset"
-          | none => .error "missing Hall witness ('subset', 'col_subset', 'col_mask', or 'mask')"
+    .error s!"missing Hall witness ('subset', '{subsetKey}', '{maskKey}', or 'mask')"
 
 private theorem flatIdx_lt {rows cols : Nat} (i : Fin rows) (j : Fin cols) :
     i.val * cols + j.val < rows * cols := by
@@ -396,6 +341,38 @@ private def buildMatchingMap {a b : Nat} (keys : Array (Fin a)) (vals : Array (F
     .ok ⟨out, hOut⟩
   else
     .error "internal error: matching map length mismatch"
+
+private def buildMatchingFn {a b : Nat} (keys : Array (Fin a)) (vals : Array (Fin b))
+    (hle : a ≤ b) (keyLabel valLabel : String) : Except String (Fin a → Fin b) := do
+  if ha0 : a = 0 then
+    return fun i => Fin.elim0 (ha0 ▸ i)
+  else
+    have hbPos : 0 < b := by omega
+    if hK : keys.size = a then
+      if hV : vals.size = a then
+        let ⟨pArr, hpLen⟩ ← buildMatchingMap keys vals hK hV hbPos
+        return fun i => pArr[i.val]'(hpLen ▸ i.isLt)
+      else throw s!"internal error: {valLabel} length mismatch"
+    else throw s!"internal error: {keyLabel} length mismatch"
+
+private def toFlatMatrix {α : Type} (flat : Array α) (rows cols : Nat) :
+    Except String (Fin rows → Fin cols → α) :=
+  if h : flat.size = rows * cols then
+    .ok fun i j => flat[i.val * cols + j.val]'(h ▸ flatIdx_lt i j)
+  else
+    .error "internal error: cost matrix length mismatch"
+
+private def resolveDualArr (raw? : Option (Array Rat)) (canDefault : Bool)
+    (mode : Mode) (n : Nat) (field : String) : Except String (Array Rat) :=
+  match raw? with
+  | some arr => .ok arr
+  | none =>
+    if !canDefault then .error s!"missing required JSON field '{field}'"
+    else
+      match mode with
+      | .exact => .error s!"missing required JSON field '{field}'"
+      | .safe => .ok (Array.replicate n 0)
+      | .hall => .ok #[]
 
 private def verifySafeDeclaredObj (root : JsonVal) (negate : Bool)
     (primalNorm lbNorm tol : Rat) : Except String Unit := do
@@ -424,8 +401,8 @@ private def verifyCertCore (root : JsonVal) (args : ParsedArgs) : Except String 
   let (rows, cols) ← parseDims root
   let negate ← parseSense root
   let mode ← parseMode root args.modeOverride
-  let costBits ← parseCostEncoding root
-  let dualBits ← parseDualEncoding root
+  let costBits ← parseEncodingFlag root "cost_encoding"
+  let dualBits ← parseEncodingFlag root "dual_encoding"
 
   let tolRaw ←
     match args.tolOverride with
@@ -447,198 +424,122 @@ private def verifyCertCore (root : JsonVal) (args : ParsedArgs) : Except String 
     if rows == 0 || cols == 0 then
       throw "INVALID: empty matrix cannot be Hall-infeasible"
     let maskArr ← parseHallMask root rows cols
-    if hFlatOrig : flatOrig.size = rows * cols then
-      let C : Fin rows → Fin cols → Option Rat := fun i j =>
-        flatOrig[i.val * cols + j.val]'(hFlatOrig ▸ flatIdx_lt i j)
-      if hle : rows ≤ cols then
-        if hMask : maskArr.size = rows then
-          let rowMask : Fin rows → Bool := fun i => maskArr[i.val]'(hMask ▸ i.isLt)
-          if checkHallInfeasible rows cols C rowMask then
-            return { mode := .hall, tol := 0, bound := none }
-          else
-            throw "INVALID: Hall infeasibility witness failed (|N_finite(S)| >= |S|)"
-        else
-          throw "internal error: row mask length mismatch"
-      else
-        if hMask : maskArr.size = cols then
-          let colMask : Fin cols → Bool := fun j => maskArr[j.val]'(hMask ▸ j.isLt)
-          if checkHallInfeasibleTranspose rows cols C colMask then
-            return { mode := .hall, tol := 0, bound := none }
-          else
-            throw "INVALID: Hall infeasibility witness failed on tall matrix (|N_finite(S)| >= |S|)"
-        else
-          throw "internal error: column mask length mismatch"
+    let C ← toFlatMatrix flatOrig rows cols
+    if rows ≤ cols then
+      let rowMask ← toFinFn maskArr rows "internal error: row mask length mismatch"
+      if checkHallInfeasible rows cols C rowMask then
+        return { mode := .hall, tol := 0, bound := none }
+      throw "INVALID: Hall infeasibility witness failed (|N_finite(S)| >= |S|)"
     else
-      throw "internal error: cost matrix length mismatch"
+      let colMask ← toFinFn maskArr cols "internal error: column mask length mismatch"
+      if checkHallInfeasibleTranspose rows cols C colMask then
+        return { mode := .hall, tol := 0, bound := none }
+      throw "INVALID: Hall infeasibility witness failed on tall matrix (|N_finite(S)| >= |S|)"
 
   -- Validate dual arrays against rows/cols BEFORE parsing primal pairs so huge dims fail fast without OOM.
-  let uRaw? ←
-    match root.getField? "u" with
-    | none | some .null => .ok none
-    | some uv => some <$> parseRatArray uv rows dualBits "u"
-  let vRaw? ←
-    match root.getField? "v" with
-    | none | some .null => .ok none
-    | some vv => some <$> parseRatArray vv cols dualBits "v"
+  let uRaw? ← match optNonNullField? root "u" with
+    | none => .ok none
+    | some uv => some <$> parseSizedRatArray uv rows dualBits "u"
+  let vRaw? ← match optNonNullField? root "v" with
+    | none => .ok none
+    | some vv => some <$> parseSizedRatArray vv cols dualBits "v"
 
   let transposed := rows > cols
-
-  let uArr : Array Rat ←
-    if !transposed then
-      match uRaw? with
-      | some ua => .ok ua
-      | none =>
-        match mode with
-        | .exact => .error "missing required JSON field 'u'"
-        | .safe => .ok (Array.replicate rows 0)
-        | .hall => .ok #[]
-    else
-      match uRaw? with
-      | some ua => .ok ua
-      | none => .error "missing required JSON field 'u'"
-
-  let vArr : Array Rat ←
-    if !transposed then
-      match vRaw? with
-      | some va => .ok va
-      | none => .error "missing required JSON field 'v'"
-    else
-      match vRaw? with
-      | some va => .ok va
-      | none =>
-        match mode with
-        | .exact => .error "missing required JSON field 'v'"
-        | .safe => .ok (Array.replicate cols 0)
-        | .hall => .ok #[]
+  let uArr ← resolveDualArr uRaw? (!transposed) mode rows "u"
+  let vArr ← resolveDualArr vRaw? transposed mode cols "v"
 
   let (rowInd, colInd) ← parsePrimalPairs root rows cols
-
   let flatNorm : Array (Option Rat) :=
     if negate then flatOrig.map (·.map (- ·)) else flatOrig
 
-  if hFlatNorm : flatNorm.size = rows * cols then
-    if hU : uArr.size = rows then
-      if hV : vArr.size = cols then
-        let Cnorm : Fin rows → Fin cols → Option Rat := fun i j =>
-          flatNorm[i.val * cols + j.val]'(hFlatNorm ▸ flatIdx_lt i j)
-        let u : Fin rows → Rat := fun i => uArr[i.val]'(hU ▸ i.isLt)
-        let v : Fin cols → Rat := fun j => vArr[j.val]'(hV ▸ j.isLt)
+  let Cnorm ← toFlatMatrix flatNorm rows cols
+  let u ← toFinFn uArr rows "internal error: u array length mismatch"
+  let v ← toFinFn vArr cols "internal error: v array length mismatch"
 
-        if hle : rows ≤ cols then
-          let p : Fin rows → Fin cols ←
-            if hRows0 : rows = 0 then
-              .ok (fun i => Fin.elim0 (hRows0 ▸ i))
-            else
-              have hColsPos : 0 < cols := by omega
-              if hRL : rowInd.size = rows then
-                if hCL : colInd.size = rows then
-                  let ⟨pArr, hpLen⟩ ← buildMatchingMap rowInd colInd hRL hCL hColsPos
-                  .ok (fun i => pArr[i.val]'(hpLen ▸ i.isLt))
-                else .error "internal error: col_ind length mismatch"
-              else .error "internal error: row_ind length mismatch"
-          let primalNorm : Rat := optCostSum rows cols Cnorm p
-          let primalOrig : Rat := if negate then -primalNorm else primalNorm
-          match mode with
-          | .exact =>
-            if checkLSAPForbidden rows cols Cnorm p u v then
-              verifyExactDeclaredObj root primalOrig
-              .ok { mode := .exact, tol := 0, bound := some primalOrig }
-            else if !checkInjective rows cols p then
-              .error "INVALID: primal assignment is not injective"
-            else if !checkFiniteMatching rows cols Cnorm p then
-              .error "INVALID: primal assignment uses a forbidden edge"
-            else if !checkDualFeasibleOpt rows cols Cnorm u v then
-              .error "INVALID: dual feasibility u[i] + v[j] <= C[i,j] violated"
-            else if !checkRectDual rows cols p v then
-              .error "INVALID: rectangular dual invariant violated (v[j] <= 0 and unassigned v[j] == 0)"
-            else if !checkCompSlackOpt rows cols Cnorm p u v then
-              .error "INVALID: complementary slackness u[i] + v[p(i)] == C[i,p(i)] violated"
-            else
-              .error "INVALID: exact LSAP certificate check failed"
-          | .safe =>
-            if checkLSAPForbiddenSafe rows cols Cnorm p v tol then
-              match safeLowerBoundOpt rows cols Cnorm v with
-              | none => .error "INVALID: row has no finite edges in safe mode"
-              | some lbNorm =>
-                verifySafeDeclaredObj root negate primalNorm lbNorm tol
-                let certBnd := if negate then -lbNorm else lbNorm
-                .ok { mode := .safe, tol := tol, bound := some certBnd }
-            else if !checkInjective rows cols p then
-              .error "INVALID: primal assignment is not injective"
-            else if !checkFiniteMatching rows cols Cnorm p then
-              .error "INVALID: primal assignment uses a forbidden edge"
-            else if rows < cols && !allFin cols (fun j => decide (v j ≤ 0)) then
-              .error "INVALID: rectangular dual invariant v[j] <= 0 violated in safe mode"
-            else
-              match safeLowerBoundOpt rows cols Cnorm v with
-              | none => .error "INVALID: row has no finite edges in safe mode"
-              | some lbNorm =>
-                .error s!"INVALID: safe duality gap {primalNorm - lbNorm} exceeds tolerance {tol}"
-          | .hall => .error "internal error: unreachable hall branch"
-        else
-          -- Tall matrix (rows > cols): invoke proved transpose checkers directly on original (rows, cols).
-          let p : Fin cols → Fin rows ←
-            if hCols0 : cols = 0 then
-              .ok (fun j => Fin.elim0 (hCols0 ▸ j))
-            else
-              have hRowsPos : 0 < rows := by omega
-              if hCL : colInd.size = cols then
-                if hRL : rowInd.size = cols then
-                  let ⟨pArr, hpLen⟩ ← buildMatchingMap colInd rowInd hCL hRL hRowsPos
-                  .ok (fun j => pArr[j.val]'(hpLen ▸ j.isLt))
-                else .error "internal error: row_ind length mismatch"
-              else .error "internal error: col_ind length mismatch"
-          let primalNorm : Rat := finSum cols (fun j => (Cnorm (p j) j).getD 0)
-          let primalOrig : Rat := if negate then -primalNorm else primalNorm
-          match mode with
-          | .exact =>
-            if checkLSAPForbiddenTranspose rows cols Cnorm p u v then
-              verifyExactDeclaredObj root primalOrig
-              .ok { mode := .exact, tol := 0, bound := some primalOrig }
-            else if !checkInjective cols rows p then
-              .error "INVALID: primal assignment is not injective"
-            else if !checkFiniteMatching cols rows (fun j i => Cnorm i j) p then
-              .error "INVALID: primal assignment uses a forbidden edge"
-            else if !checkDualFeasibleOpt cols rows (fun j i => Cnorm i j) v u then
-              .error "INVALID: dual feasibility u[i] + v[j] <= C[i,j] violated"
-            else if !checkRectDual cols rows p u then
-              .error "INVALID: rectangular dual invariant violated (u[i] <= 0 and unassigned u[i] == 0)"
-            else if !checkCompSlackOpt cols rows (fun j i => Cnorm i j) p v u then
-              .error "INVALID: complementary slackness u[p(j)] + v[j] == C[p(j),j] violated"
-            else
-              .error "INVALID: exact tall LSAP certificate check failed"
-          | .safe =>
-            if checkLSAPForbiddenTransposeSafe rows cols Cnorm p u tol then
-              match safeLowerBoundOptTranspose rows cols Cnorm u with
-              | none => .error "INVALID: column has no finite edges in safe mode"
-              | some lbNorm =>
-                verifySafeDeclaredObj root negate primalNorm lbNorm tol
-                let certBnd := if negate then -lbNorm else lbNorm
-                .ok { mode := .safe, tol := tol, bound := some certBnd }
-            else if !checkInjective cols rows p then
-              .error "INVALID: primal assignment is not injective"
-            else if !checkFiniteMatching cols rows (fun j i => Cnorm i j) p then
-              .error "INVALID: primal assignment uses a forbidden edge"
-            else if cols < rows && !allFin rows (fun i => decide (u i ≤ 0)) then
-              .error "INVALID: rectangular dual invariant u[i] <= 0 violated in safe mode"
-            else
-              match safeLowerBoundOptTranspose rows cols Cnorm u with
-              | none => .error "INVALID: column has no finite edges in safe mode"
-              | some lbNorm =>
-                .error s!"INVALID: safe duality gap {primalNorm - lbNorm} exceeds tolerance {tol}"
-          | .hall => .error "internal error: unreachable hall branch"
+  if hle : rows ≤ cols then
+    let p ← buildMatchingFn rowInd colInd hle "row_ind" "col_ind"
+    let primalNorm : Rat := optCostSum rows cols Cnorm p
+    let primalOrig : Rat := if negate then -primalNorm else primalNorm
+    match mode with
+    | .exact =>
+      if checkLSAPForbidden rows cols Cnorm p u v then
+        verifyExactDeclaredObj root primalOrig
+        .ok { mode := .exact, tol := 0, bound := some primalOrig }
+      else if !checkInjective rows cols p then
+        .error "INVALID: primal assignment is not injective"
+      else if !checkFiniteMatching rows cols Cnorm p then
+        .error "INVALID: primal assignment uses a forbidden edge"
+      else if !checkDualFeasibleOpt rows cols Cnorm u v then
+        .error "INVALID: dual feasibility u[i] + v[j] <= C[i,j] violated"
+      else if !checkRectDual rows cols p v then
+        .error "INVALID: rectangular dual invariant violated (v[j] <= 0 and unassigned v[j] == 0)"
+      else if !checkCompSlackOpt rows cols Cnorm p u v then
+        .error "INVALID: complementary slackness u[i] + v[p(i)] == C[i,p(i)] violated"
       else
-        .error "internal error: v array length mismatch"
-    else
-      .error "internal error: u array length mismatch"
+        .error "INVALID: exact LSAP certificate check failed"
+    | .safe =>
+      if checkLSAPForbiddenSafe rows cols Cnorm p v tol then
+        match safeLowerBoundOpt rows cols Cnorm v with
+        | none => .error "INVALID: row has no finite edges in safe mode"
+        | some lbNorm =>
+          verifySafeDeclaredObj root negate primalNorm lbNorm tol
+          let certBnd := if negate then -lbNorm else lbNorm
+          .ok { mode := .safe, tol := tol, bound := some certBnd }
+      else if !checkInjective rows cols p then
+        .error "INVALID: primal assignment is not injective"
+      else if !checkFiniteMatching rows cols Cnorm p then
+        .error "INVALID: primal assignment uses a forbidden edge"
+      else if rows < cols && !allFin cols (fun j => decide (v j ≤ 0)) then
+        .error "INVALID: rectangular dual invariant v[j] <= 0 violated in safe mode"
+      else
+        match safeLowerBoundOpt rows cols Cnorm v with
+        | none => .error "INVALID: row has no finite edges in safe mode"
+        | some lbNorm =>
+          .error s!"INVALID: safe duality gap {primalNorm - lbNorm} exceeds tolerance {tol}"
+    | .hall => .error "internal error: unreachable hall branch"
   else
-    .error "internal error: cost matrix length mismatch"
-
-private def readInput (path : String) : IO String := do
-  if path == "-" then
-    (← IO.getStdin).readToEnd
-  else
-    IO.FS.readFile path
+    -- Tall matrix (rows > cols): invoke proved transpose checkers directly on original (rows, cols).
+    have hge : cols ≤ rows := by omega
+    let p ← buildMatchingFn colInd rowInd hge "col_ind" "row_ind"
+    let primalNorm : Rat := finSum cols (fun j => (Cnorm (p j) j).getD 0)
+    let primalOrig : Rat := if negate then -primalNorm else primalNorm
+    match mode with
+    | .exact =>
+      if checkLSAPForbiddenTranspose rows cols Cnorm p u v then
+        verifyExactDeclaredObj root primalOrig
+        .ok { mode := .exact, tol := 0, bound := some primalOrig }
+      else if !checkInjective cols rows p then
+        .error "INVALID: primal assignment is not injective"
+      else if !checkFiniteMatching cols rows (fun j i => Cnorm i j) p then
+        .error "INVALID: primal assignment uses a forbidden edge"
+      else if !checkDualFeasibleOpt cols rows (fun j i => Cnorm i j) v u then
+        .error "INVALID: dual feasibility u[i] + v[j] <= C[i,j] violated"
+      else if !checkRectDual cols rows p u then
+        .error "INVALID: rectangular dual invariant violated (u[i] <= 0 and unassigned u[i] == 0)"
+      else if !checkCompSlackOpt cols rows (fun j i => Cnorm i j) p v u then
+        .error "INVALID: complementary slackness u[p(j)] + v[j] == C[p(j),j] violated"
+      else
+        .error "INVALID: exact tall LSAP certificate check failed"
+    | .safe =>
+      if checkLSAPForbiddenTransposeSafe rows cols Cnorm p u tol then
+        match safeLowerBoundOptTranspose rows cols Cnorm u with
+        | none => .error "INVALID: column has no finite edges in safe mode"
+        | some lbNorm =>
+          verifySafeDeclaredObj root negate primalNorm lbNorm tol
+          let certBnd := if negate then -lbNorm else lbNorm
+          .ok { mode := .safe, tol := tol, bound := some certBnd }
+      else if !checkInjective cols rows p then
+        .error "INVALID: primal assignment is not injective"
+      else if !checkFiniteMatching cols rows (fun j i => Cnorm i j) p then
+        .error "INVALID: primal assignment uses a forbidden edge"
+      else if cols < rows && !allFin rows (fun i => decide (u i ≤ 0)) then
+        .error "INVALID: rectangular dual invariant u[i] <= 0 violated in safe mode"
+      else
+        match safeLowerBoundOptTranspose rows cols Cnorm u with
+        | none => .error "INVALID: column has no finite edges in safe mode"
+        | some lbNorm =>
+          .error s!"INVALID: safe duality gap {primalNorm - lbNorm} exceeds tolerance {tol}"
+    | .hall => .error "internal error: unreachable hall branch"
 
 private def formatCliStatus (res : VerifyResult) : String :=
   match res.mode with
@@ -649,100 +550,64 @@ private def formatCliStatus (res : VerifyResult) : String :=
 private def verifyJsonlObj (root : JsonVal) (args : ParsedArgs) : Except String String := do
   let pb ← effectivePrintBound root args.printBound
   let res ← verifyCertCore root args
-  let modePart := "\"mode\":" ++ jsonQuote res.mode.toStr
+  let base := "{\"ok\":true,\"detail\":\"VERIFIED\",\"mode\":" ++ jsonQuote res.mode.toStr
   match res.mode with
   | .hall =>
-    .ok ("{\"ok\":true,\"detail\":\"VERIFIED\"," ++ modePart ++ "}")
-  | .exact =>
-    let tolPart := "\"tol\":" ++ ratObjJson res.tol
+    .ok (base ++ "}")
+  | .exact | .safe =>
+    let withTol := base ++ ",\"tol\":" ++ ratObjJson res.tol
+    let includeBound := res.mode == .safe || pb
     match res.bound with
     | some bnd =>
-      if pb then
-        .ok ("{\"ok\":true,\"detail\":\"VERIFIED\"," ++ modePart ++ "," ++ tolPart ++ ",\"bound\":" ++ ratObjJson bnd ++ "}")
-      else
-        .ok ("{\"ok\":true,\"detail\":\"VERIFIED\"," ++ modePart ++ "," ++ tolPart ++ "}")
+      if includeBound then .ok (withTol ++ ",\"bound\":" ++ ratObjJson bnd ++ "}")
+      else .ok (withTol ++ "}")
     | none =>
-      .ok ("{\"ok\":true,\"detail\":\"VERIFIED\"," ++ modePart ++ "," ++ tolPart ++ "}")
-  | .safe =>
-    let tolPart := "\"tol\":" ++ ratObjJson res.tol
-    match res.bound with
-    | some bnd =>
-      .ok ("{\"ok\":true,\"detail\":\"VERIFIED\"," ++ modePart ++ "," ++ tolPart ++ ",\"bound\":" ++ ratObjJson bnd ++ "}")
-    | none =>
-      .ok ("{\"ok\":true,\"detail\":\"VERIFIED\"," ++ modePart ++ "," ++ tolPart ++ "}")
+      .ok (withTol ++ "}")
 
-private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (args : ParsedArgs) : IO UInt32 := do
-  let line ← stdin.getLine
-  if line.isEmpty then
-    return 0
-  let trimmed := line.trimAscii.toString
-  if !trimmed.isEmpty then
-    let resp :=
-      match GoblinFormal.parseJsonStrict trimmed >>= fun root => verifyJsonlObj root args with
-      | .ok okJson => okJson
-      | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
-    stdout.putStr resp
-    stdout.putStr "\n"
-    stdout.flush
-  runJsonlLoop stdin stdout args
+private def batchFmt : BatchFormat := {
+  readErr := fun path e => s!"error reading '{path}': {e}"
+  parseErr := fun path msg => s!"error parsing batch JSON '{path}': {msg}"
+  emptyErr := fun path => s!"error: empty batch JSON array in '{path}'"
+}
 
-private def runBatch (path : String) (args : ParsedArgs) : IO UInt32 := do
-  let contents ←
-    try
-      readInput path
-    catch e =>
-      IO.eprintln s!"error reading '{path}': {e}"
-      return 1
-  match GoblinFormal.parseJsonStrict contents >>= JsonVal.asArray with
-  | .error msg =>
-    IO.eprintln s!"error parsing batch JSON '{path}': {msg}"
-    return 1
-  | .ok items =>
-    if items.isEmpty then
-      IO.eprintln s!"error: empty batch JSON array in '{path}'"
-      return 1
-    for i in [:items.size] do
-      match verifyCertCore items[i]! args with
-      | .ok _ => pure ()
-      | .error msg =>
-        IO.eprintln s!"BATCH FAIL at index {i}: {msg}"
-        return 1
-    IO.println s!"VERIFIED ({items.size} items)"
-    return 0
+private def runBatch (path : String) (args : ParsedArgs) : IO UInt32 :=
+  runBatchWith batchFmt path (fun item => verifyCertCore item args *> .ok ())
 
 end Apps.LsapCheck
 
+open Apps.LsapCheck in
 def main (args : List String) : IO UInt32 := do
-  match Apps.LsapCheck.parseArgs args {} with
+  match parseArgs args {} with
   | .error msg =>
     IO.eprintln s!"error: {msg}"
-    IO.eprintln Apps.LsapCheck.usageText
+    IO.eprintln usageText
     pure 1
   | .ok parsed =>
     if parsed.showHelp then
-      IO.println Apps.LsapCheck.usageText
+      IO.println usageText
       return 0
     if parsed.jsonl then
       if parsed.batchPath.isSome || parsed.filePath.isSome then
         IO.eprintln "error: --jsonl cannot be combined with positional or --batch arguments"
         return 1
-      return ← Apps.LsapCheck.runJsonlLoop (← IO.getStdin) (← IO.getStdout) parsed
+      return ← Apps.Common.runJsonlLoop (← IO.getStdin) (← IO.getStdout) fun root =>
+        verifyJsonlObj root parsed
     if let some bPath := parsed.batchPath then
       if parsed.filePath.isSome then
         IO.eprintln "error: --batch cannot be combined with positional certificate path"
         return 1
-      return ← Apps.LsapCheck.runBatch bPath parsed
+      return ← runBatch bPath parsed
     if parsed.filePath.isNone then
       if parsed.modeOverride.isSome || parsed.tolOverride.isSome || parsed.printBound then
         IO.eprintln "error: missing certificate JSON path"
-        IO.eprintln Apps.LsapCheck.usageText
+        IO.eprintln usageText
         return 1
-      IO.println Apps.LsapCheck.usageText
+      IO.println usageText
       return 0
     let path := parsed.filePath.getD ""
     let contents ←
       try
-        Apps.LsapCheck.readInput path
+        Apps.Common.readInput path
       catch e =>
         IO.eprintln s!"error reading '{path}': {e}"
         return 1
@@ -753,14 +618,14 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln s!"error parsing JSON '{path}': {msg}"
         return 1
     let pb ←
-      match Apps.LsapCheck.effectivePrintBound jsonVal parsed.printBound with
+      match Apps.Common.effectivePrintBound jsonVal parsed.printBound with
       | .ok b => pure b
       | .error msg =>
         IO.eprintln msg
         return 1
-    match Apps.LsapCheck.verifyCertCore jsonVal parsed with
+    match verifyCertCore jsonVal parsed with
     | .ok res =>
-      IO.println (Apps.LsapCheck.formatCliStatus res)
+      IO.println (formatCliStatus res)
       if pb then
         if let some bnd := res.bound then
           IO.println s!"BOUND {bnd.num}/{bnd.den}"

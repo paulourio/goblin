@@ -14,105 +14,7 @@ namespace GoblinFormal.Track2C
 open GoblinFormal
 open GoblinFormal.Track2B
 
-/-! ### 0. Pure `Init` Helpers: `Rat`, `Option Rat`, `allFin`, and Sparse Accumulation -/
-
-private theorem rat_lt_of_lt_of_le {a b c : Rat} (hab : a < b) (hbc : b ≤ c) : a < c :=
-  Rat.lt_iff_le_and_not_ge.mpr
-    ⟨Rat.le_trans (Rat.le_of_lt hab) hbc, fun h => Rat.not_le.mpr hab (Rat.le_trans hbc h)⟩
-
-private theorem rat_neg_nonneg {a : Rat} (ha : a ≤ 0) : 0 ≤ -a := by
-  simpa using Rat.neg_le_neg ha
-
-private theorem rat_sub_zero (a : Rat) : a - 0 = a := by
-  rw [Rat.sub_eq_add_neg, Rat.neg_zero, Rat.add_zero]
-
-private theorem rat_zero_sub (a : Rat) : 0 - a = -a := by
-  rw [Rat.sub_eq_add_neg, Rat.zero_add]
-
-private theorem rat_sub_mul (a b c : Rat) : (a - b) * c = a * c - b * c := by
-  rw [Rat.sub_eq_add_neg, Rat.add_mul, Rat.neg_mul, ← Rat.sub_eq_add_neg]
-
-private theorem rat_mul_sub (a b c : Rat) : a * (b - c) = a * b - a * c := by
-  rw [Rat.sub_eq_add_neg, Rat.mul_add, Rat.mul_neg, ← Rat.sub_eq_add_neg]
-
-private theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
-    a + c ≤ b + d :=
-  Rat.le_trans (Rat.add_le_add_right.mpr hab) (Rat.add_le_add_left.mpr hcd)
-
-private theorem rat_sub_le_sub {a b c d : Rat} (hab : a ≤ b) (hdc : d ≤ c) :
-    a - c ≤ b - d := by
-  rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg]
-  exact rat_add_le_add hab (Rat.neg_le_neg hdc)
-
-private theorem rat_mul_le_mul_of_nonpos_right {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    b * c ≤ a * c := by
-  have hc' : 0 ≤ -c := rat_neg_nonneg hc
-  have h := Rat.mul_le_mul_of_nonneg_right hab hc'
-  rw [Rat.mul_neg, Rat.mul_neg, Rat.neg_le_neg_iff] at h
-  exact h
-
-private theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    c * b ≤ c * a := by
-  rw [Rat.mul_comm c b, Rat.mul_comm c a]
-  exact rat_mul_le_mul_of_nonpos_right hab hc
-
-private theorem rat_le_max_left {a b : Rat} : a ≤ max a b := by
-  rw [Rat.max_def]
-  split
-  · assumption
-  · exact Rat.le_refl
-
-private theorem rat_le_max_right {a b : Rat} : b ≤ max a b := by
-  rw [Rat.max_def]
-  split
-  · exact Rat.le_refl
-  · next h => exact Rat.le_of_lt (Rat.not_le.mp h)
-
-private theorem rat_abs_le_iff {a b : Rat} : a.abs ≤ b ↔ -b ≤ a ∧ a ≤ b := by
-  rcases Rat.le_total (a := 0) (b := a) with ha | ha
-  · rw [Rat.abs_of_nonneg ha]
-    constructor
-    · intro hab
-      have hnb : -b ≤ 0 := by simpa using Rat.neg_le_neg (Rat.le_trans ha hab)
-      exact ⟨Rat.le_trans hnb ha, hab⟩
-    · exact And.right
-  · rw [Rat.abs_of_nonpos ha]
-    constructor
-    · intro hnab
-      have hba : -b ≤ a := Rat.neg_le_iff.mp hnab
-      have hb0 : 0 ≤ b := Rat.le_trans (rat_neg_nonneg ha) hnab
-      exact ⟨hba, Rat.le_trans ha hb0⟩
-    · intro h
-      exact Rat.neg_le_iff.mpr h.1
-
-private theorem rat_le_abs (a : Rat) : a ≤ a.abs :=
-  (rat_abs_le_iff.mp Rat.le_refl).2
-
-private theorem rat_abs_mul (a b : Rat) : (a * b).abs = a.abs * b.abs := by
-  rcases Rat.le_total (a := 0) (b := a) with ha | ha <;>
-    rcases Rat.le_total (a := 0) (b := b) with hb | hb
-  · rw [Rat.abs_of_nonneg ha, Rat.abs_of_nonneg hb, Rat.abs_of_nonneg (Rat.mul_nonneg ha hb)]
-  · have hab : a * b ≤ 0 := by simpa [Rat.mul_zero] using Rat.mul_le_mul_of_nonneg_left hb ha
-    rw [Rat.abs_of_nonneg ha, Rat.abs_of_nonpos hb, Rat.abs_of_nonpos hab, Rat.mul_neg]
-  · have hab : a * b ≤ 0 := by simpa [Rat.zero_mul] using Rat.mul_le_mul_of_nonneg_right ha hb
-    rw [Rat.abs_of_nonpos ha, Rat.abs_of_nonneg hb, Rat.abs_of_nonpos hab, Rat.neg_mul]
-  · have hab : 0 ≤ a * b := by
-      have ha' := rat_neg_nonneg ha
-      have hb' := rat_neg_nonneg hb
-      simpa [Rat.neg_mul, Rat.mul_neg, Rat.neg_neg] using Rat.mul_nonneg ha' hb'
-    rw [Rat.abs_of_nonpos ha, Rat.abs_of_nonpos hb, Rat.abs_of_nonneg hab,
-      Rat.neg_mul, Rat.mul_neg, Rat.neg_neg]
-
-private theorem finSum_swap {m n : Nat} (f : Fin m → Fin n → Rat) :
-    finSum m (fun i => finSum n (fun j => f i j)) =
-      finSum n (fun j => finSum m (fun i => f i j)) := by
-  induction m with
-  | zero =>
-    simp only [finSum_zero_n]
-    exact (finSum_zero n).symm
-  | succ m ih =>
-    simp only [finSum_succ]
-    rw [ih (fun i j => f i.castSucc j), ← finSum_add]
+/-! ### 0. Pure `Init` Helpers: `Option Rat`, `allFin`, and Sparse Accumulation -/
 
 private def natFinSum : (n : Nat) → (Fin n → Nat) → Nat
   | 0, _ => 0
@@ -223,16 +125,6 @@ private theorem guardExc_ok {c : Bool} {msg : String} {k : Except String Unit}
   cases c
   · simp at h
   · exact ⟨rfl, h⟩
-
-private theorem bool_eq_true_of_not_not {b : Bool} (h : ¬((!b) = true)) : b = true := by
-  cases b
-  · exfalso; exact h rfl
-  · rfl
-
-private theorem prop_of_not_not {P : Prop} [Decidable P] (h : ¬(¬P)) : P := by
-  by_cases hp : P
-  · exact hp
-  · exact absurd hp h
 
 theorem allTermsInBounds_iff {n : Nat} {terms : Array SparseTerm} :
     allTermsInBounds n terms = true ↔ ∀ t ∈ terms.toList, t.col < n := by
@@ -3272,9 +3164,6 @@ private def slackSignVal : ConstraintSense → Rat
   | .ge => -1
   | .eq => 0
 
-private theorem rat_eq_intCast_of_den1 (r : Rat) (h : r.den = 1) : r = (r.num : Rat) :=
-  Rat.ext (by simp) (by simpa using h)
-
 /-- Complete structural GMI certificate deriving a cut directly from `baseRows` via rational
 tableau row multipliers `rho : Array (Nat × Rat)`, non-basic bound side `colAtUpper`,
 optional upward-weakened GMI coefficients (`cStruct`, `cSlack`), and `finalizeSparseCut`
@@ -3506,7 +3395,7 @@ theorem checkStructuralGMICert_sound (cert : StructuralGMICert)
     have hIntX : isIntVal (x j) := hfeas.2.1 j (by rwa [getElem!_pos cert.isInt j.val (by omega)] at hIntJ)
     rcases hIntX with ⟨zx, hzx⟩
     have hBndInt : (sgmiColBnd cert j).getD 0 = (((sgmiColBnd cert j).getD 0).num : Rat) :=
-      rat_eq_intCast_of_den1 _ hden1
+      rat_eq_num_of_den_one hden1
     dsimp only [yStruct]
     simp only [ha, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
     cases cert.colAtUpper[j.val]!

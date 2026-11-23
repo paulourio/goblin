@@ -4,34 +4,20 @@ cuts-check: CLI verifier for Track 2B and Track 2C cutting-plane soundness
 `cover-check`, `lotsizing-check`, `agg-cmir-check`, `drop-check`).
 -/
 
+import Apps.Common
 import GoblinFormal.Track2B
 import GoblinFormal.Track2C
 
+open Apps.Common
 open GoblinFormal
 open GoblinFormal.Track2B
+
+namespace Apps.CutsCheck
 
 private def usageText : String :=
   "usage: cuts-check [<subcommand>] [--jsonl | --batch <array.json | -> | <input.json | ->]\n" ++
   "  subcommands: row-legal-mu, mir-use-lower, gmi-check, cmir-check, vub-check,\n" ++
   "               cover-check, lotsizing-check, agg-cmir-check, drop-check"
-
-private def hexDigit (n : Nat) : Char :=
-  if n < 10 then Char.ofNat ('0'.toNat + n)
-  else Char.ofNat ('a'.toNat + (n - 10))
-
-private def jsonQuote (s : String) : String :=
-  let body := s.foldl (fun acc c =>
-    if c == '"' then acc ++ "\\\""
-    else if c == '\\' then acc ++ "\\\\"
-    else if c == '\n' then acc ++ "\\n"
-    else if c == '\r' then acc ++ "\\r"
-    else if c == '\t' then acc ++ "\\t"
-    else if c.toNat < 0x20 then
-      let b := c.toNat
-      acc.push '\\' |>.push 'u' |>.push '0' |>.push '0'
-        |>.push (hexDigit (b / 16)) |>.push (hexDigit (b % 16))
-    else acc.push c) ""
-  "\"" ++ body ++ "\""
 
 private def parseSense : JsonVal → Except String ConstraintSense
   | .str "le" | .str "<=" => .ok .le
@@ -42,18 +28,11 @@ private def parseSense : JsonVal → Except String ConstraintSense
   | .num 1 0 false => .ok .ge
   | _ => .error "expected constraint sense ('le'|'eq'|'ge' or -1|0|1)"
 
-private def parseOptRat : JsonVal → Except String (Option Rat)
-  | .null => .ok none
-  | v => some <$> v.asRat
-
-private def parseRatArray (arr : Array JsonVal) : Except String (Array Rat) :=
-  arr.mapM JsonVal.asRat
-
-private def parseOptRatArray (arr : Array JsonVal) : Except String (Array (Option Rat)) :=
-  arr.mapM parseOptRat
-
-private def parseBoolArray (arr : Array JsonVal) : Except String (Array Bool) :=
-  arr.mapM JsonVal.asBool
+private def optFieldAs {α : Type} (v : JsonVal) (key : String)
+    (decode : JsonVal → Except String α) : Except String (Option α) :=
+  match optNonNullField? v key with
+  | none => pure none
+  | some fv => some <$> decode fv
 
 private def parseSparseTerm (v : JsonVal) : Except String SparseTerm := do
   let col ← v.getNat "col"
@@ -171,14 +150,10 @@ private def handleGmiCheck (v : JsonVal) : Except String String := do
     let beta ← betaVal.asRat
     let aI ← v.getArray "aI" >>= parseRatArray
     let aC ← v.getArray "aC" >>= parseRatArray
-    let cIOpt ← match v.getField? "cI" with
-      | none | some .null => pure none
-      | some arr => some <$> (arr.asArray >>= parseRatArray)
-    let cCOpt ← match v.getField? "cC" with
-      | none | some .null => pure none
-      | some arr => some <$> (arr.asArray >>= parseRatArray)
-    let solutions ← match v.getField? "solutions" with
-      | none | some .null => pure #[]
+    let cIOpt ← optFieldAs v "cI" (fun a => a.asArray >>= parseRatArray)
+    let cCOpt ← optFieldAs v "cC" (fun a => a.asArray >>= parseRatArray)
+    let solutions ← match optNonNullField? v "solutions" with
+      | none => pure #[]
       | some sv =>
         (← sv.asArray).mapM fun item => do
           let xB ← item.getRat "xB"
@@ -206,21 +181,11 @@ private def handleCmirCheck (v : JsonVal) : Except String String := do
     let useLowerI ← v.getArray "useLowerI" >>= parseBoolArray
     let useLowerC ← v.getArray "useLowerC" >>= parseBoolArray
     let rhs ← v.getRat "rhs"
-    let betaHatOpt ← match v.getField? "betaHat" with
-      | none | some .null => pure none
-      | some bv => some <$> bv.asRat
-    let alphaHatOpt ← match v.getField? "alphaHat" with
-      | none | some .null => pure none
-      | some arr => some <$> (arr.asArray >>= parseRatArray)
-    let cIOpt ← match v.getField? "cI" with
-      | none | some .null => pure none
-      | some arr => some <$> (arr.asArray >>= parseRatArray)
-    let cCOpt ← match v.getField? "cC" with
-      | none | some .null => pure none
-      | some arr => some <$> (arr.asArray >>= parseRatArray)
-    let cutRHSOpt ← match v.getField? "cutRHS" with
-      | none | some .null => pure none
-      | some rv => some <$> rv.asRat
+    let betaHatOpt ← optFieldAs v "betaHat" JsonVal.asRat
+    let alphaHatOpt ← optFieldAs v "alphaHat" (fun a => a.asArray >>= parseRatArray)
+    let cIOpt ← optFieldAs v "cI" (fun a => a.asArray >>= parseRatArray)
+    let cCOpt ← optFieldAs v "cC" (fun a => a.asArray >>= parseRatArray)
+    let cutRHSOpt ← optFieldAs v "cutRHS" JsonVal.asRat
     let lpPrimalOpt ← match v.getField? "lpPrimalI", v.getField? "lpPrimalC" with
       | some li, some lc =>
         let lpi ← li.asArray >>= parseRatArray
@@ -228,8 +193,8 @@ private def handleCmirCheck (v : JsonVal) : Except String String := do
         pure (some (lpi, lpc))
       | none, none => pure none
       | _, _ => throw "provide both lpPrimalI and lpPrimalC or neither"
-    let solutions ← match v.getField? "solutions" with
-      | none | some .null => pure #[]
+    let solutions ← match optNonNullField? v "solutions" with
+      | none => pure #[]
       | some sv =>
         (← sv.asArray).mapM fun item => do
           let xI ← item.getArray "xI" >>= parseRatArray
@@ -290,81 +255,56 @@ private def dispatchSubcmd (subcmd : String) (v : JsonVal) : Except String Strin
   | "drop-check" => Track2C.checkFinalizedCutJson v
   | _ => .error s!"unknown subcommand '{subcmd}'"
 
-private def resolveSubcmd (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
-  match defaultSubcmd with
-  | some s => .ok s
-  | none =>
-    for key in ["subcommand", "op", "mode"] do
-      if let some fv := v.getField? key then
-        if fv != .null then
-          return ← fv.asString
-    .error "missing required 'op', 'subcommand', or 'mode' field"
-
 private def dispatchItem (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
-  let sub ← resolveSubcmd defaultSubcmd v
+  let sub ← resolveSubcmd defaultSubcmd v "missing required 'op', 'subcommand', or 'mode' field"
   dispatchSubcmd sub v
 
-private def readInput (path : String) : IO String := do
-  if path == "-" then
-    let stdin ← IO.getStdin
-    stdin.readToEnd
-  else
-    IO.FS.readFile ⟨path⟩
+private def runJsonl (defaultSubcmd : Option String) : IO UInt32 := do
+  runJsonlLoop (← IO.getStdin) (← IO.getStdout) fun jv => do
+    let detail ← dispatchItem defaultSubcmd jv
+    pure ("{\"ok\":true,\"detail\":" ++ jsonQuote detail ++ "}")
 
-private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultSubcmd : Option String) : IO UInt32 := do
-  let line ← stdin.getLine
-  if line.isEmpty then
-    return 0
-  let trimmed := line.trimAscii.toString
-  if !trimmed.isEmpty then
-    let resp :=
-      match parseJsonStrict trimmed >>= dispatchItem defaultSubcmd with
-      | .ok detail => "{\"ok\":true,\"detail\":" ++ jsonQuote detail ++ "}"
-      | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
-    stdout.putStr resp
-    stdout.putStr "\n"
-    stdout.flush
-  runJsonlLoop stdin stdout defaultSubcmd
+private def batchFmt : BatchFormat := {
+  readErr := fun _ e => s!"I/O error: {e}"
+  parseErr := fun _ err => s!"JSON parse error: {err}"
+  emptyErr := fun _ => "FAIL: empty batch array"
+}
 
-private def runBatch (defaultSubcmd : Option String) (path : String) : IO UInt32 := do
+private def runBatch (defaultSubcmd : Option String) (path : String) : IO UInt32 :=
+  runBatchWith batchFmt path (fun item => dispatchItem defaultSubcmd item *> .ok ())
+
+private def runSingleFile (path : String) (handler : JsonVal → Except String String) : IO UInt32 := do
   try
     let raw ← readInput path
-    match parseJsonStrict raw >>= JsonVal.asArray with
+    match parseJsonStrict raw with
     | .error err =>
       IO.eprintln s!"JSON parse error: {err}"
       pure 1
-    | .ok items =>
-      if items.isEmpty then
-        IO.eprintln "FAIL: empty batch array"
-        return 1
-      for i in [:items.size] do
-        match dispatchItem defaultSubcmd items[i]! with
-        | .ok _ => pure ()
-        | .error err =>
-          IO.eprintln s!"BATCH FAIL at index {i}: {err}"
-          return 1
-      IO.println s!"VERIFIED ({items.size} items)"
-      pure 0
+    | .ok jv =>
+      match handler jv with
+      | .ok msg =>
+        IO.println msg
+        pure 0
+      | .error err =>
+        IO.eprintln s!"FAIL: {err}"
+        pure 1
   catch e =>
     IO.eprintln s!"I/O error: {e}"
     pure 1
 
+end Apps.CutsCheck
+
+open Apps.CutsCheck in
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] | ["help"] =>
     IO.println usageText
     pure 0
   | ["--jsonl"] =>
-    runJsonlLoop (← IO.getStdin) (← IO.getStdout) none
-  | [subcmd, "--jsonl"] =>
+    runJsonl none
+  | [subcmd, "--jsonl"] | ["--jsonl", subcmd] =>
     if isKnownSubcmd subcmd then
-      runJsonlLoop (← IO.getStdin) (← IO.getStdout) (some subcmd)
-    else
-      IO.eprintln s!"FAIL: unknown subcommand '{subcmd}'"
-      pure 1
-  | ["--jsonl", subcmd] =>
-    if isKnownSubcmd subcmd then
-      runJsonlLoop (← IO.getStdin) (← IO.getStdout) (some subcmd)
+      runJsonl (some subcmd)
     else
       IO.eprintln s!"FAIL: unknown subcommand '{subcmd}'"
       pure 1
@@ -380,63 +320,15 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln "FAIL: missing path after --batch"
     pure 1
   | [subcmd, path] =>
-    try
-      let raw ← readInput path
-      match parseJsonStrict raw with
-      | .error err =>
-        IO.eprintln s!"JSON parse error: {err}"
-        pure 1
-      | .ok jv =>
-        match dispatchSubcmd subcmd jv with
-        | .ok msg =>
-          IO.println msg
-          pure 0
-        | .error err =>
-          IO.eprintln s!"FAIL: {err}"
-          pure 1
-    catch e =>
-      IO.eprintln s!"I/O error: {e}"
-      pure 1
+    runSingleFile path (dispatchSubcmd subcmd)
   | [path] =>
     if isKnownSubcmd path then
-      try
-        let raw ← readInput "-"
-        match parseJsonStrict raw with
-        | .error err =>
-          IO.eprintln s!"JSON parse error: {err}"
-          pure 1
-        | .ok jv =>
-          match dispatchSubcmd path jv with
-          | .ok msg =>
-            IO.println msg
-            pure 0
-          | .error err =>
-            IO.eprintln s!"FAIL: {err}"
-            pure 1
-      catch e =>
-        IO.eprintln s!"I/O error: {e}"
-        pure 1
+      runSingleFile "-" (dispatchSubcmd path)
+    else if path.startsWith "-" && path != "-" then
+      IO.eprintln usageText
+      return 1
     else
-      if path.startsWith "-" && path != "-" then
-        IO.eprintln usageText
-        return 1
-      try
-        let raw ← readInput path
-        match parseJsonStrict raw with
-        | .error err =>
-          IO.eprintln s!"JSON parse error: {err}"
-          pure 1
-        | .ok jv =>
-          match dispatchItem none jv with
-          | .ok msg =>
-            IO.println msg
-            pure 0
-          | .error err =>
-            IO.eprintln s!"FAIL: {err}"
-            pure 1
-      catch e =>
-        IO.eprintln s!"I/O error: {e}"
-        pure 1
+      runSingleFile path (dispatchItem none)
   | _ =>
     IO.eprintln usageText
     pure 1

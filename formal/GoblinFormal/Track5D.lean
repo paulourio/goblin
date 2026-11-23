@@ -1554,14 +1554,6 @@ private theorem not_entryLt_of_le {a b : LaneEntry} (h : entryLe a b = true) :
   · exact entryLt_asymm hlt
   · exact entryLt_irrefl a
 
-private theorem entryLt_of_le_of_lt {a b c : LaneEntry}
-    (hab : entryLe a b = true) (hbc : entryLt b c = true) : entryLt a c = true := by
-  unfold entryLe at hab
-  simp only [Bool.or_eq_true, beq_iff_eq] at hab
-  rcases hab with hlt | rfl
-  · exact entryLt_trans hlt hbc
-  · exact hbc
-
 /-- Running `(min1, min2)` pair over `LaneEntry`. -/
 abbrev Min2Pair := LaneEntry × LaneEntry
 
@@ -1717,10 +1709,6 @@ def vec8TreeMin2 (e0 e1 e2 e3 e4 e5 e6 e7 : LaneEntry) : Min2Pair :=
   mergeMin2 (vec4TreeMin2 e0 e1 e2 e3) (vec4TreeMin2 e4 e5 e6 e7)
 
 private theorem initMin2_ordered : entryLe initMin2.1 initMin2.2 = true := by decide
-
-private theorem singleMin2_ordered (e : LaneEntry) :
-    entryLe (singleMin2 e).1 (singleMin2 e).2 = true :=
-  insertEntry_ordered e initMin2_ordered
 
 private theorem entryLe_inf_of_wf {e : LaneEntry}
     (hNaN : f64NotNaN e.val = true) (hInf : e.val = f64PosInf → e = infEntry) :

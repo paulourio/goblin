@@ -1880,7 +1880,7 @@ theorem evalCond_le_subFlags64_zero (rem : BitVec 64) :
   cases h1 : decide (rem.toInt = 0) <;> cases h2 : decide (rem.toInt < 0) <;> cases h3 : decide (0 < rem.toInt) <;>
     simp_all <;> omega
 
-private theorem f64IsZero_iff (b : BitVec 64) :
+theorem f64IsZero_iff (b : BitVec 64) :
     f64IsZero b = true ↔ (b = 0#64 ∨ b = 0x8000000000000000#64) := by
   unfold f64IsZero
   constructor
@@ -1903,10 +1903,6 @@ private theorem f64IsZero_iff (b : BitVec 64) :
     rcases h with rfl | rfl <;> decide
 
 private theorem f64IsNaN_zero : f64IsNaN 0#64 = false := by decide
-
-private theorem f64IsNaN_of_isZero {b : BitVec 64} (hz : f64IsZero b = true) :
-    f64IsNaN b = false := by
-  rcases (f64IsZero_iff b).mp hz with rfl | rfl <;> decide
 
 theorem f64Cmp_zero_z_iff (f0 : BitVec 64) :
     (f64Cmp f0 0#64).z = true ↔ (f0 = 0#64 ∨ f0 = 0x8000000000000000#64) := by

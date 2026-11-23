@@ -3,10 +3,12 @@ Apps.RulesCheck: CLI verifier for Track 2A and Track 3B presolve rules (`rules-c
 Subcommands: `divceil`, `gcd-infeas`, `gcd-div-check`, `activity`, `bin-strengthen`, `orbit-check`.
 -/
 
+import Apps.Common
 import GoblinFormal.Common.Json
 import GoblinFormal.Track2A
 import GoblinFormal.Track3B
 
+open Apps.Common
 open GoblinFormal
 open GoblinFormal.Track2A
 
@@ -22,34 +24,6 @@ private def usageText : String :=
   "  bin-strengthen  check Savelsbergh binary coefficient strengthening\n" ++
   "  orbit-check     check verifyOrbitSymmetry and orbit objective conditions\n"
 
-private def hexDigit (n : Nat) : Char :=
-  if n < 10 then Char.ofNat ('0'.toNat + n)
-  else Char.ofNat ('a'.toNat + (n - 10))
-
-private def jsonQuote (s : String) : String :=
-  let body := s.foldl (fun acc c =>
-    if c == '"' then acc ++ "\\\""
-    else if c == '\\' then acc ++ "\\\\"
-    else if c == '\n' then acc ++ "\\n"
-    else if c == '\r' then acc ++ "\\r"
-    else if c == '\t' then acc ++ "\\t"
-    else if c.toNat < 0x20 then
-      let b := c.toNat
-      acc.push '\\' |>.push 'u' |>.push '0' |>.push '0'
-        |>.push (hexDigit (b / 16)) |>.push (hexDigit (b % 16))
-    else acc.push c) ""
-  "\"" ++ body ++ "\""
-
-private def boolJson (b : Bool) : String :=
-  if b then "true" else "false"
-
-private def ratJson (r : Rat) : String :=
-  "{\"num\":\"" ++ toString r.num ++ "\",\"den\":\"" ++ toString r.den ++ "\"}"
-
-private def optRatJson : Option Rat → String
-  | none => "null"
-  | some r => ratJson r
-
 private def parseIntFlex (v : JsonVal) : Except String Int :=
   match v with
   | .num m 0 false => .ok m
@@ -58,11 +32,6 @@ private def parseIntFlex (v : JsonVal) : Except String Int :=
     if r.den == 1 then .ok r.num
     else .error s!"expected integer string, got '{s}'"
   | _ => .error "expected integer"
-
-private def parseOptRat (v : JsonVal) : Except String (Option Rat) :=
-  match v with
-  | .null => .ok none
-  | _ => some <$> v.asRat
 
 private def parseExtRat (v : JsonVal) : Except String ExtRat :=
   match v with
@@ -81,22 +50,18 @@ private def parseSense (v : JsonVal) : Except String Sense := do
 private def parseIntArray (arr : Array JsonVal) : Except String (Array Int) :=
   arr.mapM parseIntFlex
 
-private def parseNatArray (arr : Array JsonVal) : Except String (Array Nat) :=
-  arr.mapM JsonVal.asNat
-
-private def parseBoolArray (arr : Array JsonVal) : Except String (Array Bool) :=
-  arr.mapM JsonVal.asBool
-
-private def parseRatArray (arr : Array JsonVal) : Except String (Array Rat) :=
-  arr.mapM JsonVal.asRat
-
 private def parseExtRatArray (arr : Array JsonVal) : Except String (Array ExtRat) :=
   arr.mapM parseExtRat
 
-private def optNonNullField? (v : JsonVal) (key : String) : Option JsonVal :=
-  match v.getField? key with
-  | none | some .null => none
-  | some fv => some fv
+private def parseActivityTerms (v : JsonVal) : Except String (Array JsonVal × Array ActivityTerm) := do
+  let termsJson ← v.getArray "terms"
+  let terms ← termsJson.mapM fun tv => do
+    let coeff ← tv.getRat "a"
+    let lb ← parseOptRat (← tv.getField "l")
+    let ub ← parseOptRat (← tv.getField "u")
+    let isInt ← tv.getBool "is_int"
+    pure ({ coeff, lb, ub, isInt } : ActivityTerm)
+  pure (termsJson, terms)
 
 private def handleDivCeil (v : JsonVal) : Except String String := do
   let a ← parseIntFlex (← v.getField "a")
@@ -149,13 +114,7 @@ private def handleActivitySummary (v : JsonVal) : Except String String := do
   let rhs ← v.getRat "rhs"
   let hasLo ← v.getBool "has_lo"
   let hasHi ← v.getBool "has_hi"
-  let termsJson ← v.getArray "terms"
-  let terms ← termsJson.mapM fun tv => do
-    let coeff ← tv.getRat "a"
-    let lb ← parseOptRat (← tv.getField "l")
-    let ub ← parseOptRat (← tv.getField "u")
-    let isInt ← tv.getBool "is_int"
-    pure ({ coeff, lb, ub, isInt } : ActivityTerm)
+  let (termsJson, terms) ← parseActivityTerms v
   let res := evalActivitySummarySpec rhs hasLo hasHi terms
   for j in [:termsJson.size] do
     if hj : j < res.terms.size ∧ j < terms.size then
@@ -237,13 +196,7 @@ private def handleActivity (v : JsonVal) : Except String String := do
 
 private def handleBinStrengthen (v : JsonVal) : Except String String := do
   let rhs ← v.getRat "rhs"
-  let termsJson ← v.getArray "terms"
-  let terms ← termsJson.mapM fun tv => do
-    let coeff ← tv.getRat "a"
-    let lb ← parseOptRat (← tv.getField "l")
-    let ub ← parseOptRat (← tv.getField "u")
-    let isInt ← tv.getBool "is_int"
-    pure ({ coeff, lb, ub, isInt } : ActivityTerm)
+  let (_, terms) ← parseActivityTerms v
   let targetIdx ← v.getNat "target_idx"
   if hIdx : targetIdx < terms.size then
     let a := terms[targetIdx].coeff
@@ -281,7 +234,7 @@ private def handleBinStrengthen (v : JsonVal) : Except String String := do
     let specNewA := specOpt.map Prod.fst
     let specNewRHS := specOpt.map Prod.snd
     .ok ("{\"applicable\":true" ++
-         ",\"exact_max_other\":" ++ ratJson exactMaxOther ++
+         ",\"exact_max_other\":" ++ ratObjJson exactMaxOther ++
          ",\"spec_new_a\":" ++ optRatJson specNewA ++
          ",\"spec_new_rhs\":" ++ optRatJson specNewRHS ++
          ",\"proposed_valid\":true" ++
@@ -335,30 +288,22 @@ private def isKnownSubcmd (s : String) : Bool :=
   s == "activity-summary" || s == "activity-skip" ||
   s == "bin-strengthen" || s == "orbit-check"
 
-private def dispatchOne (subcmd : String) (v : JsonVal) : Except String String :=
+private def handlerForSubcmd (subcmd : String) : Except String (JsonVal → Except String String) :=
   match subcmd with
-  | "divceil" => handleDivCeil v
-  | "gcd-infeas" => handleGcdInfeas v
-  | "gcd-div-check" => Track3B.handleGcdRowDivJson v
-  | "activity" => handleActivity v
-  | "activity-summary" | "summary" => handleActivitySummary v
-  | "activity-skip" | "skip" => handleActivitySkip v
-  | "bin-strengthen" => handleBinStrengthen v
-  | "orbit-check" => handleOrbitCheck v
+  | "divceil" => .ok handleDivCeil
+  | "gcd-infeas" => .ok handleGcdInfeas
+  | "gcd-div-check" => .ok Track3B.handleGcdRowDivJson
+  | "activity" => .ok handleActivity
+  | "activity-summary" | "summary" => .ok handleActivitySummary
+  | "activity-skip" | "skip" => .ok handleActivitySkip
+  | "bin-strengthen" => .ok handleBinStrengthen
+  | "orbit-check" => .ok handleOrbitCheck
   | _ => .error s!"unknown subcommand '{subcmd}'"
 
-private def resolveItemSubcmd (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
-  match defaultSubcmd with
-  | some s => .ok s
-  | none =>
-    for key in ["subcommand", "op", "mode"] do
-      if let some fv := optNonNullField? v key then
-        return ← fv.asString
-    .error "missing required 'op' or 'subcommand' field"
-
 private def dispatchItem (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
-  let sub ← resolveItemSubcmd defaultSubcmd v
-  dispatchOne sub v
+  let sub ← resolveSubcmd defaultSubcmd v "missing required 'op' or 'subcommand' field"
+  let handler ← handlerForSubcmd sub
+  handler v
 
 private def runSingleOrBatch (handler : JsonVal → Except String String)
     (input : JsonVal) : Except String String :=
@@ -372,22 +317,8 @@ private def runSingleOrBatch (handler : JsonVal → Except String String)
 
 private def dispatch (subcmd : String) (payload : String) : Except String String := do
   let v ← parseJsonStrict payload
-  match subcmd with
-  | "divceil" => runSingleOrBatch handleDivCeil v
-  | "gcd-infeas" => runSingleOrBatch handleGcdInfeas v
-  | "gcd-div-check" => runSingleOrBatch Track3B.handleGcdRowDivJson v
-  | "activity" => runSingleOrBatch handleActivity v
-  | "activity-summary" | "summary" => runSingleOrBatch handleActivitySummary v
-  | "activity-skip" | "skip" => runSingleOrBatch handleActivitySkip v
-  | "bin-strengthen" => runSingleOrBatch handleBinStrengthen v
-  | "orbit-check" => runSingleOrBatch handleOrbitCheck v
-  | _ => .error s!"unknown subcommand '{subcmd}'"
-
-private def readInput (path : String) : IO String := do
-  if path == "-" then
-    (← IO.getStdin).readToEnd
-  else
-    IO.FS.readFile path
+  let handler ← handlerForSubcmd subcmd
+  runSingleOrBatch handler v
 
 private def runSubcommandFrom (subcmd : String) (path : String) : IO UInt32 := do
   let raw ←
@@ -404,68 +335,41 @@ private def runSubcommandFrom (subcmd : String) (path : String) : IO UInt32 := d
     IO.eprintln s!"rules-check {subcmd}: {msg}"
     pure 1
 
-private def runSubcommand (subcmd : String) : IO UInt32 :=
-  runSubcommandFrom subcmd "-"
+private def runJsonl (defaultSubcmd : Option String) : IO UInt32 := do
+  runJsonlLoop (← IO.getStdin) (← IO.getStdout) fun jv => do
+    let resJson ← dispatchItem defaultSubcmd jv
+    pure ("{\"ok\":true,\"detail\":\"VERIFIED\",\"result\":" ++ resJson ++ "}")
 
-private partial def runJsonlLoop (stdin stdout : IO.FS.Stream) (defaultSubcmd : Option String) : IO UInt32 := do
-  let line ← stdin.getLine
-  if line.isEmpty then
-    return 0
-  let trimmed := line.trimAscii.toString
-  if !trimmed.isEmpty then
-    let resp :=
-      match parseJsonStrict trimmed >>= dispatchItem defaultSubcmd with
-      | .ok resJson => "{\"ok\":true,\"detail\":\"VERIFIED\",\"result\":" ++ resJson ++ "}"
-      | .error err => "{\"ok\":false,\"error\":" ++ jsonQuote err ++ "}"
-    stdout.putStr resp
-    stdout.putStr "\n"
-    stdout.flush
-  runJsonlLoop stdin stdout defaultSubcmd
+private def batchFmt : BatchFormat := {
+  readErr := fun path e => s!"rules-check I/O error '{path}': {e}"
+  parseErr := fun path msg => s!"rules-check JSON parse error '{path}': {msg}"
+  emptyErr := fun _ => "rules-check: empty batch array"
+}
 
-private def runBatchFlag (defaultSubcmd : Option String) (path : String) : IO UInt32 := do
-  let raw ←
-    try
-      readInput path
-    catch e =>
-      IO.eprintln s!"rules-check I/O error '{path}': {e}"
-      return 1
-  match parseJsonStrict raw >>= JsonVal.asArray with
-  | .error msg =>
-    IO.eprintln s!"rules-check JSON parse error '{path}': {msg}"
-    return 1
-  | .ok items =>
-    if items.isEmpty then
-      IO.eprintln "rules-check: empty batch array"
-      return 1
-    for i in [:items.size] do
-      match dispatchItem defaultSubcmd items[i]! with
-      | .ok _ => pure ()
-      | .error msg =>
-        IO.eprintln s!"BATCH FAIL at index {i}: {msg}"
-        return 1
-    IO.println s!"VERIFIED ({items.size} items)"
-    return 0
+private def runBatchFlag (defaultSubcmd : Option String) (path : String) : IO UInt32 :=
+  runBatchWith batchFmt path (fun item => dispatchItem defaultSubcmd item *> .ok ())
 
 end Apps.RulesCheck
 
+open Apps.RulesCheck in
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["-h"] | ["--help"] | ["help"] =>
-    IO.print Apps.RulesCheck.usageText
+    IO.print usageText
     pure 0
   | ["--jsonl"] =>
-    Apps.RulesCheck.runJsonlLoop (← IO.getStdin) (← IO.getStdout) none
+    runJsonl none
   | [subcmd, "--jsonl"] | ["--jsonl", subcmd] =>
-    if Apps.RulesCheck.isKnownSubcmd subcmd then
-      Apps.RulesCheck.runJsonlLoop (← IO.getStdin) (← IO.getStdout) (some subcmd)
+    if isKnownSubcmd subcmd then
+      runJsonl (some subcmd)
     else
       IO.eprintln s!"rules-check: unknown subcommand '{subcmd}'"
       pure 1
   | ["--batch", path] =>
-    Apps.RulesCheck.runBatchFlag none path
+    runBatchFlag none path
   | [subcmd, "--batch", path] =>
-    if Apps.RulesCheck.isKnownSubcmd subcmd then
-      Apps.RulesCheck.runBatchFlag (some subcmd) path
+    if isKnownSubcmd subcmd then
+      runBatchFlag (some subcmd) path
     else
       IO.eprintln s!"rules-check: unknown subcommand '{subcmd}'"
       pure 1
@@ -473,20 +377,20 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln "rules-check: missing path after --batch"
     pure 1
   | [subcmd, path] =>
-    if Apps.RulesCheck.isKnownSubcmd subcmd then
-      Apps.RulesCheck.runSubcommandFrom subcmd path
+    if isKnownSubcmd subcmd then
+      runSubcommandFrom subcmd path
     else
       IO.eprintln s!"rules-check: unknown subcommand '{subcmd}'"
-      IO.eprint Apps.RulesCheck.usageText
+      IO.eprint usageText
       pure 1
   | [subcmd] =>
-    if Apps.RulesCheck.isKnownSubcmd subcmd then
-      Apps.RulesCheck.runSubcommand subcmd
+    if isKnownSubcmd subcmd then
+      runSubcommandFrom subcmd "-"
     else
       IO.eprintln s!"rules-check: unknown subcommand '{subcmd}'"
-      IO.eprint Apps.RulesCheck.usageText
+      IO.eprint usageText
       pure 1
   | _ =>
     IO.eprintln "rules-check: invalid arguments"
-    IO.eprint Apps.RulesCheck.usageText
+    IO.eprint usageText
     pure 1

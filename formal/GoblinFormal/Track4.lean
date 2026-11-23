@@ -230,42 +230,6 @@ theorem RatVec.dotVec_eq_dot {n : Nat} (a x : RatVec n) :
   rw [finPrefixSum] at h0
   rw [h0, hfin]
 
-private theorem rat_lt_of_lt_of_le {a b c : Rat} (hab : a < b) (hbc : b ≤ c) : a < c :=
-  Rat.not_le.mp fun hca => Rat.not_le.mpr hab (Rat.le_trans hbc hca)
-
-private theorem rat_lt_trans {a b c : Rat} (hab : a < b) (hbc : b < c) : a < c :=
-  rat_lt_of_lt_of_le hab (Rat.le_of_lt hbc)
-
-private theorem rat_mul_sub (a b c : Rat) : a * (b - c) = a * b - a * c := by
-  rw [Rat.sub_eq_add_neg, Rat.mul_add, Rat.mul_neg, ← Rat.sub_eq_add_neg]
-
-theorem finSum_swap (m n : Nat) (f : Fin m → Fin n → Rat) :
-    finSum m (fun i => finSum n (fun j => f i j)) =
-    finSum n (fun j => finSum m (fun i => f i j)) := by
-  induction m with
-  | zero =>
-    simp [finSum_zero]
-  | succ m ih =>
-    simp only [finSum_succ]
-    rw [ih (fun i j => f i.castSucc j)]
-    rw [← finSum_add]
-
-private theorem rat_div_le_iff {a b c : Rat} (hb : 0 < b) : a / b ≤ c ↔ a ≤ c * b := by
-  constructor
-  · intro h
-    calc a = a / b * b := (Rat.div_mul_cancel (Rat.ne_of_gt hb)).symm
-      _ ≤ c * b := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hb)
-  · intro h
-    exact Rat.le_of_mul_le_mul_right (by rwa [Rat.div_mul_cancel (Rat.ne_of_gt hb)]) hb
-
-private theorem rat_le_div_iff {a b c : Rat} (hc : 0 < c) : a ≤ b / c ↔ a * c ≤ b := by
-  constructor
-  · intro h
-    calc a * c ≤ b / c * c := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hc)
-      _ = b := Rat.div_mul_cancel (Rat.ne_of_gt hc)
-  · intro h
-    exact Rat.le_of_mul_le_mul_right (by rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)]) hc
-
 /-- Linear constraint `coeffs · x <sense> rhs` in `ℚ^n`. -/
 structure LinCon (n : Nat) where
   coeffs : RatVec n
@@ -361,12 +325,6 @@ NOTE: This section formalizes an abstract design model of Goblin's sequential (`
 over exact `Rat`. It is not mechanically linked to Go's floating-point solver loop; per-solve
 soundness of actual Go outputs is independently certified by the executable Mini-VIPR
 certificate verifier in Sections 3–5. -/
-
-private theorem rat_le_min_iff {x a b : Rat} : x ≤ min a b ↔ x ≤ a ∧ x ≤ b := by
-  rw [Rat.min_def]
-  split
-  · exact ⟨fun h => ⟨h, Rat.le_trans h ‹_›⟩, fun h => h.1⟩
-  · exact ⟨fun h => ⟨Rat.le_trans h (Rat.le_of_lt (Rat.not_le.mp ‹_›)), h⟩, fun h => h.2⟩
 
 private theorem rat_min_le_left (a b : Rat) : min a b ≤ a :=
   (rat_le_min_iff.mp Rat.le_refl).1
@@ -656,12 +614,6 @@ def isGapClosedOpt (P : VIPRInstance) (lb : Option Rat) (xInc : Option (Fin P.n 
   | some l, some x => isGapClosedSpec P x l relTol absTol
   | _, _ => false
 
-private theorem rat_le_max_left (a b : Rat) : a ≤ max a b := by
-  rw [Rat.max_def]
-  split
-  · assumption
-  · exact Rat.le_refl
-
 /-- Soundness of `exactGapClosedSpec`: implies `lb ≤ LPObjective P xInc` and either absolute
 or linear-magnitude relative gap closure. -/
 theorem exactGapClosedSpec_sound {P : VIPRInstance} {xInc : Fin P.n → Rat}
@@ -687,7 +639,7 @@ theorem exactGapClosedSpec_sound {P : VIPRInstance} {xInc : Fin P.n → Rat}
       have h0 : LPObjective P xInc - lb = 0 := beq_iff_eq.mp hzero
       left
       rw [h0]
-      exact rat_le_max_left 0 absTol
+      exact rat_le_max_left
     | false =>
       simp only [hzero, Bool.false_eq_true, ↓reduceIte] at hgap
       by_cases habs : LPObjective P xInc - lb ≤ max (0 : Rat) absTol
@@ -4776,18 +4728,6 @@ private theorem rat_floor_le (r : Rat) : (r.floor : Rat) ≤ r :=
 
 private theorem rat_le_ceil (r : Rat) : r ≤ (r.ceil : Rat) :=
   Rat.ceil_le_iff.mp (Int.le_refl r.ceil)
-
-private theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    c * b ≤ c * a := by
-  have hneg : 0 ≤ -c := Rat.le_neg_iff.mp (by simpa using hc)
-  have hmul := Rat.mul_le_mul_of_nonneg_left hab hneg
-  rw [Rat.neg_mul, Rat.neg_mul, Rat.neg_le_neg_iff] at hmul
-  exact hmul
-
-private theorem rat_div_le_div_of_pos {a b c : Rat} (hab : a ≤ b) (hc : 0 < c) :
-    a / c ≤ b / c := by
-  rw [Rat.div_def, Rat.div_def]
-  exact Rat.mul_le_mul_of_nonneg_right hab (Rat.le_of_lt (Rat.inv_pos.mpr hc))
 
 private theorem rat_div_le_div_of_neg {a b c : Rat} (hab : a ≤ b) (hc : c < 0) :
     b / c ≤ a / c := by

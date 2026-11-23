@@ -15,33 +15,11 @@ open GoblinFormal.Track3
 
 /-! ### Section 0: Algebraic, FinSum & Sparse-Row Helpers -/
 
-private theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
-    a + c ≤ b + d :=
-  Rat.le_trans (Rat.add_le_add_right.mpr hab) (Rat.add_le_add_left.mpr hcd)
-
-private theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    c * b ≤ c * a := by
-  have hnc : 0 ≤ -c := by
-    have h := Rat.neg_le_neg_iff.mpr hc
-    simpa using h
-  have hmul := Rat.mul_le_mul_of_nonneg_left hab hnc
-  rw [Rat.neg_mul, Rat.neg_mul, Rat.neg_le_neg_iff] at hmul
-  exact hmul
-
-private theorem rat_mul_le_mul_of_nonpos_right {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    b * c ≤ a * c := by
-  rw [Rat.mul_comm b c, Rat.mul_comm a c]
-  exact rat_mul_le_mul_of_nonpos_left hab hc
-
 private theorem rat_mul_nonpos_of_nonneg_of_nonpos {a b : Rat} (ha : 0 ≤ a) (hb : b ≤ 0) :
     a * b ≤ 0 := by
-  have hnb : 0 ≤ -b := by
-    have h := Rat.neg_le_neg_iff.mpr hb
-    simpa using h
-  have hm := Rat.mul_nonneg ha hnb
+  have hm := Rat.mul_nonneg ha (rat_neg_nonneg hb)
   rw [Rat.mul_neg] at hm
-  have h := Rat.neg_le_neg_iff.mpr hm
-  simpa using h
+  simpa using Rat.neg_le_neg_iff.mpr hm
 
 private theorem rat_mul_nonpos_of_nonpos_of_nonneg {a b : Rat} (ha : a ≤ 0) (hb : 0 ≤ b) :
     a * b ≤ 0 := by
@@ -50,50 +28,8 @@ private theorem rat_mul_nonpos_of_nonpos_of_nonneg {a b : Rat} (ha : a ≤ 0) (h
 
 private theorem rat_mul_nonneg_of_nonpos_of_nonpos {a b : Rat} (ha : a ≤ 0) (hb : b ≤ 0) :
     0 ≤ a * b := by
-  have hna : 0 ≤ -a := by
-    have h := Rat.neg_le_neg_iff.mpr ha
-    simpa using h
-  have hnb : 0 ≤ -b := by
-    have h := Rat.neg_le_neg_iff.mpr hb
-    simpa using h
-  have hm := Rat.mul_nonneg hna hnb
+  have hm := Rat.mul_nonneg (rat_neg_nonneg ha) (rat_neg_nonneg hb)
   rwa [Rat.neg_mul, Rat.mul_neg, Rat.neg_neg] at hm
-
-private theorem rat_eq_num_of_den_one {r : Rat} (hden : r.den = 1) : r = (r.num : Rat) := by
-  conv => lhs; rw [← Rat.num_divInt_den r, hden]
-  rw [Rat.divInt_ofNat, Rat.mkRat_one]
-
-private theorem rat_div_le_iff_pos {a b d : Rat} (hd : 0 < d) :
-    a / d ≤ b ↔ a ≤ b * d := by
-  constructor
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hd)
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hd)] at hm
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt (Rat.inv_pos.mpr hd))
-    rw [Rat.mul_assoc, Rat.mul_inv_cancel d (Rat.ne_of_gt hd), Rat.mul_one] at hm
-    simpa [Rat.div_def] using hm
-
-private theorem rat_le_div_iff_pos {a b d : Rat} (hd : 0 < d) :
-    a ≤ b / d ↔ a * d ≤ b := by
-  constructor
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hd)
-    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hd)] at hm
-  · intro h
-    have hm := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt (Rat.inv_pos.mpr hd))
-    rw [Rat.mul_assoc, Rat.mul_inv_cancel d (Rat.ne_of_gt hd), Rat.mul_one] at hm
-    simpa [Rat.div_def] using hm
-
-private theorem finSum_split_at {n : Nat} (f : Fin n → Rat) (k : Fin n) :
-    finSum n f = finSum n (fun j => if j = k then 0 else f j) + f k := by
-  have heq : ∀ j : Fin n,
-      f j = (if j = k then 0 else f j) + (if j = k then f k else 0) := by
-    intro j
-    by_cases hj : j = k
-    · subst hj; simp [Rat.zero_add]
-    · simp [hj, Rat.add_zero]
-  rw [finSum_congr heq, finSum_add, finSum_single]
 
 private theorem sumOptFin_congr {n : Nat} {f g : Fin n → Option Rat} (h : ∀ j, f j = g j) :
     sumOptFin n f = sumOptFin n g := by
@@ -777,24 +713,24 @@ theorem gcd_row_div_sound {n : Nat} {sense : ConstraintSense} {a : Fin n → Int
       rw [hsum_rat, hrhs]
       constructor
       · intro hle
-        have hdiv : (S' : Rat) ≤ rhs / (d : Rat) := (rat_le_div_iff_pos hd_rat_pos).mpr hle
+        have hdiv : (S' : Rat) ≤ rhs / (d : Rat) := (rat_le_div_iff hd_rat_pos).mpr hle
         exact Rat.intCast_le_intCast.mpr (Rat.le_floor_iff.mpr hdiv)
       · intro hle
         have hdiv : (S' : Rat) ≤ rhs / (d : Rat) :=
           Rat.le_floor_iff.mp (Rat.intCast_le_intCast.mp hle)
-        exact (rat_le_div_iff_pos hd_rat_pos).mp hdiv
+        exact (rat_le_div_iff hd_rat_pos).mp hdiv
     | ge =>
       simp only [beq_iff_eq] at hrhs
       unfold SatisfiesRow
       rw [hsum_rat, hrhs]
       constructor
       · intro hge
-        have hdiv : rhs / (d : Rat) ≤ (S' : Rat) := (rat_div_le_iff_pos hd_rat_pos).mpr hge
+        have hdiv : rhs / (d : Rat) ≤ (S' : Rat) := (rat_div_le_iff hd_rat_pos).mpr hge
         exact Rat.intCast_le_intCast.mpr (Rat.ceil_le_iff.mpr hdiv)
       · intro hge
         have hdiv : rhs / (d : Rat) ≤ (S' : Rat) :=
           Rat.ceil_le_iff.mp (Rat.intCast_le_intCast.mp hge)
-        exact (rat_div_le_iff_pos hd_rat_pos).mp hdiv
+        exact (rat_div_le_iff hd_rat_pos).mp hdiv
     | eq =>
       rw [Bool.and_eq_true, beq_iff_eq, beq_iff_eq] at hrhs
       rcases hrhs with ⟨hden, hrhs_num⟩
@@ -1293,22 +1229,6 @@ private theorem rcTermBound_fixed (r v : Rat) :
       have hr0 : r = 0 := Rat.le_antisymm (Rat.not_lt.mp hpos) (Rat.not_lt.mp hneg)
       simp [hr0, Rat.zero_mul]
 
-private theorem rcTermBound_nonneg_eq_lb {r l : Rat} (hr : 0 ≤ r) (ub1 ub2 : Option Rat) :
-    rcTermBound r (some l) ub1 = rcTermBound r (some l) ub2 := by
-  unfold rcTermBound
-  by_cases hpos : 0 < r
-  · simp [hpos]
-  · have hnotneg : ¬(r < 0) := Rat.not_lt.mpr hr
-    simp [hpos, hnotneg]
-
-private theorem rcTermBound_nonpos_eq_ub {r u : Rat} (hr : r ≤ 0) (lb1 lb2 : Option Rat) :
-    rcTermBound r lb1 (some u) = rcTermBound r lb2 (some u) := by
-  unfold rcTermBound
-  have hnotpos : ¬(0 < r) := Rat.not_lt.mpr hr
-  by_cases hneg : r < 0
-  · simp [hnotpos, hneg]
-  · simp [hnotpos, hneg]
-
 private theorem constraintSense_beq_iff {a b : ConstraintSense} :
     (a == b) = true ↔ a = b := by
   cases a <;> cases b <;> decide
@@ -1346,28 +1266,6 @@ private theorem projDual_ge_nonneg (y : Rat) : 0 ≤ projDual .ge y := by
   split
   · assumption
   · exact Rat.le_refl
-
-private theorem fin_cast_eq_numVars {LP LP' : LPInstance} (hVars : LP'.numVars = LP.numVars) :
-    ∀ (f : Fin LP'.numVars → Rat),
-      finSum LP'.numVars f =
-        finSum LP.numVars (fun j => f ⟨j.val, by rw [hVars]; exact j.isLt⟩) := by
-  cases LP
-  cases LP'
-  dsimp only at hVars ⊢
-  subst hVars
-  intro _
-  rfl
-
-private theorem sumOptFin_cast_numVars {LP LP' : LPInstance} (hVars : LP'.numVars = LP.numVars) :
-    ∀ (f : Fin LP'.numVars → Option Rat),
-      sumOptFin LP'.numVars f =
-        sumOptFin LP.numVars (fun j => f ⟨j.val, by rw [hVars]; exact j.isLt⟩) := by
-  cases LP
-  cases LP'
-  dsimp only at hVars ⊢
-  subst hVars
-  intro _
-  rfl
 
 private theorem checkRowSubmap_props {LP LP' : LPInstance} {hVars : LP'.numVars = LP.numVars}
     {skipRow : Fin LP.numRows} {origRowIdx : Array Nat}
@@ -2092,15 +1990,6 @@ theorem lp_presolve_primal_lift {LP LP' : LPInstance} {step : LPPresolveStep}
       · dsimp only [LP0, LP1] at hstep
         simp [hVars] at hstep
 
-private theorem rat_sub_zero (a : Rat) : a - 0 = a := by
-  rw [Rat.sub_eq_add_neg, Rat.neg_zero, Rat.add_zero]
-
-private theorem rat_mul_sub_3b (a b c : Rat) : a * (b - c) = a * b - a * c := by
-  rw [Rat.sub_eq_add_neg, Rat.mul_add, Rat.mul_neg, ← Rat.sub_eq_add_neg]
-
-private theorem rat_sub_mul_3b (a b c : Rat) : (a - b) * c = a * c - b * c := by
-  rw [Rat.sub_eq_add_neg, Rat.add_mul, Rat.neg_mul, ← Rat.sub_eq_add_neg]
-
 private theorem rat_sub_add_eq_sub_sub (a b c : Rat) : a - (b + c) = a - b - c := by
   simp only [Rat.sub_eq_add_neg, Rat.neg_add, ← Rat.add_assoc]
 
@@ -2201,11 +2090,11 @@ private theorem rat_inv_nonpos_of_neg {a : Rat} (ha : a < 0) : a⁻¹ ≤ 0 := b
 
 private theorem rat_div_nonpos_of_nonpos_of_pos {r a : Rat} (hr : r ≤ 0) (ha : 0 < a) :
     r / a ≤ 0 :=
-  (rat_div_le_iff_pos ha).mpr (by rw [Rat.zero_mul]; exact hr)
+  (rat_div_le_iff ha).mpr (by rw [Rat.zero_mul]; exact hr)
 
 private theorem rat_div_nonneg_of_nonneg_of_pos {r a : Rat} (hr : 0 ≤ r) (ha : 0 < a) :
     0 ≤ r / a :=
-  (rat_le_div_iff_pos ha).mpr (by rw [Rat.zero_mul]; exact hr)
+  (rat_le_div_iff ha).mpr (by rw [Rat.zero_mul]; exact hr)
 
 private theorem rat_div_nonpos_of_nonneg_of_neg {r a : Rat} (hr : 0 ≤ r) (ha : a < 0) :
     r / a ≤ 0 := by
@@ -2486,13 +2375,13 @@ theorem lp_presolve_safeDualBound_eq {LP LP' : LPInstance} {step : LPPresolveSte
                   have hp : ∀ i : Fin m,
                       y1 i * rhs' i = y0 i * rhs i - (y0 i * rowCoeff LP0 i cFin) * val := by
                     intro i
-                    rw [hy_eq i, (hrows i).1.2, rat_mul_sub_3b, Rat.mul_assoc]
+                    rw [hy_eq i, (hrows i).1.2, rat_mul_sub, Rat.mul_assoc]
                   rw [finSum_congr hp, finSum_sub, finSum_mul_const]
                 have hrc0_val :
                     colReducedCost LP0 y0 cFin * val = obj cFin * val - dotC * val := by
                   unfold colReducedCost
                   dsimp only [LP0]
-                  exact rat_sub_mul_3b (obj cFin) dotC val
+                  exact rat_sub_mul (obj cFin) dotC val
                 rw [hrhs_sum, hrc0_val]
                 let rowSum := finSum m (fun i => y0 i * rhs i)
                 rw [rat_rearr_fixed_lhs objC rowSum sOther (obj cFin * val) (dotC * val),

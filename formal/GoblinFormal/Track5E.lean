@@ -1949,11 +1949,6 @@ private theorem abiBfs_inv (insns : Array DecodedAmd64Insn)
           · exact Or.inr ⟨sc, hSc, fun i' d' hM => hp.2.2.2.1 (abiStateKey i' d') (hAll i' d' hM)⟩
         · exact Or.inl hInQ'
 
-private theorem evalMemAddr_isSome_of_not_rip (gpr : BitVec 4 → BitVec 64) (addr : MemAddr)
-    (h : match addr with | .ripRel _ => false | _ => true) :
-    (evalMemAddr gpr addr).isSome = true := by
-  cases addr <;> simp [evalMemAddr] at h ⊢
-
 private theorem execAmd64VecInsn_abi_step (insns : Array DecodedAmd64Insn)
     (rodata : Nat → Option (BitVec 64)) (ext : Nat → Option String)
     (idx : Nat) (hIdx : idx < insns.size) (s : Amd64VecState)
@@ -3830,31 +3825,11 @@ theorem evalX86Cond_e_sub8 (a b : BitVec 8) :
 
 /-! #### IEEE-754 SIMD Lane Algebra & `Track5D` Bridge Theorems -/
 
-private theorem f64IsZero_iff (x : BitVec 64) :
-    f64IsZero x = true ↔ x = 0#64 ∨ x = 0x8000000000000000#64 := by
-  unfold f64IsZero
-  simp only [beq_iff_eq]
-  constructor
-  · intro h
-    have hNat := congrArg BitVec.toNat h
-    have hMask : (0x7fffffffffffffff#64 : BitVec 64).toNat = 2 ^ 63 - 1 := by decide
-    rw [BitVec.toNat_and, hMask, Nat.and_two_pow_sub_one_eq_mod] at hNat
-    simp only [BitVec.toNat_ofNat] at hNat
-    have hLt := x.isLt
-    by_cases hBig : x.toNat < 2 ^ 63
-    · left; apply BitVec.eq_of_toNat_eq; simp; omega
-    · right; apply BitVec.eq_of_toNat_eq; simp; omega
-  · rintro (rfl | rfl) <;> decide
-
 private theorem f64IsZero_false_of_isNaN {x : BitVec 64} (h : f64IsNaN x = true) :
     f64IsZero x = false := by
   cases hz : f64IsZero x
   · rfl
   · rcases (f64IsZero_iff x).mp hz with rfl | rfl <;> simp [f64IsNaN] at h
-
-private theorem f64IsNaN_false_of_isZero {x : BitVec 64} (h : f64IsZero x = true) :
-    f64IsNaN x = false := by
-  rcases (f64IsZero_iff x).mp h with rfl | rfl <;> decide
 
 private theorem canonZero64_notNaN {x : BitVec 64} (h : f64NotNaN x = true) :
     f64NotNaN (canonZero64 x) = true := by

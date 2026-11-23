@@ -77,9 +77,127 @@ theorem finSum_const (n : Nat) (c : Rat) :
   | succ n ih =>
     simp only [finSum_succ, ih, Rat.natCast_add, Rat.natCast_ofNat, Rat.add_mul, Rat.one_mul]
 
-private theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
+/-! ### Elementary Rat algebra, order, and absolute-value helpers -/
+
+theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
     a + c ≤ b + d :=
   Rat.le_trans (Rat.add_le_add_right.mpr hab) (Rat.add_le_add_left.mpr hcd)
+
+theorem rat_neg_nonneg {a : Rat} (ha : a ≤ 0) : 0 ≤ -a := by
+  simpa using Rat.neg_le_neg ha
+
+theorem rat_sub_zero (a : Rat) : a - 0 = a := by
+  rw [Rat.sub_eq_add_neg, Rat.neg_zero, Rat.add_zero]
+
+theorem rat_zero_sub (a : Rat) : 0 - a = -a := by
+  rw [Rat.sub_eq_add_neg, Rat.zero_add]
+
+theorem rat_sub_mul (a b c : Rat) : (a - b) * c = a * c - b * c := by
+  rw [Rat.sub_eq_add_neg, Rat.add_mul, Rat.neg_mul, ← Rat.sub_eq_add_neg]
+
+theorem rat_mul_sub (a b c : Rat) : a * (b - c) = a * b - a * c := by
+  rw [Rat.sub_eq_add_neg, Rat.mul_add, Rat.mul_neg, ← Rat.sub_eq_add_neg]
+
+theorem rat_lt_of_lt_of_le {a b c : Rat} (hab : a < b) (hbc : b ≤ c) : a < c :=
+  Rat.not_le.mp fun hca => Rat.not_le.mpr hab (Rat.le_trans hbc hca)
+
+theorem rat_lt_of_le_of_lt {a b c : Rat} (hab : a ≤ b) (hbc : b < c) : a < c :=
+  Rat.not_le.mp fun hca => Rat.not_le.mpr hbc (Rat.le_trans hca hab)
+
+theorem rat_sub_le_sub {a b c d : Rat} (hab : a ≤ b) (hdc : d ≤ c) :
+    a - c ≤ b - d := by
+  rw [Rat.sub_eq_add_neg, Rat.sub_eq_add_neg]
+  exact rat_add_le_add hab (Rat.neg_le_neg hdc)
+
+theorem rat_mul_le_mul_of_nonpos_right {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
+    b * c ≤ a * c := by
+  have h := Rat.mul_le_mul_of_nonneg_right hab (rat_neg_nonneg hc)
+  rwa [Rat.mul_neg, Rat.mul_neg, Rat.neg_le_neg_iff] at h
+
+theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
+    c * b ≤ c * a := by
+  rw [Rat.mul_comm c b, Rat.mul_comm c a]
+  exact rat_mul_le_mul_of_nonpos_right hab hc
+
+theorem rat_div_le_iff {a b c : Rat} (hb : 0 < b) : a / b ≤ c ↔ a ≤ c * b := by
+  constructor
+  · intro h
+    have h1 := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hb)
+    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hb)] at h1
+  · intro h
+    exact Rat.le_of_mul_le_mul_right (by rwa [Rat.div_mul_cancel (Rat.ne_of_gt hb)]) hb
+
+theorem rat_le_div_iff {a b c : Rat} (hc : 0 < c) : a ≤ b / c ↔ a * c ≤ b := by
+  constructor
+  · intro h
+    have h1 := Rat.mul_le_mul_of_nonneg_right h (Rat.le_of_lt hc)
+    rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)] at h1
+  · intro h
+    exact Rat.le_of_mul_le_mul_right (by rwa [Rat.div_mul_cancel (Rat.ne_of_gt hc)]) hc
+
+theorem rat_div_le_div_of_pos {a b c : Rat} (hab : a ≤ b) (hc : 0 < c) :
+    a / c ≤ b / c := by
+  rw [Rat.div_def, Rat.div_def]
+  exact Rat.mul_le_mul_of_nonneg_right hab (Rat.le_of_lt (Rat.inv_pos.mpr hc))
+
+theorem rat_le_min_iff {a b c : Rat} : a ≤ min b c ↔ a ≤ b ∧ a ≤ c := by
+  rw [Rat.min_def]
+  split
+  · next h => exact ⟨fun h1 => ⟨h1, Rat.le_trans h1 h⟩, And.left⟩
+  · next h =>
+    have hlt : c ≤ b := Rat.le_of_lt (Rat.not_le.mp h)
+    exact ⟨fun h1 => ⟨Rat.le_trans h1 hlt, h1⟩, And.right⟩
+
+theorem rat_le_max_left {a b : Rat} : a ≤ max a b := by
+  rw [Rat.max_def]
+  split
+  · assumption
+  · exact Rat.le_refl
+
+theorem rat_le_max_right {a b : Rat} : b ≤ max a b := by
+  rw [Rat.max_def]
+  split
+  · exact Rat.le_refl
+  · next h => exact Rat.le_of_lt (Rat.not_le.mp h)
+
+theorem rat_abs_le_iff {a b : Rat} : a.abs ≤ b ↔ -b ≤ a ∧ a ≤ b := by
+  rcases Rat.le_total (a := 0) (b := a) with ha | ha
+  · rw [Rat.abs_of_nonneg ha]
+    constructor
+    · intro hab
+      have hnb : -b ≤ 0 := by simpa using Rat.neg_le_neg (Rat.le_trans ha hab)
+      exact ⟨Rat.le_trans hnb ha, hab⟩
+    · exact And.right
+  · rw [Rat.abs_of_nonpos ha]
+    constructor
+    · intro hnab
+      have hba : -b ≤ a := Rat.neg_le_iff.mp hnab
+      have hb0 : 0 ≤ b := Rat.le_trans (rat_neg_nonneg ha) hnab
+      exact ⟨hba, Rat.le_trans ha hb0⟩
+    · intro h
+      exact Rat.neg_le_iff.mpr h.1
+
+theorem rat_le_abs (a : Rat) : a ≤ a.abs :=
+  (rat_abs_le_iff.mp Rat.le_refl).2
+
+theorem rat_abs_mul (a b : Rat) : (a * b).abs = a.abs * b.abs := by
+  rcases Rat.le_total (a := 0) (b := a) with ha | ha <;>
+    rcases Rat.le_total (a := 0) (b := b) with hb | hb
+  · rw [Rat.abs_of_nonneg ha, Rat.abs_of_nonneg hb, Rat.abs_of_nonneg (Rat.mul_nonneg ha hb)]
+  · have hab : a * b ≤ 0 := by simpa [Rat.mul_zero] using Rat.mul_le_mul_of_nonneg_left hb ha
+    rw [Rat.abs_of_nonneg ha, Rat.abs_of_nonpos hb, Rat.abs_of_nonpos hab, Rat.mul_neg]
+  · have hab : a * b ≤ 0 := by simpa [Rat.zero_mul] using Rat.mul_le_mul_of_nonneg_right ha hb
+    rw [Rat.abs_of_nonpos ha, Rat.abs_of_nonneg hb, Rat.abs_of_nonpos hab, Rat.neg_mul]
+  · have hab : 0 ≤ a * b := by
+      simpa [Rat.neg_mul, Rat.mul_neg, Rat.neg_neg] using
+        Rat.mul_nonneg (rat_neg_nonneg ha) (rat_neg_nonneg hb)
+    rw [Rat.abs_of_nonpos ha, Rat.abs_of_nonpos hb, Rat.abs_of_nonneg hab,
+      Rat.neg_mul, Rat.mul_neg, Rat.neg_neg]
+
+theorem rat_eq_num_of_den_one {r : Rat} (hden : r.den = 1) : r = (r.num : Rat) :=
+  Rat.ext (by simp) (by simpa using hden)
+
+/-! ### Finite-sum monotonicity, splitting, swapping, and permutation invariance -/
 
 theorem finSum_le_finSum {n : Nat} {f g : Fin n → Rat} (h : ∀ i, f i ≤ g i) :
     finSum n f ≤ finSum n g := by
@@ -137,6 +255,27 @@ theorem finSum_single {n : Nat} (k : Fin n) (c : Rat) :
         simp [Ne.symm hk]
       rw [hleft, ih k0, hright, Rat.add_zero]
 
+theorem finSum_split_at {n : Nat} (f : Fin n → Rat) (k : Fin n) :
+    finSum n f = finSum n (fun j => if j = k then 0 else f j) + f k := by
+  have heq : ∀ j : Fin n,
+      f j = (if j = k then 0 else f j) + (if j = k then f k else 0) := by
+    intro j
+    by_cases hj : j = k
+    · subst hj; simp [Rat.zero_add]
+    · simp [hj, Rat.add_zero]
+  rw [finSum_congr heq, finSum_add, finSum_single]
+
+theorem finSum_swap {m n : Nat} (f : Fin m → Fin n → Rat) :
+    finSum m (fun i => finSum n (fun j => f i j)) =
+      finSum n (fun j => finSum m (fun i => f i j)) := by
+  induction m with
+  | zero =>
+    simp only [finSum_zero_n]
+    exact (finSum_zero n).symm
+  | succ m ih =>
+    simp only [finSum_succ]
+    rw [ih (fun i j => f i.castSucc j), ← finSum_add]
+
 theorem le_finSum_of_nonneg {n : Nat} {f : Fin n → Rat} (h : ∀ i, 0 ≤ f i) (k : Fin n) :
     f k ≤ finSum n f := by
   have hle : ∀ j : Fin n, (if j = k then f k else 0) ≤ f j := by
@@ -181,24 +320,12 @@ theorem finSum_inj_le {m n : Nat} {g : Fin n → Rat} {q : Fin m → Fin n}
         simp only [Fin.val_castSucc, Fin.val_last] at hval
         omega
       simp [hne]
-    have hsplit : finSum n g = finSum n g' + g k := by
-      have heq : ∀ j, g j = g' j + (if j = k then g k else 0) := by
-        intro j
-        dsimp [g']
-        by_cases hj : j = k
-        · subst hj; simp [Rat.zero_add]
-        · simp [hj, Rat.add_zero]
-      rw [finSum_congr heq, finSum_add, finSum_single]
+    have hsplit : finSum n g = finSum n g' + g k := finSum_split_at g k
     rw [finSum_succ, ← hmatch, hsplit]
     exact Rat.add_le_add_right.mpr hih
 
-private theorem rat_neg_le_abs (x : Rat) : -x ≤ x.abs := by
-  rcases Rat.le_total (a := 0) (b := x) with hx | hx
-  · rw [Rat.abs_of_nonneg hx]
-    have hneg : -x ≤ 0 := Rat.neg_le_iff.mpr (by simpa using hx)
-    exact Rat.le_trans hneg hx
-  · rw [Rat.abs_of_nonpos hx]
-    exact Rat.le_refl
+private theorem rat_neg_le_abs (x : Rat) : -x ≤ x.abs :=
+  Rat.neg_le_iff.mp (rat_abs_le_iff.mp Rat.le_refl).1
 
 private theorem finSum_inj_le_any {n : Nat} {g : Fin n → Rat} {q : Fin n → Fin n}
     (hq : ∀ i₁ i₂, q i₁ = q i₂ → i₁ = i₂) :

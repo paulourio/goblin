@@ -171,26 +171,6 @@ theorem checkPrimalFeasible_sound {LP : LPInstance} {x : Fin LP.numVars → Rat}
   rw [Bool.and_eq_true, allFinBool_iff, allFinBool_iff] at h
   exact ⟨fun j => checkVarBounds_sound (h.1 j), fun i => checkRowConstraint_sound (h.2 i)⟩
 
-private theorem rat_add_le_add {a b c d : Rat} (hab : a ≤ b) (hcd : c ≤ d) :
-    a + c ≤ b + d :=
-  Rat.le_trans (Rat.add_le_add_right.mpr hab) (Rat.add_le_add_left.mpr hcd)
-
-private theorem rat_lt_of_le_of_lt {a b c : Rat} (hab : a ≤ b) (hbc : b < c) :
-    a < c :=
-  Rat.not_le.mp (fun hca => (Rat.not_le.mpr hbc) (Rat.le_trans hca hab))
-
-private theorem rat_mul_le_mul_of_nonpos_left {a b c : Rat} (hab : a ≤ b) (hc : c ≤ 0) :
-    c * b ≤ c * a := by
-  have hnc : 0 ≤ -c := by
-    have h := Rat.neg_le_neg_iff.mpr hc
-    simpa using h
-  have hmul := Rat.mul_le_mul_of_nonneg_left hab hnc
-  rw [Rat.neg_mul, Rat.neg_mul, Rat.neg_le_neg_iff] at hmul
-  exact hmul
-
-private theorem rat_sub_mul (a b c : Rat) : (a - b) * c = a * c - b * c := by
-  rw [Rat.sub_eq_add_neg, Rat.add_mul, Rat.neg_mul, ← Rat.sub_eq_add_neg]
-
 /-- Projects a dual multiplier onto the dual cone of a constraint row:
 `le` -> `y ≤ 0`, `ge` -> `y ≥ 0`, `eq` -> unconstrained. -/
 def projDual (sense : ConstraintSense) (y : Rat) : Rat :=
