@@ -1,6 +1,7 @@
 package goblin
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -139,6 +140,83 @@ type CompiledProblem struct {
 	rowStride      int
 	sense          Sense
 	isMIP          bool
+
+	// Optional unmerged/unrounded algebraic metadata attached only when float
+	// folding lost rational exactness (kept at tail to preserve prior field offsets).
+	exactOrig *exactModelOrig
+}
+
+type exactModelTerm struct {
+	col   int
+	coeff float64
+}
+
+type exactModelRow struct {
+	termStart    int
+	termEnd      int
+	rhs          float64
+	exprConst    float64
+	hasDupLoss   bool
+	rhsInexact   bool
+	intTightened bool
+	intEqInfeas  bool
+}
+
+type exactModelOrig struct {
+	objConst    float64
+	objHasLoss  bool
+	objTerms    []exactModelTerm
+	rows        []exactModelRow
+	rowTerms    []exactModelTerm
+	intEqInfeas bool
+}
+
+func (e *exactModelOrig) cloneZeroObj() *exactModelOrig {
+	if e == nil {
+		return nil
+	}
+	cp := *e
+	cp.objConst = 0
+	cp.objHasLoss = false
+	cp.objTerms = nil
+	return &cp
+}
+
+func (e *exactModelOrig) cloneForContRelax(negateObj bool) *exactModelOrig {
+	if e == nil {
+		return nil
+	}
+	cp := *e
+	cp.intEqInfeas = false
+	if negateObj && cp.objConst != 0 {
+		cp.objConst = -cp.objConst
+	}
+	if negateObj && len(e.objTerms) > 0 {
+		cp.objTerms = make([]exactModelTerm, len(e.objTerms))
+		for k, t := range e.objTerms {
+			cp.objTerms[k] = exactModelTerm{col: t.col, coeff: -t.coeff}
+		}
+	}
+	if len(e.rows) > 0 {
+		cp.rows = make([]exactModelRow, len(e.rows))
+		copy(cp.rows, e.rows)
+		for i := range cp.rows {
+			cp.rows[i].intTightened = false
+			cp.rows[i].intEqInfeas = false
+		}
+	}
+	return &cp
+}
+
+func (p *CompiledProblem) zeroObjCopy() *CompiledProblem {
+	cp := *p
+	cp.lazy = nil
+	cp.objCoeffs = make([]float64, p.numVars)
+	cp.objMin = make([]float64, p.numVars)
+	cp.objConstant = 0
+	cp.objConstMinVal = 0
+	cp.exactOrig = p.exactOrig.cloneZeroObj()
+	return &cp
 }
 
 func denseRowStride(n, mc, nnz int) int {
@@ -392,7 +470,17 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	inTouched := make([]uint8, n)
 	touched := make([]int, 0, min(n, defaultTouchedCap))
 	objHasDup := false
+	objHasDupLoss := false
 	for _, t := range m.objTerms {
+		if t.Var == invalidDotVar {
+			if firstErr == nil {
+				firstErr = errors.New("Dot: mismatched slice lengths")
+				if abortOnErr {
+					return nil, firstErr
+				}
+			}
+			continue
+		}
 		col, ok := m.validVar(t.Var)
 		if !ok {
 			if firstErr == nil {
@@ -440,7 +528,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		}
 		for _, col := range touched {
 			if w, exists := wideMap[col]; exists {
-				val := w.finish(math.NaN())
+				val, exact := w.finishWithExactCheck(math.NaN())
 				if math.IsNaN(val) || math.IsInf(val, 0) {
 					if firstErr == nil {
 						firstErr = fmt.Errorf("objective has non-finite accumulated coefficient for variable %q", m.vars[col].name)
@@ -448,6 +536,9 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 							return nil, firstErr
 						}
 					}
+				}
+				if !exact {
+					objHasDupLoss = true
 				}
 				if val == 0 {
 					val = 0
@@ -489,43 +580,53 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	p.colIdx = make([]int, 0, totalNNZ)
 	p.rowVal = make([]float64, 0, totalNNZ)
 
+	var origRows []exactModelRow
+	var origRowTerms []exactModelTerm
+	anyRowInexact := false
+	anyIntEqInfeas := false
+
 	for i := range mc {
 		c := &m.constraints[i]
+		rhsBad := math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) || math.IsNaN(c.exprConst) || math.IsInf(c.exprConst, 0)
+		netRHS := c.rhs - c.exprConst
+		if !rhsBad && (math.IsNaN(netRHS) || math.IsInf(netRHS, 0)) {
+			rhsBad = true
+		}
 		if firstErr == nil {
 			if !c.sense.valid() {
 				firstErr = fmt.Errorf("constraint %q has invalid sense %d", c.name, int8(c.sense))
 				if abortOnErr {
 					return nil, firstErr
 				}
-			} else if math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) {
-				firstErr = fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
+			} else if rhsBad {
+				firstErr = fmt.Errorf("constraint %q has non-finite RHS %v", c.name, netRHS)
 				if abortOnErr {
 					return nil, firstErr
 				}
 			}
 		}
-		p.rowNames[i] = c.name
-		p.rowSense[i] = c.sense
-		p.rowRHS[i] = c.rhs
-
-		switch c.sense {
-		case LessEqual:
-			p.rowLB[i] = math.Inf(-1)
-			p.rowUB[i] = c.rhs
-		case GreaterEqual:
-			p.rowLB[i] = c.rhs
-			p.rowUB[i] = math.Inf(1)
-		case Equal:
-			p.rowLB[i] = c.rhs
-			p.rowUB[i] = c.rhs
+		rhsHi, rhsLo := twoSumExact(c.rhs, -c.exprConst)
+		if rhsBad {
+			rhsHi = netRHS
+			rhsLo = 0
 		}
 
 		touched = touched[:0]
 		rowHasDup := false
+		rowHasDupLoss := false
 		sorted := true
 		prevCol := -1
 		cTerms := m.conTerms[c.termStart:c.termEnd]
 		for _, t := range cTerms {
+			if t.Var == invalidDotVar {
+				if firstErr == nil {
+					firstErr = errors.New("Dot: mismatched slice lengths")
+					if abortOnErr {
+						return nil, firstErr
+					}
+				}
+				continue
+			}
 			col, ok := m.validVar(t.Var)
 			if !ok {
 				if firstErr == nil {
@@ -577,7 +678,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			}
 			for _, col := range touched {
 				if w, exists := wideMap[col]; exists {
-					val := w.finish(math.NaN())
+					val, exact := w.finishWithExactCheck(math.NaN())
 					if math.IsNaN(val) || math.IsInf(val, 0) {
 						if firstErr == nil {
 							firstErr = fmt.Errorf("constraint %q has non-finite accumulated coefficient for variable %q", c.name, m.vars[col].name)
@@ -585,6 +686,9 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 								return nil, firstErr
 							}
 						}
+					}
+					if !exact {
+						rowHasDupLoss = true
 					}
 					rowAcc[col] = val
 				}
@@ -599,6 +703,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		if useDense {
 			denseRow = p.denseRows[i*p.rowStride : (i+1)*p.rowStride]
 		}
+		allIntExactCoeffs := !rowHasDupLoss
 		for _, col := range touched {
 			val := rowAcc[col]
 			rowAcc[col] = 0
@@ -606,14 +711,98 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			if val == 0 {
 				continue
 			}
+			if m.vars[col].cat == Continuous || math.IsNaN(val) || math.IsInf(val, 0) || math.Trunc(val) != val {
+				allIntExactCoeffs = false
+			}
 			p.colIdx = append(p.colIdx, col)
 			p.rowVal = append(p.rowVal, val)
 			if useDense {
 				denseRow[col] = val
 			}
 		}
+
+		rowRHS := rhsHi
+		intTightened := false
+		intEqInfeas := false
+		if !rhsBad && rhsLo != 0 && allIntExactCoeffs &&
+			math.Abs(rhsLo) < 1 && math.Trunc(rhsHi) == rhsHi && math.Abs(rhsHi) <= 0x1p52 {
+			switch c.sense {
+			case LessEqual:
+				if rhsLo < 0 {
+					rowRHS = rhsHi - 1
+				}
+				intTightened = true
+			case GreaterEqual:
+				if rhsLo > 0 {
+					rowRHS = rhsHi + 1
+				}
+				intTightened = true
+			case Equal:
+				intEqInfeas = true
+				anyIntEqInfeas = true
+			}
+		}
+		p.rowNames[i] = c.name
+		p.rowSense[i] = c.sense
+		p.rowRHS[i] = rowRHS
+
+		switch c.sense {
+		case LessEqual:
+			p.rowLB[i] = math.Inf(-1)
+			p.rowUB[i] = rowRHS
+		case GreaterEqual:
+			p.rowLB[i] = rowRHS
+			p.rowUB[i] = math.Inf(1)
+		case Equal:
+			p.rowLB[i] = rowRHS
+			p.rowUB[i] = rowRHS
+		}
+
+		rhsInexact := !rhsBad && rhsLo != 0
+		if rhsInexact || rowHasDupLoss || intTightened || intEqInfeas {
+			anyRowInexact = true
+			if origRows == nil {
+				origRows = make([]exactModelRow, mc)
+			}
+			rowMeta := exactModelRow{
+				rhs:          c.rhs,
+				exprConst:    c.exprConst,
+				hasDupLoss:   rowHasDupLoss,
+				rhsInexact:   rhsInexact,
+				intTightened: intTightened,
+				intEqInfeas:  intEqInfeas,
+			}
+			if rowHasDupLoss {
+				rowMeta.termStart = len(origRowTerms)
+				for _, t := range cTerms {
+					if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
+						origRowTerms = append(origRowTerms, exactModelTerm{col: col, coeff: t.Coeff})
+					}
+				}
+				rowMeta.termEnd = len(origRowTerms)
+			}
+			origRows[i] = rowMeta
+		}
 	}
 	p.rowPtr[mc] = len(p.colIdx)
+	if objHasDupLoss || anyRowInexact {
+		eo := &exactModelOrig{
+			objConst:    m.objConst,
+			objHasLoss:  objHasDupLoss,
+			rows:        origRows,
+			rowTerms:    origRowTerms,
+			intEqInfeas: anyIntEqInfeas,
+		}
+		if objHasDupLoss {
+			eo.objTerms = make([]exactModelTerm, 0, len(m.objTerms))
+			for _, t := range m.objTerms {
+				if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
+					eo.objTerms = append(eo.objTerms, exactModelTerm{col: col, coeff: t.Coeff})
+				}
+			}
+		}
+		p.exactOrig = eo
+	}
 	p.invalidErr = firstErr
 
 	buildCSCFromCSR(p)
@@ -762,13 +951,28 @@ func collapseExpansionBuf(e *[expansionCap]float64, n int) int {
 	return len(compressExpansion(e[:n]))
 }
 
-func growExpansionBuf(e *[expansionCap]float64, n int, b float64) (int, bool) {
+func twoSumExact(a, b float64) (float64, float64) {
+	if math.Abs(a) < math.Abs(b) {
+		a, b = b, a
+	}
+	s, e := twoSum(a, b)
+	if s == 0 {
+		s = 0
+	}
+	if e == 0 {
+		e = 0
+	}
+	return s, e
+}
+
+func growExpansionBuf(e *[expansionCap]float64, n int, b float64) (int, bool, bool) {
 	if b == 0 {
-		return n, true
+		return n, true, false
 	}
 	if math.IsNaN(b) || math.IsInf(b, 0) {
-		return n, false
+		return n, false, false
 	}
+	capped := false
 	if n >= expansionCap {
 		n = collapseExpansionBuf(e, n)
 		if n >= expansionCap {
@@ -782,6 +986,7 @@ func growExpansionBuf(e *[expansionCap]float64, n int, b float64) (int, bool) {
 				e[n] = top
 				n++
 			}
+			capped = true
 		}
 	}
 	q := b
@@ -790,7 +995,7 @@ func growExpansionBuf(e *[expansionCap]float64, n int, b float64) (int, bool) {
 		var h float64
 		q, h = twoSum(q, e[i])
 		if math.IsNaN(q) || math.IsInf(q, 0) {
-			return w, false
+			return w, false, capped
 		}
 		if h != 0 {
 			e[w] = h
@@ -801,7 +1006,7 @@ func growExpansionBuf(e *[expansionCap]float64, n int, b float64) (int, bool) {
 		e[w] = q
 		w++
 	}
-	return w, true
+	return w, true, capped
 }
 
 // wideDotAcc accumulates values and products across three power-of-two Shewchuk expansions
@@ -814,6 +1019,7 @@ type wideDotAcc struct {
 	midLen int
 	loLen  int
 	nonFin bool
+	capped bool
 }
 
 func (w *wideDotAcc) isEmpty() bool {
@@ -829,17 +1035,20 @@ func (w *wideDotAcc) addVal(v float64) {
 		return
 	}
 	_, e := math.Frexp(math.Abs(v))
-	var ok bool
+	var ok, capHit bool
 	switch {
 	case e > wideExpCutoff:
-		w.hiLen, ok = growExpansionBuf(&w.hiBuf, w.hiLen, math.Ldexp(v, -wideHiShift))
+		w.hiLen, ok, capHit = growExpansionBuf(&w.hiBuf, w.hiLen, math.Ldexp(v, -wideHiShift))
 	case e < -wideExpCutoff:
-		w.loLen, ok = growExpansionBuf(&w.loBuf, w.loLen, math.Ldexp(v, wideHiShift))
+		w.loLen, ok, capHit = growExpansionBuf(&w.loBuf, w.loLen, math.Ldexp(v, wideHiShift))
 	default:
-		w.midLen, ok = growExpansionBuf(&w.midBuf, w.midLen, v)
+		w.midLen, ok, capHit = growExpansionBuf(&w.midBuf, w.midLen, v)
 	}
 	if !ok {
 		w.nonFin = true
+	}
+	if capHit {
+		w.capped = true
 	}
 }
 
@@ -854,24 +1063,42 @@ func (w *wideDotAcc) addProd(a, b float64) {
 	_, ea := math.Frexp(math.Abs(a))
 	_, eb := math.Frexp(math.Abs(b))
 	sumExp := ea + eb
-	var ok1, ok2 bool
+	var ok1, ok2, cap1, cap2 bool
 	switch {
 	case sumExp > wideExpCutoff:
 		p, pe := twoProd(math.Ldexp(a, -wideHalfShift), math.Ldexp(b, -wideHalfShift))
-		w.hiLen, ok1 = growExpansionBuf(&w.hiBuf, w.hiLen, pe)
-		w.hiLen, ok2 = growExpansionBuf(&w.hiBuf, w.hiLen, p)
+		w.hiLen, ok1, cap1 = growExpansionBuf(&w.hiBuf, w.hiLen, pe)
+		w.hiLen, ok2, cap2 = growExpansionBuf(&w.hiBuf, w.hiLen, p)
 	case sumExp < -wideExpCutoff:
 		p, pe := twoProd(math.Ldexp(a, wideHalfShift), math.Ldexp(b, wideHalfShift))
-		w.loLen, ok1 = growExpansionBuf(&w.loBuf, w.loLen, pe)
-		w.loLen, ok2 = growExpansionBuf(&w.loBuf, w.loLen, p)
+		w.loLen, ok1, cap1 = growExpansionBuf(&w.loBuf, w.loLen, pe)
+		w.loLen, ok2, cap2 = growExpansionBuf(&w.loBuf, w.loLen, p)
 	default:
 		p, pe := twoProd(a, b)
-		w.midLen, ok1 = growExpansionBuf(&w.midBuf, w.midLen, pe)
-		w.midLen, ok2 = growExpansionBuf(&w.midBuf, w.midLen, p)
+		w.midLen, ok1, cap1 = growExpansionBuf(&w.midBuf, w.midLen, pe)
+		w.midLen, ok2, cap2 = growExpansionBuf(&w.midBuf, w.midLen, p)
 	}
 	if !ok1 || !ok2 {
 		w.nonFin = true
 	}
+	if cap1 || cap2 {
+		w.capped = true
+	}
+}
+
+func (w *wideDotAcc) finishWithExactCheck(fallback float64) (float64, bool) {
+	val := w.finish(fallback)
+	if w.nonFin || w.capped || math.IsNaN(val) || math.IsInf(val, 0) {
+		return val, false
+	}
+	w.addVal(-val)
+	if w.nonFin || w.capped {
+		return val, false
+	}
+	w.hiLen = collapseExpansionBuf(&w.hiBuf, w.hiLen)
+	w.midLen = collapseExpansionBuf(&w.midBuf, w.midLen)
+	w.loLen = collapseExpansionBuf(&w.loBuf, w.loLen)
+	return val, w.hiLen == 0 && w.midLen == 0 && w.loLen == 0
 }
 
 func (w *wideDotAcc) finish(fallback float64) float64 {

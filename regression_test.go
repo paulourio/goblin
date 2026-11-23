@@ -2828,3 +2828,286 @@ func TestAdversarialPeerReviewPureGoRegressions(t *testing.T) {
 		}
 	})
 }
+
+func TestRegressionDotLengthMismatch(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	cases := []struct {
+		name      string
+		buildExpr func(x, y gb.Var) gb.Expr
+		inObj     bool
+	}{
+		{
+			name:      "fewer_vars_constraint",
+			buildExpr: func(x, _ gb.Var) gb.Expr { return gb.Dot([]gb.Var{x}, []float64{1, 2}) },
+		},
+		{
+			name:      "more_vars_constraint",
+			buildExpr: func(x, y gb.Var) gb.Expr { return gb.Dot([]gb.Var{x, y}, []float64{1}) },
+		},
+		{
+			name:      "scaled_zero_constraint",
+			buildExpr: func(x, _ gb.Var) gb.Expr { return gb.Dot([]gb.Var{x}, []float64{1, 2}).Scale(0) },
+		},
+		{
+			name:      "fewer_vars_objective",
+			buildExpr: func(x, _ gb.Var) gb.Expr { return gb.Dot([]gb.Var{x}, []float64{1, 2}) },
+			inObj:     true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := gb.NewModel("dot_mismatch_"+tc.name, gb.Minimize)
+			x := m.AddContVar("x", 0, 10)
+			y := m.AddContVar("y", 0, 10)
+			expr := tc.buildExpr(x, y)
+			if tc.inObj {
+				m.SetObjective(expr)
+				m.AddConstraint("c", gb.Le(gb.NewExpr(x.T(1)), 5))
+			} else {
+				m.SetObjective(gb.NewExpr(x.T(1), y.T(1)))
+				m.AddConstraint("c", gb.Le(expr, 5))
+			}
+
+			if err := m.Validate(); err == nil || !containsSubstring(err.Error(), "Dot: mismatched slice lengths") {
+				t.Fatalf("Validate err = %v, want substring %q", err, "Dot: mismatched slice lengths")
+			}
+			if _, err := m.CompileChecked(); err == nil || !containsSubstring(err.Error(), "Dot: mismatched slice lengths") {
+				t.Fatalf("CompileChecked err = %v, want substring %q", err, "Dot: mismatched slice lengths")
+			}
+			res, err := m.Solve(ctx)
+			if err == nil || !containsSubstring(err.Error(), "Dot: mismatched slice lengths") {
+				t.Fatalf("Solve err = %v, want substring %q", err, "Dot: mismatched slice lengths")
+			}
+			if res.Status != gb.StatusUndefined {
+				t.Fatalf("Solve status = %v, want StatusUndefined", res.Status)
+			}
+		})
+	}
+}
+
+func containsSubstring(s, sub string) bool {
+	return len(sub) == 0 || (len(s) >= len(sub) && indexSubstring(s, sub) >= 0)
+}
+
+func indexSubstring(s, sub string) int {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestRegressionExactModelPreservationAndIntTightening(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	t.Run("int_tiny_rhs_le_tightens_floor", func(t *testing.T) {
+		t.Parallel()
+		for _, pre := range []bool{true, false} {
+			for _, cert := range []bool{false, true} {
+				m := gb.NewModel("int_le_tiny", gb.Maximize)
+				x := m.AddIntVar("x", 0, 10)
+				m.SetObjective(gb.NewExpr(x.T(1)))
+				m.AddConstraint("c", gb.Le(gb.NewExpr(x.T(1)).AddConstant(1e-17), 3))
+				res, err := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(cert))
+				if err != nil || res.Status != gb.StatusOptimal || res.Objective != 2 || len(res.Values) != 1 || res.Values[0] != 2 {
+					t.Fatalf("pre=%v cert=%v: got status=%v obj=%v vals=%v err=%v, want Optimal obj=2",
+						pre, cert, res.Status, res.Objective, res.Values, err)
+				}
+			}
+		}
+	})
+
+	t.Run("int_tiny_rhs_ge_tightens_ceil", func(t *testing.T) {
+		t.Parallel()
+		for _, cert := range []bool{false, true} {
+			m := gb.NewModel("int_ge_tiny", gb.Minimize)
+			x := m.AddIntVar("x", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(1)))
+			m.AddConstraint("c", gb.Ge(gb.NewExpr(x.T(1)).AddConstant(-1e-17), 3))
+			res, err := m.Solve(ctx, gb.WithCertified(cert))
+			if err != nil || res.Status != gb.StatusOptimal || res.Objective != 4 || len(res.Values) != 1 || res.Values[0] != 4 {
+				t.Fatalf("cert=%v: got status=%v obj=%v vals=%v err=%v, want Optimal obj=4",
+					cert, res.Status, res.Objective, res.Values, err)
+			}
+		}
+	})
+
+	t.Run("int_tiny_rhs_eq_infeasible", func(t *testing.T) {
+		t.Parallel()
+		for _, cert := range []bool{false, true} {
+			m := gb.NewModel("int_eq_tiny", gb.Maximize)
+			x := m.AddIntVar("x", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(1)))
+			m.AddConstraint("c", gb.Eq(gb.NewExpr(x.T(1)).AddConstant(1e-17), 3))
+			res, err := m.Solve(ctx, gb.WithCertified(cert))
+			if err != nil || res.Status != gb.StatusInfeasible {
+				t.Fatalf("cert=%v: got status=%v err=%v, want StatusInfeasible", cert, res.Status, err)
+			}
+		}
+	})
+
+	t.Run("zero_var_inexact_const_infeasible", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			sense gb.ConstraintSense
+			c     float64
+		}{
+			{gb.LessEqual, 1e-17},
+			{gb.Equal, 1e-17},
+			{gb.GreaterEqual, -1e-17},
+		} {
+			for _, cert := range []bool{false, true} {
+				m := gb.NewModel("empty_row_inexact", gb.Minimize)
+				x := m.AddContVar("x", 0, 1)
+				m.SetObjective(gb.NewExpr(x.T(1)))
+				m.AddConstraint("c", gb.Constraint{Expr: gb.Expr{Constant: tc.c}, Sense: tc.sense, RHS: 0})
+				res, err := m.Solve(ctx, gb.WithCertified(cert))
+				if err != nil || res.Status != gb.StatusInfeasible {
+					t.Fatalf("sense=%v cert=%v: got status=%v err=%v, want StatusInfeasible", tc.sense, cert, res.Status, err)
+				}
+			}
+		}
+	})
+
+	t.Run("cont_dup_terms_0_1_plus_0_2_exact_polish", func(t *testing.T) {
+		t.Parallel()
+		m := gb.NewModel("cont_01_02", gb.Maximize)
+		x := m.AddContVar("x", 0, 10)
+		m.SetObjective(gb.NewExpr(x.T(1)))
+		m.AddConstraint("c", gb.Le(gb.NewExpr(x.T(0.1), x.T(0.2)), 0.3))
+		res, err := m.Solve(ctx, gb.WithCertified(true))
+		if err != nil || res.Status != gb.StatusOptimal || len(res.Values) != 1 || res.Values[0] != 0.9999999999999999 {
+			t.Fatalf("got status=%v obj=%.17g vals=%v err=%v, want x=0.9999999999999999",
+				res.Status, res.Objective, res.Values, err)
+		}
+	})
+
+	t.Run("obj_dup_terms_and_const_exact_eval", func(t *testing.T) {
+		t.Parallel()
+		m := gb.NewModel("obj_dup", gb.Maximize)
+		x := m.AddContVar("x", 0, 10)
+		m.SetObjective(gb.NewExpr(x.T(0.1), x.T(0.2)).AddConstant(1))
+		m.AddConstraint("c", gb.Le(gb.NewExpr(x.T(1)), 1))
+		res, err := m.Solve(ctx, gb.WithCertified(true))
+		wantObj := 1.0 + (0.1 + 0.2)
+		// Exact rat(0.1)+rat(0.2)+1 rounds identically to math.Float64frombits? Check 1 + exact(0.1)+exact(0.2):
+		if err != nil || res.Status != gb.StatusOptimal || res.Values[0] != 1 || math.Abs(res.Objective-wantObj) > 1e-15 {
+			t.Fatalf("got status=%v obj=%.17g vals=%v err=%v", res.Status, res.Objective, res.Values, err)
+		}
+	})
+}
+
+func TestRegressionLimitBestBoundIsTrivialInf(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	buildMin := func() *gb.Model {
+		m := gb.NewModel("min_limit", gb.Minimize)
+		x0 := m.AddContVar("x0", 0, 10)
+		x1 := m.AddContVar("x1", 0, 10)
+		x2 := m.AddContVar("x2", 0, 10)
+		x3 := m.AddContVar("x3", 0, 10)
+		m.SetObjective(gb.NewExpr(x0.T(-1.4), x1.T(-0.8), x2.T(-0.6), x3.T(-0.4)))
+		m.AddConstraint("c0", gb.Le(gb.NewExpr(x0.T(1), x1.T(1)), 2))
+		m.AddConstraint("c1", gb.Le(gb.NewExpr(x1.T(1), x2.T(1)), 2))
+		m.AddConstraint("c2", gb.Le(gb.NewExpr(x2.T(1), x3.T(1)), 2))
+		return m
+	}
+
+	for _, tc := range []struct {
+		name string
+		opts []gb.Option
+		want gb.Status
+	}{
+		{"max_iter_1", []gb.Option{gb.WithCertified(true), gb.WithMaxIter(1)}, gb.StatusIterationLimit},
+		{"time_limit_neg", []gb.Option{gb.WithCertified(true), gb.WithTimeLimit(-1)}, gb.StatusTimeLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res, err := buildMin().Solve(ctx, tc.opts...)
+			if err != nil || res.Status != tc.want {
+				t.Fatalf("got status=%v err=%v, want %v", res.Status, err, tc.want)
+			}
+			if !math.IsInf(res.BestBound, -1) || res.Objective != 0 || len(res.Values) != 0 {
+				t.Fatalf("got BestBound=%v Objective=%v len(Values)=%d, want -Inf, 0, 0",
+					res.BestBound, res.Objective, len(res.Values))
+			}
+		})
+	}
+
+	mMax := gb.NewModel("max_limit", gb.Maximize)
+	x := mMax.AddContVar("x", 0, 10)
+	mMax.SetObjective(gb.NewExpr(x.T(1)))
+	mMax.AddConstraint("c", gb.Le(gb.NewExpr(x.T(1)), 5))
+	resMax, errMax := mMax.Solve(ctx, gb.WithCertified(true), gb.WithTimeLimit(-1))
+	if errMax != nil || resMax.Status != gb.StatusTimeLimit || !math.IsInf(resMax.BestBound, 1) || resMax.Objective != 0 {
+		t.Fatalf("max time limit got status=%v bb=%v obj=%v err=%v, want StatusTimeLimit +Inf 0",
+			resMax.Status, resMax.BestBound, resMax.Objective, errMax)
+	}
+}
+
+func TestRegressionCertifiedFinding3ExactMIPPatterns(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	t.Run("presolve_activity_bound_continuous_repair", func(t *testing.T) {
+		t.Parallel()
+		m := gb.NewModel("diff2_1158", gb.Minimize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddBinaryVar("x1")
+		x2 := m.AddBinaryVar("x2")
+		x3 := m.AddContVar("x3", 0, math.Inf(1))
+		x4 := m.AddIntVar("x4", 1, 2)
+		x5 := m.AddIntVar("x5", math.Inf(-1), 4)
+		x6 := m.AddContVar("x6", math.Inf(-1), 9)
+		m.SetObjective(gb.NewExpr(x0.T(-6), x1.T(3), x2.T(-2), x3.T(1), x4.T(6), x5.T(-5), x6.T(5)))
+		m.AddConstraint("r0", gb.Le(gb.NewExpr(x3.T(2), x4.T(-2), x6.T(5)), -6))
+		m.AddConstraint("r1", gb.Eq(gb.NewExpr(x3.T(-2), x6.T(5)), -8))
+		res, err := m.Solve(ctx, gb.WithCertified(true))
+		if err != nil || res.Status != gb.StatusOptimal || res.Objective != -30 {
+			t.Fatalf("got status=%v obj=%v err=%v, want Optimal obj=-30", res.Status, res.Objective, err)
+		}
+	})
+
+	t.Run("unbounded_mip_activity_bound_anchor", func(t *testing.T) {
+		t.Parallel()
+		m := gb.NewModel("diff2_628", gb.Maximize)
+		x0 := m.AddContVar("x0", -4, -1)
+		x1 := m.AddIntVar("x1", math.Inf(-1), 3)
+		m.SetObjective(gb.NewExpr(x0.T(1.25), x1.T(-1.875)))
+		m.AddConstraint("r0", gb.Ge(gb.NewExpr(x0.T(-0.125)), -0.25))
+		m.AddConstraint("r2", gb.Eq(gb.NewExpr(x0.T(-1.75)), 4.5))
+		res, err := m.Solve(ctx, gb.WithCertified(true))
+		if err != nil || res.Status != gb.StatusUnbounded {
+			t.Fatalf("got status=%v err=%v, want StatusUnbounded", res.Status, err)
+		}
+	})
+
+	t.Run("unbounded_int_cg_exact_gap_closure", func(t *testing.T) {
+		t.Parallel()
+		m := gb.NewModel("diff2_880", gb.Maximize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddIntVar("x1", math.Inf(-1), 0)
+		x2 := m.AddIntVar("x2", 0, math.Inf(1))
+		x3 := m.AddIntVar("x3", 4, 11)
+		x4 := m.AddIntVar("x4", math.Inf(-1), math.Inf(1))
+		x5 := m.AddContVar("x5", -1, 6)
+		x6 := m.AddIntVar("x6", math.Inf(-1), 8)
+		m.SetObjective(gb.NewExpr(x0.T(6), x1.T(-3), x2.T(4), x3.T(-1), x4.T(1), x5.T(-3e6), x6.T(1)))
+		m.AddConstraint("r0", gb.Le(gb.NewExpr(x1.T(1), x4.T(5), x6.T(-5)), -4))
+		m.AddConstraint("r1", gb.Ge(gb.NewExpr(x0.T(-4), x3.T(1), x4.T(-6), x5.T(-5), x6.T(-4)), -5))
+		m.AddConstraint("r2", gb.Eq(gb.NewExpr(x1.T(1e6), x2.T(-4), x3.T(1e6), x5.T(4), x6.T(-2)), -2))
+		m.AddConstraint("r3", gb.Le(gb.NewExpr(x0.T(-4), x5.T(5), x6.T(2)), -8))
+		res, err := m.Solve(ctx, gb.WithCertified(true))
+		if err != nil || res.Status != gb.StatusOptimal || res.Objective != 13999992 {
+			t.Fatalf("got status=%v obj=%.17g bb=%.17g err=%v, want Optimal 13999992",
+				res.Status, res.Objective, res.BestBound, err)
+		}
+	})
+}

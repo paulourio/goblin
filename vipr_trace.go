@@ -351,6 +351,7 @@ func (tr *VIPRTrace) presolveMIP(
 			modelID:   p.modelID,
 			Backend:   backend,
 			Status:    StatusTimeLimit,
+			BestBound: trivialDualBound(p.sense),
 			SolveTime: time.Since(start),
 		}, true
 	}
@@ -421,6 +422,28 @@ type viprRatProblem struct {
 	rowRHS   []*big.Rat
 	rowCols  [][]int
 	rowVals  [][]*big.Rat
+	colRows  [][]int
+	colVals  [][]*big.Rat
+}
+
+func (rp *viprRatProblem) ensureCols() {
+	if rp.colRows != nil {
+		return
+	}
+	colRows := make([][]int, rp.n)
+	colVals := make([][]*big.Rat, rp.n)
+	for i := range rp.m {
+		cols := rp.rowCols[i]
+		vals := rp.rowVals[i]
+		for k, col := range cols {
+			if col >= 0 && col < rp.n && vals[k] != nil && vals[k].Sign() != 0 {
+				colRows[col] = append(colRows[col], i)
+				colVals[col] = append(colVals[col], vals[k])
+			}
+		}
+	}
+	rp.colRows = colRows
+	rp.colVals = colVals
 }
 
 func viprRatFromFloat(v float64) (*big.Rat, bool) {
@@ -445,12 +468,16 @@ func buildVIPRRatProblem(p *CompiledProblem) (*viprRatProblem, bool) {
 	if !ok {
 		return nil, false
 	}
+	objMinVec, okObj := exactMinObjVecRat(p)
+	if !okObj {
+		return nil, false
+	}
 	rp := &viprRatProblem{
 		p:        p,
 		n:        n,
 		m:        m,
 		objConst: objConst,
-		objMin:   make([]*big.Rat, n),
+		objMin:   objMinVec,
 		isInt:    make([]bool, n),
 		lb:       make([]*big.Rat, n),
 		ub:       make([]*big.Rat, n),
@@ -460,11 +487,6 @@ func buildVIPRRatProblem(p *CompiledProblem) (*viprRatProblem, bool) {
 		rowVals:  make([][]*big.Rat, m),
 	}
 	for j := range n {
-		c, okC := viprRatFromFloat(p.objMin[j])
-		if !okC {
-			return nil, false
-		}
-		rp.objMin[j] = c
 		rp.isInt[j] = p.varCat[j] != Continuous
 		lo, hi := p.varLB[j], p.varUB[j]
 		if !math.IsInf(lo, -1) {
@@ -484,25 +506,14 @@ func buildVIPRRatProblem(p *CompiledProblem) (*viprRatProblem, bool) {
 	}
 	for i := range m {
 		rp.rowSense[i] = p.rowSense[i]
-		rhs, okR := viprRatFromFloat(p.rowRHS[i])
+		rhs, okR := exactRowRHSRat(p, i)
 		if !okR {
 			return nil, false
 		}
 		rp.rowRHS[i] = rhs
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		cols := make([]int, 0, en-st)
-		vals := make([]*big.Rat, 0, en-st)
-		for k := st; k < en; k++ {
-			v := p.rowVal[k]
-			if v == 0 {
-				continue
-			}
-			vr, okV := viprRatFromFloat(v)
-			if !okV {
-				return nil, false
-			}
-			cols = append(cols, p.colIdx[k])
-			vals = append(vals, vr)
+		cols, vals, okC := exactCanonicalRowTermsRat(p, i)
+		if !okC {
+			return nil, false
 		}
 		rp.rowCols[i] = cols
 		rp.rowVals[i] = vals
@@ -1117,7 +1128,6 @@ func solveVIPRPeelSystem(m int, eqTerms [][]viprBasisTerm, eqRHS []*big.Rat) ([]
 // in exact rational arithmetic by peeling singleton rows and columns before factoring
 // any remaining nucleus.
 func solveVIPRBasisTranspose(rp *viprRatProblem, basis []int, eqRHS []*big.Rat) ([]*big.Rat, bool) {
-	p := rp.p
 	n := rp.n
 	m := rp.m
 	if m == 0 {
@@ -1126,21 +1136,17 @@ func solveVIPRBasisTranspose(rp *viprRatProblem, basis []int, eqRHS []*big.Rat) 
 	if len(basis) < m || len(eqRHS) < m {
 		return nil, false
 	}
+	rp.ensureCols()
 
 	eqTerms := make([][]viprBasisTerm, m)
 	for q := range m {
 		bVar := basis[q]
 		if bVar >= 0 && bVar < n {
-			var ents []viprBasisTerm
-			for idx := p.colPtr[bVar]; idx < p.colPtr[bVar+1]; idx++ {
-				ri := p.rowIdx[idx]
-				if ri >= 0 && ri < m && p.colVal[idx] != 0 {
-					rv, ok := viprRatFromFloat(p.colVal[idx])
-					if !ok {
-						return nil, false
-					}
-					ents = append(ents, viprBasisTerm{col: ri, val: rv})
-				}
+			rows := rp.colRows[bVar]
+			vals := rp.colVals[bVar]
+			ents := make([]viprBasisTerm, len(rows))
+			for k, ri := range rows {
+				ents[k] = viprBasisTerm{col: ri, val: new(big.Rat).Set(vals[k])}
 			}
 			eqTerms[q] = ents
 		} else {
@@ -1663,71 +1669,318 @@ func (rp *viprRatProblem) refineExactIncumbent(approx []float64, scratchLP func(
 			continue
 		}
 		lo, hi := rp.p.varLB[j], rp.p.varUB[j]
+		var chosen *big.Rat
 		var val float64
 		switch {
 		case !math.IsInf(lo, -1) && math.Abs(lpRes.Primal[j]-lo) <= 1e-7:
-			val = lo
+			if rp.lb[j] != nil {
+				chosen = new(big.Rat).Set(rp.lb[j])
+			} else {
+				val = lo
+			}
 		case !math.IsInf(hi, 1) && math.Abs(lpRes.Primal[j]-hi) <= 1e-7:
-			val = hi
+			if rp.ub[j] != nil {
+				chosen = new(big.Rat).Set(rp.ub[j])
+			} else {
+				val = hi
+			}
 		case !math.IsInf(lo, -1) && lpRes.ReducedCosts[j] >= 0:
-			val = lo
+			if rp.lb[j] != nil {
+				chosen = new(big.Rat).Set(rp.lb[j])
+			} else {
+				val = lo
+			}
 		case !math.IsInf(hi, 1) && lpRes.ReducedCosts[j] <= 0:
-			val = hi
+			if rp.ub[j] != nil {
+				chosen = new(big.Rat).Set(rp.ub[j])
+			} else {
+				val = hi
+			}
 		default:
 			val = lpRes.Primal[j]
 		}
-		r, ok := viprRatFromFloat(val)
-		if !ok {
-			return returnFallback()
+		if chosen == nil {
+			r, ok := viprRatFromFloat(val)
+			if !ok {
+				return returnFallback()
+			}
+			chosen = r
 		}
-		xRat[j] = r
+		xRat[j] = chosen
 	}
 
-	if len(basicContCols) > 0 && len(activeRows) >= len(basicContCols) && len(activeRows) <= viprMaxNucleusSize {
-		kMat := len(basicContCols)
-		colPos := make([]int, rp.n)
-		for j := range rp.n {
-			colPos[j] = -1
-		}
-		for pos, col := range basicContCols {
-			colPos[col] = pos
-		}
-		mat := make([][]*big.Rat, len(activeRows))
-		rhs := make([]*big.Rat, len(activeRows))
-		term := new(big.Rat)
-		for rIdx, rowID := range activeRows {
-			row := make([]*big.Rat, kMat)
-			for c := range kMat {
-				row[c] = new(big.Rat)
-			}
-			rRHS := new(big.Rat).Set(rp.rowRHS[rowID])
-			for idx, col := range rp.rowCols[rowID] {
-				coeff := rp.rowVals[rowID][idx]
-				if pPos := colPos[col]; pPos >= 0 {
-					row[pPos].Add(row[pPos], coeff)
-				} else {
-					term.Mul(coeff, xRat[col])
-					rRHS.Sub(rRHS, term)
-				}
-			}
-			mat[rIdx] = row
-			rhs[rIdx] = rRHS
-		}
-		if solB, ok := solveVIPRRectRat(mat, rhs, kMat); ok {
-			for pos, col := range basicContCols {
-				xRat[col] = solB[pos]
-			}
-		}
+	if xSol, ok := rp.solveContRowsRect(xRat, basicContCols, activeRows); ok {
+		xRat = xSol
 	}
 
 	if !rp.checkExactFeasible(xRat) {
-		return returnFallback()
+		if repaired, okRep := rp.repairContinuousExactIncumbent(xRat, basicContCols, isBasicStruct, activeRows); okRep {
+			xRat = repaired
+		} else {
+			return returnFallback()
+		}
 	}
 	refinedObj := rp.evalObjNoConst(xRat)
-	if fallbackX != nil && fallbackObj.Cmp(refinedObj) < 0 {
+	if fallbackX != nil && fallbackObj.Cmp(refinedObj) <= 0 {
 		return fallbackX, fallbackObj, true
 	}
 	return xRat, refinedObj, true
+}
+
+func (rp *viprRatProblem) solveContRowsRect(xBase []*big.Rat, freeCols, eqRows []int) ([]*big.Rat, bool) {
+	kMat := len(freeCols)
+	if kMat == 0 || len(eqRows) < kMat || len(eqRows) > viprMaxNucleusSize {
+		return nil, false
+	}
+	colPos := make([]int, rp.n)
+	for j := range rp.n {
+		colPos[j] = -1
+	}
+	for pos, col := range freeCols {
+		colPos[col] = pos
+	}
+	mat := make([][]*big.Rat, len(eqRows))
+	rhs := make([]*big.Rat, len(eqRows))
+	term := new(big.Rat)
+	for rIdx, rowID := range eqRows {
+		row := make([]*big.Rat, kMat)
+		for c := range kMat {
+			row[c] = new(big.Rat)
+		}
+		rRHS := new(big.Rat).Set(rp.rowRHS[rowID])
+		for idx, col := range rp.rowCols[rowID] {
+			coeff := rp.rowVals[rowID][idx]
+			if pPos := colPos[col]; pPos >= 0 {
+				row[pPos].Add(row[pPos], coeff)
+			} else {
+				term.Mul(coeff, xBase[col])
+				rRHS.Sub(rRHS, term)
+			}
+		}
+		mat[rIdx] = row
+		rhs[rIdx] = rRHS
+	}
+	solB, ok := solveVIPRRectRat(mat, rhs, kMat)
+	if !ok {
+		return nil, false
+	}
+	xOut := make([]*big.Rat, rp.n)
+	for j := range rp.n {
+		xOut[j] = new(big.Rat).Set(xBase[j])
+	}
+	for pos, col := range freeCols {
+		xOut[col] = solB[pos]
+	}
+	return xOut, true
+}
+
+// repairContinuousExactIncumbent recovers exact primal feasibility when 1-ULP outward
+// presolved bounds or nonbasic continuous pins leave xRat slightly infeasible.
+func (rp *viprRatProblem) repairContinuousExactIncumbent(
+	xRat []*big.Rat,
+	basicContCols []int,
+	isBasicStruct []bool,
+	activeRows []int,
+) ([]*big.Rat, bool) {
+	// Reject immediately if any integer coordinate itself violates integer bounds.
+	for j := range rp.n {
+		if !rp.isInt[j] {
+			continue
+		}
+		if xRat[j] == nil || !xRat[j].IsInt() {
+			return nil, false
+		}
+		if rp.lb[j] != nil && xRat[j].Cmp(rp.lb[j]) < 0 {
+			return nil, false
+		}
+		if rp.ub[j] != nil && xRat[j].Cmp(rp.ub[j]) > 0 {
+			return nil, false
+		}
+	}
+
+	var violRows []int
+	inViol := make([]bool, rp.m)
+	act := new(big.Rat)
+	term := new(big.Rat)
+	for i := range rp.m {
+		act.SetInt64(0)
+		for idx, col := range rp.rowCols[i] {
+			term.Mul(rp.rowVals[i][idx], xRat[col])
+			act.Add(act, term)
+		}
+		cmp := act.Cmp(rp.rowRHS[i])
+		bad := (rp.rowSense[i] == LessEqual && cmp > 0) ||
+			(rp.rowSense[i] == GreaterEqual && cmp < 0) ||
+			(rp.rowSense[i] == Equal && cmp != 0)
+		if bad {
+			violRows = append(violRows, i)
+			inViol[i] = true
+		}
+	}
+
+	isOOB := make([]bool, rp.n)
+	oobClamp := make([]*big.Rat, rp.n)
+	var oobCols []int
+	for j := range rp.n {
+		if rp.isInt[j] {
+			continue
+		}
+		if rp.lb[j] != nil && xRat[j].Cmp(rp.lb[j]) < 0 {
+			isOOB[j] = true
+			oobClamp[j] = rp.lb[j]
+			oobCols = append(oobCols, j)
+		} else if rp.ub[j] != nil && xRat[j].Cmp(rp.ub[j]) > 0 {
+			isOOB[j] = true
+			oobClamp[j] = rp.ub[j]
+			oobCols = append(oobCols, j)
+		}
+	}
+
+	// Build candidate row subsets (active + violated, and equality + violated).
+	dedupRows := func(groups ...[]int) []int {
+		seen := make([]bool, rp.m)
+		var out []int
+		for _, g := range groups {
+			for _, id := range g {
+				if id >= 0 && id < rp.m && !seen[id] {
+					seen[id] = true
+					out = append(out, id)
+				}
+			}
+		}
+		return out
+	}
+	var equalActive []int
+	for _, id := range activeRows {
+		if rp.rowSense[id] == Equal {
+			equalActive = append(equalActive, id)
+		}
+	}
+	rowSets := make([][]int, 0, 3)
+	augRows := dedupRows(activeRows, violRows)
+	if len(augRows) > 0 && len(augRows) <= viprMaxNucleusSize {
+		rowSets = append(rowSets, augRows)
+	}
+	eqViolRows := dedupRows(equalActive, violRows)
+	if len(eqViolRows) > 0 && len(eqViolRows) <= viprMaxNucleusSize && len(eqViolRows) != len(augRows) {
+		rowSets = append(rowSets, eqViolRows)
+	}
+	if len(violRows) > 0 && len(violRows) <= viprMaxNucleusSize && len(violRows) != len(eqViolRows) {
+		rowSets = append(rowSets, violRows)
+	}
+
+	// Rank nonbasic continuous variables: violated rows first, then oob-coupled rows, then active rows.
+	inCand := make([]bool, rp.n)
+	var candPromote []int
+	addRowContCands := func(rowID int) {
+		for _, col := range rp.rowCols[rowID] {
+			if !rp.isInt[col] && !isBasicStruct[col] && !inCand[col] {
+				inCand[col] = true
+				candPromote = append(candPromote, col)
+			}
+		}
+	}
+	for _, rID := range violRows {
+		addRowContCands(rID)
+	}
+	for i := range rp.m {
+		touchesOOB := false
+		for _, col := range rp.rowCols[i] {
+			if isOOB[col] {
+				touchesOOB = true
+				break
+			}
+		}
+		if touchesOOB {
+			addRowContCands(i)
+		}
+	}
+	for _, rID := range activeRows {
+		addRowContCands(rID)
+	}
+	const maxPromote = 24
+	if len(candPromote) > maxPromote {
+		candPromote = candPromote[:maxPromote]
+	}
+
+	xClamped := make([]*big.Rat, rp.n)
+	for j := range rp.n {
+		if oobClamp[j] != nil {
+			xClamped[j] = new(big.Rat).Set(oobClamp[j])
+		} else {
+			xClamped[j] = new(big.Rat).Set(xRat[j])
+		}
+	}
+	if len(oobCols) > 0 && rp.checkExactFeasible(xClamped) {
+		return xClamped, true
+	}
+
+	tryWithExtras := func(xBase []*big.Rat, baseFree []int) ([]*big.Rat, bool) {
+		maxPair := min(len(candPromote), 12)
+		for _, eqRows := range rowSets {
+			if len(baseFree) > 0 && len(eqRows) >= len(baseFree) {
+				if sol, ok := rp.solveContRowsRect(xBase, baseFree, eqRows); ok && rp.checkExactFeasible(sol) {
+					return sol, true
+				}
+			}
+			for _, c := range candPromote {
+				free1 := append(slices.Clone(baseFree), c)
+				if sol, ok := rp.solveContRowsRect(xBase, free1, eqRows); ok && rp.checkExactFeasible(sol) {
+					return sol, true
+				}
+			}
+			for i := range maxPair {
+				for k := i + 1; k < maxPair; k++ {
+					free2 := append(slices.Clone(baseFree), candPromote[i], candPromote[k])
+					if sol, ok := rp.solveContRowsRect(xBase, free2, eqRows); ok && rp.checkExactFeasible(sol) {
+						return sol, true
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
+	if len(oobCols) > 0 {
+		remFree := make([]int, 0, len(basicContCols))
+		for _, col := range basicContCols {
+			if !isOOB[col] {
+				remFree = append(remFree, col)
+			}
+		}
+		if sol, ok := tryWithExtras(xClamped, remFree); ok {
+			return sol, true
+		}
+	}
+
+	if len(violRows) > 0 {
+		if sol, ok := tryWithExtras(xRat, basicContCols); ok {
+			return sol, true
+		}
+	}
+
+	// Single-column basis swap fallback on active/violated rows.
+	maxOut := min(len(basicContCols), 12)
+	maxIn := min(len(candPromote), 12)
+	if maxOut > 0 && maxIn > 0 {
+		for outIdx := range maxOut {
+			swapped := make([]int, 0, len(basicContCols))
+			for idx, col := range basicContCols {
+				if idx != outIdx {
+					swapped = append(swapped, col)
+				}
+			}
+			for inIdx := range maxIn {
+				cand := append(slices.Clone(swapped), candPromote[inIdx])
+				for _, eqRows := range rowSets {
+					if sol, ok := rp.solveContRowsRect(xRat, cand, eqRows); ok && rp.checkExactFeasible(sol) {
+						return sol, true
+					}
+				}
+			}
+		}
+	}
+	return nil, false
 }
 
 type viprNodeKind uint8
@@ -1778,6 +2031,7 @@ type viprGlobalCut struct {
 	cols          []int
 	vals          []*big.Rat
 	rhs           *big.Rat
+	isGe          bool
 	normExp       int
 	lpCols        []int
 	lpVals        []float64
@@ -1827,6 +2081,7 @@ type babVIPRRecorder struct {
 	cutScratchLP           *LPSolver
 	scratchCutIDs          []int
 	allCuts                []viprGlobalCut
+	roundedBaseRow         []int
 	stagedCuts             []viprCertifiedCut
 	activeCutIDs           []int
 	cachedIncPtr           *float64
@@ -1836,11 +2091,28 @@ type babVIPRRecorder struct {
 	cachedIncOK            bool
 	disableSIMD            bool
 	invalid                bool
+	deadline               time.Time
+	done                   <-chan struct{}
 	rootCutsCertified      int
 	inTreeCutsCertified    int
 	rcfFixingsCertified    int
 	unbTightCertified      int
 	orbitBranchesCertified int
+}
+
+func (r *babVIPRRecorder) canceled() bool {
+	if r == nil {
+		return false
+	}
+	return stopRequested(r.deadline, r.done)
+}
+
+func (r *babVIPRRecorder) setDeadline(deadline time.Time, done <-chan struct{}) {
+	if r == nil {
+		return
+	}
+	r.deadline = deadline
+	r.done = done
 }
 
 func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *babVIPRRecorder {
@@ -1849,12 +2121,42 @@ func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *ba
 	if !ok {
 		return &babVIPRRecorder{trace: tr, invalid: true}
 	}
-	return &babVIPRRecorder{
+	rec := &babVIPRRecorder{
 		trace:       tr,
 		rp:          rp,
 		root:        &viprTreeNode{kind: viprNodeOpen},
 		disableSIMD: disableSIMD,
 	}
+	if eo := p.exactOrig; eo != nil && len(eo.rows) == rp.m {
+		var rounded []int
+		for i := range rp.m {
+			if !eo.rows[i].intTightened {
+				continue
+			}
+			if rounded == nil {
+				rounded = make([]int, rp.m)
+				for j := range rounded {
+					rounded[j] = -1
+				}
+			}
+			tightRHS, okT := viprRatFromFloat(p.rowRHS[i])
+			if !okT {
+				return &babVIPRRecorder{trace: tr, invalid: true}
+			}
+			cutID := len(rec.allCuts)
+			rec.allCuts = append(rec.allCuts, viprGlobalCut{
+				cols: slices.Clone(rp.rowCols[i]),
+				vals: cloneRatSlice(rp.rowVals[i]),
+				rhs:  tightRHS,
+				isGe: rp.rowSense[i] == GreaterEqual,
+				kind: viprCutCG,
+				refs: []viprRowMult{{rowID: i, mult: big.NewRat(1, 1)}},
+			})
+			rounded[i] = cutID
+		}
+		rec.roundedBaseRow = rounded
+	}
+	return rec
 }
 
 func (r *babVIPRRecorder) close() {
@@ -1974,6 +2276,8 @@ func (r *babVIPRRecorder) ensureBaseScratchLP() *LPSolver {
 		s.DisableSIMD = r.disableSIMD
 		r.baseScratchLP = s
 	}
+	r.baseScratchLP.Deadline = r.deadline
+	r.baseScratchLP.Done = r.done
 	return r.baseScratchLP
 }
 
@@ -2002,6 +2306,8 @@ func (r *babVIPRRecorder) ensureCutScratchLP() *LPSolver {
 		r.cutScratchLP = s
 		r.scratchCutIDs = r.scratchCutIDs[:0]
 	}
+	r.cutScratchLP.Deadline = r.deadline
+	r.cutScratchLP.Done = r.done
 	if len(r.scratchCutIDs) < len(r.activeCutIDs) {
 		add := make([]dynamicRow, 0, len(r.activeCutIDs)-len(r.scratchCutIDs))
 		for _, cutID := range r.activeCutIDs[len(r.scratchCutIDs):] {
@@ -2023,11 +2329,17 @@ func (r *babVIPRRecorder) rowData(rowID int) (ConstraintSense, *big.Rat, []int, 
 		return r.rp.rowSense[rowID], r.rp.rowRHS[rowID], r.rp.rowCols[rowID], r.rp.rowVals[rowID]
 	}
 	c := &r.allCuts[rowID-r.rp.m]
+	if c.isGe {
+		return GreaterEqual, c.rhs, c.cols, c.vals
+	}
 	return LessEqual, c.rhs, c.cols, c.vals
 }
 
 func (r *babVIPRRecorder) activeRowID(activeIdx int) int {
 	if activeIdx < r.rp.m {
+		if r.roundedBaseRow != nil && activeIdx >= 0 && r.roundedBaseRow[activeIdx] >= 0 {
+			return r.rp.m + r.roundedBaseRow[activeIdx]
+		}
 		return activeIdx
 	}
 	return r.rp.m + r.activeCutIDs[activeIdx-r.rp.m]
@@ -2135,7 +2447,6 @@ func (r *babVIPRRecorder) purgeSlackCuts(s *LPSolver, slackTol float64) int {
 
 func (r *babVIPRRecorder) solveBasisTransposeActive(basis []int, eqRHS []*big.Rat) ([]*big.Rat, bool) {
 	rp := r.rp
-	p := rp.p
 	n := rp.n
 	baseM := rp.m
 	numExtra := len(r.activeCutIDs)
@@ -2146,6 +2457,7 @@ func (r *babVIPRRecorder) solveBasisTransposeActive(basis []int, eqRHS []*big.Ra
 	if len(basis) < m || len(eqRHS) < m {
 		return nil, false
 	}
+	rp.ensureCols()
 
 	var cutColTerms [][]viprBasisTerm
 	if numExtra > 0 {
@@ -2165,18 +2477,17 @@ func (r *babVIPRRecorder) solveBasisTransposeActive(basis []int, eqRHS []*big.Ra
 	for q := range m {
 		bVar := basis[q]
 		if bVar >= 0 && bVar < n {
-			var ents []viprBasisTerm
-			for idx := p.colPtr[bVar]; idx < p.colPtr[bVar+1]; idx++ {
-				ri := p.rowIdx[idx]
-				if ri >= 0 && ri < baseM && p.colVal[idx] != 0 {
-					rv, ok := viprRatFromFloat(p.colVal[idx])
-					if !ok {
-						return nil, false
-					}
-					ents = append(ents, viprBasisTerm{col: ri, val: rv})
-				}
+			rows := rp.colRows[bVar]
+			vals := rp.colVals[bVar]
+			extraLen := 0
+			if cutColTerms != nil {
+				extraLen = len(cutColTerms[bVar])
 			}
-			if cutColTerms != nil && len(cutColTerms[bVar]) > 0 {
+			ents := make([]viprBasisTerm, 0, len(rows)+extraLen)
+			for k, ri := range rows {
+				ents = append(ents, viprBasisTerm{col: ri, val: new(big.Rat).Set(vals[k])})
+			}
+			if extraLen > 0 {
 				ents = append(ents, cutColTerms[bVar]...)
 			}
 			eqTerms[q] = ents
@@ -2597,6 +2908,123 @@ func (r *babVIPRRecorder) recordNodeDual(vn *viprTreeNode, s *LPSolver, lpRes LP
 	}
 }
 
+func (r *babVIPRRecorder) exactDualSearchMinFloor(vn *viprTreeNode, searchShift float64) (float64, bool) {
+	if r == nil || r.invalid || r.rp == nil || vn == nil || vn.bestDualRHS == nil {
+		return 0, false
+	}
+	bound := vn.bestDualRHS
+	if searchShift != 0 {
+		bound = new(big.Rat).Add(r.rp.objConst, vn.bestDualRHS)
+	}
+	return exactRatToFloatFloor(bound), true
+}
+
+func (r *babVIPRRecorder) exactNodeGapClosed(vn *viprTreeNode, bestPrimal []float64) bool {
+	if r == nil || r.invalid || !r.cachedIncOK || vn == nil || vn.bestDualRHS == nil || len(bestPrimal) == 0 {
+		return false
+	}
+	if r.cachedIncPtr != &bestPrimal[0] || r.cachedIncObj == nil {
+		return false
+	}
+	return r.cachedIncObj.Cmp(vn.bestDualRHS) <= 0
+}
+
+func (r *babVIPRRecorder) exactSubtreeGapClosed(vn *viprTreeNode, bestPrimal []float64) bool {
+	if r == nil || r.invalid || !r.cachedIncOK || vn == nil || len(bestPrimal) == 0 {
+		return false
+	}
+	if r.cachedIncPtr != &bestPrimal[0] || r.cachedIncObj == nil {
+		return false
+	}
+	for cur := vn; cur != nil; cur = cur.parent {
+		if cur.bestDualRHS != nil {
+			return r.cachedIncObj.Cmp(cur.bestDualRHS) <= 0
+		}
+	}
+	return false
+}
+
+func (r *babVIPRRecorder) exactTreeGapClosed(bestPrimal []float64) bool {
+	if r == nil || r.invalid || !r.cachedIncOK || r.root == nil || len(bestPrimal) == 0 {
+		return false
+	}
+	if r.cachedIncPtr != &bestPrimal[0] || r.cachedIncObj == nil {
+		return false
+	}
+	var walk func(vn *viprTreeNode, bestAncRHS *big.Rat) bool
+	walk = func(vn *viprTreeNode, bestAncRHS *big.Rat) bool {
+		if vn == nil {
+			return false
+		}
+		curBest := bestAncRHS
+		if vn.bestDualRHS != nil && (curBest == nil || vn.bestDualRHS.Cmp(curBest) > 0) {
+			curBest = vn.bestDualRHS
+		}
+		if curBest != nil && r.cachedIncObj.Cmp(curBest) <= 0 {
+			return true
+		}
+		switch vn.kind {
+		case viprNodeLeafBoundConflict, viprNodeLeafFarkas:
+			return true
+		case viprNodeLeafDual, viprNodeOpen:
+			return false
+		case viprNodeBranch, viprNodeOrbitBranch:
+			return walk(vn.left, curBest) && walk(vn.right, curBest)
+		default:
+			return false
+		}
+	}
+	return walk(r.root, nil)
+}
+
+func (r *babVIPRRecorder) solveCutScratchNode(lbR, ubR []*big.Rat, strictDual bool) (*LPSolver, LPResult, bool) {
+	sc := r.ensureCutScratchLP()
+	if sc == nil {
+		return nil, LPResult{}, false
+	}
+	lbF := make([]float64, r.rp.n)
+	ubF := make([]float64, r.rp.n)
+	for j := range r.rp.n {
+		lbF[j] = viprRatToOutwardFloat(lbR[j], false)
+		ubF[j] = viprRatToOutwardFloat(ubR[j], true)
+	}
+	sc.SetStructuralBounds(lbF, ubF)
+	origDualTol := sc.effDualTol
+	if strictDual {
+		sc.effDualTol = min(origDualTol, 1e-13)
+	}
+	res := sc.Solve()
+	sc.effDualTol = origDualTol
+	return sc, res, true
+}
+
+func (r *babVIPRRecorder) tryTightenNodeDualForPrune(vn *viprTreeNode, bestPrimal []float64) (closed, infeas bool) {
+	if r == nil || r.invalid || !r.cachedIncOK || vn == nil || len(bestPrimal) == 0 {
+		return false, false
+	}
+	if r.exactNodeGapClosed(vn, bestPrimal) {
+		return true, false
+	}
+	lbR, ubR := r.nodeBoundsRat(vn)
+	sc, res, ok := r.solveCutScratchNode(lbR, ubR, true)
+	if !ok {
+		return false, false
+	}
+	switch res.Status {
+	case StatusInfeasible:
+		if w, okF := r.extractNodeFarkasActive(sc, res.Dual, lbR, ubR); okF {
+			vn.kind = viprNodeLeafFarkas
+			vn.farkas = w
+			return false, true
+		}
+		return false, false
+	case StatusOptimal:
+		r.recordNodeDual(vn, sc, res)
+		return r.exactNodeGapClosed(vn, bestPrimal), false
+	}
+	return false, false
+}
+
 func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes LPResult) {
 	if r == nil || r.invalid || vn == nil {
 		return
@@ -2615,16 +3043,7 @@ func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes
 		return
 	}
 	// Retry once on a cut-synced scratch LP solver when warm-start state cannot yield an exact ray.
-	sc := r.ensureCutScratchLP()
-	if sc != nil {
-		lbF := make([]float64, r.rp.n)
-		ubF := make([]float64, r.rp.n)
-		for j := range r.rp.n {
-			lbF[j] = viprRatToOutwardFloat(lbR[j], false)
-			ubF[j] = viprRatToOutwardFloat(ubR[j], true)
-		}
-		sc.SetStructuralBounds(lbF, ubF)
-		res := sc.Solve()
+	if sc, res, ok := r.solveCutScratchNode(lbR, ubR, false); ok {
 		switch res.Status {
 		case StatusInfeasible:
 			if w, ok := r.extractNodeFarkasActive(sc, res.Dual, lbR, ubR); ok {
@@ -2644,9 +3063,10 @@ func (r *babVIPRRecorder) certifyRowActivityFarkas(vn *viprTreeNode, row int) bo
 	if r == nil || r.invalid || vn == nil || row < 0 || row >= r.rp.m {
 		return false
 	}
+	gID := r.activeRowID(row)
 	lbR, ubR := r.nodeBoundsRat(vn)
 	for _, sgn := range []int64{1, -1} {
-		cand := []viprRowMult{{rowID: row, mult: big.NewRat(sgn, 1)}}
+		cand := []viprRowMult{{rowID: gID, mult: big.NewRat(sgn, 1)}}
 		if w, _, ok := r.projectFarkasMults(cand, lbR, ubR); ok {
 			vn.kind = viprNodeLeafFarkas
 			vn.farkas = w
@@ -2683,18 +3103,10 @@ func (r *babVIPRRecorder) certifySubtreeLeaf(vn *viprTreeNode) {
 			return
 		}
 	}
-	sc := r.ensureCutScratchLP()
-	if sc == nil {
+	sc, res, ok := r.solveCutScratchNode(lbR, ubR, r.cachedIncOK)
+	if !ok {
 		return
 	}
-	lbF := make([]float64, r.rp.n)
-	ubF := make([]float64, r.rp.n)
-	for j := range r.rp.n {
-		lbF[j] = viprRatToOutwardFloat(lbR[j], false)
-		ubF[j] = viprRatToOutwardFloat(ubR[j], true)
-	}
-	sc.SetStructuralBounds(lbF, ubF)
-	res := sc.Solve()
 	switch res.Status {
 	case StatusInfeasible:
 		r.certifyNodeFarkas(vn, sc, res)
@@ -4478,8 +4890,8 @@ func (r *babVIPRRecorder) propagateRowSide(
 	term, num *big.Rat,
 ) (feasible, changed bool) {
 	rp := r.rp
-	cols := rp.rowCols[rowIdx]
-	vals := rp.rowVals[rowIdx]
+	gID := r.activeRowID(rowIdx)
+	_, rowRHS, cols, vals := r.rowData(gID)
 
 	infCnt := 0
 	act := new(big.Rat)
@@ -4501,14 +4913,14 @@ func (r *babVIPRRecorder) propagateRowSide(
 	}
 
 	if infCnt == 0 {
-		cmp := act.Cmp(rp.rowRHS[rowIdx])
+		cmp := act.Cmp(rowRHS)
 		if (isUpperSide && cmp > 0) || (!isUpperSide && cmp < 0) {
 			mult := big.NewRat(1, 1)
 			if !isUpperSide {
 				mult = big.NewRat(-1, 1)
 			}
 			vn.kind = viprNodeLeafFarkas
-			vn.farkas = []viprRowMult{{rowID: rowIdx, mult: mult}}
+			vn.farkas = []viprRowMult{{rowID: gID, mult: mult}}
 			return false, false
 		}
 	}
@@ -4528,7 +4940,7 @@ func (r *babVIPRRecorder) propagateRowSide(
 		if infCnt == 1 && selfBD != nil {
 			continue
 		}
-		num.Sub(rp.rowRHS[rowIdx], act)
+		num.Sub(rowRHS, act)
 		if selfBD != nil {
 			term.Mul(a, selfBD)
 			num.Add(num, term)
@@ -4547,7 +4959,7 @@ func (r *babVIPRRecorder) propagateRowSide(
 		if targetUpper {
 			if ubR[col] == nil || cand.Cmp(ubR[col]) < 0 {
 				vn.propSteps = append(vn.propSteps, viprPropStep{
-					rowIdx:   rowIdx,
+					rowIdx:   gID,
 					col:      col,
 					isUpper:  true,
 					roundInt: rp.isInt[col],
@@ -4566,7 +4978,7 @@ func (r *babVIPRRecorder) propagateRowSide(
 			}
 		} else if lbR[col] == nil || cand.Cmp(lbR[col]) > 0 {
 			vn.propSteps = append(vn.propSteps, viprPropStep{
-				rowIdx:   rowIdx,
+				rowIdx:   gID,
 				col:      col,
 				isUpper:  false,
 				roundInt: rp.isInt[col],
@@ -4648,17 +5060,18 @@ func (r *babVIPRRecorder) propagateNode(vn *viprTreeNode, curLB, curUB []float64
 	for range maxPasses {
 		anyChanged := false
 		for i := range rp.m {
-			cols := rp.rowCols[i]
+			gID := r.activeRowID(i)
+			sense, rowRHS, cols, _ := r.rowData(gID)
 			if len(cols) == 0 {
-				rhsSign := rp.rowRHS[i].Sign()
-				if (rp.rowSense[i] == LessEqual || rp.rowSense[i] == Equal) && rhsSign < 0 {
+				rhsSign := rowRHS.Sign()
+				if (sense == LessEqual || sense == Equal) && rhsSign < 0 {
 					vn.kind = viprNodeLeafFarkas
-					vn.farkas = []viprRowMult{{rowID: i, mult: big.NewRat(1, 1)}}
+					vn.farkas = []viprRowMult{{rowID: gID, mult: big.NewRat(1, 1)}}
 					return false, false
 				}
-				if (rp.rowSense[i] == GreaterEqual || rp.rowSense[i] == Equal) && rhsSign > 0 {
+				if (sense == GreaterEqual || sense == Equal) && rhsSign > 0 {
 					vn.kind = viprNodeLeafFarkas
-					vn.farkas = []viprRowMult{{rowID: i, mult: big.NewRat(-1, 1)}}
+					vn.farkas = []viprRowMult{{rowID: gID, mult: big.NewRat(-1, 1)}}
 					return false, false
 				}
 				continue
@@ -4666,7 +5079,7 @@ func (r *babVIPRRecorder) propagateNode(vn *viprTreeNode, curLB, curUB []float64
 			if len(cols) > viprMaxPropRowLen {
 				continue
 			}
-			if rp.rowSense[i] == LessEqual || rp.rowSense[i] == Equal {
+			if sense == LessEqual || sense == Equal {
 				ok, chg := r.propagateRowSide(vn, i, true, lbR, ubR, curLB, curUB, term, num)
 				if !ok {
 					return false, false
@@ -4675,7 +5088,7 @@ func (r *babVIPRRecorder) propagateNode(vn *viprTreeNode, curLB, curUB []float64
 					anyChanged = true
 				}
 			}
-			if rp.rowSense[i] == GreaterEqual || rp.rowSense[i] == Equal {
+			if sense == GreaterEqual || sense == Equal {
 				ok, chg := r.propagateRowSide(vn, i, false, lbR, ubR, curLB, curUB, term, num)
 				if !ok {
 					return false, false
@@ -4707,6 +5120,10 @@ type viprEmitter struct {
 	asmMeta   map[int]viprAsmMeta
 }
 
+func (em *viprEmitter) canceled() bool {
+	return em != nil && em.rec != nil && em.rec.canceled()
+}
+
 func viprMergeAsms(lists ...[]int) []int {
 	total := 0
 	for _, ls := range lists {
@@ -4716,6 +5133,18 @@ func viprMergeAsms(lists ...[]int) []int {
 		return nil
 	}
 	out := make([]int, 0, total)
+	if total > 32 {
+		seen := make(map[int]struct{}, total)
+		for _, ls := range lists {
+			for _, a := range ls {
+				if _, ok := seen[a]; !ok {
+					seen[a] = struct{}{}
+					out = append(out, a)
+				}
+			}
+		}
+		return out
+	}
 	for _, ls := range lists {
 		for _, a := range ls {
 			if !slices.Contains(out, a) {
@@ -4862,6 +5291,9 @@ func (em *viprEmitter) emitAssume(col int, isUpper bool, bound *big.Int) int {
 }
 
 func (em *viprEmitter) emitGlobalCut(cut viprGlobalCut) (int, bool) {
+	if em.canceled() {
+		return -1, false
+	}
 	toBoundJSON := func(bts []viprBoundTerm) []viprBoundRefJSON {
 		if len(bts) == 0 {
 			return nil
@@ -4900,15 +5332,21 @@ func (em *viprEmitter) emitGlobalCut(cut viprGlobalCut) (int, bool) {
 				Mult: viprBigRatToPayload(rm.mult),
 			})
 		}
+		sense := "<="
+		roundRule := "roundDown"
+		if cut.kind == viprCutCG && cut.isGe {
+			sense = ">="
+			roundRule = "roundUp"
+		}
 		linID := em.addStep(viprStepJSON{
 			Rule:   "lincomb",
-			Sense:  "<=",
+			Sense:  sense,
 			Refs:   viprOptRefs(refs),
 			Bounds: toBoundJSON(cut.bounds),
 		})
 		if cut.kind == viprCutCG {
 			return em.addStep(viprStepJSON{
-				Rule: "roundDown",
+				Rule: roundRule,
 				Ref:  viprIntPtr(linID),
 			}), true
 		}
@@ -4993,8 +5431,7 @@ func (em *viprEmitter) emitPropStep(
 		return linID, true
 	}
 
-	cols := em.rp.rowCols[ps.rowIdx]
-	vals := em.rp.rowVals[ps.rowIdx]
+	_, _, cols, vals := em.rec.rowData(ps.rowIdx)
 	var aTarget *big.Rat
 	for k, col := range cols {
 		if col == ps.col {
@@ -5006,8 +5443,12 @@ func (em *viprEmitter) emitPropStep(
 		return -1, false
 	}
 
+	refID, okRef := em.rowRefID(ps.rowIdx)
+	if !okRef {
+		return -1, false
+	}
 	invA := new(big.Rat).Inv(aTarget)
-	refs := []viprLinRefJSON{{ID: ps.rowIdx, Mult: viprBigRatToPayload(invA)}}
+	refs := []viprLinRefJSON{{ID: refID, Mult: viprBigRatToPayload(invA)}}
 	var bounds []viprBoundRefJSON
 	scaled := new(big.Rat)
 	negScaled := new(big.Rat)
@@ -5128,12 +5569,15 @@ func (em *viprEmitter) emitSafeDual(mults []viprRowMult, activeLB, activeUB []*b
 }
 
 func nearestDual(vn *viprTreeNode) ([]viprRowMult, bool) {
+	var bestMults []viprRowMult
+	var bestRHS *big.Rat
 	for cur := vn; cur != nil; cur = cur.parent {
-		if cur.bestDualRHS != nil {
-			return cur.bestDual, true
+		if cur.bestDualRHS != nil && (bestRHS == nil || cur.bestDualRHS.Cmp(bestRHS) > 0) {
+			bestMults = cur.bestDual
+			bestRHS = cur.bestDualRHS
 		}
 	}
-	return nil, false
+	return bestMults, bestRHS != nil
 }
 
 func (em *viprEmitter) emitNode(
@@ -5142,7 +5586,7 @@ func (em *viprEmitter) emitNode(
 	lbStepID, ubStepID []int,
 	boundAsms []int,
 ) (stepID int, unsat bool, boundRHS *big.Rat, ok bool) {
-	if vn == nil {
+	if vn == nil || em.canceled() {
 		return -1, false, nil, false
 	}
 	curLB := slices.Clone(activeLB)
@@ -5425,6 +5869,13 @@ func (r *babVIPRRecorder) collectNeededCuts() []bool {
 		if vn == nil {
 			return
 		}
+		for _, ps := range vn.propSteps {
+			if ps.rowIdx >= baseM {
+				if cutIdx := ps.rowIdx - baseM; cutIdx < nCuts {
+					need[cutIdx] = true
+				}
+			}
+		}
 		markMults(vn.bestDual)
 		markMults(vn.farkas)
 		walk(vn.left)
@@ -5448,7 +5899,7 @@ func (r *babVIPRRecorder) collectNeededCuts() []bool {
 }
 
 func (r *babVIPRRecorder) finalize(res Result) {
-	if r == nil || r.trace == nil || r.invalid || r.rp == nil || r.root == nil {
+	if r == nil || r.trace == nil || r.invalid || r.rp == nil || r.root == nil || r.canceled() {
 		return
 	}
 	defer r.close()
@@ -5491,6 +5942,12 @@ func (r *babVIPRRecorder) finalize(res Result) {
 	rootID, rootUnsat, rootRHS, ok := em.emitNode(r.root, rp.lb, rp.ub, lbStepID, ubStepID, nil)
 	if !ok || len(em.steps) == 0 || rootID < rp.m {
 		return
+	}
+	if !rootUnsat && r.root.bestDualRHS != nil && rootRHS.Cmp(r.root.bestDualRHS) < 0 {
+		if sid, sRHS, sOK := em.emitSafeDual(r.root.bestDual, rp.lb, rp.ub, nil); sOK && sid >= rp.m && sRHS.Cmp(rootRHS) > 0 {
+			rootID = sid
+			rootRHS = sRHS
+		}
 	}
 
 	if rootUnsat {
@@ -5583,18 +6040,18 @@ func buildGCDInfeasSteps(rp *viprRatProblem) ([]viprStepJSON, int, bool) {
 	tmpGCD := new(big.Int)
 	scaledNum := new(big.Int)
 	for i := range rp.m {
-		if rp.rowSense[i] != Equal {
-			continue
-		}
 		cols := rp.rowCols[i]
 		vals := rp.rowVals[i]
 		if len(cols) == 0 {
 			sgn := rp.rowRHS[i].Sign()
-			if sgn == 0 {
+			infeas := (rp.rowSense[i] == LessEqual && sgn < 0) ||
+				(rp.rowSense[i] == GreaterEqual && sgn > 0) ||
+				(rp.rowSense[i] == Equal && sgn != 0)
+			if !infeas {
 				continue
 			}
 			mult := int64(1)
-			if sgn > 0 {
+			if rp.rowSense[i] == GreaterEqual || (rp.rowSense[i] == Equal && sgn > 0) {
 				mult = -1
 			}
 			return []viprStepJSON{
@@ -5603,6 +6060,9 @@ func buildGCDInfeasSteps(rp *viprRatProblem) ([]viprStepJSON, int, bool) {
 					Refs: viprOptRefs([]viprLinRefJSON{{ID: i, Mult: viprInt64Payload(mult)}}),
 				},
 			}, 0, true
+		}
+		if rp.rowSense[i] != Equal {
+			continue
 		}
 		allInt := true
 		lcmDen.SetInt64(1)

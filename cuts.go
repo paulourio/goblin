@@ -406,7 +406,7 @@ func buildCutStaticCache(p *CompiledProblem) cutStaticCache {
 				col := p.colIdx[k]
 				rawV := p.rowVal[k]
 				lb, ub := p.varLB[col], p.varUB[col]
-				if math.IsInf(lb, -1) && math.IsInf(ub, 1) {
+				if p.varCat[col] == Continuous && math.IsInf(lb, -1) && math.IsInf(ub, 1) {
 					mirValid = false
 				}
 				if p.varCat[col] != Continuous && math.Abs(rawV) > cutCompareTol {
@@ -1739,7 +1739,7 @@ func separateCMIRFromSparseRow(
 			return cuts
 		}
 		l, u := varLB[col], varUB[col]
-		if math.IsNaN(l) || math.IsNaN(u) || (math.IsInf(l, -1) && math.IsInf(u, 1)) {
+		if math.IsNaN(l) || math.IsNaN(u) || (varCat[col] == Continuous && math.IsInf(l, -1) && math.IsInf(u, 1)) {
 			return cuts
 		}
 		if varCat[col] != Continuous {
@@ -1797,6 +1797,9 @@ func separateCMIRFromSparseRow(
 			for k, col := range cols {
 				a := sign * vals[k]
 				l, u := varLB[col], varUB[col]
+				if math.IsInf(l, -1) && math.IsInf(u, 1) {
+					continue
+				}
 				if varCat[col] != Continuous {
 					l = math.Ceil(l)
 					u = math.Floor(u)
@@ -1871,6 +1874,28 @@ func separateCMIRFromSparseRow(
 		for k, col := range cols {
 			a := sign * vals[k]
 			l, u := varLB[col], varUB[col]
+			if math.IsInf(l, -1) && math.IsInf(u, 1) {
+				if ws.certObs != nil {
+					validCut = false
+					break
+				}
+				if a == 0 {
+					continue
+				}
+				// Doubly-unbounded integer variable enters untouched when a/delta is an exact integer.
+				q := a / delta
+				qr := math.Round(q)
+				if math.IsInf(qr, 0) || math.IsNaN(qr) || q != qr || qr*delta != a {
+					validCut = false
+					break
+				}
+				if qr != 0 && outLen < len(idxBuf) {
+					idxBuf[outLen] = col
+					valBuf[outLen] = qr
+					outLen++
+				}
+				continue
+			}
 			if varCat[col] != Continuous {
 				l = math.Ceil(l)
 				u = math.Floor(u)

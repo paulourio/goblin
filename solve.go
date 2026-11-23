@@ -354,6 +354,24 @@ func (m *Model) Solve(ctx context.Context, opts ...Option) (Result, error) {
 	return SolveCompiled(ctx, p, opts...)
 }
 
+func trivialDualBound(sense Sense) float64 {
+	if sense == Maximize {
+		return math.Inf(1)
+	}
+	return math.Inf(-1)
+}
+
+func isLimitStatus(st Status) bool {
+	return st == StatusTimeLimit || st == StatusIterationLimit || st == StatusNodeLimit
+}
+
+func isOppositeInfBound(sense Sense, b float64) bool {
+	if sense == Maximize {
+		return math.IsInf(b, -1)
+	}
+	return math.IsInf(b, 1)
+}
+
 // SolveCompiled solves a pre-compiled CompiledProblem under ctx using the selected backend
 // (pure-Go Branch-and-Cut by default, or COIN-OR CBC/CLP when WithCBC() / WithBackend(BackendCBC) is passed).
 // When ctx is canceled or its deadline expires, SolveCompiled aborts and returns (Result{}, ctx.Err()).
@@ -411,6 +429,7 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 			modelID:   p.modelID,
 			Backend:   opt.Backend,
 			Status:    StatusTimeLimit,
+			BestBound: trivialDualBound(p.sense),
 			SolveTime: time.Since(start),
 		}, nil
 	}
@@ -421,6 +440,7 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 				modelID:   p.modelID,
 				Backend:   opt.Backend,
 				Status:    StatusTimeLimit,
+				BestBound: trivialDualBound(p.sense),
 				SolveTime: time.Since(start),
 			}, nil
 		}
@@ -444,17 +464,75 @@ func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Res
 	return res, nil
 }
 
+func hasEmptyInfeasibleRow(p *CompiledProblem) bool {
+	if p == nil || p.invalidErr != nil {
+		return false
+	}
+	eo := p.exactOrig
+	for i := range p.numConstraints {
+		if p.rowPtr[i+1] != p.rowPtr[i] {
+			continue
+		}
+		if eo != nil && i < len(eo.rows) && eo.rows[i].hasDupLoss {
+			continue
+		}
+		rhsHi, rhsLo := p.rowRHS[i], 0.0
+		if eo != nil && i < len(eo.rows) && eo.rows[i].rhsInexact && !eo.rows[i].intTightened {
+			rhsHi, rhsLo = twoSumExact(eo.rows[i].rhs, -eo.rows[i].exprConst)
+		}
+		sgn := 0
+		switch {
+		case rhsHi > 0:
+			sgn = 1
+		case rhsHi < 0:
+			sgn = -1
+		case rhsLo > 0:
+			sgn = 1
+		case rhsLo < 0:
+			sgn = -1
+		}
+		switch p.rowSense[i] {
+		case LessEqual:
+			if sgn < 0 {
+				return true
+			}
+		case GreaterEqual:
+			if sgn > 0 {
+				return true
+			}
+		case Equal:
+			if sgn != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options, backend Backend, start, deadline time.Time, done <-chan struct{}) Result {
+	if (p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas) || hasEmptyInfeasibleRow(p) {
+		if opt.viprTrace != nil {
+			opt.viprTrace.recordRootInfeasibleEqRow(p)
+		}
+		return Result{
+			modelID:   p.modelID,
+			Backend:   backend,
+			Status:    StatusInfeasible,
+			SolveTime: time.Since(start),
+		}
+	}
 	workProb := p
 	var lpPre LPPresolveResult
 	usedLPPresolve := false
 	if opt.EnablePresolve && p.isMIP {
 		if opt.viprTrace != nil {
-			var earlyRes Result
-			var doneEarly bool
-			workProb, earlyRes, doneEarly = opt.viprTrace.presolveMIP(ctx, p, backend, opt.DisableSIMD, start, deadline, done)
-			if doneEarly {
-				return earlyRes
+			if p.exactOrig == nil {
+				var earlyRes Result
+				var doneEarly bool
+				workProb, earlyRes, doneEarly = opt.viprTrace.presolveMIP(ctx, p, backend, opt.DisableSIMD, start, deadline, done)
+				if doneEarly {
+					return earlyRes
+				}
 			}
 		} else {
 			preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
@@ -466,6 +544,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 					modelID:   p.modelID,
 					Backend:   backend,
 					Status:    StatusTimeLimit,
+					BestBound: trivialDualBound(p.sense),
 					SolveTime: time.Since(start),
 				}
 			}
@@ -491,6 +570,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 				modelID:   p.modelID,
 				Backend:   backend,
 				Status:    StatusTimeLimit,
+				BestBound: trivialDualBound(p.sense),
 				SolveTime: time.Since(start),
 			}
 		}
@@ -546,6 +626,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 						modelID:    p.modelID,
 						Backend:    backend,
 						Status:     StatusIterationLimit,
+						BestBound:  trivialDualBound(p.sense),
 						Nodes:      res.Nodes,
 						Iterations: res.Iterations,
 						SolveTime:  time.Since(start),
@@ -560,6 +641,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 						modelID:    p.modelID,
 						Backend:    backend,
 						Status:     StatusNodeLimit,
+						BestBound:  trivialDualBound(p.sense),
 						Nodes:      res.Nodes,
 						Iterations: res.Iterations,
 						SolveTime:  time.Since(start),

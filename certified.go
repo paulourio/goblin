@@ -79,6 +79,7 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 			modelID:   p.modelID,
 			Backend:   opt.Backend,
 			Status:    StatusTimeLimit,
+			BestBound: trivialDualBound(p.sense),
 			SolveTime: time.Since(start),
 		}
 		var wit *lpCertWitness
@@ -94,6 +95,7 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 				modelID:   p.modelID,
 				Backend:   opt.Backend,
 				Status:    StatusTimeLimit,
+				BestBound: trivialDualBound(p.sense),
 				SolveTime: time.Since(start),
 			}
 			var wit *lpCertWitness
@@ -301,6 +303,7 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 	if len(res.Values) == p.numVars && len(doc.Incumbent) == p.numVars {
 		incRat := make([]*big.Rat, p.numVars)
 		okInc := true
+		contDrifted := false
 		for j := range p.numVars {
 			r, ok := parseVIPRRatValue(doc.Incumbent[j])
 			if !ok {
@@ -325,23 +328,36 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 			} else {
 				rf := exactRatToFloat(r)
 				if math.Abs(v-rf) > 1e-5*max(1.0, math.Abs(rf)) {
-					okInc = false
-					break
+					contDrifted = true
 				}
 			}
 			incRat[j] = r
 		}
 		if okInc && verifyExactPrimalRat(p, incRat, true) {
-			if ou, okObj := evalExactUserObjRat(p, incRat); okObj {
-				for j := range p.numVars {
-					res.Values[j] = exactRatToFloat(incRat[j])
+			if objMin, _, okObj := evalExactMinAndLinObjRat(p, incRat); okObj {
+				ou := objMin
+				if p.sense == Maximize {
+					ou = new(big.Rat).Neg(objMin)
 				}
 				objF := exactRatToFloat(ou)
-				if !isNonFinite(res.Objective) && math.Abs(res.Objective-objF) <= 1e-5*max(1.0, math.Abs(objF)) {
-					res.Objective = objF
+				lbMin := trace.TargetLB()
+				acceptDrifted := contDrifted &&
+					doc.Mode == "optimal" &&
+					res.Status == StatusOptimal &&
+					lbMin != nil &&
+					objMin.Cmp(lbMin) <= 0 &&
+					!isNonFinite(res.Objective) &&
+					math.Abs(res.Objective-objF) <= 1e-5*max(1.0, math.Abs(objF))
+				if !contDrifted || acceptDrifted {
+					for j := range p.numVars {
+						res.Values[j] = exactRatToFloat(incRat[j])
+					}
+					if !isNonFinite(res.Objective) && math.Abs(res.Objective-objF) <= 1e-5*max(1.0, math.Abs(objF)) {
+						res.Objective = objF
+					}
+					objUser = ou
+					hasPolishedInc = true
 				}
-				objUser = ou
-				hasPolishedInc = true
 			}
 		}
 	}
@@ -373,12 +389,16 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 			bUser = userBoundFromMinRat(p, lbMin)
 		}
 		if bUser != nil && !isNonFinite(res.BestBound) {
-			bf := exactRatToFloat(bUser)
+			bf := exactRatToOutwardBound(p.sense, bUser)
 			maxSnap := 1e-5 * max(1.0, math.Abs(bf))
 			if res.Status != StatusOptimal {
 				maxSnap = 1e-2 * max(1.0, math.Abs(bf))
 			}
-			if p.sense == Maximize {
+			if res.Status == StatusOptimal && doc.Mode == "optimal" {
+				if math.Abs(res.BestBound-bf) <= maxSnap {
+					res.BestBound = bf
+				}
+			} else if p.sense == Maximize {
 				if res.BestBound < bf && bf-res.BestBound <= maxSnap {
 					res.BestBound = bf
 				}
@@ -411,7 +431,7 @@ func verifyLimitBestBoundAgainstCert(p *CompiledProblem, certMinLB *big.Rat, cla
 	if math.IsInf(claimed, 0) {
 		return false
 	}
-	bf := exactRatToFloat(userBoundFromMinRat(p, certMinLB))
+	bf := exactRatToOutwardBound(p.sense, userBoundFromMinRat(p, certMinLB))
 	tol := 0.0
 	if !strictPolished {
 		tol = 1e-6 * max(1.0, math.Abs(bf))
@@ -439,6 +459,24 @@ func computeExactUserReducedCostsRat(p *CompiledProblem, yMin []*big.Rat) ([]*bi
 		if yi.Sign() == 0 {
 			continue
 		}
+		if eo := p.exactOrig; eo != nil && i < len(eo.rows) && eo.rows[i].hasDupLoss {
+			er := eo.rows[i]
+			for _, t := range eo.rowTerms[er.termStart:er.termEnd] {
+				if t.coeff == 0 {
+					continue
+				}
+				if t.col < 0 || t.col >= len(dots) {
+					return nil, false
+				}
+				av, okA := exactRatFromFloat(t.coeff)
+				if !okA {
+					return nil, false
+				}
+				prod.Mul(yi, av)
+				dots[t.col].Add(dots[t.col], &prod)
+			}
+			continue
+		}
 		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
 			fv := p.rowVal[k]
 			if fv == 0 {
@@ -458,10 +496,24 @@ func computeExactUserReducedCostsRat(p *CompiledProblem, yMin []*big.Rat) ([]*bi
 	}
 	rcUser := make([]*big.Rat, n)
 	neg := p.sense == Maximize
-	for j := range n {
-		cj, okC := exactRatFromFloat(p.objMin[j])
-		if !okC {
+	var objMinVec []*big.Rat
+	if p.exactOrig != nil && p.exactOrig.objHasLoss {
+		var okVec bool
+		objMinVec, okVec = exactMinObjVecRat(p)
+		if !okVec {
 			return nil, false
+		}
+	}
+	for j := range n {
+		var cj *big.Rat
+		if objMinVec != nil {
+			cj = objMinVec[j]
+		} else {
+			var okC bool
+			cj, okC = exactRatFromFloat(p.objMin[j])
+			if !okC {
+				return nil, false
+			}
 		}
 		rcj := new(big.Rat).Sub(cj, dots[j])
 		if neg {
@@ -492,19 +544,44 @@ func evalExactMinAndLinObjRat(p *CompiledProblem, x []*big.Rat) (objMin, linAbs 
 	}
 	lin := new(big.Rat)
 	var prod big.Rat
-	for j := range p.numVars {
-		if x[j] == nil {
-			return nil, nil, false
+	if eo := p.exactOrig; eo != nil && eo.objHasLoss {
+		for j := range p.numVars {
+			if x[j] == nil {
+				return nil, nil, false
+			}
 		}
-		if p.objMin[j] == 0 || x[j].Sign() == 0 {
-			continue
+		for _, t := range eo.objTerms {
+			if t.col < 0 || t.col >= p.numVars {
+				return nil, nil, false
+			}
+			if t.coeff == 0 || x[t.col].Sign() == 0 {
+				continue
+			}
+			cj, okJ := exactRatFromFloat(t.coeff)
+			if !okJ {
+				return nil, nil, false
+			}
+			prod.Mul(cj, x[t.col])
+			lin.Add(lin, &prod)
 		}
-		cj, okJ := exactRatFromFloat(p.objMin[j])
-		if !okJ {
-			return nil, nil, false
+		if p.sense == Maximize && lin.Sign() != 0 {
+			lin.Neg(lin)
 		}
-		prod.Mul(cj, x[j])
-		lin.Add(lin, &prod)
+	} else {
+		for j := range p.numVars {
+			if x[j] == nil {
+				return nil, nil, false
+			}
+			if p.objMin[j] == 0 || x[j].Sign() == 0 {
+				continue
+			}
+			cj, okJ := exactRatFromFloat(p.objMin[j])
+			if !okJ {
+				return nil, nil, false
+			}
+			prod.Mul(cj, x[j])
+			lin.Add(lin, &prod)
+		}
 	}
 	objMin = new(big.Rat).Add(cMin, lin)
 	linAbs = new(big.Rat).Abs(lin)
@@ -550,29 +627,14 @@ func verifyExactPrimalRat(p *CompiledProblem, x []*big.Rat, requireInt bool) boo
 			}
 		}
 	}
-	var act, prod big.Rat
 	for i := range p.numConstraints {
-		rhs, ok := exactRatFromFloat(p.rowRHS[i])
+		rhs, ok := exactRowRHSRat(p, i)
 		if !ok {
 			return false
 		}
-		act.SetInt64(0)
-		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
-			fv := p.rowVal[k]
-			col := p.colIdx[k]
-			if col < 0 || col >= len(x) {
-				return false
-			}
-			xCol := x[col]
-			if fv == 0 || xCol.Sign() == 0 {
-				continue
-			}
-			av, okA := exactRatFromFloat(fv)
-			if !okA {
-				return false
-			}
-			prod.Mul(av, xCol)
-			act.Add(&act, &prod)
+		act, okAct := exactEvalRowActivityRat(p, i, x)
+		if !okAct {
+			return false
 		}
 		cmp := act.Cmp(rhs)
 		switch p.rowSense[i] {
@@ -646,7 +708,7 @@ func floatBestBoundValidAndClosed(p *CompiledProblem, x []*big.Rat, safeMinBnd *
 		return false
 	}
 	bUser := userBoundFromMinRat(p, safeMinBnd)
-	bUserFloat := exactRatToFloat(bUser)
+	bUserFloat := exactRatToOutwardBound(p.sense, bUser)
 	tol := 1e-6 * max(1.0, math.Abs(bUserFloat))
 	if strictFloat {
 		tol = 0
@@ -681,7 +743,16 @@ func floatBestBoundValidAndClosed(p *CompiledProblem, x []*big.Rat, safeMinBnd *
 	if diff <= cleanAbs+ulpSlack {
 		return true
 	}
-	return (diff / linMag) <= cleanRel+ulpSlack
+	if math.IsInf(cleanRel, 1) {
+		return true
+	}
+	if cleanRel == 0 {
+		return diff <= ulpSlack
+	}
+	if math.IsInf(linMag, 1) {
+		return true
+	}
+	return diff <= cleanRel*linMag+ulpSlack
 }
 
 func approxLPPrimalFeasible(p *CompiledProblem, vals []float64) bool {
@@ -872,17 +943,11 @@ func verifyDirectBoundOrEmptyRowInfeas(p *CompiledProblem) bool {
 		}
 	}
 	for i := range p.numConstraints {
-		allZero := true
-		for k := p.rowPtr[i]; k < p.rowPtr[i+1]; k++ {
-			if p.rowVal[k] != 0 {
-				allZero = false
-				break
-			}
-		}
-		if !allZero {
+		cols, _, okC := exactCanonicalRowTermsRat(p, i)
+		if !okC || len(cols) > 0 {
 			continue
 		}
-		rhs, ok := exactRatFromFloat(p.rowRHS[i])
+		rhs, ok := exactRowRHSRat(p, i)
 		if !ok {
 			continue
 		}
@@ -946,11 +1011,36 @@ func extractElasticPhase1Farkas(stop exactStop, p *CompiledProblem, rp *viprRatP
 	}
 	var objTerms []Term
 	for i := range p.numConstraints {
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		terms := make([]Term, 0, (en-st)+2)
-		for k := st; k < en; k++ {
-			if p.rowVal[k] != 0 {
-				terms = append(terms, Term{Var: vars[p.colIdx[k]], Coeff: p.rowVal[k]})
+		var terms []Term
+		rhsVal := p.rowRHS[i]
+		var exprConst float64
+		if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasDupLoss || (eo.rows[i].rhsInexact && !eo.rows[i].intTightened)) {
+			er := eo.rows[i]
+			if er.hasDupLoss {
+				terms = make([]Term, 0, (er.termEnd-er.termStart)+2)
+				for _, t := range eo.rowTerms[er.termStart:er.termEnd] {
+					terms = append(terms, Term{Var: vars[t.col], Coeff: t.coeff})
+				}
+			} else {
+				st, en := p.rowPtr[i], p.rowPtr[i+1]
+				terms = make([]Term, 0, (en-st)+2)
+				for k := st; k < en; k++ {
+					if p.rowVal[k] != 0 {
+						terms = append(terms, Term{Var: vars[p.colIdx[k]], Coeff: p.rowVal[k]})
+					}
+				}
+			}
+			if er.rhsInexact && !er.intTightened {
+				rhsVal = er.rhs
+				exprConst = er.exprConst
+			}
+		} else {
+			st, en := p.rowPtr[i], p.rowPtr[i+1]
+			terms = make([]Term, 0, (en-st)+2)
+			for k := st; k < en; k++ {
+				if p.rowVal[k] != 0 {
+					terms = append(terms, Term{Var: vars[p.colIdx[k]], Coeff: p.rowVal[k]})
+				}
 			}
 		}
 		switch p.rowSense[i] {
@@ -958,18 +1048,18 @@ func extractElasticPhase1Farkas(stop exactStop, p *CompiledProblem, rp *viprRatP
 			sp := m.AddContVar("", 0, math.Inf(1))
 			terms = append(terms, Term{Var: sp, Coeff: -1})
 			objTerms = append(objTerms, Term{Var: sp, Coeff: 1})
-			m.AddConstraint("", Le(NewExpr(terms...), p.rowRHS[i]))
+			m.AddConstraint("", Le(NewExpr(terms...).AddConstant(exprConst), rhsVal))
 		case GreaterEqual:
 			sn := m.AddContVar("", 0, math.Inf(1))
 			terms = append(terms, Term{Var: sn, Coeff: 1})
 			objTerms = append(objTerms, Term{Var: sn, Coeff: 1})
-			m.AddConstraint("", Ge(NewExpr(terms...), p.rowRHS[i]))
+			m.AddConstraint("", Ge(NewExpr(terms...).AddConstant(exprConst), rhsVal))
 		case Equal:
 			sp := m.AddContVar("", 0, math.Inf(1))
 			sn := m.AddContVar("", 0, math.Inf(1))
 			terms = append(terms, Term{Var: sp, Coeff: -1}, Term{Var: sn, Coeff: 1})
 			objTerms = append(objTerms, Term{Var: sp, Coeff: 1}, Term{Var: sn, Coeff: 1})
-			m.AddConstraint("", Eq(NewExpr(terms...), p.rowRHS[i]))
+			m.AddConstraint("", Eq(NewExpr(terms...).AddConstant(exprConst), rhsVal))
 		}
 	}
 	m.SetObjective(NewExpr(objTerms...))
@@ -1058,8 +1148,13 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 			for j := range res.ReducedCosts {
 				res.ReducedCosts[j] = 0
 			}
-			res.Objective = p.objConstant
-			res.BestBound = p.objConstant
+			if objU, okO := evalExactUserObjRat(p, emptyX); okO {
+				res.Objective = exactRatToFloat(objU)
+				res.BestBound = exactRatToOutwardBound(p.sense, objU)
+			} else {
+				res.Objective = p.objConstant
+				res.BestBound = p.objConstant
+			}
 			return &lpCertWitness{primal: emptyX, dualMin: zeroDuals, polished: true}
 		}
 
@@ -1072,16 +1167,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 				rcUser, okRC := computeExactUserReducedCostsRat(p, yDirect)
 				if okO && okRC {
 					res.Objective = exactRatToFloat(objU)
-					bUserF := exactRatToFloat(userBoundFromMinRat(p, safeBnd))
-					if p.sense == Maximize {
-						if res.BestBound < bUserF {
-							res.BestBound = bUserF
-						}
-					} else {
-						if res.BestBound > bUserF {
-							res.BestBound = bUserF
-						}
-					}
+					res.BestBound = exactRatToOutwardBound(p.sense, userBoundFromMinRat(p, safeBnd))
 					res.BestBound = clampBestBoundToObj(p.sense, res.BestBound, res.Objective)
 					neg := p.sense == Maximize
 					for i, yi := range yDirect {
@@ -1126,7 +1212,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 				}
 			}
 			res.Objective = solObjF
-			res.BestBound = solObjF
+			res.BestBound = exactRatToOutwardBound(p.sense, sol.ObjectiveUser)
 			return &lpCertWitness{primal: sol.Primal, dualMin: sol.DualMin, polished: true}
 		}
 
@@ -1144,7 +1230,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 						}
 						objU, _ := evalExactUserObjRat(p, xDirect)
 						res.Objective = exactRatToFloat(objU)
-						res.BestBound = exactRatToFloat(userBoundFromMinRat(p, safeBnd))
+						res.BestBound = exactRatToOutwardBound(p.sense, userBoundFromMinRat(p, safeBnd))
 						res.BestBound = clampBestBoundToObj(p.sense, res.BestBound, res.Objective)
 						return &lpCertWitness{primal: xDirect, dualMin: yMin, polished: true}
 					}
@@ -1294,7 +1380,7 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 			if !okSafe || !verifyLimitBestBoundAgainstCert(p, safeMinBnd, res.BestBound, wit.polished) {
 				return ErrCertificationFailed
 			}
-		} else if res.BestBound != 0 && !isTrivialInfBound(p.sense, res.BestBound) {
+		} else if !isTrivialInfBound(p.sense, res.BestBound) {
 			return ErrCertificationFailed
 		}
 		if len(res.Values) == 0 {
@@ -1445,7 +1531,7 @@ func verifyCertifiedMIP(
 			if !verifyLimitBestBoundAgainstCert(p, chk.certifiedMinLB, res.BestBound, strictPolished) {
 				return ErrCertificationFailed
 			}
-		} else if res.BestBound != 0 && !isTrivialInfBound(p.sense, res.BestBound) {
+		} else if !isTrivialInfBound(p.sense, res.BestBound) {
 			return ErrCertificationFailed
 		}
 		if len(res.Values) == 0 {
@@ -1915,11 +2001,12 @@ func buildCertVIPRInstanceFromProblem(p *CompiledProblem) (*certVIPRInstance, bo
 		ub:       make([]*big.Rat, n),
 		baseRows: make([]certLinCon, m),
 	}
+	objMinVec, okVec := exactMinObjVecRat(p)
+	if !okVec {
+		return nil, false
+	}
 	for j := range n {
-		cj, okJ := exactRatFromFloat(p.objMin[j])
-		if !okJ {
-			return nil, false
-		}
+		cj := objMinVec[j]
 		inst.objDense[j] = cj
 		if cj.Sign() != 0 {
 			inst.objTerms = append(inst.objTerms, certRatTerm{col: j, val: new(big.Rat).Set(cj)})
@@ -1941,21 +2028,17 @@ func buildCertVIPRInstanceFromProblem(p *CompiledProblem) (*certVIPRInstance, bo
 		}
 	}
 	for i := range m {
-		rhs, okR := exactRatFromFloat(p.rowRHS[i])
+		rhs, okR := exactRowRHSRat(p, i)
 		if !okR {
 			return nil, false
 		}
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		rawTerms := make([]certRatTerm, 0, en-st)
-		for k := st; k < en; k++ {
-			if p.rowVal[k] == 0 {
-				continue
-			}
-			vr, okV := exactRatFromFloat(p.rowVal[k])
-			if !okV {
-				return nil, false
-			}
-			rawTerms = append(rawTerms, certRatTerm{col: p.colIdx[k], val: vr})
+		cols, vals, okC := exactCanonicalRowTermsRat(p, i)
+		if !okC {
+			return nil, false
+		}
+		rawTerms := make([]certRatTerm, len(cols))
+		for k, col := range cols {
+			rawTerms[k] = certRatTerm{col: col, val: vals[k]}
 		}
 		inst.baseRows[i] = certLinCon{
 			terms: canonicalCertTerms(rawTerms),

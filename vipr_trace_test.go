@@ -2440,3 +2440,138 @@ func TestVIPRTraceTinyScaledKnapsackAndStrictBounds(t *testing.T) {
 		runJSONLItems(t, viprExe, certs)
 	}
 }
+
+func TestVIPRTraceExactOrigIntTighteningAndFinding3(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	var certs [][]byte
+
+	for _, pre := range []bool{true, false} {
+		// Tightened Le integer row: x + 1e-17 <= 3 -> Optimal x = 2 via roundDown VIPR step.
+		mLe := NewModel("vipr_exact_int_le", Maximize)
+		xLe := mLe.AddIntVar("x", 0, 10)
+		mLe.SetObjective(NewExpr(xLe.T(1)))
+		mLe.AddConstraint("c", Le(NewExpr(xLe.T(1)).AddConstant(1e-17), 3))
+		trLe := NewVIPRTrace()
+		resLe, errLe := mLe.Solve(ctx, WithCertified(true), WithPresolve(pre), WithVIPRTrace(trLe))
+		if errLe != nil || resLe.Status != StatusOptimal || resLe.Objective != 2 {
+			t.Fatalf("le pre=%v: status=%v obj=%v err=%v", pre, resLe.Status, resLe.Objective, errLe)
+		}
+		rawLe, errM := trLe.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("le pre=%v MarshalVIPRJSON: %v", pre, errM)
+		}
+		certs = append(certs, rawLe)
+
+		// Tightened Ge integer row: x - 1e-17 >= 3 -> Optimal x = 4 via roundUp VIPR step.
+		mGe := NewModel("vipr_exact_int_ge", Minimize)
+		xGe := mGe.AddIntVar("x", 0, 10)
+		mGe.SetObjective(NewExpr(xGe.T(1)))
+		mGe.AddConstraint("c", Ge(NewExpr(xGe.T(1)).AddConstant(-1e-17), 3))
+		trGe := NewVIPRTrace()
+		resGe, errGe := mGe.Solve(ctx, WithCertified(true), WithPresolve(pre), WithVIPRTrace(trGe))
+		if errGe != nil || resGe.Status != StatusOptimal || resGe.Objective != 4 {
+			t.Fatalf("ge pre=%v: status=%v obj=%v err=%v", pre, resGe.Status, resGe.Objective, errGe)
+		}
+		rawGe, errM := trGe.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("ge pre=%v MarshalVIPRJSON: %v", pre, errM)
+		}
+		certs = append(certs, rawGe)
+
+		// Exact Equal integer row: x + 1e-17 == 3 -> Infeasible.
+		mEq := NewModel("vipr_exact_int_eq", Maximize)
+		xEq := mEq.AddIntVar("x", 0, 10)
+		mEq.SetObjective(NewExpr(xEq.T(1)))
+		mEq.AddConstraint("c", Eq(NewExpr(xEq.T(1)).AddConstant(1e-17), 3))
+		trEq := NewVIPRTrace()
+		resEq, errEq := mEq.Solve(ctx, WithCertified(true), WithPresolve(pre), WithVIPRTrace(trEq))
+		if errEq != nil || resEq.Status != StatusInfeasible {
+			t.Fatalf("eq pre=%v: status=%v err=%v", pre, resEq.Status, errEq)
+		}
+		rawEq, errM := trEq.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("eq pre=%v MarshalVIPRJSON: %v", pre, errM)
+		}
+		certs = append(certs, rawEq)
+	}
+
+	// Finding 1(b) continuous duplicate folding inside a MIP with VIPR trace.
+	{
+		m := NewModel("vipr_cont_dup_mip", Maximize)
+		x := m.AddContVar("x", 0, 10)
+		b := m.AddBinaryVar("b")
+		m.SetObjective(NewExpr(x.T(1), b.T(1)))
+		m.AddConstraint("c", Le(NewExpr(x.T(0.1), x.T(0.2), b.T(0)), 0.3))
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || res.Values[0] != 0.9999999999999999 || res.Values[1] != 1 {
+			t.Fatalf("cont_dup_mip: status=%v vals=%v err=%v", res.Status, res.Values, err)
+		}
+		raw, errM := tr.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("cont_dup_mip MarshalVIPRJSON: %v", errM)
+		}
+		certs = append(certs, raw)
+	}
+
+	// Finding 3 diff2#880 (doubly-unbounded integer CG + exact zero-gap closure) and diff2#1158.
+	{
+		m := NewModel("vipr_diff2_880", Maximize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddIntVar("x1", math.Inf(-1), 0)
+		x2 := m.AddIntVar("x2", 0, math.Inf(1))
+		x3 := m.AddIntVar("x3", 4, 11)
+		x4 := m.AddIntVar("x4", math.Inf(-1), math.Inf(1))
+		x5 := m.AddContVar("x5", -1, 6)
+		x6 := m.AddIntVar("x6", math.Inf(-1), 8)
+		m.SetObjective(NewExpr(x0.T(6), x1.T(-3), x2.T(4), x3.T(-1), x4.T(1), x5.T(-3e6), x6.T(1)))
+		m.AddConstraint("r0", Le(NewExpr(x1.T(1), x4.T(5), x6.T(-5)), -4))
+		m.AddConstraint("r1", Ge(NewExpr(x0.T(-4), x3.T(1), x4.T(-6), x5.T(-5), x6.T(-4)), -5))
+		m.AddConstraint("r2", Eq(NewExpr(x1.T(1e6), x2.T(-4), x3.T(1e6), x5.T(4), x6.T(-2)), -2))
+		m.AddConstraint("r3", Le(NewExpr(x0.T(-4), x5.T(5), x6.T(2)), -8))
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || res.Objective != 13999992 {
+			t.Fatalf("diff2_880: status=%v obj=%.17g err=%v", res.Status, res.Objective, err)
+		}
+		raw, errM := tr.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("diff2_880 MarshalVIPRJSON: %v", errM)
+		}
+		certs = append(certs, raw)
+	}
+	{
+		m := NewModel("vipr_diff2_1158", Minimize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddBinaryVar("x1")
+		x2 := m.AddBinaryVar("x2")
+		x3 := m.AddContVar("x3", 0, math.Inf(1))
+		x4 := m.AddIntVar("x4", 1, 2)
+		x5 := m.AddIntVar("x5", math.Inf(-1), 4)
+		x6 := m.AddContVar("x6", math.Inf(-1), 9)
+		m.SetObjective(NewExpr(x0.T(-6), x1.T(3), x2.T(-2), x3.T(1), x4.T(6), x5.T(-5), x6.T(5)))
+		m.AddConstraint("r0", Le(NewExpr(x3.T(2), x4.T(-2), x6.T(5)), -6))
+		m.AddConstraint("r1", Eq(NewExpr(x3.T(-2), x6.T(5)), -8))
+		tr := NewVIPRTrace()
+		res, err := m.Solve(ctx, WithCertified(true), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || res.Objective != -30 {
+			t.Fatalf("diff2_1158: status=%v obj=%v err=%v", res.Status, res.Objective, err)
+		}
+		raw, errM := tr.MarshalVIPRJSON()
+		if errM != nil {
+			t.Fatalf("diff2_1158 MarshalVIPRJSON: %v", errM)
+		}
+		certs = append(certs, raw)
+	}
+
+	if formalOn {
+		runJSONLItems(t, viprExe, certs)
+	}
+}

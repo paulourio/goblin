@@ -44,9 +44,11 @@ func TestCertifiedPureLPModes(t *testing.T) {
 				if res.Status != StatusOptimal {
 					t.Fatalf("status=%v, want Optimal", res.Status)
 				}
-				wantObj := exactRatToFloat(big.NewRat(3*12375+500, 300))
-				if res.Objective != wantObj || res.BestBound != wantObj {
-					t.Fatalf("obj=%.17g bound=%.17g, want %.17g", res.Objective, res.BestBound, wantObj)
+				wantExact := big.NewRat(3*12375+500, 300)
+				wantObj := exactRatToFloat(wantExact)
+				wantBound := exactRatToOutwardBound(Minimize, wantExact)
+				if res.Objective != wantObj || res.BestBound != wantBound {
+					t.Fatalf("obj=%.17g bound=%.17g, want (%.17g, %.17g)", res.Objective, res.BestBound, wantObj, wantBound)
 				}
 			}
 		}
@@ -1375,8 +1377,9 @@ func TestCertifiedExactZeroGapDefaultAndScaledKnapsack(t *testing.T) {
 		wantExact := new(big.Rat).Add(new(big.Rat).Mul(big.NewRat(9, 1), c0), new(big.Rat).Mul(big.NewRat(2, 1), c1))
 		_ = wantRat
 		wantF := exactRatToFloat(wantExact)
-		if res.Objective != wantF || res.BestBound != wantF {
-			t.Fatalf("scale=%g got (obj=%.17g, bound=%.17g), want %.17g", scale, res.Objective, res.BestBound, wantF)
+		wantBound := exactRatToOutwardBound(Maximize, wantExact)
+		if res.Objective != wantF || res.BestBound != wantBound {
+			t.Fatalf("scale=%g got (obj=%.17g, bound=%.17g), want (%.17g, %.17g)", scale, res.Objective, res.BestBound, wantF, wantBound)
 		}
 	}
 
@@ -1519,5 +1522,125 @@ func TestVerifyVIPRTraceStrictPolishedVsUnpolished(t *testing.T) {
 		if errUnpol := VerifyVIPRTrace(p, tr, mut, DefaultOptions()); errUnpol != nil {
 			t.Fatalf("%s: unpolished VerifyVIPRTrace unexpectedly rejected 1e-8 float drift: %v", tc.name, errUnpol)
 		}
+	}
+}
+
+func TestCertifiedExactModelOrigVerification(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	mInt := NewModel("cert_exact_int_tiny", Maximize)
+	xi := mInt.AddIntVar("x", 0, 10)
+	mInt.SetObjective(NewExpr(xi.T(1)))
+	mInt.AddConstraint("c", Le(NewExpr(xi.T(1)).AddConstant(1e-17), 3))
+	pInt := mInt.Compile()
+	if verifyExactPrimalRat(pInt, []*big.Rat{big.NewRat(3, 1)}, true) {
+		t.Fatal("x=3 unexpectedly passed verifyExactPrimalRat on x + 1e-17 <= 3")
+	}
+	if !verifyExactPrimalRat(pInt, []*big.Rat{big.NewRat(2, 1)}, true) {
+		t.Fatal("x=2 unexpectedly failed verifyExactPrimalRat on x + 1e-17 <= 3")
+	}
+	if res, err := SolveCompiled(ctx, pInt, WithCertified(true)); err != nil || res.Status != StatusOptimal || res.Objective != 2 {
+		t.Fatalf("SolveCompiled int tiny got status=%v obj=%v err=%v, want Optimal obj=2", res.Status, res.Objective, err)
+	}
+
+	mCont := NewModel("cert_exact_cont_dup", Maximize)
+	xc := mCont.AddContVar("x", 0, 10)
+	mCont.SetObjective(NewExpr(xc.T(1)))
+	mCont.AddConstraint("c", Le(NewExpr(xc.T(0.1), xc.T(0.2)), 0.3))
+	pCont := mCont.Compile()
+	sumCoeff := new(big.Rat).Add(new(big.Rat).SetFloat64(0.1), new(big.Rat).SetFloat64(0.2))
+	exactMaxX := new(big.Rat).Quo(new(big.Rat).SetFloat64(0.3), sumCoeff)
+	if !verifyExactPrimalRat(pCont, []*big.Rat{exactMaxX}, false) {
+		t.Fatal("exact rat(0.3)/(rat(0.1)+rat(0.2)) failed verifyExactPrimalRat")
+	}
+	roundedAbove := new(big.Rat).SetFloat64(0.3 / (0.1 + 0.2))
+	// Check: rounded float64(0.3) / float64(0.1+0.2) is 0.9999999999999998 (below) while x=1 violates 0.1+0.2<=0.3:
+	_ = roundedAbove
+	if verifyExactPrimalRat(pCont, []*big.Rat{big.NewRat(1, 1)}, false) {
+		t.Fatal("x=1 unexpectedly passed verifyExactPrimalRat on 0.1x + 0.2x <= 0.3")
+	}
+}
+
+func TestCertifiedLimitExitRejectsZeroBestBound(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	mLP := NewModel("limit_zero_bb_lp", Minimize)
+	x0 := mLP.AddContVar("x0", 0, 10)
+	x1 := mLP.AddContVar("x1", 0, 10)
+	x2 := mLP.AddContVar("x2", 0, 10)
+	x3 := mLP.AddContVar("x3", 0, 10)
+	mLP.SetObjective(NewExpr(x0.T(-1.4), x1.T(-0.8), x2.T(-0.6), x3.T(-0.4)))
+	mLP.AddConstraint("c0", Le(NewExpr(x0.T(1), x1.T(1)), 2))
+	mLP.AddConstraint("c1", Le(NewExpr(x1.T(1), x2.T(1)), 2))
+	mLP.AddConstraint("c2", Le(NewExpr(x2.T(1), x3.T(1)), 2))
+
+	faultCtx := withGoblinCertFault(ctx, func(_ *CompiledProblem, _ *VIPRTrace, _ *lpCertWitness, res *Result) {
+		res.BestBound = 0
+	})
+	res, err := mLP.Solve(faultCtx, WithCertified(true), WithMaxIter(1))
+	if !errors.Is(err, ErrCertificationFailed) || res.Status != StatusNumericalError {
+		t.Fatalf("faulted LP limit exit got status=%v err=%v, want StatusNumericalError + ErrCertificationFailed", res.Status, err)
+	}
+
+	mMIP := NewModel("limit_zero_bb_mip", Minimize)
+	xm := mMIP.AddIntVar("x", 0, 10)
+	ym := mMIP.AddContVar("y", 0, 10)
+	mMIP.SetObjective(NewExpr(xm.T(-1.4), ym.T(0.5)))
+	mMIP.AddConstraint("c", Le(NewExpr(xm.T(1), ym.T(1)), 2))
+	resM, errM := mMIP.Solve(faultCtx, WithCertified(true), WithTimeLimit(-1))
+	if !errors.Is(errM, ErrCertificationFailed) || resM.Status != StatusNumericalError {
+		t.Fatalf("faulted MIP limit exit got status=%v err=%v, want StatusNumericalError + ErrCertificationFailed", resM.Status, errM)
+	}
+}
+
+func TestCertifiedBestBoundOutwardRoundingAndULPSlack(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	twoThirds := big.NewRat(2, 3)
+	fl := exactRatToFloatFloor(twoThirds)
+	cl := exactRatToFloatCeil(twoThirds)
+	if new(big.Rat).SetFloat64(fl).Cmp(twoThirds) > 0 {
+		t.Fatalf("floor(2/3) = %.17g exceeded 2/3", fl)
+	}
+	if new(big.Rat).SetFloat64(cl).Cmp(twoThirds) < 0 {
+		t.Fatalf("ceil(2/3) = %.17g below 2/3", cl)
+	}
+	huge := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 1025))
+	if got := exactRatToFloatFloor(huge); got != math.MaxFloat64 {
+		t.Fatalf("floor(2^1025) = %v, want math.MaxFloat64", got)
+	}
+	if got := exactRatToFloatCeil(huge); !math.IsInf(got, 1) {
+		t.Fatalf("ceil(2^1025) = %v, want +Inf", got)
+	}
+
+	mMin := NewModel("outward_min_2_3", Minimize)
+	xMin := mMin.AddContVar("x", 0, 10)
+	mMin.SetObjective(NewExpr(xMin.T(1)))
+	mMin.AddConstraint("c", Ge(NewExpr(xMin.T(3)), 2))
+	resMin, errMin := mMin.Solve(ctx, WithCertified(true))
+	if errMin != nil || resMin.Status != StatusOptimal || new(big.Rat).SetFloat64(resMin.BestBound).Cmp(twoThirds) > 0 {
+		t.Fatalf("min 2/3 got status=%v bb=%.17g err=%v", resMin.Status, resMin.BestBound, errMin)
+	}
+
+	mMax := NewModel("outward_max_2_3", Maximize)
+	xMax := mMax.AddContVar("x", 0, 10)
+	mMax.SetObjective(NewExpr(xMax.T(1)))
+	mMax.AddConstraint("c", Le(NewExpr(xMax.T(3)), 2))
+	resMax, errMax := mMax.Solve(ctx, WithCertified(true))
+	if errMax != nil || resMax.Status != StatusOptimal || new(big.Rat).SetFloat64(resMax.BestBound).Cmp(twoThirds) < 0 {
+		t.Fatalf("max 2/3 got status=%v bb=%.17g err=%v", resMax.Status, resMax.BestBound, errMax)
+	}
+
+	// Verify ulpSlack scaling on large constant offset (1e16 + x) with RelGapTol=1e-6.
+	mConst := NewModel("large_const_ulp_slack", Minimize)
+	xb := mConst.AddBinaryVar("x")
+	mConst.SetObjective(NewExpr(xb.T(1)).AddConstant(1e16))
+	mConst.AddConstraint("c", Ge(NewExpr(xb.T(1)), 0))
+	resC, errC := mConst.Solve(ctx, WithCertified(true), WithRelGapTol(1e-6))
+	if errC != nil || resC.Status != StatusOptimal || resC.Objective != 1e16 {
+		t.Fatalf("large const MIP got status=%v obj=%.17g err=%v", resC.Status, resC.Objective, errC)
 	}
 }

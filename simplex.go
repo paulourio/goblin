@@ -538,6 +538,7 @@ func buildScaledLP(p *CompiledProblem) (mat *CompiledProblem, rowScale, colScale
 	}
 
 	cp := *p
+	cp.exactOrig = nil
 	cp.varLB = make([]float64, n)
 	cp.varUB = make([]float64, n)
 	cp.objMin = make([]float64, n)

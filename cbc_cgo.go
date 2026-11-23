@@ -234,6 +234,15 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		senseSign = -1.0
 	}
 
+	if hasEmptyInfeasibleRow(p) {
+		return Result{
+			modelID:   p.modelID,
+			Backend:   BackendCBC,
+			Status:    StatusInfeasible,
+			SolveTime: time.Since(start),
+		}
+	}
+
 	if !p.isMIP {
 		rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, nil, nil, nil)
 		droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, nil, nil)
@@ -248,6 +257,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 					modelID:   p.modelID,
 					Backend:   BackendCBC,
 					Status:    StatusTimeLimit,
+					BestBound: trivialDualBound(p.sense),
 					SolveTime: time.Since(start),
 				}
 			}
@@ -285,10 +295,15 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			if ctx != nil && ctx.Err() != nil {
 				return Result{}
 			}
+			bestBound := 0.0
+			if isLimitStatus(waitSt) {
+				bestBound = trivialDualBound(p.sense)
+			}
 			return Result{
 				modelID:   p.modelID,
 				Backend:   BackendCBC,
 				Status:    waitSt,
+				BestBound: bestBound,
 				SolveTime: time.Since(start),
 			}
 		}
@@ -379,6 +394,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				modelID:   p.modelID,
 				Backend:   BackendCBC,
 				Status:    StatusTimeLimit,
+				BestBound: trivialDualBound(p.sense),
 				SolveTime: time.Since(start),
 			}
 		}
@@ -405,6 +421,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				if rem <= 0 {
 					lpRef.Close()
 					res.Status = StatusIterationLimit
+					res.BestBound = trivialDualBound(p.sense)
 					return res, true
 				}
 				lpRef.MaxIter = rem
@@ -429,6 +446,9 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			if refRes.Status == StatusUnbounded || refRes.Status == StatusTimeLimit || refRes.Status == StatusIterationLimit ||
 				(acceptInfeasible && refRes.Status == StatusInfeasible) {
 				res.Status = refRes.Status
+				if isLimitStatus(res.Status) {
+					res.BestBound = trivialDualBound(p.sense)
+				}
 				return res, true
 			}
 			return res, false
@@ -495,9 +515,20 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				return fbRes
 			}
 		}
+		if isLimitStatus(res.Status) {
+			res.BestBound = trivialDualBound(p.sense)
+		}
 		return res
 	}
 
+	if p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas {
+		return Result{
+			modelID:   p.modelID,
+			Backend:   BackendCBC,
+			Status:    StatusInfeasible,
+			SolveTime: time.Since(start),
+		}
+	}
 	droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, nil, nil)
 	if !droppedTiny && !hasUnscalableCBCMIPObjective(p.objMin) && hasCBCPivotRiskTiny(p, p.varLB, p.varUB, nil, nil) {
 		return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, 0, 0, 0)
@@ -514,6 +545,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				modelID:   p.modelID,
 				Backend:   BackendCBC,
 				Status:    StatusTimeLimit,
+				BestBound: trivialDualBound(p.sense),
 				SolveTime: time.Since(start),
 			}
 		}
@@ -563,10 +595,15 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		if ctx != nil && ctx.Err() != nil {
 			return Result{}
 		}
+		bestBound := 0.0
+		if isLimitStatus(waitSt) {
+			bestBound = trivialDualBound(p.sense)
+		}
 		return Result{
 			modelID:   p.modelID,
 			Backend:   BackendCBC,
 			Status:    waitSt,
+			BestBound: bestBound,
 			SolveTime: time.Since(start),
 		}
 	}
@@ -645,6 +682,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			modelID:   p.modelID,
 			Backend:   BackendCBC,
 			Status:    StatusTimeLimit,
+			BestBound: trivialDualBound(p.sense),
 			SolveTime: time.Since(start),
 		}
 	}
@@ -669,6 +707,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 					modelID:    p.modelID,
 					Backend:    BackendCBC,
 					Status:     StatusTimeLimit,
+					BestBound:  trivialDualBound(p.sense),
 					Nodes:      int(cRes.nodes),
 					Iterations: int(cRes.iterations),
 					CutsAdded:  int(cRes.cuts_added),
@@ -687,6 +726,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 						modelID:    p.modelID,
 						Backend:    BackendCBC,
 						Status:     StatusIterationLimit,
+						BestBound:  trivialDualBound(p.sense),
 						Nodes:      int(cRes.nodes),
 						Iterations: int(cRes.iterations),
 						CutsAdded:  int(cRes.cuts_added),
@@ -719,6 +759,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 					modelID:    p.modelID,
 					Backend:    BackendCBC,
 					Status:     resRelax.Status,
+					BestBound:  trivialDualBound(p.sense),
 					Nodes:      int(cRes.nodes),
 					Iterations: int(cRes.iterations),
 					CutsAdded:  int(cRes.cuts_added),
@@ -726,12 +767,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				}
 			}
 		}
-		feasProb := *p
-		feasProb.lazy = nil
-		feasProb.objCoeffs = make([]float64, n)
-		feasProb.objMin = make([]float64, n)
-		feasProb.objConstant = 0
-		feasProb.objConstMinVal = 0
+		feasProb := p.zeroObjCopy()
 		feasOpts := opt
 		if opt.MaxIter > 0 {
 			rem := opt.MaxIter - int(cRes.iterations)
@@ -740,6 +776,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 					modelID:    p.modelID,
 					Backend:    BackendCBC,
 					Status:     StatusIterationLimit,
+					BestBound:  trivialDualBound(p.sense),
 					Nodes:      int(cRes.nodes),
 					Iterations: int(cRes.iterations),
 					CutsAdded:  int(cRes.cuts_added),
@@ -755,6 +792,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 					modelID:    p.modelID,
 					Backend:    BackendCBC,
 					Status:     StatusNodeLimit,
+					BestBound:  trivialDualBound(p.sense),
 					Nodes:      int(cRes.nodes),
 					Iterations: int(cRes.iterations),
 					CutsAdded:  int(cRes.cuts_added),
@@ -763,7 +801,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 			}
 			feasOpts.MaxNodes = remNodes
 		}
-		feasRes := solveCBC(ctx, &feasProb, feasOpts, start, deadline, done)
+		feasRes := solveCBC(ctx, feasProb, feasOpts, start, deadline, done)
 		if ctx != nil && ctx.Err() != nil {
 			return Result{}
 		}
@@ -771,10 +809,15 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		if st == StatusOptimal {
 			st = StatusUnbounded
 		}
+		bestBound := 0.0
+		if isLimitStatus(st) {
+			bestBound = trivialDualBound(p.sense)
+		}
 		return Result{
 			modelID:    p.modelID,
 			Backend:    BackendCBC,
 			Status:     st,
+			BestBound:  bestBound,
 			Nodes:      int(cRes.nodes) + feasRes.Nodes,
 			Iterations: int(cRes.iterations) + feasRes.Iterations,
 			CutsAdded:  int(cRes.cuts_added) + feasRes.CutsAdded,
@@ -791,6 +834,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				modelID:    p.modelID,
 				Backend:    BackendCBC,
 				Status:     StatusTimeLimit,
+				BestBound:  trivialDualBound(p.sense),
 				Nodes:      int(cRes.nodes),
 				Iterations: int(cRes.iterations),
 				CutsAdded:  int(cRes.cuts_added),
@@ -809,6 +853,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 					modelID:    p.modelID,
 					Backend:    BackendCBC,
 					Status:     StatusIterationLimit,
+					BestBound:  trivialDualBound(p.sense),
 					Nodes:      int(cRes.nodes),
 					Iterations: int(cRes.iterations),
 					CutsAdded:  int(cRes.cuts_added),
@@ -831,6 +876,7 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 				modelID:    p.modelID,
 				Backend:    BackendCBC,
 				Status:     resRelax.Status,
+				BestBound:  trivialDualBound(p.sense),
 				Nodes:      int(cRes.nodes),
 				Iterations: int(cRes.iterations),
 				CutsAdded:  int(cRes.cuts_added),
@@ -927,6 +973,9 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 		} else {
 			res.BestBound = p.ObjectiveFromMin(float64(cRes.best_bound_min))
 		}
+	}
+	if isLimitStatus(res.Status) && (cRes.has_best_bound == 0 || math.IsNaN(res.BestBound) || isOppositeInfBound(p.sense, res.BestBound)) {
+		res.BestBound = trivialDualBound(p.sense)
 	}
 	if res.Status == StatusOptimal && (!hasValidSol || math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) || math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0)) {
 		return Result{
@@ -1730,6 +1779,7 @@ func fallbackCBCMIPToGo(
 				modelID:    p.modelID,
 				Backend:    BackendCBC,
 				Status:     StatusIterationLimit,
+				BestBound:  trivialDualBound(p.sense),
 				Nodes:      cNodes,
 				Iterations: cIters,
 				CutsAdded:  cCuts,
@@ -1745,6 +1795,7 @@ func fallbackCBCMIPToGo(
 				modelID:    p.modelID,
 				Backend:    BackendCBC,
 				Status:     StatusNodeLimit,
+				BestBound:  trivialDualBound(p.sense),
 				Nodes:      cNodes,
 				Iterations: cIters,
 				CutsAdded:  cCuts,
@@ -3293,42 +3344,28 @@ func evalShiftedConstMin(fixedW *wideDotAcc, baseConstMin float64) float64 {
 }
 
 func seedWideDotAcc(w *wideDotAcc, hi, mid, lo []float64) {
-	if len(hi) <= expansionCap {
-		w.hiLen = copy(w.hiBuf[:], hi)
-	} else {
-		for _, v := range hi {
-			var ok bool
-			w.hiLen, ok = growExpansionBuf(&w.hiBuf, w.hiLen, v)
+	seedPart := func(buf *[expansionCap]float64, n *int, vals []float64) bool {
+		if len(vals) <= expansionCap {
+			*n = copy(buf[:], vals)
+			return true
+		}
+		for _, v := range vals {
+			var ok, capped bool
+			*n, ok, capped = growExpansionBuf(buf, *n, v)
+			if capped {
+				w.capped = true
+			}
 			if !ok {
 				w.nonFin = true
-				return
+				return false
 			}
 		}
+		return true
 	}
-	if len(mid) <= expansionCap {
-		w.midLen = copy(w.midBuf[:], mid)
-	} else {
-		for _, v := range mid {
-			var ok bool
-			w.midLen, ok = growExpansionBuf(&w.midBuf, w.midLen, v)
-			if !ok {
-				w.nonFin = true
-				return
-			}
-		}
+	if !seedPart(&w.hiBuf, &w.hiLen, hi) || !seedPart(&w.midBuf, &w.midLen, mid) {
+		return
 	}
-	if len(lo) <= expansionCap {
-		w.loLen = copy(w.loBuf[:], lo)
-	} else {
-		for _, v := range lo {
-			var ok bool
-			w.loLen, ok = growExpansionBuf(&w.loBuf, w.loLen, v)
-			if !ok {
-				w.nonFin = true
-				return
-			}
-		}
-	}
+	seedPart(&w.loBuf, &w.loLen, lo)
 }
 
 func rowBoundsFromSense(sense ConstraintSense, rhs float64) (rLB, rUB float64) {

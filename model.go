@@ -172,6 +172,7 @@ type varDef struct {
 type constraintDef struct {
 	name      string
 	rhs       float64
+	exprConst float64
 	termStart int
 	termEnd   int
 	sense     ConstraintSense
@@ -497,14 +498,15 @@ func (m *Model) AddConstraint(name string, c Constraint) {
 	if !c.Sense.valid() {
 		m.recordErr(fmt.Errorf("constraint %q has invalid sense %d", name, int8(c.Sense)))
 	}
-	// Shift Expr.Constant to the right-hand side so Terms (<=, =, >=) RHS - Expr.Constant.
-	rhs := c.RHS - c.Expr.Constant
+	// Store RHS and Expr.Constant separately so Compile can preserve exact rational
+	// boundaries and detect cancellation or rounding loss in c.RHS - c.Expr.Constant.
 	termStart := len(m.conTerms)
 	m.conTerms = append(m.conTerms, c.Expr.Terms...)
 	termEnd := len(m.conTerms)
 	m.constraints = append(m.constraints, constraintDef{
 		name:      name,
-		rhs:       rhs,
+		rhs:       c.RHS,
+		exprConst: c.Expr.Constant,
 		termStart: termStart,
 		termEnd:   termEnd,
 		sense:     c.Sense,
@@ -546,6 +548,9 @@ func (m *Model) Validate() error {
 	touched := make([]int, 0, min(len(m.vars), defaultModelCap))
 	objHasDup := false
 	for _, t := range m.objTerms {
+		if t.Var == invalidDotVar {
+			return errors.New("Dot: mismatched slice lengths")
+		}
 		col, ok := m.validVar(t.Var)
 		if !ok {
 			return fmt.Errorf("objective references invalid or foreign Var handle %v", t.Var)
@@ -591,13 +596,19 @@ func (m *Model) Validate() error {
 		if !c.sense.valid() {
 			return fmt.Errorf("constraint %q has invalid sense %d", c.name, int8(c.sense))
 		}
-		if math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) {
-			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs)
+		if math.IsNaN(c.rhs) || math.IsInf(c.rhs, 0) || math.IsNaN(c.exprConst) || math.IsInf(c.exprConst, 0) {
+			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, c.rhs-c.exprConst)
+		}
+		if net := c.rhs - c.exprConst; math.IsNaN(net) || math.IsInf(net, 0) {
+			return fmt.Errorf("constraint %q has non-finite RHS %v", c.name, net)
 		}
 		touched = touched[:0]
 		rowHasDup := false
 		cTerms := m.conTerms[c.termStart:c.termEnd]
 		for _, t := range cTerms {
+			if t.Var == invalidDotVar {
+				return errors.New("Dot: mismatched slice lengths")
+			}
 			col, ok := m.validVar(t.Var)
 			if !ok {
 				return fmt.Errorf("constraint %q references invalid or foreign Var handle %v", c.name, t.Var)

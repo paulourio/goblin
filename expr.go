@@ -106,16 +106,23 @@ func SumVars(vars ...Var) Expr {
 	return Expr{Terms: terms}
 }
 
-// Dot computes the inner product sum_i coeffs[i] * vars[i] up to min(len(vars), len(coeffs)),
-// skipping any entry whose coefficient is zero. Mismatched slice lengths silently truncate
-// to min(len(vars), len(coeffs)), and duplicate variables or non-finite coefficients are
-// retained until Model.Compile merges or validates terms.
+// invalidDotVar is a sentinel variable ID emitted by Dot on slice-length mismatches so
+// Expr retains its {Terms, Constant} value layout while Model.Validate and Model.Compile
+// surface a deterministic deferred error instead of panicking or silently truncating.
+const invalidDotVar = Var(^uint64(0))
+
+// Dot computes the inner product sum_i coeffs[i] * vars[i], skipping any entry whose
+// coefficient is zero. If len(vars) != len(coeffs), it records an invalid sentinel term
+// so Model.Validate and Model.Compile return an error instead of silently truncating;
+// duplicate variables or non-finite coefficients are retained until compilation.
 func Dot(vars []Var, coeffs []float64) Expr {
-	n := min(len(vars), len(coeffs))
-	terms := make([]Term, 0, n)
-	for i := range n {
+	if len(vars) != len(coeffs) {
+		return Expr{Terms: []Term{{Var: invalidDotVar, Coeff: 1}}}
+	}
+	terms := make([]Term, 0, len(vars))
+	for i, v := range vars {
 		if coeffs[i] != 0 {
-			terms = append(terms, Term{Var: vars[i], Coeff: coeffs[i]})
+			terms = append(terms, Term{Var: v, Coeff: coeffs[i]})
 		}
 	}
 	return Expr{Terms: terms}
