@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -196,8 +197,9 @@ var (
 	reCallTarget      = regexp.MustCompile(`CALL\s+([^\s(]+)\(SB\)`)
 	reSubSP           = regexp.MustCompile(`^\$(0x[0-9a-fA-F]+|[0-9]+),\s*SP\b`)
 	reObjdumpAddrFunc = regexp.MustCompile(`^([0-9a-f]+)\s+<([^>]+)>:$`)
-	reObjdumpInsn     = regexp.MustCompile(`^\s*([0-9a-f]+):\s+([a-z0-9]+)(?:\s+(.*))?$`)
+	reObjdumpInsn     = regexp.MustCompile(`^\s*([0-9a-f]+):\s+([A-Za-z0-9.]+)(?:\s+(.*))?$`)
 	reOpmaskReg       = regexp.MustCompile(`%k[0-7]\b`)
+	reHighSimdReg     = regexp.MustCompile(`%[xy]mm(?:1[6-9]|2[0-9]|3[01])\b`)
 )
 
 func main() {
@@ -227,6 +229,10 @@ func run() int {
 			for _, v := range res.Violations {
 				fmt.Fprintf(os.Stderr, "VIOLATION: %s\n", v)
 			}
+			return 1
+		}
+		if *useSIMD && runtime.GOARCH == "amd64" && res.VectorAudits == 0 {
+			fmt.Fprintln(os.Stderr, "VIOLATION: vector CFG audit unavailable (GNU objdump missing or failed)")
 			return 1
 		}
 		fmt.Printf("goblin-optcheck invariants PASS (simd=%v): inline=%d noinline=%d bce_loops=%d disasm=%d vector_audits=%d\n",
@@ -293,6 +299,29 @@ func run() int {
 		}
 		if err := os.WriteFile(*jsonOut, append(raw, '\n'), reportPerm); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to write %s: %v\n", *jsonOut, err)
+			return 1
+		}
+	}
+	if *useSIMD && runtime.GOARCH == "amd64" {
+		hasVectorFailure := false
+		for _, sr := range rep.Suites {
+			if sr.VectorAudit == nil || !sr.VectorAudit.Available {
+				fmt.Fprintf(os.Stderr, "VIOLATION: vector CFG audit unavailable for suite %s\n", sr.Suite)
+				hasVectorFailure = true
+				continue
+			}
+			if len(sr.VectorAudit.UnguardedEVEX) > 0 {
+				fmt.Fprintf(os.Stderr, "VIOLATION: unguarded EVEX in suite %s: %s\n",
+					sr.Suite, strings.Join(sr.VectorAudit.UnguardedEVEX, ", "))
+				hasVectorFailure = true
+			}
+			for _, hz := range sr.VectorAudit.Hazards {
+				fmt.Fprintf(os.Stderr, "VIOLATION: vector CFG hazard in suite %s [%s] %s @ %s: %s\n",
+					sr.Suite, hz.Kind, hz.Func, hz.Addr, hz.Insn)
+				hasVectorFailure = true
+			}
+		}
+		if hasVectorFailure {
 			return 1
 		}
 	}
@@ -1181,78 +1210,215 @@ type objdumpInsn struct {
 }
 
 func normalizeHexAddr(addr string) string {
-	s := strings.TrimLeft(strings.ToLower(strings.TrimSpace(addr)), "0")
+	s := strings.ToLower(strings.TrimSpace(addr))
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimLeft(s, "0")
 	if s == "" {
 		return "0"
 	}
 	return s
 }
 
+func isX86PrefixToken(tok string) bool {
+	switch tok {
+	case "notrack", "bnd", "rep", "repz", "repe", "repne", "repnz", "lock",
+		"cs", "ds", "es", "fs", "gs", "ss",
+		"data16", "data32", "addr16", "addr32",
+		"xacquire", "xrelease", "rex":
+		return true
+	default:
+		return strings.HasPrefix(tok, "rex.")
+	}
+}
+
+func splitFirstWord(s string) (string, string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", false
+	}
+	idx := strings.IndexAny(s, " \t")
+	if idx < 0 {
+		return s, "", true
+	}
+	return s[:idx], strings.TrimSpace(s[idx+1:]), true
+}
+
+func normalizeX86PrefixOpArgs(op, args string) (string, string) {
+	opL := strings.ToLower(strings.TrimSpace(op))
+	argsTrim := strings.TrimSpace(args)
+	for range 16 {
+		if !isX86PrefixToken(opL) {
+			break
+		}
+		nextOp, nextArgs, ok := splitFirstWord(argsTrim)
+		if !ok {
+			break
+		}
+		opL = strings.ToLower(nextOp)
+		argsTrim = nextArgs
+	}
+	return opL, argsTrim
+}
+
 func isEVEXInsn(op, args string) bool {
-	if strings.Contains(args, "%zmm") ||
-		reOpmaskReg.MatchString(args) ||
-		strings.Contains(args, "{1to") ||
-		strings.Contains(args, "{rn-") ||
-		strings.Contains(args, "{rz-") ||
-		strings.Contains(args, "{rd-") ||
-		strings.Contains(args, "{ru-") ||
-		strings.Contains(args, "{sae}") {
+	opL, argsEff := normalizeX86PrefixOpArgs(op, args)
+	argsL := strings.ToLower(argsEff)
+	if strings.Contains(argsL, "%zmm") ||
+		reOpmaskReg.MatchString(argsL) ||
+		reHighSimdReg.MatchString(argsL) ||
+		strings.Contains(argsL, "{1to") ||
+		strings.Contains(argsL, "{z}") ||
+		strings.Contains(argsL, "{rn-") ||
+		strings.Contains(argsL, "{rz-") ||
+		strings.Contains(argsL, "{rd-") ||
+		strings.Contains(argsL, "{ru-") ||
+		strings.Contains(argsL, "{sae}") {
 		return true
 	}
-	return strings.HasPrefix(op, "vpternlog") ||
-		strings.HasPrefix(op, "vpermi2") ||
-		strings.HasPrefix(op, "vpermt2") ||
-		strings.HasPrefix(op, "vcompress") ||
-		strings.HasPrefix(op, "vexpand")
+	for _, prefix := range []string{
+		"vpternlog", "vpermi2", "vpermt2", "vcompress", "vexpand",
+		"vpblendm", "vmovdqu64", "vmovdqu32", "vmovdqa64", "vmovdqa32",
+		"vpcmpq", "vpcmpuq", "vscalef", "vrcp14", "vrsqrt14",
+		"vrndscale", "vfixupimm", "vfpclass", "vptestm",
+		"vpmovm2", "vpmovq2m", "vpmovd2m",
+	} {
+		if strings.HasPrefix(opL, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func isVEXYMMInsn(op, args string) bool {
-	if isEVEXInsn(op, args) {
+	opL, argsEff := normalizeX86PrefixOpArgs(op, args)
+	argsL := strings.ToLower(argsEff)
+	if isEVEXInsn(opL, argsL) {
 		return false
 	}
-	if op == "vzeroupper" || op == "vzeroall" {
+	if opL == "vzeroupper" || opL == "vzeroall" {
 		return false
 	}
-	return strings.HasPrefix(op, "v") && strings.Contains(args, "%ymm")
+	return strings.HasPrefix(opL, "v") && strings.Contains(argsL, "%ymm")
 }
 
 func isLegacySSEInsn(op, args string) bool {
-	return !strings.HasPrefix(op, "v") && strings.Contains(args, "%xmm")
+	opL, argsEff := normalizeX86PrefixOpArgs(op, args)
+	argsL := strings.ToLower(argsEff)
+	return !strings.HasPrefix(opL, "v") && strings.Contains(argsL, "%xmm")
 }
 
 func dirtiesUpperVector(op, args string) bool {
-	if !strings.HasPrefix(op, "v") || op == "vzeroupper" || op == "vzeroall" {
+	opL, argsEff := normalizeX86PrefixOpArgs(op, args)
+	argsL := strings.ToLower(argsEff)
+	if !strings.HasPrefix(opL, "v") || opL == "vzeroupper" || opL == "vzeroall" {
 		return false
 	}
-	return strings.Contains(args, "%ymm") || strings.Contains(args, "%zmm") || isEVEXInsn(op, args)
+	return strings.Contains(argsL, "%ymm") || strings.Contains(argsL, "%zmm") || isEVEXInsn(opL, argsL)
 }
 
-func isNoreturnRuntimeCall(raw string) bool {
-	return strings.Contains(raw, "runtime.panic") || strings.Contains(raw, "runtime.gopanic")
+func isRetInsn(op, args string) bool {
+	opL, _ := normalizeX86PrefixOpArgs(op, args)
+	return opL == "ret" || opL == "retq"
+}
+
+func stripTrailingComment(s string) string {
+	if before, _, ok := strings.Cut(s, "//"); ok {
+		s = before
+	}
+	if before, _, ok := strings.Cut(s, "#"); ok {
+		s = before
+	}
+	return s
+}
+
+func parseTargetSymbol(args string) string {
+	fields := strings.Fields(stripTrailingComment(args))
+	if len(fields) < 2 {
+		return ""
+	}
+	symTok := fields[1]
+	if !strings.HasPrefix(symTok, "<") || !strings.HasSuffix(symTok, ">") || len(symTok) < 3 {
+		return ""
+	}
+	inner := symTok[1 : len(symTok)-1]
+	base, _, _ := strings.Cut(inner, "+")
+	return base
+}
+
+func isNoreturnRuntimeCall(args string) bool {
+	sym := parseTargetSymbol(args)
+	return strings.HasPrefix(sym, "runtime.panic") || strings.HasPrefix(sym, "runtime.gopanic")
+}
+
+func isMorestackTarget(args string) bool {
+	sym := parseTargetSymbol(args)
+	return strings.HasPrefix(sym, "runtime.morestack")
+}
+
+func isCpuFeatureCheck(args string) bool {
+	for tok := range strings.FieldsSeq(stripTrailingComment(args)) {
+		if strings.HasPrefix(tok, "<") && strings.HasSuffix(tok, ">") && len(tok) > 2 {
+			inner := strings.ToLower(tok[1 : len(tok)-1])
+			if strings.Contains(inner, "hasavx512") ||
+				strings.Contains(inner, "x86hasavx512") ||
+				strings.Contains(inner, "activetier") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isCpuFeatureGuardAt(insns []objdumpInsn, idx int) bool {
+	if idx < 0 || idx >= len(insns) {
+		return false
+	}
+	op := insns[idx].op
+	if op == "jmp" || op == "jmpq" || !strings.HasPrefix(op, "j") {
+		return false
+	}
+	if idx >= 1 && isCpuFeatureCheck(insns[idx-1].args) {
+		return true
+	}
+	if idx >= 2 && isCpuFeatureCheck(insns[idx-2].args) {
+		prevOp := insns[idx-1].op
+		if strings.HasPrefix(prevOp, "cmp") || strings.HasPrefix(prevOp, "test") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseJumpTargetHex(args string) string {
-	tok, _, _ := strings.Cut(strings.TrimSpace(args), " ")
-	if tok == "" || strings.HasPrefix(tok, "*") || strings.HasPrefix(tok, "%") {
+	tok, _, ok := splitFirstWord(args)
+	if !ok || tok == "" || strings.HasPrefix(tok, "*") || strings.HasPrefix(tok, "%") {
 		return ""
 	}
-	for i := range len(tok) {
-		c := tok[i]
+	hexTok := tok
+	if strings.HasPrefix(hexTok, "0x") || strings.HasPrefix(hexTok, "0X") {
+		hexTok = hexTok[2:]
+	}
+	if hexTok == "" {
+		return ""
+	}
+	for i := range len(hexTok) {
+		c := hexTok[i]
 		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 		if !isHex {
 			return ""
 		}
 	}
-	return normalizeHexAddr(tok)
+	return normalizeHexAddr(hexTok)
 }
 
 func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAuditReport) {
 	hasEVEX := false
 	hasVEXYMM := false
-	for _, ins := range insns {
-		if isEVEXInsn(ins.op, ins.args) {
+	for i := range insns {
+		insns[i].op, insns[i].args = normalizeX86PrefixOpArgs(insns[i].op, insns[i].args)
+		if isEVEXInsn(insns[i].op, insns[i].args) {
 			hasEVEX = true
-		} else if isVEXYMMInsn(ins.op, ins.args) {
+		} else if isVEXYMMInsn(insns[i].op, insns[i].args) {
 			hasVEXYMM = true
 		}
 	}
@@ -1267,8 +1433,27 @@ func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAudi
 		report.VEXYMMFuncCount++
 	}
 
+	recorded := make(map[string]bool)
+	addHazard := func(ins objdumpInsn, kind string) {
+		k := ins.addr + ":" + kind
+		if recorded[k] {
+			return
+		}
+		recorded[k] = true
+		report.Hazards = append(report.Hazards, vectorHazard{
+			Func: funcName,
+			Addr: ins.addr,
+			Kind: kind,
+			Insn: ins.op + " " + ins.args,
+		})
+	}
+
 	addrToIdx := make(map[string]int, len(insns))
 	for i, ins := range insns {
+		if _, dup := addrToIdx[ins.addr]; dup {
+			addHazard(ins, "DUPLICATE_ADDR")
+			continue
+		}
 		addrToIdx[ins.addr] = i
 	}
 
@@ -1299,26 +1484,12 @@ func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAudi
 	}
 	push(0, false)
 
-	recorded := make(map[string]bool)
-	addHazard := func(ins objdumpInsn, kind string) {
-		k := ins.addr + ":" + kind
-		if recorded[k] {
-			return
-		}
-		recorded[k] = true
-		report.Hazards = append(report.Hazards, vectorHazard{
-			Func: funcName,
-			Addr: ins.addr,
-			Kind: kind,
-			Insn: ins.op + " " + ins.args,
-		})
-	}
-
 	for head := 0; head < len(queue); {
 		st := queue[head]
 		head++
 		ins := insns[st.idx]
 		dirty := st.dirty
+		isLast := st.idx+1 == len(insns)
 
 		nextDirty := dirty
 		switch {
@@ -1330,7 +1501,7 @@ func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAudi
 			addHazard(ins, "LEGACY_SSE_WHILE_DIRTY")
 		}
 
-		if ins.op == "ret" || ins.op == "retq" {
+		if isRetInsn(ins.op, ins.args) {
 			if nextDirty {
 				addHazard(ins, "DIRTY_RET")
 			}
@@ -1340,33 +1511,47 @@ func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAudi
 			continue
 		}
 		if ins.op == "call" || ins.op == "callq" {
-			if isNoreturnRuntimeCall(ins.raw) {
+			if isNoreturnRuntimeCall(ins.args) {
 				continue
 			}
-			if nextDirty && !strings.Contains(ins.raw, "runtime.morestack") {
+			if nextDirty && !isMorestackTarget(ins.args) {
 				addHazard(ins, "DIRTY_CALL")
+			} else if isLast && nextDirty {
+				addHazard(ins, "DIRTY_FALL_OFF_END")
 			}
 			push(st.idx+1, nextDirty)
 			continue
 		}
 		if ins.op == "jmp" || ins.op == "jmpq" {
-			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
-				if tgtIdx, ok := addrToIdx[tgt]; ok {
-					push(tgtIdx, nextDirty)
-				} else if nextDirty && !strings.Contains(ins.raw, "runtime.morestack") {
-					addHazard(ins, "DIRTY_RET")
-				}
+			tgt := parseJumpTargetHex(ins.args)
+			if tgt == "" {
+				addHazard(ins, "INDIRECT_OR_UNRESOLVED_JMP")
+				continue
+			}
+			if tgtIdx, ok := addrToIdx[tgt]; ok {
+				push(tgtIdx, nextDirty)
+			} else if nextDirty && !isMorestackTarget(ins.args) {
+				addHazard(ins, "DIRTY_RET")
 			}
 			continue
 		}
 		if strings.HasPrefix(ins.op, "j") {
-			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
-				if tgtIdx, ok := addrToIdx[tgt]; ok {
-					push(tgtIdx, nextDirty)
-				}
+			tgt := parseJumpTargetHex(ins.args)
+			if tgt == "" {
+				addHazard(ins, "INDIRECT_OR_UNRESOLVED_JMP")
+			} else if tgtIdx, ok := addrToIdx[tgt]; ok {
+				push(tgtIdx, nextDirty)
+			} else if nextDirty && !isMorestackTarget(ins.args) {
+				addHazard(ins, "DIRTY_COND_EXT_JMP")
+			}
+			if isLast && nextDirty {
+				addHazard(ins, "DIRTY_FALL_OFF_END")
 			}
 			push(st.idx+1, nextDirty)
 			continue
+		}
+		if isLast && nextDirty {
+			addHazard(ins, "DIRTY_FALL_OFF_END")
 		}
 		push(st.idx+1, nextDirty)
 	}
@@ -1390,7 +1575,14 @@ func checkUnguardedEVEX(insns []objdumpInsn, addrToIdx map[string]int) bool {
 		if isEVEXInsn(ins.op, ins.args) {
 			return true
 		}
-		if ins.op == "ret" || ins.op == "retq" || ins.op == "ud2" || ins.op == "int3" {
+		if isRetInsn(ins.op, ins.args) || ins.op == "ud2" || ins.op == "int3" {
+			continue
+		}
+		if ins.op == "call" || ins.op == "callq" {
+			if isNoreturnRuntimeCall(ins.args) {
+				continue
+			}
+			enqueue(idx + 1)
 			continue
 		}
 		if ins.op == "jmp" || ins.op == "jmpq" {
@@ -1402,7 +1594,15 @@ func checkUnguardedEVEX(insns []objdumpInsn, addrToIdx map[string]int) bool {
 			continue
 		}
 		if strings.HasPrefix(ins.op, "j") {
-			// Stop before conditional branches; this path requires a runtime guard.
+			if isCpuFeatureGuardAt(insns, idx) {
+				continue
+			}
+			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
+				if tgtIdx, ok := addrToIdx[tgt]; ok {
+					enqueue(tgtIdx)
+				}
+			}
+			enqueue(idx + 1)
 			continue
 		}
 		enqueue(idx + 1)
@@ -1440,7 +1640,7 @@ func auditObjdumpVectorCFG(raw string) vectorAuditReport {
 		if im := reObjdumpInsn.FindStringSubmatch(codePart); im != nil {
 			insns = append(insns, objdumpInsn{
 				addr: normalizeHexAddr(im[1]),
-				op:   im[2],
+				op:   strings.ToLower(im[2]),
 				args: strings.TrimSpace(im[3]),
 				raw:  line,
 			})
