@@ -2,7 +2,6 @@ package goblin
 
 import (
 	"cmp"
-	"container/heap"
 	"math"
 	"slices"
 	"sync"
@@ -117,9 +116,7 @@ type searchNode struct {
 
 type nodeQueue []*searchNode
 
-func (pq nodeQueue) Len() int { return len(pq) }
-func (pq nodeQueue) Less(i, j int) bool {
-	ni, nj := pq[i], pq[j]
+func searchNodeLess(ni, nj *searchNode) bool {
 	if dl := ni.lowerBound - nj.lowerBound; dl > nodeQueueCmpTol || dl < -nodeQueueCmpTol {
 		return dl < 0
 	}
@@ -128,14 +125,48 @@ func (pq nodeQueue) Less(i, j int) bool {
 	}
 	return ni.depth > nj.depth
 }
-func (pq nodeQueue) Swap(i, j int) { pq[i], pq[j] = pq[j], pq[i] }
-func (pq *nodeQueue) Push(x any)   { *pq = append(*pq, x.(*searchNode)) }
-func (pq *nodeQueue) Pop() any {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil
-	*pq = old[:n-1]
+
+func (pq *nodeQueue) push(node *searchNode) {
+	q := append(*pq, node)
+	j := len(q) - 1
+	for j > 0 {
+		i := (j - 1) / 2
+		if !searchNodeLess(q[j], q[i]) {
+			break
+		}
+		q[i], q[j] = q[j], q[i]
+		j = i
+	}
+	*pq = q
+}
+
+func (pq *nodeQueue) pop() *searchNode {
+	q := *pq
+	n := len(q) - 1
+	item := q[0]
+	if n > 0 {
+		q[0] = q[n]
+		q[n] = nil
+		i := 0
+		for {
+			j1 := 2*i + 1
+			if j1 >= n || j1 < 0 {
+				break
+			}
+			j := j1
+			if j2 := j1 + 1; j2 < n && searchNodeLess(q[j2], q[j1]) {
+				j = j2
+			}
+			if !searchNodeLess(q[j], q[i]) {
+				break
+			}
+			q[i], q[j] = q[j], q[i]
+			i = j
+		}
+	} else {
+		q[0] = nil
+	}
+	*pq = q[:n]
 	return item
 }
 
@@ -1344,7 +1375,7 @@ func (b *babEngine) tryInTreeCuts(
 	}
 	if !b.capLPIter(b.lpSolver, b.defaultLPIter) {
 		node.lowerBound = max(node.lowerBound, *nodeMin)
-		heap.Push(&b.pq, node)
+		b.pq.push(node)
 		b.hitIterLimit = true
 		return false, true
 	}
@@ -1380,7 +1411,7 @@ func (b *babEngine) tryInTreeCuts(
 			b.vipr.restoreActiveCuts(cutSnap)
 		}
 		node.lowerBound = max(node.lowerBound, *nodeMin)
-		heap.Push(&b.pq, node)
+		b.pq.push(node)
 		if nextRes.Status == StatusTimeLimit {
 			b.hitTimeLimit = true
 		} else {
@@ -1553,7 +1584,7 @@ func (b *babEngine) resolveNodeAfterFix(
 	)
 	if stop != StatusNotSolved {
 		node.lowerBound = max(node.lowerBound, *nodeMin)
-		heap.Push(&b.pq, node)
+		b.pq.push(node)
 		if stop == StatusTimeLimit {
 			b.hitTimeLimit = true
 		} else {
@@ -1660,7 +1691,6 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	}
 
 	b.pq = make(nodeQueue, 0, initNodeQueueCap)
-	heap.Init(&b.pq)
 	b.sym = initNodeSymmetry(p)
 	var symPtr *nodeSymmetry
 	var rootVN *viprTreeNode
@@ -1917,8 +1947,8 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		pc:          pCosts[brVar],
 		counter:     &nodeCounter,
 	}, rootVN)
-	heap.Push(&b.pq, downNode)
-	heap.Push(&b.pq, upNode)
+	b.pq.push(downNode)
+	b.pq.push(upNode)
 
 	lastIncumbentNode := 1
 	heurMisses := 0
@@ -1929,7 +1959,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	if b.opts.EnableHeuristics {
 		isContLinked = b.contLinkedIntCols()
 	}
-	for b.pq.Len() > 0 || b.plungeNode != nil {
+	for len(b.pq) > 0 || b.plungeNode != nil {
 		if b.vipr != nil && b.vipr.exactNodeGapClosed(b.vipr.rootNode(), b.bestPrimal) {
 			break
 		}
@@ -1959,7 +1989,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			break
 		}
 		if b.opts.Workers > 1 && !b.opts.isSubMIP {
-			openCount := b.pq.Len()
+			openCount := len(b.pq)
 			if b.plungeNode != nil {
 				openCount++
 			}
@@ -1992,10 +2022,10 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			fromPlunge = true
 		} else {
 			if b.plungeNode != nil {
-				heap.Push(&b.pq, b.plungeNode)
+				b.pq.push(b.plungeNode)
 				b.plungeNode = nil
 			}
-			node = heap.Pop(&b.pq).(*searchNode)
+			node = b.pq.pop()
 		}
 
 		if (node.lowerBound >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(node.lowerBound, b.bestObjMin, pruneRelTol)) &&
@@ -2031,7 +2061,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		nodeRes, stop := solveNodeLP(b.lpSolver, curLB, curUB, b.defaultLPIter, b.capLPIter, b.budgetBound, &b.totalLPIters)
 		if stop != StatusNotSolved {
 			// The node was not evaluated: keep it open so its bound stays in the global bound.
-			heap.Push(&b.pq, node)
+			b.pq.push(node)
 			if stop == StatusTimeLimit {
 				b.hitTimeLimit = true
 			} else {
@@ -2310,10 +2340,10 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 
 		if bVal-math.Floor(bVal) >= halfFracTarget {
 			b.plungeNode = cUp
-			heap.Push(&b.pq, cDown)
+			b.pq.push(cDown)
 		} else {
 			b.plungeNode = cDown
-			heap.Push(&b.pq, cUp)
+			b.pq.push(cUp)
 		}
 	}
 	return Result{}, false
@@ -2461,7 +2491,7 @@ func (c *parCoordinator) publishBranch(workerID int, pushChild, nextPlunge *sear
 	if minPruned < c.prunedMinBound {
 		c.prunedMinBound = minPruned
 	}
-	heap.Push(&c.pq, pushChild)
+	c.pq.push(pushChild)
 	c.activeBounds[workerID] = nextPlunge.lowerBound
 	c.cond.Broadcast()
 	c.mu.Unlock()
@@ -2473,7 +2503,7 @@ func (c *parCoordinator) abortOnLimit(workerID int, node *searchNode, stop Statu
 		c.prunedMinBound = minPruned
 	}
 	if node != nil {
-		heap.Push(&c.pq, node)
+		c.pq.push(node)
 	}
 	c.activeBounds[workerID] = math.Inf(1)
 	if stop == StatusTimeLimit {
@@ -2506,7 +2536,7 @@ func (c *parCoordinator) nextNode(
 
 	parkPlunge := func() {
 		if localPlunge != nil {
-			heap.Push(&c.pq, localPlunge)
+			c.pq.push(localPlunge)
 			localPlunge = nil
 		}
 		c.activeBounds[workerID] = math.Inf(1)
@@ -2553,12 +2583,12 @@ func (c *parCoordinator) nextNode(
 				localPlunge = nil
 				fromPlunge = true
 			} else {
-				heap.Push(&c.pq, localPlunge)
+				c.pq.push(localPlunge)
 				localPlunge = nil
 			}
 		}
 		if node == nil {
-			if c.pq.Len() == 0 {
+			if len(c.pq) == 0 {
 				c.activeBounds[workerID] = math.Inf(1)
 				if c.waitingWorkers+1 == c.numWorkers {
 					c.stopAll.Store(true)
@@ -2570,7 +2600,7 @@ func (c *parCoordinator) nextNode(
 				c.waitingWorkers--
 				continue
 			}
-			node = heap.Pop(&c.pq).(*searchNode)
+			node = c.pq.pop()
 			fromPlunge = false
 		}
 
@@ -3089,16 +3119,10 @@ func (w *parWorker) run() {
 
 func (b *babEngine) exploreTreeParallel(req *parallelTreeReq) (Result, bool) {
 	if b.plungeNode != nil {
-		heap.Push(&b.pq, b.plungeNode)
+		b.pq.push(b.plungeNode)
 		b.plungeNode = nil
 	}
-	workers := req.workers
-	if workers > b.pq.Len() {
-		workers = b.pq.Len()
-	}
-	if workers < 2 {
-		workers = 2
-	}
+	workers := max(min(req.workers, len(b.pq)), 2)
 
 	coord := &parCoordinator{
 		b:                b,
@@ -3271,7 +3295,7 @@ func (b *babEngine) limitStatus() Status {
 		return StatusTimeLimit
 	case b.hitIterLimit:
 		return StatusIterationLimit
-	case b.hitNodeLimit || b.pq.Len() > 0 || b.plungeNode != nil:
+	case b.hitNodeLimit || len(b.pq) > 0 || b.plungeNode != nil:
 		return StatusNodeLimit
 	case b.hitLPLimitStatus != StatusNotSolved:
 		return b.hitLPLimitStatus
