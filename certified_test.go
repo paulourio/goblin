@@ -1205,7 +1205,7 @@ func TestVIPRJSONByteIdenticalToEncodingJSONV2(t *testing.T) {
 		LB:        trOpt.cert.LB,
 		UB:        trOpt.cert.UB,
 		BaseRows:  trOpt.cert.BaseRows,
-		Mode:      trOpt.cert.Mode,
+		Mode:      string(trOpt.cert.Mode),
 		TargetLB:  trOpt.cert.TargetLB,
 		Incumbent: trOpt.cert.Incumbent,
 		Steps:     make([]mirrorStep, len(trOpt.cert.Steps)),
@@ -1213,7 +1213,7 @@ func TestVIPRJSONByteIdenticalToEncodingJSONV2(t *testing.T) {
 	}
 	for i, s := range trOpt.cert.Steps {
 		mc.Steps[i] = mirrorStep{
-			Rule:        s.Rule,
+			Rule:        string(s.Rule),
 			Row:         s.Row,
 			Col:         s.Col,
 			Sense:       s.Sense,

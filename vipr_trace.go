@@ -96,7 +96,7 @@ type viprInstanceJSON struct {
 }
 
 type viprStepJSON struct {
-	Rule        string                 `json:"rule"`
+	Rule        viprRule               `json:"rule"`
 	Row         *int                   `json:"row,omitzero"`
 	Col         *int                   `json:"col,omitzero"`
 	Sense       string                 `json:"sense,omitzero"`
@@ -128,7 +128,7 @@ type viprCertJSON struct {
 	LB        []*viprRatPayload      `json:"lb"`
 	UB        []*viprRatPayload      `json:"ub"`
 	BaseRows  []viprLinConJSON       `json:"baseRows"`
-	Mode      string                 `json:"mode"`
+	Mode      viprMode               `json:"mode"`
 	TargetLB  *viprRatPayload        `json:"targetLB,omitzero"`
 	Incumbent []viprRatPayload       `json:"incumbent,omitzero"`
 	Steps     []viprStepJSON         `json:"steps"`
@@ -379,7 +379,7 @@ func (tr *VIPRTrace) Mode() string {
 	if tr == nil || !tr.hasCert {
 		return ""
 	}
-	return tr.cert.Mode
+	return string(tr.cert.Mode)
 }
 
 // TargetLB returns a copy of the certified lower bound in shifted minimized form
@@ -511,7 +511,7 @@ func buildVIPRRatProblem(p *CompiledProblem) (*viprRatProblem, bool) {
 	return rp, true
 }
 
-func (rp *viprRatProblem) buildBaseCert(mode string) viprCertJSON {
+func (rp *viprRatProblem) buildBaseCert(mode viprMode) viprCertJSON {
 	senseStr := func(s ConstraintSense) string {
 		switch s {
 		case LessEqual:
@@ -661,7 +661,7 @@ func (tr *VIPRTrace) RecordPresolveInfeasibleEnvelope(res VIPRPresolveResult) bo
 	if res.InfeasConflictCol >= 0 && res.InfeasConflictCol < rp.n {
 		col := res.InfeasConflictCol
 		if rp.lb[col] != nil && rp.ub[col] != nil && rp.ub[col].Cmp(rp.lb[col]) < 0 {
-			steps = []viprStepJSON{{Rule: "boundConflict", Col: viprIntPtr(col)}}
+			steps = []viprStepJSON{{Rule: viprRuleBoundConflict, Col: viprIntPtr(col)}}
 		}
 	}
 	if len(steps) == 0 && res.InfeasRow >= 0 && res.InfeasRow < rp.m {
@@ -669,7 +669,7 @@ func (tr *VIPRTrace) RecordPresolveInfeasibleEnvelope(res VIPRPresolveResult) bo
 		cols := rp.rowCols[row]
 		vals := rp.rowVals[row]
 		if len(cols) == 0 {
-			steps = []viprStepJSON{{Rule: "conIndex", Row: viprIntPtr(row)}}
+			steps = []viprStepJSON{{Rule: viprRuleConIndex, Row: viprIntPtr(row)}}
 		} else if res.InfeasGCDDivisor > 0 {
 			if gcdSteps, gcdRoot, okGCD := buildGCDInfeasSteps(rp); okGCD {
 				steps = gcdSteps
@@ -733,7 +733,7 @@ func (tr *VIPRTrace) RecordPresolveInfeasibleEnvelope(res VIPRPresolveResult) bo
 					})
 				}
 				steps = []viprStepJSON{{
-					Rule:   "farkas",
+					Rule:   viprRuleFarkas,
 					Refs:   viprOptRefs([]viprLinRefJSON{{ID: row, Mult: viprInt64Payload(rowMult)}}),
 					Bounds: bounds,
 				}}
@@ -749,7 +749,7 @@ func (tr *VIPRTrace) RecordPresolveInfeasibleEnvelope(res VIPRPresolveResult) bo
 	if len(steps) == 0 {
 		return false
 	}
-	cert := rp.buildBaseCert("infeasible")
+	cert := rp.buildBaseCert(viprModeInfeasible)
 	cert.Steps = steps
 	cert.RootStep = rootStep
 	tr.cert = cert
@@ -1436,18 +1436,18 @@ func (rp *viprRatProblem) checkExactFeasible(x []*big.Rat) bool {
 			term.Mul(rp.rowVals[i][k], x[col])
 			lhs.Add(lhs, term)
 		}
-		cmp := lhs.Cmp(rp.rowRHS[i])
+		ord := lhs.Cmp(rp.rowRHS[i])
 		switch rp.rowSense[i] {
 		case LessEqual:
-			if cmp > 0 {
+			if ord > 0 {
 				return false
 			}
 		case GreaterEqual:
-			if cmp < 0 {
+			if ord < 0 {
 				return false
 			}
 		case Equal:
-			if cmp != 0 {
+			if ord != 0 {
 				return false
 			}
 		}
@@ -1688,10 +1688,10 @@ func (rp *viprRatProblem) repairContinuousExactIncumbent(
 			term.Mul(rp.rowVals[i][idx], xRat[col])
 			act.Add(act, term)
 		}
-		cmp := act.Cmp(rp.rowRHS[i])
-		bad := (rp.rowSense[i] == LessEqual && cmp > 0) ||
-			(rp.rowSense[i] == GreaterEqual && cmp < 0) ||
-			(rp.rowSense[i] == Equal && cmp != 0)
+		ord := act.Cmp(rp.rowRHS[i])
+		bad := (rp.rowSense[i] == LessEqual && ord > 0) ||
+			(rp.rowSense[i] == GreaterEqual && ord < 0) ||
+			(rp.rowSense[i] == Equal && ord != 0)
 		if bad {
 			violRows = append(violRows, i)
 			inViol[i] = true
@@ -5239,8 +5239,8 @@ func (r *babVIPRRecorder) propagateRowSide(
 	}
 
 	if infCnt == 0 {
-		cmp := act.Cmp(rowRHS)
-		if (isUpperSide && cmp > 0) || (!isUpperSide && cmp < 0) {
+		ord := act.Cmp(rowRHS)
+		if (isUpperSide && ord > 0) || (!isUpperSide && ord < 0) {
 			mult := big.NewRat(1, 1)
 			if !isUpperSide {
 				mult = big.NewRat(-1, 1)
@@ -5504,11 +5504,11 @@ func (em *viprEmitter) getAsms(id int) []int {
 
 func (em *viprEmitter) computeStepAsms(id int, st viprStepJSON) []int {
 	switch st.Rule {
-	case "assume":
+	case viprRuleAssume:
 		return []int{id}
-	case "conIndex":
+	case viprRuleConIndex:
 		return nil
-	case "lincomb", "farkas", "dualBound":
+	case viprRuleLinComb, viprRuleFarkas, viprRuleDualBound:
 		if st.Refs == nil {
 			return nil
 		}
@@ -5519,12 +5519,12 @@ func (em *viprEmitter) computeStepAsms(id int, st viprStepJSON) []int {
 			}
 		}
 		return viprMergeAsms(lists...)
-	case "roundDown", "roundUp":
+	case viprRuleRoundDown, viprRuleRoundUp:
 		if st.Ref == nil {
 			return nil
 		}
 		return slices.Clone(em.getAsms(*st.Ref))
-	case "boundConflict":
+	case viprRuleBoundConflict:
 		var lbA, ubA []int
 		if st.LBRef != nil {
 			lbA = em.getAsms(*st.LBRef)
@@ -5533,7 +5533,7 @@ func (em *viprEmitter) computeStepAsms(id int, st viprStepJSON) []int {
 			ubA = em.getAsms(*st.UBRef)
 		}
 		return viprMergeAsms(lbA, ubA)
-	case "safeDual":
+	case viprRuleSafeDual:
 		var lists [][]int
 		if st.Refs != nil {
 			for _, ref := range *st.Refs {
@@ -5548,7 +5548,7 @@ func (em *viprEmitter) computeStepAsms(id int, st viprStepJSON) []int {
 			}
 		}
 		return viprMergeAsms(lists...)
-	case "branch":
+	case viprRuleBranch:
 		var leftRem, rightRem []int
 		if st.Left != nil && st.LeftAsm != nil {
 			leftRem = viprFilterOutAsms(em.getAsms(*st.Left), *st.LeftAsm)
@@ -5557,7 +5557,7 @@ func (em *viprEmitter) computeStepAsms(id int, st viprStepJSON) []int {
 			rightRem = viprFilterOutAsms(em.getAsms(*st.Right), *st.RightAsm)
 		}
 		return viprMergeAsms(leftRem, rightRem)
-	case "orbitBranch":
+	case viprRuleOrbitBranch:
 		var leftRem, rightRem []int
 		if st.Left != nil && st.LeftAsm != nil {
 			drop := make([]int, 0, 1+len(st.OrbitAsms))
@@ -5608,7 +5608,7 @@ func (em *viprEmitter) emitAssume(col int, isUpper bool, bound *big.Int) int {
 		bound:   new(big.Rat).SetInt(bound),
 	}
 	return em.addStep(viprStepJSON{
-		Rule:        "assume",
+		Rule:        viprRuleAssume,
 		Col:         viprIntPtr(col),
 		Sense:       sense,
 		Bound:       viprBigIntJSON(bound),
@@ -5659,13 +5659,13 @@ func (em *viprEmitter) emitGlobalCut(cut viprGlobalCut) (int, bool) {
 			})
 		}
 		sense := "<="
-		roundRule := "roundDown"
+		roundRule := viprRuleRoundDown
 		if cut.kind == viprCutCG && cut.isGe {
 			sense = ">="
-			roundRule = "roundUp"
+			roundRule = viprRuleRoundUp
 		}
 		linID := em.addStep(viprStepJSON{
-			Rule:   "lincomb",
+			Rule:   viprRuleLinComb,
 			Sense:  sense,
 			Refs:   viprOptRefs(refs),
 			Bounds: toBoundJSON(cut.bounds),
@@ -5687,7 +5687,7 @@ func (em *viprEmitter) emitGlobalCut(cut viprGlobalCut) (int, bool) {
 			{ID: leftAsmID, Mult: viprBigRatToPayload(cut.vubDelta)},
 		}
 		leftID := em.addStep(viprStepJSON{
-			Rule:   "lincomb",
+			Rule:   viprRuleLinComb,
 			Sense:  "<=",
 			Refs:   viprOptRefs(leftRefs),
 			Bounds: toBoundJSON(cut.vubLeftBounds),
@@ -5696,13 +5696,13 @@ func (em *viprEmitter) emitGlobalCut(cut viprGlobalCut) (int, bool) {
 		rightAsmID := em.emitAssume(cut.vubBinCol, false, oneInt)
 		negUB := new(big.Rat).Neg(cut.vubUB)
 		rightID := em.addStep(viprStepJSON{
-			Rule:   "lincomb",
+			Rule:   viprRuleLinComb,
 			Sense:  "<=",
 			Refs:   viprOptRefs([]viprLinRefJSON{{ID: rightAsmID, Mult: viprBigRatToPayload(negUB)}}),
 			Bounds: []viprBoundRefJSON{{Col: cut.vubCol, Kind: "ub", Mult: viprInt64Payload(1)}},
 		})
 		return em.addStep(viprStepJSON{
-			Rule:     "branch",
+			Rule:     viprRuleBranch,
 			Col:      viprIntPtr(cut.vubBinCol),
 			SplitVal: viprBigIntJSON(zeroInt),
 			LeftAsm:  viprIntPtr(leftAsmID),
@@ -5789,15 +5789,15 @@ func (em *viprEmitter) emitPropStep(
 		sense = "<="
 	}
 	linID := em.addStep(viprStepJSON{
-		Rule:   "lincomb",
+		Rule:   viprRuleLinComb,
 		Sense:  sense,
 		Refs:   viprOptRefs(refs),
 		Bounds: bounds,
 	})
 	if ps.roundInt {
-		rule := "roundUp"
+		rule := viprRuleRoundUp
 		if ps.isUpper {
-			rule = "roundDown"
+			rule = viprRuleRoundDown
 		}
 		return em.addStep(viprStepJSON{
 			Rule: rule,
@@ -5835,7 +5835,7 @@ func (em *viprEmitter) emitFarkas(w []viprRowMult, activeLB, activeUB []*big.Rat
 		appendBoundOrStepRef(&refs, &bounds, j, useUB, stepID, viprBigRatToPayload(neg))
 	}
 	return em.addStep(viprStepJSON{
-		Rule:   "farkas",
+		Rule:   viprRuleFarkas,
 		Refs:   viprOptRefs(refs),
 		Bounds: bounds,
 	}), true
@@ -5858,7 +5858,7 @@ func (em *viprEmitter) emitSafeDual(mults []viprRowMult, activeLB, activeUB []*b
 		refs = append(refs, viprLinRefJSON{ID: id, Mult: viprBigRatToPayload(rm.mult)})
 	}
 	return em.addStep(viprStepJSON{
-		Rule:      "safeDual",
+		Rule:      viprRuleSafeDual,
 		Refs:      viprOptRefs(refs),
 		BoundAsms: slices.Clone(boundAsms),
 	}), rhs, true
@@ -6021,7 +6021,7 @@ func (em *viprEmitter) emitNode(
 			return -1, false, nil, false
 		}
 		id := em.addStep(viprStepJSON{
-			Rule:  "boundConflict",
+			Rule:  viprRuleBoundConflict,
 			Col:   viprIntPtr(col),
 			LBRef: viprOptNonNegPtr(st.lbID[col]),
 			UBRef: viprOptNonNegPtr(st.ubID[col]),
@@ -6065,7 +6065,7 @@ func (em *viprEmitter) emitNode(
 		}
 
 		brID := em.addStep(viprStepJSON{
-			Rule:     "branch",
+			Rule:     viprRuleBranch,
 			Col:      viprIntPtr(vn.branchCol),
 			SplitVal: viprBigIntJSON(vn.splitVal),
 			LeftAsm:  viprIntPtr(leftAsmID),
@@ -6114,7 +6114,7 @@ func (em *viprEmitter) emitNode(
 		}
 
 		obID := em.addStep(viprStepJSON{
-			Rule:      "orbitBranch",
+			Rule:      viprRuleOrbitBranch,
 			Col:       viprIntPtr(vn.branchCol),
 			LeftAsm:   viprIntPtr(leftAsmID),
 			RightAsm:  viprIntPtr(rightAsmID),
@@ -6367,7 +6367,7 @@ func (r *babVIPRRecorder) finalize(res Result) {
 	}
 
 	if rootUnsat {
-		cert := rp.buildBaseCert("infeasible")
+		cert := rp.buildBaseCert(viprModeInfeasible)
 		cert.Steps = em.steps
 		cert.RootStep = rootID - rp.m
 		r.trace.cert = cert
@@ -6379,9 +6379,9 @@ func (r *babVIPRRecorder) finalize(res Result) {
 
 	targetLB := new(big.Rat).Add(rp.objConst, rootRHS)
 
-	mode := "bound"
+	mode := viprModeBound
 	if hasExactInc && incObjNoConst.Cmp(rootRHS) <= 0 {
-		mode = "optimal"
+		mode = viprModeOptimal
 	}
 
 	cert := rp.buildBaseCert(mode)
@@ -6394,7 +6394,7 @@ func (r *babVIPRRecorder) finalize(res Result) {
 		}
 		cert.Incumbent = incPay
 	}
-	if mode == "bound" {
+	if mode == viprModeBound {
 		lbPay := viprBigRatToPayload(targetLB)
 		cert.TargetLB = &lbPay
 	}
@@ -6425,7 +6425,7 @@ func (tr *VIPRTrace) recordRootInfeasibleEqRow(p *CompiledProblem) {
 	if !ok {
 		return
 	}
-	cert := rp.buildBaseCert("infeasible")
+	cert := rp.buildBaseCert(viprModeInfeasible)
 	cert.Steps = steps
 	cert.RootStep = rootStep
 	tr.cert = cert
@@ -6452,7 +6452,7 @@ func buildGCDInfeasSteps(rp *viprRatProblem) ([]viprStepJSON, int, bool) {
 			}
 			return []viprStepJSON{
 				{
-					Rule: "farkas",
+					Rule: viprRuleFarkas,
 					Refs: viprOptRefs([]viprLinRefJSON{{ID: i, Mult: viprInt64Payload(mult)}}),
 				},
 			}, 0, true
@@ -6480,11 +6480,11 @@ func buildGCDInfeasSteps(rp *viprRatProblem) ([]viprStepJSON, int, bool) {
 		}
 		multPay := viprBigRatToPayload(scaleMult)
 		steps := []viprStepJSON{
-			{Rule: "lincomb", Sense: "<=", Refs: viprOptRefs([]viprLinRefJSON{{ID: i, Mult: multPay}})},
-			{Rule: "roundDown", Ref: viprIntPtr(rp.m + 0)},
-			{Rule: "lincomb", Sense: ">=", Refs: viprOptRefs([]viprLinRefJSON{{ID: i, Mult: multPay}})},
-			{Rule: "roundUp", Ref: viprIntPtr(rp.m + 2)},
-			{Rule: "farkas", Refs: viprOptRefs([]viprLinRefJSON{
+			{Rule: viprRuleLinComb, Sense: "<=", Refs: viprOptRefs([]viprLinRefJSON{{ID: i, Mult: multPay}})},
+			{Rule: viprRuleRoundDown, Ref: viprIntPtr(rp.m + 0)},
+			{Rule: viprRuleLinComb, Sense: ">=", Refs: viprOptRefs([]viprLinRefJSON{{ID: i, Mult: multPay}})},
+			{Rule: viprRuleRoundUp, Ref: viprIntPtr(rp.m + 2)},
+			{Rule: viprRuleFarkas, Refs: viprOptRefs([]viprLinRefJSON{
 				{ID: rp.m + 1, Mult: viprInt64Payload(1)},
 				{ID: rp.m + 3, Mult: viprInt64Payload(-1)},
 			})},
@@ -6508,7 +6508,7 @@ func (tr *VIPRTrace) recordPresolveInfeasible(p *CompiledProblem, disableSIMD bo
 		return
 	}
 	if steps, rootStep, okGCD := buildGCDInfeasSteps(rp); okGCD {
-		cert := rp.buildBaseCert("infeasible")
+		cert := rp.buildBaseCert(viprModeInfeasible)
 		cert.Steps = steps
 		cert.RootStep = rootStep
 		tr.cert = cert
@@ -6546,7 +6546,7 @@ func (tr *VIPRTrace) recordPresolveInfeasible(p *CompiledProblem, disableSIMD bo
 // adoptInfeasSteps copies a Mini-VIPR empty-set proof from a zero-objective
 // probe onto p while preserving p's objective vector and constant.
 func (tr *VIPRTrace) adoptInfeasSteps(p *CompiledProblem, sub *VIPRTrace) {
-	if tr == nil || p == nil || sub == nil || !sub.hasCert || sub.cert.Mode != "infeasible" {
+	if tr == nil || p == nil || sub == nil || !sub.hasCert || sub.cert.Mode != viprModeInfeasible {
 		return
 	}
 	tr.reset(p)
@@ -6554,7 +6554,7 @@ func (tr *VIPRTrace) adoptInfeasSteps(p *CompiledProblem, sub *VIPRTrace) {
 	if !ok {
 		return
 	}
-	cert := rp.buildBaseCert("infeasible")
+	cert := rp.buildBaseCert(viprModeInfeasible)
 	cert.Steps = slices.Clone(sub.cert.Steps)
 	cert.RootStep = sub.cert.RootStep
 	tr.cert = cert
@@ -6590,9 +6590,9 @@ func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Re
 		}
 		incObjNoConst := rp.evalObjNoConst(wit.primal)
 		targetLB := new(big.Rat).Add(rp.objConst, rhs)
-		mode := "bound"
+		mode := viprModeBound
 		if incObjNoConst.Cmp(rhs) <= 0 {
-			mode = "optimal"
+			mode = viprModeOptimal
 		}
 		cert := rp.buildBaseCert(mode)
 		cert.Steps = em.steps
@@ -6602,7 +6602,7 @@ func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Re
 			incPay[j] = viprBigRatToPayload(wit.primal[j])
 		}
 		cert.Incumbent = incPay
-		if mode == "bound" {
+		if mode == viprModeBound {
 			lbPay := viprBigRatToPayload(targetLB)
 			cert.TargetLB = &lbPay
 		}
@@ -6616,8 +6616,8 @@ func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Re
 		if wit.hasDirectInfeas {
 			for j := range rp.n {
 				if rp.lb[j] != nil && rp.ub[j] != nil && rp.ub[j].Cmp(rp.lb[j]) < 0 {
-					cert := rp.buildBaseCert("infeasible")
-					cert.Steps = []viprStepJSON{{Rule: "boundConflict", Col: viprIntPtr(j)}}
+					cert := rp.buildBaseCert(viprModeInfeasible)
+					cert.Steps = []viprStepJSON{{Rule: viprRuleBoundConflict, Col: viprIntPtr(j)}}
 					cert.RootStep = 0
 					trace.reset(p)
 					trace.presolveEnv = nil
@@ -6628,7 +6628,7 @@ func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Re
 				}
 			}
 			if steps, rootStep, okGCD := buildGCDInfeasSteps(rp); okGCD {
-				cert := rp.buildBaseCert("infeasible")
+				cert := rp.buildBaseCert(viprModeInfeasible)
 				cert.Steps = steps
 				cert.RootStep = rootStep
 				trace.reset(p)
@@ -6658,7 +6658,7 @@ func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Re
 		if !okF || len(em.steps) == 0 || id < rp.m {
 			return
 		}
-		cert := rp.buildBaseCert("infeasible")
+		cert := rp.buildBaseCert(viprModeInfeasible)
 		cert.Steps = em.steps
 		cert.RootStep = id - rp.m
 		trace.reset(p)
@@ -6682,7 +6682,7 @@ func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Re
 			return
 		}
 		targetLB := new(big.Rat).Add(rp.objConst, rhs)
-		cert := rp.buildBaseCert("bound")
+		cert := rp.buildBaseCert(viprModeBound)
 		cert.Steps = em.steps
 		cert.RootStep = id - rp.m
 		lbPay := viprBigRatToPayload(targetLB)

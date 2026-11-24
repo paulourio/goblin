@@ -447,7 +447,7 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 				objF := exactRatToFloat(ou)
 				lbMin := trace.TargetLB()
 				acceptDrifted := contDrifted &&
-					doc.Mode == "optimal" &&
+					doc.Mode == viprModeOptimal &&
 					res.Status == StatusOptimal &&
 					lbMin != nil &&
 					objMin.Cmp(lbMin) <= 0 &&
@@ -470,7 +470,7 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 	switch res.Status {
 	case StatusOptimal, StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
 		var bUser *big.Rat
-		if doc.Mode == "optimal" {
+		if doc.Mode == viprModeOptimal {
 			if objUser != nil {
 				bUser = objUser
 			} else if len(doc.Incumbent) == p.numVars {
@@ -503,7 +503,7 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 				}
 			} else if !isNonFinite(res.BestBound) {
 				maxSnap := 1e-5 * max(1.0, math.Abs(bf))
-				if doc.Mode == "optimal" {
+				if doc.Mode == viprModeOptimal {
 					if math.Abs(res.BestBound-bf) <= maxSnap {
 						res.BestBound = bf
 					}
@@ -1524,7 +1524,7 @@ func verifyCertifiedMIP(
 			return ErrCertificationFailed
 		}
 		chk, errChk := verifyMiniVIPRProblem(p, raw)
-		if errChk != nil || chk.mode != "infeasible" {
+		if errChk != nil || chk.mode != viprModeInfeasible {
 			return ErrCertificationFailed
 		}
 		return nil
@@ -1564,7 +1564,7 @@ func verifyCertifiedMIP(
 			return ErrCertificationFailed
 		}
 		chk, errChk := verifyMiniVIPRProblem(p, raw)
-		if errChk != nil || (chk.mode != "optimal" && chk.mode != "bound") {
+		if errChk != nil || (chk.mode != viprModeOptimal && chk.mode != viprModeBound) {
 			return ErrCertificationFailed
 		}
 		if len(chk.incumbent) != n || chk.certifiedMinLB == nil {
@@ -1574,7 +1574,7 @@ func verifyCertifiedMIP(
 			return ErrCertificationFailed
 		}
 		relTol, absTol := opt.effectiveGapTols()
-		if relTol == 0 && absTol == 0 && chk.mode != "optimal" {
+		if relTol == 0 && absTol == 0 && chk.mode != viprModeOptimal {
 			return ErrCertificationFailed
 		}
 		if !exactGapClosedRat(p, chk.incumbent, chk.certifiedMinLB, relTol, absTol) {
@@ -1640,7 +1640,7 @@ func verifyCertifiedMIP(
 				return ErrCertificationFailed
 			}
 			traceInc = chk.incumbent
-			if chk.mode == "infeasible" {
+			if chk.mode == viprModeInfeasible {
 				if len(res.Values) != 0 || res.Objective != 0 {
 					return ErrCertificationFailed
 				}
@@ -1768,7 +1768,7 @@ type certVIPRInstance struct {
 }
 
 type certVIPRVerified struct {
-	mode           string
+	mode           viprMode
 	incumbent      []*big.Rat
 	certifiedMinLB *big.Rat
 }
@@ -1799,7 +1799,7 @@ type certOrbitWitDoc struct {
 }
 
 type certStepDoc struct {
-	Rule        string             `json:"rule"`
+	Rule        viprRule           `json:"rule"`
 	Row         *int               `json:"row"`
 	Col         *int               `json:"col"`
 	Sense       *string            `json:"sense"`
@@ -1833,7 +1833,7 @@ type certVIPRDoc struct {
 	LB        []viprRawJSON `json:"lb"`
 	UB        []viprRawJSON `json:"ub"`
 	BaseRows  []viprRawJSON `json:"baseRows"`
-	Mode      string        `json:"mode"`
+	Mode      viprMode      `json:"mode"`
 	TargetLB  viprRawJSON   `json:"targetLB"`
 	Incumbent []viprRawJSON `json:"incumbent"`
 	Steps     []certStepDoc `json:"steps"`
@@ -2881,14 +2881,14 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 	var ok bool
 
 	switch step.Rule {
-	case "conIndex":
+	case viprRuleConIndex:
 		if step.Row == nil || *step.Row < 0 || *step.Row >= len(inst.baseRows) {
 			return certDerivedEntry{}, false
 		}
 		derived = certDerivedEntry{con: inst.baseRows[*step.Row]}
 		ok = true
 
-	case "assume":
+	case viprRuleAssume:
 		if step.Col == nil || *step.Col < 0 || *step.Col >= inst.n || !inst.isInt[*step.Col] {
 			return certDerivedEntry{}, false
 		}
@@ -2926,7 +2926,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		}
 		ok = true
 
-	case "lincomb":
+	case viprRuleLinComb:
 		if step.Sense == nil || step.Refs == nil {
 			return certDerivedEntry{}, false
 		}
@@ -2940,13 +2940,13 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		}
 		derived, ok = certEvalLinComb(inst, entries, sense, *step.Refs, bnds)
 
-	case "roundDown":
+	case viprRuleRoundDown:
 		derived, ok = certEvalRoundStep(inst, entries, step.Ref, true)
 
-	case "roundUp":
+	case viprRuleRoundUp:
 		derived, ok = certEvalRoundStep(inst, entries, step.Ref, false)
 
-	case "branch":
+	case viprRuleBranch:
 		splitInt, okS := parseVIPRBigInt(step.SplitVal)
 		if !okS {
 			return certDerivedEntry{}, false
@@ -2959,7 +2959,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		derived = certDerivedEntry{con: cOut, assumptions: asms}
 		ok = true
 
-	case "orbitBranch":
+	case viprRuleOrbitBranch:
 		if step.Witnesses == nil {
 			return certDerivedEntry{}, false
 		}
@@ -3014,7 +3014,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		derived = certDerivedEntry{con: cOut, assumptions: outAsms}
 		ok = true
 
-	case "farkas":
+	case viprRuleFarkas:
 		if step.Refs == nil {
 			return certDerivedEntry{}, false
 		}
@@ -3029,7 +3029,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		derived = e
 		ok = true
 
-	case "boundConflict":
+	case viprRuleBoundConflict:
 		if step.Col == nil || *step.Col < 0 || *step.Col >= inst.n {
 			return certDerivedEntry{}, false
 		}
@@ -3054,7 +3054,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		}
 		ok = true
 
-	case "dualBound":
+	case viprRuleDualBound:
 		if step.Refs == nil {
 			return certDerivedEntry{}, false
 		}
@@ -3069,7 +3069,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		derived = e
 		ok = true
 
-	case "safeDual":
+	case viprRuleSafeDual:
 		if step.Refs == nil {
 			return certDerivedEntry{}, false
 		}
@@ -3951,14 +3951,14 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 	var incumbent []*big.Rat
 	var targetLB *big.Rat
 	switch doc.Mode {
-	case "infeasible":
-	case "optimal":
+	case viprModeInfeasible:
+	case viprModeOptimal:
 		var okInc bool
 		incumbent, okInc = certParseRatSlice(doc.Incumbent, inst.n)
 		if !okInc {
 			return certVIPRVerified{}, ErrCertificationFailed
 		}
-	case "bound":
+	case viprModeBound:
 		rLB, okLB := parseVIPRRatValue(doc.TargetLB)
 		if !okLB {
 			return certVIPRVerified{}, ErrCertificationFailed
@@ -4005,13 +4005,13 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 	}
 
 	switch doc.Mode {
-	case "infeasible":
+	case viprModeInfeasible:
 		if !certIsUnsatCon(rootEnt.con) {
 			return certVIPRVerified{}, ErrCertificationFailed
 		}
-		return certVIPRVerified{mode: "infeasible"}, nil
+		return certVIPRVerified{mode: viprModeInfeasible}, nil
 
-	case "optimal":
+	case viprModeOptimal:
 		incLin, certMinLB, okInc := certVerifyIncumbentAndObj(inst, origEnvInst, incumbent)
 		if !okInc {
 			return certVIPRVerified{}, ErrCertificationFailed
@@ -4025,12 +4025,12 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 			}
 		}
 		return certVIPRVerified{
-			mode:           "optimal",
+			mode:           viprModeOptimal,
 			incumbent:      incumbent,
 			certifiedMinLB: certMinLB,
 		}, nil
 
-	case "bound":
+	case viprModeBound:
 		if incumbent != nil {
 			if _, _, okInc := certVerifyIncumbentAndObj(inst, origEnvInst, incumbent); !okInc {
 				return certVIPRVerified{}, ErrCertificationFailed
@@ -4046,7 +4046,7 @@ func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (c
 			}
 		}
 		return certVIPRVerified{
-			mode:           "bound",
+			mode:           viprModeBound,
 			incumbent:      incumbent,
 			certifiedMinLB: targetLB,
 		}, nil

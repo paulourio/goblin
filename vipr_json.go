@@ -11,6 +11,30 @@ import (
 // package init tasks into binaries that do not enable VIPR tracing or certification.
 type viprRawJSON []byte
 
+type viprRule string
+
+const (
+	viprRuleAssume        viprRule = "assume"
+	viprRuleConIndex      viprRule = "conIndex"
+	viprRuleLinComb       viprRule = "lincomb"
+	viprRuleFarkas        viprRule = "farkas"
+	viprRuleDualBound     viprRule = "dualBound"
+	viprRuleSafeDual      viprRule = "safeDual"
+	viprRuleRoundDown     viprRule = "roundDown"
+	viprRuleRoundUp       viprRule = "roundUp"
+	viprRuleBoundConflict viprRule = "boundConflict"
+	viprRuleBranch        viprRule = "branch"
+	viprRuleOrbitBranch   viprRule = "orbitBranch"
+)
+
+type viprMode string
+
+const (
+	viprModeOptimal    viprMode = "optimal"
+	viprModeInfeasible viprMode = "infeasible"
+	viprModeBound      viprMode = "bound"
+)
+
 func (v viprRawJSON) MarshalJSON() ([]byte, error) {
 	if v == nil {
 		return []byte("null"), nil
@@ -574,12 +598,12 @@ func decodeVIPRBoolPtrField(dst **bool, val viprRawJSON) bool {
 	return true
 }
 
-func decodeVIPROptStringField(dst *string, val viprRawJSON) bool {
+func decodeVIPROptStringField[S ~string](dst *S, val viprRawJSON) bool {
 	s, ok := viprUnmarshalOptString(val)
 	if !ok {
 		return false
 	}
-	*dst = s
+	*dst = S(s)
 	return true
 }
 
@@ -1035,7 +1059,7 @@ func appendVIPRPresolveStepJSON(dst []byte, s viprPresolveStepJSON) []byte {
 
 func appendVIPRStepJSON(dst []byte, s viprStepJSON) []byte {
 	dst = append(dst, `{"rule":`...)
-	dst = appendVIPRQuoted(dst, s.Rule)
+	dst = appendVIPRQuoted(dst, string(s.Rule))
 	dst = appendVIPROptIntField(dst, `,"row":`, s.Row)
 	dst = appendVIPROptIntField(dst, `,"col":`, s.Col)
 	if s.Sense != "" {
@@ -1152,7 +1176,7 @@ func marshalVIPRCertJSON(c viprCertJSON) []byte {
 	dst = append(dst, `,"baseRows":`...)
 	dst = appendVIPRBaseRows(dst, c.BaseRows)
 	dst = append(dst, `,"mode":`...)
-	dst = appendVIPRQuoted(dst, c.Mode)
+	dst = appendVIPRQuoted(dst, string(c.Mode))
 	if c.TargetLB != nil {
 		dst = append(dst, `,"targetLB":`...)
 		dst = appendVIPRRatPayload(dst, *c.TargetLB)
