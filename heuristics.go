@@ -594,7 +594,8 @@ func tryPropagatedRounding(
 	auxSolver *LPSolver,
 	searchShift float64,
 	isContLinked []bool,
-) (sol []float64, objMin float64, ok bool) {
+	maxIterCap int,
+) (sol []float64, objMin float64, itersUsed int, ok bool) {
 	n := p.numVars
 	hasCont := len(p.intCols) < n
 
@@ -629,7 +630,7 @@ func tryPropagatedRounding(
 	}
 	if fixedAny {
 		if !propagateBounds(p, baseHLB, baseHUB, 1) {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
 	}
 	lpFallbackSolver := auxSolver
@@ -741,7 +742,13 @@ func tryPropagatedRounding(
 				}
 			}
 		} else if auxSolver != nil {
-			if sSol, _, sOk := solveFixedIntContinuousLP(p, hlb, hub, lpFallbackSolver, isContLinked); sOk {
+			rem := maxIterCap - itersUsed
+			if rem <= 0 {
+				break
+			}
+			sSol, _, usedIt, sOk := solveFixedIntContinuousLPBudgeted(p, hlb, hub, lpFallbackSolver, isContLinked, rem)
+			itersUsed += usedIt
+			if sOk {
 				if sObj := evalLinearSum(searchShift, p.objMin, sSol, n); !math.IsNaN(sObj) && !math.IsInf(sObj, 0) && sObj < bestObj {
 					bestObj = sObj
 					bestSol = sSol
@@ -751,9 +758,9 @@ func tryPropagatedRounding(
 	}
 
 	if bestSol != nil {
-		return bestSol, bestObj, true
+		return bestSol, bestObj, itersUsed, true
 	}
-	return nil, 0, false
+	return nil, 0, itersUsed, false
 }
 
 type epigraphRowTerm struct {
@@ -1341,6 +1348,21 @@ func trySingleRowCompletion(p *CompiledProblem, hlb, hub []float64) ([]float64, 
 	return nil, 0, false
 }
 
+func solveBudgetedSubLP(lp *LPSolver, baseIter, maxIterCap int, itersUsed *int) (LPResult, bool) {
+	rem := maxIterCap - *itersUsed
+	if rem <= 0 {
+		return LPResult{Status: StatusIterationLimit}, false
+	}
+	if baseIter > 0 {
+		lp.MaxIter = min(baseIter, rem)
+	} else {
+		lp.MaxIter = rem
+	}
+	res := lp.Solve()
+	*itersUsed += res.Iterations
+	return res, true
+}
+
 // solveFixedIntContinuousLP optimizes the continuous (and continuous-linked integer) variables
 // after fixing primary integer decisions, trying closed-form epigraph and single-row solvers before LP fallback.
 func solveFixedIntContinuousLP(
@@ -1349,11 +1371,22 @@ func solveFixedIntContinuousLP(
 	auxSolver *LPSolver,
 	isContLinked []bool,
 ) (sol []float64, objMin float64, ok bool) {
+	sol, objMin, _, ok = solveFixedIntContinuousLPBudgeted(p, hlb, hub, auxSolver, isContLinked, math.MaxInt)
+	return sol, objMin, ok
+}
+
+func solveFixedIntContinuousLPBudgeted(
+	p *CompiledProblem,
+	hlb, hub []float64,
+	auxSolver *LPSolver,
+	isContLinked []bool,
+	maxIterCap int,
+) (sol []float64, objMin float64, itersUsed int, ok bool) {
 	if !propagateBounds(p, hlb, hub, nodePropPasses) {
-		return nil, 0, false
+		return nil, 0, 0, false
 	}
 	if eSol, eObj, eOk := solveEpigraphContinuousLP(p, hlb, hub, isContLinked); eOk {
-		return eSol, eObj, true
+		return eSol, eObj, 0, true
 	}
 	n := p.numVars
 	nCont := n - len(p.intCols)
@@ -1366,10 +1399,13 @@ func solveFixedIntContinuousLP(
 	}
 	if !hasUnfixedInt {
 		if cSol, cObj, cOk := trySingleRowCompletion(p, hlb, hub); cOk {
-			return cSol, cObj, true
+			return cSol, cObj, 0, true
 		}
 	}
 	if !hasUnfixedInt && auxSolver != nil && n <= heurCompactLPMaxVars {
+		if maxIterCap <= 0 {
+			return nil, 0, 0, false
+		}
 		var savedLB, savedUB []float64
 		if auxSolver.scaled {
 			savedLB = slices.Clone(auxSolver.origLB)
@@ -1378,24 +1414,30 @@ func solveFixedIntContinuousLP(
 			savedLB = slices.Clone(auxSolver.ws.lb[:n])
 			savedUB = slices.Clone(auxSolver.ws.ub[:n])
 		}
+		prevMaxIter := auxSolver.MaxIter
+		if prevMaxIter <= 0 || maxIterCap < prevMaxIter {
+			auxSolver.MaxIter = maxIterCap
+		}
 		auxSolver.SetStructuralBounds(hlb, hub)
 		res := auxSolver.Solve()
+		auxSolver.MaxIter = prevMaxIter
 		auxSolver.SetStructuralBounds(savedLB, savedUB)
+		itersUsed += res.Iterations
 		if res.Status == StatusOptimal {
 			if fixedContFeasibleScaled(p, res.Primal, hlb, hub) {
 				obj := minObjective(p, res.Primal)
 				if !math.IsNaN(obj) && !math.IsInf(obj, 0) {
-					return slices.Clone(res.Primal), obj, true
+					return slices.Clone(res.Primal), obj, itersUsed, true
 				}
 			}
 		}
-		if res.Status == StatusInfeasible {
-			return nil, 0, false
+		if res.Status == StatusInfeasible || maxIterCap-itersUsed <= 0 {
+			return nil, 0, itersUsed, false
 		}
 	}
 
-	if auxSolver == nil && n > heurNoAuxSkipVars {
-		return nil, 0, false
+	if (auxSolver == nil && n > heurNoAuxSkipVars) || maxIterCap-itersUsed <= 0 {
+		return nil, 0, itersUsed, false
 	}
 
 	subModel := NewModel("__cont_lp__", Minimize)
@@ -1435,12 +1477,12 @@ func solveFixedIntContinuousLP(
 		}
 		remRHS, remOK := evalFixedRowResidual(p.colIdx[s:e], p.rowVal[s:e], hlb, isFree, p.rowRHS[i])
 		if !remOK {
-			return nil, 0, false
+			return nil, 0, itersUsed, false
 		}
 		sense := p.rowSense[i]
 		if len(terms) == 0 {
 			if !emptyRowResidualFeasible(sense, remRHS, incumbentRowTol(p, sc, i, primalTol)) {
-				return nil, 0, false
+				return nil, 0, itersUsed, false
 			}
 			continue
 		}
@@ -1455,14 +1497,15 @@ func solveFixedIntContinuousLP(
 	ws := AcquireWorkspace(subP.numVars, subP.numConstraints)
 	defer ReleaseWorkspace(ws)
 	lp := NewLPSolver(subP, ws)
+	baseIter := lp.MaxIter
 	if auxSolver != nil {
 		lp.Deadline = auxSolver.Deadline
 		lp.Done = auxSolver.Done
 		lp.DisableSIMD = auxSolver.DisableSIMD
 	}
-	res := lp.Solve()
-	if res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
-		return nil, 0, false
+	res, ranLP := solveBudgetedSubLP(lp, baseIter, maxIterCap, &itersUsed)
+	if !ranLP || res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
+		return nil, 0, itersUsed, false
 	}
 
 	var subLB, subUB []float64
@@ -1501,7 +1544,10 @@ func solveFixedIntContinuousLP(
 				subLB[idx] = lo
 				subUB[idx] = lo
 				lp.SetStructuralBounds(subLB, subUB)
-				resLo := lp.Solve()
+				resLo, ranLo := solveBudgetedSubLP(lp, baseIter, maxIterCap, &itersUsed)
+				if !ranLo {
+					return nil, 0, itersUsed, false
+				}
 				okLo := resLo.Status == StatusOptimal && len(resLo.Primal) == subP.numVars
 
 				if hi > lo {
@@ -1511,8 +1557,8 @@ func solveFixedIntContinuousLP(
 					subLB[idx] = hi
 					subUB[idx] = hi
 					lp.SetStructuralBounds(subLB, subUB)
-					resHi := lp.Solve()
-					okHi := resHi.Status == StatusOptimal && len(resHi.Primal) == subP.numVars
+					resHi, ranHi := solveBudgetedSubLP(lp, baseIter, maxIterCap, &itersUsed)
+					okHi := ranHi && resHi.Status == StatusOptimal && len(resHi.Primal) == subP.numVars
 					if okHi && (!okLo || lpMinWithConst(subP, resHi) < lpMinWithConst(subP, resLo)-heurDedupTol) {
 						res = resHi
 						skippedIntegralFix = false
@@ -1520,7 +1566,7 @@ func solveFixedIntContinuousLP(
 					}
 				}
 				if !okLo {
-					return nil, 0, false
+					return nil, 0, itersUsed, false
 				}
 				subLB[idx] = lo
 				subUB[idx] = lo
@@ -1546,9 +1592,10 @@ func solveFixedIntContinuousLP(
 		// Re-solve once with all batched integer fixings applied when rounding small
 		// integral residuals violated a high-coefficient constraint.
 		lp.SetStructuralBounds(subLB, subUB)
-		res = lp.Solve()
-		if res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
-			return nil, 0, false
+		var ranFix bool
+		res, ranFix = solveBudgetedSubLP(lp, baseIter, maxIterCap, &itersUsed)
+		if !ranFix || res.Status != StatusOptimal || len(res.Primal) != subP.numVars {
+			return nil, 0, itersUsed, false
 		}
 		copy(cand, hlb)
 		for idx, col := range freeCols {
@@ -1563,11 +1610,11 @@ func solveFixedIntContinuousLP(
 	if feasCand {
 		obj := minObjective(p, cand)
 		if math.IsNaN(obj) || math.IsInf(obj, 0) {
-			return nil, 0, false
+			return nil, 0, itersUsed, false
 		}
-		return cand, obj, true
+		return cand, obj, itersUsed, true
 	}
-	return nil, 0, false
+	return nil, 0, itersUsed, false
 }
 
 type divingReq struct {
@@ -1578,6 +1625,8 @@ type divingReq struct {
 	diveSolver    *LPSolver
 	bestObjMin    float64
 	searchShift   float64
+	maxIterCap    int
+	itersUsed     *int
 	onlyEqSupport bool
 	isContLinked  []bool
 }
@@ -1591,6 +1640,19 @@ func tryFractionalDiving(req *divingReq) (sol []float64, objMin float64, ok bool
 	searchShift := req.searchShift
 	onlyEqSupport := req.onlyEqSupport
 	isContLinked := req.isContLinked
+	capLeft := req.maxIterCap
+	if capLeft == 0 && req.itersUsed == nil {
+		capLeft = math.MaxInt
+	}
+	used := 0
+	defer func() {
+		if req.itersUsed != nil {
+			*req.itersUsed += used
+		}
+	}()
+	if capLeft <= 0 {
+		return nil, 0, false
+	}
 	n := p.numVars
 	isRootFrac := make([]bool, n)
 	for _, col := range p.intCols {
@@ -1651,11 +1713,14 @@ func tryFractionalDiving(req *divingReq) (sol []float64, objMin float64, ok bool
 	branch1DUB := make([]float64, n)
 	branch1X := make([]float64, n)
 
+	prevMaxIter := 0
 	if diveSolver != nil {
 		prevFast := diveSolver.fastHeuristicPrimal
+		prevMaxIter = diveSolver.MaxIter
 		diveSolver.fastHeuristicPrimal = true
 		defer func() {
 			diveSolver.fastHeuristicPrimal = prevFast
+			diveSolver.MaxIter = prevMaxIter
 		}()
 	}
 
@@ -1732,7 +1797,13 @@ func tryFractionalDiving(req *divingReq) (sol []float64, objMin float64, ok bool
 					fixLB[col] = iv
 					fixUB[col] = iv
 				}
-				if lpSol, _, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, diveSolver, isContLinked); okLP {
+				rem := capLeft - used
+				if rem <= 0 {
+					return nil, 0, false
+				}
+				lpSol, _, subUsed, okLP := solveFixedIntContinuousLPBudgeted(p, fixLB, fixUB, diveSolver, isContLinked, rem)
+				used += subUsed
+				if okLP {
 					if lpObj := evalLinearSum(searchShift, p.objMin, lpSol, n); !math.IsNaN(lpObj) && !math.IsInf(lpObj, 0) && lpObj < bestObjMin {
 						return lpSol, lpObj, true
 					}
@@ -1762,8 +1833,20 @@ func tryFractionalDiving(req *divingReq) (sol []float64, objMin float64, ok bool
 		var m1 float64
 		ok1 := propagateFromCol(p, dlb, dub, bestCol, &rowQueue, inQueue)
 		if ok1 {
+			rem := capLeft - used
+			if rem <= 0 {
+				return nil, 0, false
+			}
+			if diveSolver != nil {
+				if prevMaxIter > 0 {
+					diveSolver.MaxIter = min(prevMaxIter, rem)
+				} else {
+					diveSolver.MaxIter = rem
+				}
+			}
 			diveSolver.SetStructuralBounds(dlb, dub)
 			res1 = diveSolver.Solve()
+			used += res1.Iterations
 			m1 = lpMinWithShift(p, res1, searchShift)
 			ok1 = res1.Status == StatusOptimal && !math.IsNaN(m1) && !math.IsInf(m1, 0) && m1 < bestObjMin-heurIntBoundTol
 		}
@@ -1796,10 +1879,23 @@ func tryFractionalDiving(req *divingReq) (sol []float64, objMin float64, ok bool
 		var m2 float64
 		ok2 := propagateFromCol(p, dlb, dub, bestCol, &rowQueue, inQueue)
 		if ok2 {
-			diveSolver.SetStructuralBounds(dlb, dub)
-			res2 = diveSolver.Solve()
-			m2 = lpMinWithShift(p, res2, searchShift)
-			ok2 = res2.Status == StatusOptimal && !math.IsNaN(m2) && !math.IsInf(m2, 0) && m2 < bestObjMin-heurIntBoundTol
+			rem := capLeft - used
+			if rem <= 0 {
+				ok2 = false
+			} else {
+				if diveSolver != nil {
+					if prevMaxIter > 0 {
+						diveSolver.MaxIter = min(prevMaxIter, rem)
+					} else {
+						diveSolver.MaxIter = rem
+					}
+				}
+				diveSolver.SetStructuralBounds(dlb, dub)
+				res2 = diveSolver.Solve()
+				used += res2.Iterations
+				m2 = lpMinWithShift(p, res2, searchShift)
+				ok2 = res2.Status == StatusOptimal && !math.IsNaN(m2) && !math.IsInf(m2, 0) && m2 < bestObjMin-heurIntBoundTol
+			}
 		}
 
 		if ok2 && (!ok1 || m2 <= m1+intFeasTol) {
@@ -2082,9 +2178,13 @@ func tryRootSubMIP(req *rootSubMIPReq) (sol []float64, objMin float64, nodesUsed
 			fixLB[col] = cand[col]
 			fixUB[col] = cand[col]
 		}
-		if lpSol, _, okLP := solveFixedIntContinuousLP(p, fixLB, fixUB, lpSolver, isContLinked); okLP {
-			if lpObj := evalLinearSum(searchShift, p.objMin, lpSol, n); !math.IsNaN(lpObj) && !math.IsInf(lpObj, 0) && lpObj < bestObjMin-heurIntBoundTol {
-				return lpSol, lpObj, usedN, usedIt, true
+		if rem := maxIterCap - usedIt; rem > 0 {
+			lpSol, _, subUsed, okLP := solveFixedIntContinuousLPBudgeted(p, fixLB, fixUB, lpSolver, isContLinked, rem)
+			usedIt += subUsed
+			if okLP {
+				if lpObj := evalLinearSum(searchShift, p.objMin, lpSol, n); !math.IsNaN(lpObj) && !math.IsInf(lpObj, 0) && lpObj < bestObjMin-heurIntBoundTol {
+					return lpSol, lpObj, usedN, usedIt, true
+				}
 			}
 		}
 		return nil, 0, usedN, usedIt, false
@@ -2302,16 +2402,17 @@ func fpEvaluateCandidate(
 	xCand, curLB, curUB, rlb, rub []float64,
 	propagatedOK bool,
 	isContLinked []bool,
-) (sol []float64, objMin float64, ok bool) {
+	maxIterCap int,
+) (sol []float64, objMin float64, itersUsed int, ok bool) {
 	if len(p.intCols) == p.numVars {
 		if !incumbentFeasibleScaled(p, xCand, primalTol) {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
 		obj := minObjective(p, xCand)
 		if math.IsNaN(obj) || math.IsInf(obj, 0) {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
-		return slices.Clone(xCand), obj, true
+		return slices.Clone(xCand), obj, 0, true
 	}
 	if !propagatedOK {
 		copy(rlb, curLB)
@@ -2325,7 +2426,7 @@ func fpEvaluateCandidate(
 			rub[col] = v
 		}
 	}
-	return solveFixedIntContinuousLP(p, rlb, rub, nil, isContLinked)
+	return solveFixedIntContinuousLPBudgeted(p, rlb, rub, nil, isContLinked, maxIterCap)
 }
 
 type feasPumpReq struct {
@@ -2454,7 +2555,9 @@ func tryFeasibilityPump(req *feasPumpReq) (sol []float64, objMin float64, itersU
 		improvedThisPass := false
 		if !slices.Contains(evalHashes, h) {
 			evalHashes = append(evalHashes, h)
-			if cand, _, cOK := fpEvaluateCandidate(p, xInt, curLB, curUB, rlb, rub, propOK, isContLinked); cOK {
+			cand, _, subIt, cOK := fpEvaluateCandidate(p, xInt, curLB, curUB, rlb, rub, propOK, isContLinked, iterBudget-itersUsed)
+			itersUsed += subIt
+			if cOK {
 				if cObj := evalLinearSum(searchShift, p.objMin, cand, n); !math.IsNaN(cObj) && !math.IsInf(cObj, 0) && cObj < curBestObjMin-heurIntBoundTol {
 					bestSol = cand
 					curBestObjMin = cObj
@@ -2526,11 +2629,15 @@ func tryFeasibilityPump(req *feasPumpReq) (sol []float64, objMin float64, itersU
 					rlb[col] = v
 					rub[col] = v
 				}
-				if pSol, _, pOK := solveFixedIntContinuousLP(p, rlb, rub, nil, isContLinked); pOK {
-					if pObj := evalLinearSum(searchShift, p.objMin, pSol, n); !math.IsNaN(pObj) && !math.IsInf(pObj, 0) && pObj < curBestObjMin-heurIntBoundTol {
-						bestSol = pSol
-						curBestObjMin = pObj
-						foundCount++
+				if rem := iterBudget - itersUsed; rem > 0 {
+					pSol, _, subIt, pOK := solveFixedIntContinuousLPBudgeted(p, rlb, rub, nil, isContLinked, rem)
+					itersUsed += subIt
+					if pOK {
+						if pObj := evalLinearSum(searchShift, p.objMin, pSol, n); !math.IsNaN(pObj) && !math.IsInf(pObj, 0) && pObj < curBestObjMin-heurIntBoundTol {
+							bestSol = pSol
+							curBestObjMin = pObj
+							foundCount++
+						}
 					}
 				}
 			}

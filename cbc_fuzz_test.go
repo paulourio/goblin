@@ -258,6 +258,9 @@ func buildDiffMADBoundaryExtreme(rng *rand.Rand, tag string) *gb.Model {
 // CBC quirks), so we always assert full invariants on pure-Go and only compare against
 // CBC when CBC itself produced a numerically clean reference.
 func cbcOracleReliable(p *gb.CompiledProblem, res gb.Result) (reliable, hasIncumbent bool) {
+	if res.FellBackToGo {
+		return false, false
+	}
 	switch res.Status {
 	case gb.StatusInfeasible, gb.StatusUnbounded, gb.StatusNumericalError, gb.StatusUndefined:
 		return false, false
@@ -402,6 +405,9 @@ func FuzzMADDifferentialCBC(f *testing.F) {
 			gb.WithTimeLimit(timeLimit),
 			gb.WithMaxNodes(maxNodes),
 		)
+		if regime%5 != 4 && resCBC.FellBackToGo {
+			t.Fatalf("[%s] unexpected pure-Go fallback on normal-scaled MAD model", tag)
+		}
 
 		resGo := mustSolveCompiled(t, p,
 			gb.WithTimeLimit(timeLimit),
@@ -480,10 +486,18 @@ func FuzzMADMediumDecomposedCBC(f *testing.F) {
 		)
 		goElapsed := time.Since(tGo)
 
-		// Always enforce strict soundness on pure-Go; only validate CBC directly when
-		// upstream C++ CBC did not hit its own extreme-scale numerical tolerance drift
-		// (see cbcOracleReliable).
+		// Always enforce strict soundness on pure-Go; skip CBC-vs-Go cross-oracle comparison
+		// when BackendCBC delegated execution to pure-Go (FellBackToGo) or when upstream C++
+		// CBC hit its own extreme-scale numerical tolerance drift (see cbcOracleReliable).
+		if resCBC.Backend != gb.BackendCBC {
+			t.Fatalf("[%s] expected CBC backend, got %v", tag, resCBC.Backend)
+		}
 		assertDecomposedMADSoundness(t, tag, "go", p, resGo, inst.plantedObj)
+		if resCBC.FellBackToGo {
+			verifyMILPInvariants(t, tag+"/go", p, resGo)
+			_ = verifyOptionalIncumbent(t, tag+"/go", p, resGo)
+			return
+		}
 		if cbcOK, _ := cbcOracleReliable(p, resCBC); cbcOK {
 			assertDecomposedMADSoundness(t, tag, "cbc", p, resCBC, inst.plantedObj)
 		}
@@ -526,6 +540,9 @@ func FuzzMADExactOptimumCBC(f *testing.F) {
 		const maxNodes = 1500
 
 		resCBC := mustSolveCompiled(t, p, gb.WithCBC(), gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
+		if resCBC.FellBackToGo {
+			t.Fatalf("[%s] unexpected pure-Go fallback on normal-scaled exact-opt MAD model", tag)
+		}
 		resGo := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
 
 		assertExactOptMADSoundness(t, tag, "cbc", p, resCBC, inst.exactLP, inst.exactMILP, false)
@@ -567,10 +584,18 @@ func FuzzMADAdversarialCBC(f *testing.F) {
 		resCBC := mustSolveCompiled(t, p, gb.WithCBC(), gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
 		resGo := mustSolveCompiled(t, p, gb.WithTimeLimit(timeLimit), gb.WithMaxNodes(maxNodes))
 
-		// Always enforce strict soundness on pure-Go; only validate CBC directly when
-		// upstream C++ CBC did not hit its own extreme-scale numerical tolerance drift
-		// (see cbcOracleReliable).
+		// Always enforce strict soundness on pure-Go; skip CBC-vs-Go cross-oracle comparison
+		// when BackendCBC delegated execution to pure-Go (FellBackToGo) or when upstream C++
+		// CBC hit its own extreme-scale numerical tolerance drift (see cbcOracleReliable).
+		if resCBC.Backend != gb.BackendCBC {
+			t.Fatalf("[%s] expected CBC backend, got %v", tag, resCBC.Backend)
+		}
 		assertDecomposedMADSoundness(t, tag, "go", p, resGo, inst.plantedObj)
+		if resCBC.FellBackToGo {
+			verifyMILPInvariants(t, tag+"/go", p, resGo)
+			_ = verifyOptionalIncumbent(t, tag+"/go", p, resGo)
+			return
+		}
 		if cbcOK, _ := cbcOracleReliable(p, resCBC); cbcOK {
 			assertDecomposedMADSoundness(t, tag, "cbc", p, resCBC, inst.plantedObj)
 		}

@@ -258,6 +258,83 @@ func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 		t.Fatal("expected WriteMPS error on reserved 'MARKER' row name")
 	}
 
+	// Identifiers starting with '$' or '*' must be rejected so MPS comment prefixes cannot truncate cards.
+	for _, badPrefix := range []string{"$", "*"} {
+		mBadProb := gb.NewModel(badPrefix+"prob", gb.Minimize)
+		xp := mBadProb.AddContVar("x", 0, 1)
+		mBadProb.SetObjective(gb.VarExpr(xp))
+		if err := format.WriteMPS(mBadProb.Compile(), &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected WriteMPS error on problem name starting with %q", badPrefix)
+		}
+
+		mBadObj := gb.NewModel("mps_bad_obj", gb.Minimize)
+		xo := mBadObj.AddContVar("x", 0, 1)
+		mBadObj.SetObjectiveNamed(badPrefix+"obj", gb.VarExpr(xo))
+		if err := format.WriteMPS(mBadObj.Compile(), &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected WriteMPS error on objective name starting with %q", badPrefix)
+		}
+
+		mBadVar := gb.NewModel("mps_bad_var_pfx", gb.Minimize)
+		xv := mBadVar.AddContVar(badPrefix+"x", 0, 1)
+		mBadVar.SetObjective(gb.VarExpr(xv))
+		if err := format.WriteMPS(mBadVar.Compile(), &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected WriteMPS error on variable name starting with %q", badPrefix)
+		}
+
+		mBadRow := gb.NewModel("mps_bad_row_pfx", gb.Minimize)
+		xr := mBadRow.AddContVar("x", 0, 1)
+		mBadRow.SetObjective(gb.VarExpr(xr))
+		mBadRow.AddConstraint(badPrefix+"cap", gb.VarExpr(xr).Le(5))
+		if err := format.WriteMPS(mBadRow.Compile(), &bytes.Buffer{}); err == nil {
+			t.Fatalf("expected WriteMPS error on row name starting with %q", badPrefix)
+		}
+	}
+
+	// Verify fixed-MPS 1-based column offsets (5, 15, 25 -> 0-based 4, 14, 24) for <=8-char names
+	// and space-separated fallback when names exceed 8 characters.
+	mAlign := gb.NewModel("mps_align", gb.Minimize)
+	xShort := mAlign.AddContVar("x1", 2.5, 9.5)
+	xLong := mAlign.AddContVar("long_var_01", 1.25, 4.75)
+	mAlign.SetObjective(gb.NewExpr(xShort.T(3.5), xLong.T(-2.0)))
+	mAlign.AddConstraint("r1", gb.NewExpr(xShort.T(1.5), xLong.T(0.5)).Le(12.5))
+	mAlign.AddConstraint("long_row_01", gb.VarExpr(xShort).Ge(3.0))
+	var alignBuf bytes.Buffer
+	if err := format.WriteMPS(mAlign.Compile(), &alignBuf); err != nil {
+		t.Fatalf("WriteMPS align failed: %v", err)
+	}
+	alignMPS := alignBuf.String()
+	for _, wantLine := range []string{
+		"    x1        OBJ       3.5",
+		"    x1        r1        1.5",
+		"    x1        long_row_01 1",
+		"    long_var_01 OBJ       -2",
+		"    RHS       r1        12.5",
+		"    RHS       long_row_01 3",
+		" LO BND       x1        2.5",
+		" UP BND       x1        9.5",
+		" LO BND       long_var_01 1.25",
+	} {
+		if !strings.Contains(alignMPS, wantLine+"\n") {
+			t.Fatalf("missing aligned MPS line %q in:\n%s", wantLine, alignMPS)
+		}
+	}
+	fixedColLine := "    x1        r1        1.5"
+	if strings.Index(fixedColLine, "x1") != 4 || strings.Index(fixedColLine, "r1") != 14 || strings.Index(fixedColLine, "1.5") != 24 {
+		t.Fatalf("unexpected fixed-MPS column offsets in %q", fixedColLine)
+	}
+
+	// Sub-tolerance bound conflict (lb = 5 + 1e-9 > ub = 5) must also normalize to (0, 1).
+	mConfTiny := gb.NewModel("mps_conf_tiny", gb.Minimize)
+	xConfTiny := mConfTiny.AddContVar("x_tiny", 5.0+1e-9, 5.0)
+	mConfTiny.SetObjective(gb.VarExpr(xConfTiny))
+	var confTinyBuf bytes.Buffer
+	if err := format.WriteMPS(mConfTiny.Compile(), &confTinyBuf); err != nil {
+		t.Fatalf("WriteMPS tiny conflicting bounds failed: %v", err)
+	}
+	if !strings.Contains(confTinyBuf.String(), " LO BND       x_tiny    1\n") {
+		t.Fatalf("expected normalized LO BND 1 for tiny bound conflict:\n%s", confTinyBuf.String())
+	}
+
 	// Conflicting integer bounds (lb > ub) must lower cleanly without emitting invalid UI < LI BOUNDS.
 	mConfInt := gb.NewModel("mps_conf_int", gb.Minimize)
 	xConf := mConfInt.AddIntVar("x_conf", 5, 3)
@@ -302,6 +379,19 @@ func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 		lowerBig := strings.ToLower(string(outBig))
 		if strings.Contains(lowerBig, "errors on input") || !strings.Contains(lowerBig, "infeasible") {
 			t.Fatalf("expected clean Infeasible from cbc on conflicting 1e305 > 1e304 MPS, got:\n%s", string(outBig))
+		}
+
+		mpsTinyFile := filepath.Join(t.TempDir(), "conf_tiny.mps")
+		if err := os.WriteFile(mpsTinyFile, confTinyBuf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write temp tiny MPS: %v", err)
+		}
+		outTiny, err := exec.CommandContext(t.Context(), cbcBin, mpsTinyFile, "-solve", "-quit").CombinedOutput()
+		if err != nil {
+			t.Fatalf("cbc failed on conflicting 5+1e-9 > 5 MPS: %v\n%s", err, string(outTiny))
+		}
+		lowerTiny := strings.ToLower(string(outTiny))
+		if strings.Contains(lowerTiny, "errors on input") || !strings.Contains(lowerTiny, "infeasible") {
+			t.Fatalf("expected clean Infeasible from cbc on conflicting 5+1e-9 > 5 MPS, got:\n%s", string(outTiny))
 		}
 	}
 }
@@ -392,6 +482,13 @@ func TestPuLPJSONEdgeCases(t *testing.T) {
 	}
 }
 
+func referenceMPSNameField(s string) string {
+	if len(s) <= 8 {
+		return s + strings.Repeat(" ", 10-len(s))
+	}
+	return s + " "
+}
+
 func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	probName := p.Name()
 	objName := p.ObjName()
@@ -404,11 +501,7 @@ func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	for i := range numRows {
 		seenRows[p.RowName(i)] = struct{}{}
 	}
-	type conflictRow struct {
-		name string
-		rhs  float64
-	}
-	var conflictRows []conflictRow
+	var conflictRows []string
 	conflictRowByCol := make(map[int]string)
 	for j := range numVars {
 		lb, ub := p.VarBounds(j)
@@ -425,11 +518,7 @@ func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 				}
 			}
 			seenRows[rname] = struct{}{}
-			rhs := ub
-			if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
-				rhs = 0
-			}
-			conflictRows = append(conflictRows, conflictRow{name: rname, rhs: rhs})
+			conflictRows = append(conflictRows, rname)
 			conflictRowByCol[j] = rname
 		}
 	}
@@ -449,8 +538,8 @@ func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		}
 		_, _ = fmt.Fprintf(w, " %s  %s\n", senseChar, p.RowName(i))
 	}
-	for _, cr := range conflictRows {
-		_, _ = fmt.Fprintf(w, " L  %s\n", cr.name)
+	for _, rname := range conflictRows {
+		_, _ = fmt.Fprintf(w, " L  %s\n", rname)
 	}
 	_, _ = io.WriteString(w, "COLUMNS\n")
 	inIntBlock := false
@@ -463,22 +552,22 @@ func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 			_, _ = io.WriteString(w, "    MARKEND   'MARKER'                 'INTEND'\n")
 			inIntBlock = false
 		}
-		vname := p.VarName(j)
+		vField := referenceMPSNameField(p.VarName(j))
 		hasEntry := false
 		if objMin := p.ObjMinCoeff(j); objMin != 0 {
-			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, fmtFloat(objMin))
+			_, _ = fmt.Fprintf(w, "    %s%s%s\n", vField, referenceMPSNameField(objName), fmtFloat(objMin))
 			hasEntry = true
 		}
 		p.ForEachColTerm(j, func(r int, val float64) {
-			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, p.RowName(r), fmtFloat(val))
+			_, _ = fmt.Fprintf(w, "    %s%s%s\n", vField, referenceMPSNameField(p.RowName(r)), fmtFloat(val))
 			hasEntry = true
 		})
 		if crName, ok := conflictRowByCol[j]; ok {
-			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, crName, "1")
+			_, _ = fmt.Fprintf(w, "    %s%s1\n", vField, referenceMPSNameField(crName))
 			hasEntry = true
 		}
 		if !hasEntry {
-			_, _ = fmt.Fprintf(w, "    %-10s %-10s %15s\n", vname, objName, "0")
+			_, _ = fmt.Fprintf(w, "    %s%s0\n", vField, referenceMPSNameField(objName))
 		}
 	}
 	if inIntBlock {
@@ -490,67 +579,59 @@ func referenceWriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 		if sense == gb.Maximize {
 			senseSign = -1.0
 		}
-		_, _ = fmt.Fprintf(w, "    RHS       %-10s %15s\n", objName, fmtFloat(-senseSign*objConst))
+		_, _ = fmt.Fprintf(w, "    RHS       %s%s\n", referenceMPSNameField(objName), fmtFloat(-senseSign*objConst))
 	}
 	for i := range numRows {
 		if rhs := p.RowRHS(i); rhs != 0 {
-			_, _ = fmt.Fprintf(w, "    RHS       %-10s %15s\n", p.RowName(i), fmtFloat(rhs))
-		}
-	}
-	for _, cr := range conflictRows {
-		if cr.rhs != 0 {
-			_, _ = fmt.Fprintf(w, "    RHS       %-10s %15s\n", cr.name, fmtFloat(cr.rhs))
+			_, _ = fmt.Fprintf(w, "    RHS       %s%s\n", referenceMPSNameField(p.RowName(i)), fmtFloat(rhs))
 		}
 	}
 	_, _ = io.WriteString(w, "BOUNDS\n")
 	for j := range numVars {
 		vname := p.VarName(j)
+		vField := referenceMPSNameField(vname)
 		lb, ub := p.VarBounds(j)
 		cat := p.VarCategory(j)
 		if _, isConflict := conflictRowByCol[j]; isConflict {
-			effLB := lb
-			if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
-				effLB = 1
-			}
 			bndType := "LO"
 			if cat != gb.Continuous {
 				bndType = "LI"
 			}
-			_, _ = fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, fmtFloat(effLB))
+			_, _ = fmt.Fprintf(w, " %s BND       %s1\n", bndType, vField)
 			if cat != gb.Continuous {
-				_, _ = fmt.Fprintf(w, " PL BND       %-10s\n", vname)
+				_, _ = fmt.Fprintf(w, " PL BND       %s\n", vname)
 			}
 			continue
 		}
 		if cat == gb.Binary && lb == 0 && ub == 1 {
-			_, _ = fmt.Fprintf(w, " BV BND       %-10s\n", vname)
+			_, _ = fmt.Fprintf(w, " BV BND       %s\n", vname)
 			continue
 		}
 		if math.IsInf(lb, -1) && math.IsInf(ub, 1) {
-			_, _ = fmt.Fprintf(w, " FR BND       %-10s\n", vname)
+			_, _ = fmt.Fprintf(w, " FR BND       %s\n", vname)
 			continue
 		}
 		if lb == ub {
-			_, _ = fmt.Fprintf(w, " FX BND       %-10s %15s\n", vname, fmtFloat(lb))
+			_, _ = fmt.Fprintf(w, " FX BND       %s%s\n", vField, fmtFloat(lb))
 			continue
 		}
 		if math.IsInf(lb, -1) {
-			_, _ = fmt.Fprintf(w, " MI BND       %-10s\n", vname)
+			_, _ = fmt.Fprintf(w, " MI BND       %s\n", vname)
 		} else if lb != 0 || ub < 0 || cat != gb.Continuous {
 			bndType := "LO"
 			if cat != gb.Continuous {
 				bndType = "LI"
 			}
-			_, _ = fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, fmtFloat(lb))
+			_, _ = fmt.Fprintf(w, " %s BND       %s%s\n", bndType, vField, fmtFloat(lb))
 		}
 		if !math.IsInf(ub, 1) {
 			bndType := "UP"
 			if cat != gb.Continuous {
 				bndType = "UI"
 			}
-			_, _ = fmt.Fprintf(w, " %s BND       %-10s %15s\n", bndType, vname, fmtFloat(ub))
+			_, _ = fmt.Fprintf(w, " %s BND       %s%s\n", bndType, vField, fmtFloat(ub))
 		} else if cat != gb.Continuous {
-			_, _ = fmt.Fprintf(w, " PL BND       %-10s\n", vname)
+			_, _ = fmt.Fprintf(w, " PL BND       %s\n", vname)
 		}
 	}
 	_, _ = io.WriteString(w, "ENDATA\n")

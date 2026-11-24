@@ -33,26 +33,12 @@ func mpsBoundTag(cat gb.VarCategory, contTag, intTag string) string {
 	return contTag
 }
 
-func appendMPSField(buf []byte, s string, width int, rightAlign bool) []byte {
-	pad := width - len(s)
-	if pad <= 0 {
-		return append(buf, s...)
-	}
-	if rightAlign {
-		buf = append(buf, mpsSpaces[:pad]...)
-		return append(buf, s...)
-	}
+func appendMPSNameField(buf []byte, s string) []byte {
 	buf = append(buf, s...)
-	return append(buf, mpsSpaces[:pad]...)
-}
-
-func appendMPSFloatField(buf []byte, val float64, width int) []byte {
-	var numBuf [32]byte
-	num := strconv.AppendFloat(numBuf[:0], val, 'g', -1, 64)
-	if pad := width - len(num); pad > 0 {
-		buf = append(buf, mpsSpaces[:pad]...)
+	if len(s) <= 8 {
+		return append(buf, mpsSpaces[:10-len(s)]...)
 	}
-	return append(buf, num...)
+	return append(buf, ' ')
 }
 
 type mpsWriter struct {
@@ -102,11 +88,9 @@ func (mw *mpsWriter) writeColEntry(vname, rname string, val float64) {
 	}
 	buf := mw.buf
 	buf = append(buf, "    "...)
-	buf = appendMPSField(buf, vname, 10, false)
-	buf = append(buf, ' ')
-	buf = appendMPSField(buf, rname, 10, false)
-	buf = append(buf, ' ')
-	buf = appendMPSFloatField(buf, val, 15)
+	buf = appendMPSNameField(buf, vname)
+	buf = appendMPSNameField(buf, rname)
+	buf = strconv.AppendFloat(buf, val, 'g', -1, 64)
 	buf = append(buf, '\n')
 	mw.buf = buf
 	mw.maybeFlush()
@@ -118,11 +102,9 @@ func (mw *mpsWriter) writeColEntryText(vname, rname, numStr string) {
 	}
 	buf := mw.buf
 	buf = append(buf, "    "...)
-	buf = appendMPSField(buf, vname, 10, false)
-	buf = append(buf, ' ')
-	buf = appendMPSField(buf, rname, 10, false)
-	buf = append(buf, ' ')
-	buf = appendMPSField(buf, numStr, 15, true)
+	buf = appendMPSNameField(buf, vname)
+	buf = appendMPSNameField(buf, rname)
+	buf = append(buf, numStr...)
 	buf = append(buf, '\n')
 	mw.buf = buf
 	mw.maybeFlush()
@@ -134,15 +116,14 @@ func (mw *mpsWriter) writeRHSEntry(rname string, val float64) {
 	}
 	buf := mw.buf
 	buf = append(buf, "    RHS       "...)
-	buf = appendMPSField(buf, rname, 10, false)
-	buf = append(buf, ' ')
-	buf = appendMPSFloatField(buf, val, 15)
+	buf = appendMPSNameField(buf, rname)
+	buf = strconv.AppendFloat(buf, val, 'g', -1, 64)
 	buf = append(buf, '\n')
 	mw.buf = buf
 	mw.maybeFlush()
 }
 
-func (mw *mpsWriter) writeBoundVal(bndType, vname string, val float64) {
+func (mw *mpsWriter) writeBoundEntry(bndType, vname string, val float64, hasVal bool) {
 	if mw.err != nil {
 		return
 	}
@@ -150,23 +131,12 @@ func (mw *mpsWriter) writeBoundVal(bndType, vname string, val float64) {
 	buf = append(buf, ' ')
 	buf = append(buf, bndType...)
 	buf = append(buf, " BND       "...)
-	buf = appendMPSField(buf, vname, 10, false)
-	buf = append(buf, ' ')
-	buf = appendMPSFloatField(buf, val, 15)
-	buf = append(buf, '\n')
-	mw.buf = buf
-	mw.maybeFlush()
-}
-
-func (mw *mpsWriter) writeBoundFlag(bndType, vname string) {
-	if mw.err != nil {
-		return
+	if hasVal {
+		buf = appendMPSNameField(buf, vname)
+		buf = strconv.AppendFloat(buf, val, 'g', -1, 64)
+	} else {
+		buf = append(buf, vname...)
 	}
-	buf := mw.buf
-	buf = append(buf, ' ')
-	buf = append(buf, bndType...)
-	buf = append(buf, " BND       "...)
-	buf = appendMPSField(buf, vname, 10, false)
 	buf = append(buf, '\n')
 	mw.buf = buf
 	mw.maybeFlush()
@@ -178,6 +148,9 @@ func validateMPSIdent(kind, s string, allowEmpty bool) error {
 			return nil
 		}
 		return fmt.Errorf("MPS %s identifier cannot be empty", kind)
+	}
+	if s[0] == '$' || s[0] == '*' {
+		return fmt.Errorf("MPS %s identifier %q cannot start with comment prefix %q", kind, s, s[0])
 	}
 	if strings.EqualFold(s, "'MARKER'") {
 		return fmt.Errorf("MPS %s identifier %q is reserved for INTORG/INTEND markers", kind, s)
@@ -256,11 +229,7 @@ func validateMPSProblem(p *gb.CompiledProblem) (probName, objName string, confli
 					}
 				}
 				seenRows[rname] = struct{}{}
-				rhs, effLB := ub, lb
-				if math.IsInf(lb, 1) || math.IsInf(ub, -1) || lb-ub > 1e-7 || math.Abs(lb) >= 1e20 || math.Abs(ub) >= 1e20 {
-					rhs, effLB = 0, 1
-				}
-				conflictRows = append(conflictRows, mpsConflictRow{col: j, name: rname, rhs: rhs, effLB: effLB})
+				conflictRows = append(conflictRows, mpsConflictRow{col: j, name: rname, rhs: 0, effLB: 1})
 			}
 		}
 	}
@@ -372,9 +341,9 @@ func writeMPSBoundsSection(mw *mpsWriter, p *gb.CompiledProblem, conflictRows []
 		if crIdx < len(conflictRows) && conflictRows[crIdx].col == j {
 			cr := conflictRows[crIdx]
 			crIdx++
-			mw.writeBoundVal(mpsBoundTag(cat, "LO", "LI"), vname, cr.effLB)
+			mw.writeBoundEntry(mpsBoundTag(cat, "LO", "LI"), vname, cr.effLB, true)
 			if cat != gb.Continuous {
-				mw.writeBoundFlag("PL", vname)
+				mw.writeBoundEntry("PL", vname, 0, false)
 			}
 			if mw.err != nil {
 				return
@@ -382,26 +351,26 @@ func writeMPSBoundsSection(mw *mpsWriter, p *gb.CompiledProblem, conflictRows []
 			continue
 		}
 		if cat == gb.Binary && lb == 0 && ub == 1 {
-			mw.writeBoundFlag("BV", vname)
+			mw.writeBoundEntry("BV", vname, 0, false)
 			continue
 		}
 		if math.IsInf(lb, -1) && math.IsInf(ub, 1) {
-			mw.writeBoundFlag("FR", vname)
+			mw.writeBoundEntry("FR", vname, 0, false)
 			continue
 		}
 		if lb == ub {
-			mw.writeBoundVal("FX", vname, lb)
+			mw.writeBoundEntry("FX", vname, lb, true)
 			continue
 		}
 		if math.IsInf(lb, -1) {
-			mw.writeBoundFlag("MI", vname)
+			mw.writeBoundEntry("MI", vname, 0, false)
 		} else if lb != 0 || ub < 0 || cat != gb.Continuous {
-			mw.writeBoundVal(mpsBoundTag(cat, "LO", "LI"), vname, lb)
+			mw.writeBoundEntry(mpsBoundTag(cat, "LO", "LI"), vname, lb, true)
 		}
 		if !math.IsInf(ub, 1) {
-			mw.writeBoundVal(mpsBoundTag(cat, "UP", "UI"), vname, ub)
+			mw.writeBoundEntry(mpsBoundTag(cat, "UP", "UI"), vname, ub, true)
 		} else if cat != gb.Continuous {
-			mw.writeBoundFlag("PL", vname)
+			mw.writeBoundEntry("PL", vname, 0, false)
 		}
 		if mw.err != nil {
 			return

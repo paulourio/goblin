@@ -1396,7 +1396,11 @@ func separateCoverFromSparseRow(
 		return cutPlane{}, false
 	}
 	finalRHS := float64(finalRHSInt)
-	if int64(finalRHS) < finalRHSInt {
+	if finalRHSInt < (1 << 53) {
+		if int64(finalRHS) < finalRHSInt {
+			finalRHS = nextUp(finalRHS)
+		}
+	} else if finalRHS < 0x1p63 && int64(finalRHS) < finalRHSInt {
 		finalRHS = nextUp(finalRHS)
 	}
 

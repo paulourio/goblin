@@ -192,6 +192,7 @@ type branchSelectReq struct {
 	absGapTol      float64
 	objConstMin    float64
 	sbBudgetLeft   int
+	strictExactGap bool
 }
 
 type parallelTreeReq struct {
@@ -219,6 +220,8 @@ type polishIncumbentReq struct {
 	fixScratchLB *[]float64
 	fixScratchUB *[]float64
 	ensureHeur   func() *LPSolver
+	iterLeft     func() int
+	addIters     func(int)
 }
 
 type sbOutcome struct {
@@ -670,10 +673,16 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 		}
 	}
 
+	var rootVN *viprTreeNode
+	if b.vipr != nil {
+		rootVN = b.vipr.rootNode()
+	}
+
 	if isIntegerFeasible(p, rootRes.Primal) {
 		if cand, ok := b.polishIncumbent(rootRes.Primal); ok {
 			b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
-			if b.bestPrimal != nil && (b.gapClosed(b.rootLPMin, b.bestObjMin, opts.RelGapTol) || (b.vipr != nil && b.vipr.exactNodeGapClosed(b.vipr.rootNode(), b.bestPrimal))) {
+			if b.rootGapClosed(rootVN, &b.rootLPMin) {
+				b.rootLPUser = b.userObjFromSearchMin(b.rootLPMin)
 				return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootLPMin), b.rootLPUser, 1, 0, true))
 			}
 		}
@@ -684,7 +693,8 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 		b.runPreCutHeuristics(rootRes.Primal)
 	}
 
-	if b.bestPrimal != nil && (b.gapClosed(b.rootLPMin, b.bestObjMin, opts.RelGapTol) || (b.vipr != nil && b.vipr.exactNodeGapClosed(b.vipr.rootNode(), b.bestPrimal))) {
+	if b.rootGapClosed(rootVN, &b.rootLPMin) {
+		b.rootLPUser = b.userObjFromSearchMin(b.rootLPMin)
 		return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootLPMin), b.rootLPUser, b.nodesExplored, 0, true))
 	}
 
@@ -727,7 +737,8 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 			}
 		}
 	}
-	if b.bestPrimal != nil && (b.gapClosed(b.rootCutMin, b.bestObjMin, opts.RelGapTol) || (b.vipr != nil && b.vipr.exactNodeGapClosed(b.vipr.rootNode(), b.bestPrimal))) {
+	if b.rootGapClosed(rootVN, &b.rootCutMin) {
+		b.rootCutUser = b.userObjFromSearchMin(b.rootCutMin)
 		return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootCutMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, true))
 	}
 
@@ -890,14 +901,53 @@ func (b *babEngine) runRootSubMIP(primal []float64, hs *LPSolver, isContLinked [
 	return ok && b.acceptIncumbent(sol, objMin)
 }
 
+func (b *babEngine) runPropagatedRounding(primal, curLB, curUB []float64, hs *LPSolver, isContLinked []bool) bool {
+	remIter := b.iterLeft()
+	if remIter <= 0 {
+		return false
+	}
+	sol, objMin, usedIt, ok := tryPropagatedRounding(b.p, primal, curLB, curUB, hs, b.searchShift, isContLinked, remIter)
+	b.totalLPIters += usedIt
+	if b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter {
+		b.hitIterLimit = true
+	}
+	return ok && b.acceptIncumbent(sol, objMin)
+}
+
+func (b *babEngine) runFractionalDiving(primal []float64, hs *LPSolver, isContLinked []bool, onlyEqSupport bool) {
+	remIter := b.iterLeft()
+	if remIter <= 0 {
+		return
+	}
+	usedIt := 0
+	sol, objMin, ok := tryFractionalDiving(&divingReq{
+		p:             b.p,
+		rootPrimal:    primal,
+		baseLB:        b.p.varLB,
+		baseUB:        b.p.varUB,
+		diveSolver:    hs,
+		bestObjMin:    b.bestObjMin,
+		searchShift:   b.searchShift,
+		maxIterCap:    remIter,
+		itersUsed:     &usedIt,
+		onlyEqSupport: onlyEqSupport,
+		isContLinked:  isContLinked,
+	})
+	b.totalLPIters += usedIt
+	if b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter {
+		b.hitIterLimit = true
+	}
+	if ok {
+		b.acceptIncumbent(sol, objMin)
+	}
+}
+
 func (b *babEngine) runPreCutHeuristics(rootPrimal []float64) {
 	p := b.p
 	isContLinked := b.contLinkedIntCols()
 	b.heurSolver.CopyRootBasisFrom(b.lpSolver)
 	if !b.timeExpired() {
-		if sol, objMin, ok := tryPropagatedRounding(p, rootPrimal, p.varLB, p.varUB, b.heurSolver, b.searchShift, isContLinked); ok {
-			b.acceptIncumbent(sol, objMin)
-		}
+		b.runPropagatedRounding(rootPrimal, p.varLB, p.varUB, b.heurSolver, isContLinked)
 	}
 	// Defer fractional diving and root sub-MIP until after root cuts when cutting is enabled.
 	if b.cutsEnabled() {
@@ -905,13 +955,7 @@ func (b *babEngine) runPreCutHeuristics(rootPrimal []float64) {
 	}
 	if !b.timeExpired() && !b.gapClosed(b.rootLPMin, b.bestObjMin, b.opts.RelGapTol) {
 		b.heurSolver.CopyRootBasisFrom(b.lpSolver)
-		if sol, objMin, ok := tryFractionalDiving(&divingReq{
-			p: p, rootPrimal: rootPrimal, baseLB: p.varLB, baseUB: p.varUB,
-			diveSolver: b.heurSolver, bestObjMin: b.bestObjMin, searchShift: b.searchShift,
-			onlyEqSupport: true, isContLinked: isContLinked,
-		}); ok {
-			b.acceptIncumbent(sol, objMin)
-		}
+		b.runFractionalDiving(rootPrimal, b.heurSolver, isContLinked, true)
 	}
 	if !b.timeExpired() && !b.gapClosed(b.rootLPMin, b.bestObjMin, b.opts.RelGapTol) {
 		b.heurSolver.CopyRootBasisFrom(b.lpSolver)
@@ -949,12 +993,38 @@ func (b *babEngine) rootCutZeroGainTol(base float64) float64 {
 	return max(zeroGainAbsTol, effGainRel*math.Abs(base))
 }
 
+func (b *babEngine) strictExactVIPRGap() bool {
+	return b.vipr != nil && b.opts.RelGapTol == 0 && b.opts.AbsGapTol == 0
+}
+
+func (b *babEngine) rootGapClosed(rootVN *viprTreeNode, boundMin *float64) bool {
+	if b.bestPrimal == nil {
+		return false
+	}
+	if b.strictExactVIPRGap() {
+		prune, _ := b.shouldPruneNode(rootVN, boundMin, b.opts.RelGapTol)
+		return prune
+	}
+	return b.gapClosed(*boundMin, b.bestObjMin, b.opts.RelGapTol) ||
+		(b.vipr != nil && b.vipr.exactNodeGapClosed(rootVN, b.bestPrimal))
+}
+
 func (b *babEngine) shouldPruneNode(vn *viprTreeNode, nodeMin *float64, pruneRelTol float64) (prune, infeas bool) {
 	floatPrune := *nodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol)
-	if !floatPrune && (b.vipr == nil || !b.vipr.exactNodeGapClosed(vn, b.bestPrimal)) {
-		return false, false
-	}
-	if b.vipr != nil && b.bestPrimal != nil && b.opts.RelGapTol == 0 && b.opts.AbsGapTol == 0 {
+	if b.strictExactVIPRGap() {
+		if b.bestPrimal == nil {
+			return false, false
+		}
+		if b.vipr.exactSubtreeGapClosed(vn, b.bestPrimal) {
+			if f, ok := b.vipr.exactDualSearchMinFloor(vn, b.searchShift); ok && f > *nodeMin {
+				*nodeMin = f
+			}
+			return true, false
+		}
+		nearCutoff := floatPrune || *nodeMin >= b.bestObjMin-1e-9*max(1.0, math.Abs(b.bestObjMin))
+		if !nearCutoff {
+			return false, false
+		}
 		closed, inf := b.vipr.tryTightenNodeDualForPrune(vn, b.bestPrimal)
 		if inf {
 			return false, true
@@ -965,6 +1035,10 @@ func (b *babEngine) shouldPruneNode(vn *viprTreeNode, nodeMin *float64, pruneRel
 			}
 			return true, false
 		}
+		return false, false
+	}
+	if !floatPrune && (b.vipr == nil || !b.vipr.exactNodeGapClosed(vn, b.bestPrimal)) {
+		return false, false
 	}
 	return true, false
 }
@@ -1058,7 +1132,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		if isIntegerFeasible(p, curLPRes.Primal) {
 			if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 				b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
-				if b.bestPrimal != nil && b.gapClosed(nextMin, b.bestObjMin, b.opts.RelGapTol) {
+				if b.bestPrimal != nil && !b.strictExactVIPRGap() && b.gapClosed(nextMin, b.bestObjMin, b.opts.RelGapTol) {
 					anchorLPRes = curLPRes
 					anchorCuts = b.cutsAdded
 					break
@@ -1129,13 +1203,7 @@ func (b *babEngine) runPostCutHeuristics(cutPrimal []float64) {
 		// Cuts did not tighten the root relaxation, so run deferred diving and the
 		// feasibility pump before resorting to a root sub-MIP.
 		hs.CopyRootBasisFrom(b.lpSolver)
-		if sol, objMin, ok := tryFractionalDiving(&divingReq{
-			p: p, rootPrimal: cutPrimal, baseLB: p.varLB, baseUB: p.varUB,
-			diveSolver: hs, bestObjMin: b.bestObjMin, searchShift: b.searchShift,
-			onlyEqSupport: true, isContLinked: isContLinked,
-		}); ok {
-			b.acceptIncumbent(sol, objMin)
-		}
+		b.runFractionalDiving(cutPrimal, hs, isContLinked, true)
 		if !b.timeExpired() && !b.gapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol) {
 			hs.CopyRootBasisFrom(b.lpSolver)
 			b.runFeasibilityPump(cutPrimal, b.rootCutMin, hs, isContLinked)
@@ -1150,18 +1218,10 @@ func (b *babEngine) runPostCutHeuristics(cutPrimal []float64) {
 		b.postCutSubMIPFound = true
 	}
 	if !b.timeExpired() && !b.postCutSubMIPFound && !b.gapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol) {
-		if sol, objMin, ok := tryPropagatedRounding(p, cutPrimal, p.varLB, p.varUB, hs, b.searchShift, isContLinked); ok {
-			b.acceptIncumbent(sol, objMin)
-		}
+		b.runPropagatedRounding(cutPrimal, p.varLB, p.varUB, hs, isContLinked)
 	}
 	if !b.timeExpired() && !b.postCutSubMIPFound && !b.gapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol) {
-		if sol, objMin, ok := tryFractionalDiving(&divingReq{
-			p: p, rootPrimal: cutPrimal, baseLB: p.varLB, baseUB: p.varUB,
-			diveSolver: hs, bestObjMin: b.bestObjMin, searchShift: b.searchShift,
-			onlyEqSupport: p.numVars > postCutDiveVarMin, isContLinked: isContLinked,
-		}); ok {
-			b.acceptIncumbent(sol, objMin)
-		}
+		b.runFractionalDiving(cutPrimal, hs, isContLinked, p.numVars > postCutDiveVarMin)
 	}
 	if b.bestPrimal == nil && !b.timeExpired() && !b.gapClosed(b.rootCutMin, b.bestObjMin, b.opts.RelGapTol) {
 		b.runFeasibilityPump(cutPrimal, b.rootCutMin, hs, isContLinked)
@@ -1346,8 +1406,10 @@ func (b *babEngine) tryInTreeCuts(
 	if b.vipr != nil {
 		b.vipr.recordNodeDual(node.viprNode, b.lpSolver, nextRes)
 	}
-	if *nodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol) {
-		b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+	if prune, inf := b.shouldPruneNode(node.viprNode, nodeMin, pruneRelTol); prune || inf {
+		if prune {
+			b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+		}
 		return true, false
 	}
 	if isIntegerFeasible(b.p, nodeRes.Primal) {
@@ -1356,8 +1418,10 @@ func (b *babEngine) tryInTreeCuts(
 				*lastIncumbentNode = b.nodesExplored
 				*heurMisses = 0
 			}
-			if *nodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol) {
-				b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+			if prune, inf := b.shouldPruneNode(node.viprNode, nodeMin, pruneRelTol); prune || inf {
+				if prune {
+					b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+				}
 				return true, false
 			}
 		}
@@ -1466,10 +1530,10 @@ func (b *babEngine) resolveRootLP(
 			b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
 		}
 	}
-	if b.bestPrimal != nil && b.gapClosed(*rootNodeMin, b.bestObjMin, b.opts.RelGapTol) {
+	if b.rootGapClosed(rootVN, rootNodeMin) {
 		return b.optimalRootResult(min(b.bestObjMin, *rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true, true
 	}
-	if *rootNodeMin >= b.bestObjMin-b.opts.AbsGapTol {
+	if !b.strictExactVIPRGap() && *rootNodeMin >= b.bestObjMin-b.opts.AbsGapTol {
 		b.prunedMinBound = min(b.prunedMinBound, *rootNodeMin)
 		return Result{}, false, true
 	}
@@ -1515,8 +1579,10 @@ func (b *babEngine) resolveNodeAfterFix(
 	if b.vipr != nil {
 		b.vipr.recordNodeDual(node.viprNode, b.lpSolver, reRes)
 	}
-	if *nodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol) {
-		b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+	if prune, inf := b.shouldPruneNode(node.viprNode, nodeMin, pruneRelTol); prune || inf {
+		if prune {
+			b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+		}
 		return postFixPruned
 	}
 	if isIntegerFeasible(b.p, nodeRes.Primal) {
@@ -1525,8 +1591,10 @@ func (b *babEngine) resolveNodeAfterFix(
 				*lastIncumbentNode = b.nodesExplored
 				*heurMisses = 0
 			}
-			if *nodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol) {
-				b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+			if prune, inf := b.shouldPruneNode(node.viprNode, nodeMin, pruneRelTol); prune || inf {
+				if prune {
+					b.prunedMinBound = min(b.prunedMinBound, *nodeMin)
+				}
 				return postFixPruned
 			}
 		}
@@ -1732,6 +1800,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			pruneRelTol:    pruneRelTol,
 			absGapTol:      b.opts.AbsGapTol,
 			objConstMin:    objConstMin,
+			strictExactGap: b.strictExactVIPRGap(),
 		})
 		b.sbIters += sb.probeIters
 		b.prunedMinBound = min(b.prunedMinBound, sb.prunedBound)
@@ -1794,17 +1863,18 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 	if brVar == -1 {
 		if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 			b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
-			if b.bestPrimal != nil && b.gapClosed(rootNodeMin, b.bestObjMin, b.opts.RelGapTol) {
+			if b.rootGapClosed(rootVN, &rootNodeMin) {
 				return b.optimalRootResult(min(b.bestObjMin, rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true
 			}
 		}
 		brVar, brVal = selectNearIntegralBranchVar(p, curLPRes.Primal, curLB, curUB)
 	}
 	if brVar == -1 {
-		if leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
-			p, curLB, curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.vipr, rootVN,
-		); leafOK {
-			b.totalLPIters += leafRes.Iterations
+		leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
+			p, curLB, curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.iterLeft(), b.vipr, rootVN,
+		)
+		b.totalLPIters += leafRes.Iterations
+		if leafOK {
 			if leafInfeas {
 				return Result{}, false
 			}
@@ -1812,12 +1882,26 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			if cand, ok := b.polishIncumbent(leafRes.Primal); ok {
 				b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
 			}
-			if b.bestPrimal != nil && (rootNodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(rootNodeMin, b.bestObjMin, b.opts.RelGapTol)) {
-				return b.optimalRootResult(min(b.bestObjMin, rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true
+			if prune, inf := b.shouldPruneNode(rootVN, &rootNodeMin, b.opts.RelGapTol); prune || inf {
+				if prune && b.bestPrimal != nil {
+					return b.optimalRootResult(min(b.bestObjMin, rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true
+				}
+				return Result{}, false
 			}
 		}
 		b.unsolvedMinBound = rootNodeMin
-		b.hitLPLimitStatus = StatusNumericalError
+		switch {
+		case !leafOK && (leafRes.Status == StatusTimeLimit || b.timeExpired()):
+			b.hitTimeLimit = true
+		case !leafOK && (leafRes.Status == StatusIterationLimit || (b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter)):
+			b.hitIterLimit = true
+		case b.timeExpired():
+			b.hitTimeLimit = true
+		case b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter:
+			b.hitIterLimit = true
+		default:
+			b.hitLPLimitStatus = StatusNumericalError
+		}
 		return Result{}, false
 	}
 
@@ -1915,7 +1999,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		}
 
 		if (node.lowerBound >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(node.lowerBound, b.bestObjMin, pruneRelTol)) &&
-			(b.vipr == nil || b.bestPrimal == nil || b.opts.RelGapTol != 0 || b.opts.AbsGapTol != 0 || b.vipr.exactSubtreeGapClosed(node.viprNode, b.bestPrimal)) {
+			(b.vipr == nil || (!b.strictExactVIPRGap() && b.bestPrimal != nil) || b.vipr.exactSubtreeGapClosed(node.viprNode, b.bestPrimal)) {
 			b.prunedMinBound = min(b.prunedMinBound, node.lowerBound)
 			continue
 		}
@@ -2033,8 +2117,8 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		stride := nodeHeurStride(n, heurMisses)
 		shallowHeur := !b.postCutSubMIPFound && heurMisses < heurMedMissCap && node.depth <= heurShallowDepth && (n <= largeModelHeurVarCap || node.depth <= 1)
 		runHeur := shallowHeur || b.nodesExplored%stride == 0
-		if b.opts.EnableHeuristics && !b.timeExpired() && runHeur {
-			if sol, objMin, ok := tryPropagatedRounding(p, nodeRes.Primal, curLB, curUB, b.heurSolver, b.searchShift, isContLinked); ok && b.acceptIncumbent(sol, objMin) {
+		if b.opts.EnableHeuristics && !b.timeExpired() && b.iterLeft() > 0 && runHeur {
+			if b.runPropagatedRounding(nodeRes.Primal, curLB, curUB, b.heurSolver, isContLinked) {
 				lastIncumbentNode = b.nodesExplored
 				heurMisses = 0
 				if prune, inf := b.shouldPruneNode(node.viprNode, &nodeMin, pruneRelTol); prune || inf {
@@ -2107,6 +2191,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 				absGapTol:      b.opts.AbsGapTol,
 				objConstMin:    objConstMin,
 				sbBudgetLeft:   sbBudgetLeft,
+				strictExactGap: b.strictExactVIPRGap(),
 			})
 			b.sbIters += sb.probeIters
 			b.prunedMinBound = min(b.prunedMinBound, sb.prunedBound)
@@ -2166,10 +2251,11 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			bVar, bVal = selectNearIntegralBranchVar(p, nodeRes.Primal, curLB, curUB)
 		}
 		if bVar == -1 {
-			if leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
-				p, curLB, curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.vipr, node.viprNode,
-			); leafOK {
-				b.totalLPIters += leafRes.Iterations
+			leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
+				p, curLB, curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, b.ensureHeurSolver, b.iterLeft(), b.vipr, node.viprNode,
+			)
+			b.totalLPIters += leafRes.Iterations
+			if leafOK {
 				if leafInfeas {
 					continue
 				}
@@ -2190,8 +2276,22 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			// Nothing can be branched on: keep the node's bound so the final status
 			// never claims an optimal proof over an unexplored region.
 			b.unsolvedMinBound = min(b.unsolvedMinBound, nodeMin)
-			if b.hitLPLimitStatus == StatusNotSolved {
-				b.hitLPLimitStatus = StatusNumericalError
+			switch {
+			case !leafOK && (leafRes.Status == StatusTimeLimit || b.timeExpired()):
+				b.hitTimeLimit = true
+			case !leafOK && (leafRes.Status == StatusIterationLimit || (b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter)):
+				b.hitIterLimit = true
+			case b.timeExpired():
+				b.hitTimeLimit = true
+			case b.opts.MaxIter > 0 && b.totalLPIters >= b.opts.MaxIter:
+				b.hitIterLimit = true
+			default:
+				if b.hitLPLimitStatus == StatusNotSolved {
+					b.hitLPLimitStatus = StatusNumericalError
+				}
+			}
+			if b.hitTimeLimit || b.hitIterLimit {
+				break
 			}
 			continue
 		}
@@ -2539,7 +2639,12 @@ func (w *parWorker) ensureHeurSolver() *LPSolver {
 }
 
 func (w *parWorker) polishIncumbent(x []float64) ([]float64, bool) {
-	b := w.coord.b
+	c := w.coord
+	b := c.b
+	var iterLeftFn func() int
+	if b.opts.MaxIter > 0 {
+		iterLeftFn = func() int { return c.iterLeft(0) }
+	}
 	return polishIncumbentWith(&polishIncumbentReq{
 		p:            b.p,
 		exactIntRows: b.exactIntRows,
@@ -2550,6 +2655,8 @@ func (w *parWorker) polishIncumbent(x []float64) ([]float64, bool) {
 		fixScratchLB: &w.fixScratchLB,
 		fixScratchUB: &w.fixScratchUB,
 		ensureHeur:   w.ensureHeurSolver,
+		iterLeft:     iterLeftFn,
+		addIters:     c.addIters,
 	})
 }
 
@@ -2806,12 +2913,14 @@ func (w *parWorker) run() {
 		stride := nodeHeurStride(n, w.heurMisses)
 		shallowHeur := !b.postCutSubMIPFound && w.heurMisses < heurMedMissCap && node.depth <= heurShallowDepth && (n <= largeModelHeurVarCap || node.depth <= 1)
 		runHeur := shallowHeur || w.nodesProcessed%stride == 0
-		if b.opts.EnableHeuristics && !b.timeExpired() && runHeur {
+		if b.opts.EnableHeuristics && !b.timeExpired() && c.iterLeft(0) > 0 && runHeur {
 			var hs *LPSolver
 			if hasCont {
 				hs = w.ensureHeurSolver()
 			}
-			if sol, objMin, ok := tryPropagatedRounding(p, nodeRes.Primal, w.curLB, w.curUB, hs, b.searchShift, c.isContLinked); ok && c.acceptIncumbent(sol, objMin) {
+			sol, objMin, usedIt, ok := tryPropagatedRounding(p, nodeRes.Primal, w.curLB, w.curUB, hs, b.searchShift, c.isContLinked, c.iterLeft(0))
+			c.addIters(usedIt)
+			if ok && c.acceptIncumbent(sol, objMin) {
 				w.heurMisses = 0
 				if w.isPruned(nodeMin) {
 					prevKind = nodeOutcomePruned
@@ -2914,10 +3023,11 @@ func (w *parWorker) run() {
 			bVar, bVal = selectNearIntegralBranchVar(p, nodeRes.Primal, w.curLB, w.curUB)
 		}
 		if bVar == -1 {
-			if leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
-				p, w.curLB, w.curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, w.ensureHeurSolver, nil, nil,
-			); leafOK {
-				c.addIters(leafRes.Iterations)
+			leafRes, leafMin, leafInfeas, leafOK := resolveFixedIntLeaf(
+				p, w.curLB, w.curUB, b.exactIntRows, b.searchShift, b.deadline, b.done, w.ensureHeurSolver, c.iterLeft(0), nil, nil,
+			)
+			c.addIters(leafRes.Iterations)
+			if leafOK {
 				if leafInfeas {
 					continue
 				}
@@ -2932,6 +3042,16 @@ func (w *parWorker) run() {
 					prevBound = nodeMin
 					continue
 				}
+			}
+			if (!leafOK && (leafRes.Status == StatusTimeLimit || b.timeExpired())) || b.timeExpired() {
+				node.lowerBound = max(node.lowerBound, nodeMin)
+				c.abortOnLimit(w.id, node, StatusTimeLimit, prevMinPruned)
+				return
+			}
+			if (!leafOK && (leafRes.Status == StatusIterationLimit || c.iterLeft(0) <= 0)) || c.iterLeft(0) <= 0 {
+				node.lowerBound = max(node.lowerBound, nodeMin)
+				c.abortOnLimit(w.id, node, StatusIterationLimit, prevMinPruned)
+				return
 			}
 			prevKind = nodeOutcomeUnsolved
 			prevBound = nodeMin
@@ -3220,7 +3340,7 @@ func (b *babEngine) finalizeResult() Result {
 		b.vipr.exactTreeGapClosed(b.bestPrimal)
 	if exactTreeClosed {
 		bestBoundMin = b.bestObjMin
-	} else if !b.gapClosed(bestBoundMin, b.bestObjMin, b.opts.RelGapTol) {
+	} else if (b.strictExactVIPRGap() && b.limitStatus() != StatusOptimal) || !b.gapClosed(bestBoundMin, b.bestObjMin, b.opts.RelGapTol) {
 		status = b.limitStatus()
 		if status == StatusOptimal {
 			// Unreachable in exact bookkeeping: an open gap implies an open or unsolved node.
@@ -3715,6 +3835,10 @@ func selectBranchVar(req *branchSelectReq) sbOutcome {
 			return false, math.Inf(1)
 		}
 		boundMin = bound
+		if req.strictExactGap {
+			margin := max(1e-6, 1e-7*max(1.0, math.Abs(req.bestObjMin)))
+			return boundMin > req.bestObjMin+margin, boundMin
+		}
 		cut = boundMin >= req.bestObjMin-req.absGapTol || isGapClosed(boundMin, req.bestObjMin, req.objConstMin, req.pruneRelTol, req.absGapTol)
 		return cut, boundMin
 	}
@@ -3928,6 +4052,10 @@ func selectNearIntegralBranchVar(p *CompiledProblem, x, curLB, curUB []float64) 
 // polishIncumbent snaps near-integral integer components of x, re-optimizes continuous
 // variables when needed to eliminate snapping residuals, and verifies all bounds and rows within incumbentTol.
 func (b *babEngine) polishIncumbent(x []float64) ([]float64, bool) {
+	var iterLeftFn func() int
+	if b.opts.MaxIter > 0 {
+		iterLeftFn = b.iterLeft
+	}
 	return polishIncumbentWith(&polishIncumbentReq{
 		p:            b.p,
 		exactIntRows: b.exactIntRows,
@@ -3938,6 +4066,8 @@ func (b *babEngine) polishIncumbent(x []float64) ([]float64, bool) {
 		fixScratchLB: &b.fixScratchLB,
 		fixScratchUB: &b.fixScratchUB,
 		ensureHeur:   b.ensureHeurSolver,
+		iterLeft:     iterLeftFn,
+		addIters:     func(it int) { b.totalLPIters += it },
 	})
 }
 
@@ -3985,9 +4115,26 @@ func polishIncumbentWith(req *polishIncumbentReq) ([]float64, bool) {
 			fixUB[col] = iv
 		}
 		if validFix {
+			if req.iterLeft != nil && req.iterLeft() <= 0 {
+				return nil, false
+			}
 			hs := req.ensureHeur()
+			prevMaxIter := hs.MaxIter
+			if req.iterLeft != nil {
+				rem := req.iterLeft()
+				if rem <= 0 {
+					return nil, false
+				}
+				if prevMaxIter <= 0 || rem < prevMaxIter {
+					hs.MaxIter = rem
+				}
+			}
 			hs.SetStructuralBounds(fixLB, fixUB)
 			polRes := hs.Solve()
+			hs.MaxIter = prevMaxIter
+			if req.addIters != nil {
+				req.addIters(polRes.Iterations)
+			}
 			if polRes.Status == StatusInfeasible {
 				return nil, false
 			}
@@ -4014,6 +4161,7 @@ func resolveFixedIntLeaf(
 	deadline time.Time,
 	done <-chan struct{},
 	ensureHeur func() *LPSolver,
+	maxIterCap int,
 	vipr babVIPRHook,
 	vn *viprTreeNode,
 ) (res LPResult, objMin float64, infeas, ok bool) {
@@ -4031,13 +4179,21 @@ func resolveFixedIntLeaf(
 			return LPResult{Status: StatusInfeasible}, 0, true, true
 		}
 	}
+	if maxIterCap <= 0 {
+		return LPResult{Status: StatusIterationLimit}, 0, false, false
+	}
 	hs := ensureHeur()
 	prevSkip := hs.SkipExactFarkas
+	prevMaxIter := hs.MaxIter
 	hs.SkipExactFarkas = false
+	if prevMaxIter <= 0 || maxIterCap < prevMaxIter {
+		hs.MaxIter = maxIterCap
+	}
 	hs.InitCrashBasis()
 	hs.SetStructuralBounds(curLB, curUB)
 	res = hs.Solve()
 	hs.SkipExactFarkas = prevSkip
+	hs.MaxIter = prevMaxIter
 	if res.Status == StatusInfeasible {
 		if vipr != nil && vn != nil {
 			vipr.certifyNodeFarkas(vn, hs, res)

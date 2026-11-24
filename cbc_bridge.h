@@ -88,7 +88,7 @@ GoblinLPSolver* goblin_lp_new(
 
 void goblin_lp_free(GoblinLPSolver *s);
 
-void goblin_lp_set_bounds(
+int goblin_lp_set_bounds(
     GoblinLPSolver *s,
     int num_cols,
     const double *col_lb,

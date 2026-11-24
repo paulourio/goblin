@@ -2288,7 +2288,10 @@ func finalizeStage2Duals(p stage2Problem, st *stage2State, hasPotCancel bool) {
 					if math.IsInf(c, 1) {
 						continue
 					}
-					lim := c - v[j]
+					lim, rem := twoSumAssign(c, -v[j])
+					if rem < 0 && !math.IsInf(lim, 0) {
+						lim = math.Nextafter(lim, math.Inf(-1))
+					}
 					if !math.IsInf(lim, 1) && lim < ui {
 						ui = clampFinite(lim)
 					}

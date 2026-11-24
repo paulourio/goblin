@@ -304,7 +304,7 @@ type cbcLPFinalizeReq struct {
 	fallback         func(acceptInfeasible bool) (LPResult, bool, bool)
 }
 
-func finalizeCBCLP(req *cbcLPFinalizeReq) (LPResult, bool) {
+func finalizeCBCLP(req *cbcLPFinalizeReq) (res LPResult, fellBack, canceled bool) {
 	p := req.p
 	lb, ub := req.lb, req.ub
 	cuts := req.cuts
@@ -320,47 +320,47 @@ func finalizeCBCLP(req *cbcLPFinalizeReq) (LPResult, bool) {
 	}
 	if status != StatusOptimal {
 		if !droppedTiny && status == StatusUnbounded {
-			if fbRes, handled, canceled := fallback(true); handled {
-				return fbRes, canceled
+			if fbRes, handled, isCanceled := fallback(true); handled {
+				return fbRes, !isCanceled, isCanceled
 			}
-			return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+			return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false, false
 		}
 		if !droppedTiny && status == StatusInfeasible &&
 			(unresolvedCancel || hasAnyInfiniteBound(lb, ub, n) || totalIters == 0 ||
 				hasCBCScalingRisk(p, lb, ub, cuts) || hasCBCPivotRiskTiny(p, lb, ub, cuts)) {
-			if fbRes, handled, canceled := fallback(true); handled {
-				return fbRes, canceled
+			if fbRes, handled, isCanceled := fallback(true); handled {
+				return fbRes, !isCanceled, isCanceled
 			}
 		}
 		if unresolvedCancel && status == StatusNumericalError {
-			if fbRes, handled, canceled := fallback(true); handled {
-				return fbRes, canceled
+			if fbRes, handled, isCanceled := fallback(true); handled {
+				return fbRes, !isCanceled, isCanceled
 			}
 		}
-		return LPResult{Status: status, Iterations: totalIters}, false
+		return LPResult{Status: status, Iterations: totalIters}, false, false
 	}
 
 	snapCBCBounds(primal, lb, ub, n)
 	objMin := evalLinearSum(0, p.objMin, primal, n)
 	if !cbcPrimalWithinTol(p, lb, ub, cuts, primal, false) {
 		if !droppedTiny {
-			if fbRes, handled, canceled := fallback(true); handled {
-				return fbRes, canceled
+			if fbRes, handled, isCanceled := fallback(true); handled {
+				return fbRes, !isCanceled, isCanceled
 			}
 		}
-		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false, false
 	}
 	if !cbcLPDualWithinTol(p, lb, ub, cuts, primal, duals, rc, objMin) {
 		if hasAnyInfiniteBound(lb, ub, n) || unresolvedCancel {
-			if fbRes, handled, canceled := fallback(unresolvedCancel); handled {
-				return fbRes, canceled
+			if fbRes, handled, isCanceled := fallback(unresolvedCancel); handled {
+				return fbRes, !isCanceled, isCanceled
 			}
 		}
-		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false, false
 	}
 	userObj := p.EvaluateObjective(primal)
 	if math.IsNaN(userObj) || math.IsInf(userObj, 0) {
-		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false
+		return LPResult{Status: StatusNumericalError, Iterations: totalIters}, false, false
 	}
 	if p.sense == Maximize {
 		for i := range m {
@@ -378,7 +378,7 @@ func finalizeCBCLP(req *cbcLPFinalizeReq) (LPResult, bool) {
 		Dual:         duals[:p.numConstraints],
 		ReducedCosts: rc,
 		Iterations:   totalIters,
-	}, false
+	}, false, false
 }
 
 func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
@@ -548,7 +548,7 @@ func solveCBCLP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt
 	}
 
 	unresolvedCancel := (rowCancel || objCancel) && !droppedTiny && (!pc.active || pc.unresolved)
-	lpRes, canceled := finalizeCBCLP(&cbcLPFinalizeReq{
+	lpRes, fellBack, canceled := finalizeCBCLP(&cbcLPFinalizeReq{
 		p: p, lb: p.varLB, ub: p.varUB, cuts: noCuts,
 		status: Status(cRes.status), primal: primal, duals: duals, rc: rc,
 		totalIters: totalIters, droppedTiny: droppedTiny, unresolvedCancel: unresolvedCancel,
@@ -573,6 +573,7 @@ func solveCBCLP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt
 		return Result{}
 	}
 	res := cbcStatusResult(p, lpRes.Status, start, 0, lpRes.Iterations, 0)
+	res.FellBackToGo = fellBack
 	if lpRes.Status == StatusOptimal {
 		res.Objective = lpRes.Objective
 		res.BestBound = lpRes.Objective
@@ -690,6 +691,7 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 	if pc.active {
 		pc.restoreMIPResult(p, primal, &cRes)
 	}
+	totalIters := int(cRes.iterations)
 
 	status := Status(cRes.status)
 	if status == StatusUnbounded && !hasAnyInfiniteBound(p.varLB, p.varUB, n) {
@@ -697,22 +699,22 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 	}
 	if status == StatusUnbounded && len(cbc.intCols32) > 0 {
 		if !droppedTiny {
-			resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, int(cRes.iterations), nil, nil, deadline, done)
+			resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, totalIters, nil, nil, deadline, done)
 			if canceled {
 				return Result{}
 			}
-			cRes.iterations += C.int(resRelax.Iterations)
+			totalIters += resRelax.Iterations
 			switch resRelax.Status {
 			case StatusOptimal:
-				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 			case StatusInfeasible, StatusTimeLimit, StatusIterationLimit:
-				return cbcStatusResult(p, resRelax.Status, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+				return cbcStatusResult(p, resRelax.Status, start, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 			}
 		}
 		feasProb := p.zeroObjCopy()
-		feasOpts, limitSt := remainingCBCMIPBudget(opt, int(cRes.nodes), int(cRes.iterations))
+		feasOpts, limitSt := remainingCBCMIPBudget(opt, int(cRes.nodes), totalIters)
 		if limitSt != StatusNotSolved {
-			return cbcStatusResult(p, limitSt, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+			return cbcStatusResult(p, limitSt, start, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 		}
 		feasRes := solveCBC(ctx, feasProb, feasOpts, start, deadline, done)
 		if ctx != nil && ctx.Err() != nil {
@@ -722,28 +724,30 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 		if st == StatusOptimal {
 			st = StatusUnbounded
 		}
-		return cbcStatusResult(
+		outRes := cbcStatusResult(
 			p, st, start,
 			int(cRes.nodes)+feasRes.Nodes,
-			int(cRes.iterations)+feasRes.Iterations,
+			totalIters+feasRes.Iterations,
 			int(cRes.cuts_added)+feasRes.CutsAdded,
 		)
+		outRes.FellBackToGo = feasRes.FellBackToGo
+		return outRes
 	}
 	if status == StatusInfeasible && !droppedTiny &&
 		(hasAnyInfiniteBound(p.varLB, p.varUB, n) || hasCBCScalingRisk(p, p.varLB, p.varUB, noCuts)) {
-		resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, int(cRes.iterations), nil, nil, deadline, done)
+		resRelax, canceled := runBudgetedGoLPProbe(ctx, p, opt, totalIters, nil, nil, deadline, done)
 		if canceled {
 			return Result{}
 		}
-		cRes.iterations += C.int(resRelax.Iterations)
+		totalIters += resRelax.Iterations
 		switch resRelax.Status {
 		case StatusInfeasible:
 			// Root LP relaxation is Farkas-certified infeasible; preserve StatusInfeasible.
 		case StatusTimeLimit, StatusIterationLimit:
-			return cbcStatusResult(p, resRelax.Status, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+			return cbcStatusResult(p, resRelax.Status, start, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 		default:
 			if cRes.nodes == 0 || resRelax.Status == StatusUnbounded || hasCBCScalingRisk(p, p.varLB, p.varUB, noCuts) {
-				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 			}
 		}
 	}
@@ -752,13 +756,13 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 		snapCBCBounds(primal, p.varLB, p.varUB, n)
 		if !cbcPrimalWithinTol(p, p.varLB, p.varUB, noCuts, primal, true) {
 			if polished, extraIt, ok := polishCBCMIPPrimal(
-				ctx, p, opt, int(cRes.iterations), status == StatusOptimal,
+				ctx, p, opt, totalIters, status == StatusOptimal,
 				cRes.has_best_bound != 0, float64(cRes.best_bound_min), primal, deadline, done,
 			); ok {
-				cRes.iterations += C.int(extraIt)
+				totalIters += extraIt
 				primal = polished
 			} else {
-				cRes.iterations += C.int(extraIt)
+				totalIters += extraIt
 				hasValidSol = false
 				if status == StatusOptimal {
 					status = StatusNumericalError
@@ -770,21 +774,22 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 		}
 	}
 	if status == StatusOptimal && hasValidSol {
-		if mipSt, extraIt := verifyCBCMIPOptimality(ctx, &cbcMIPVerifyReq{
-			p: p, opt: opt, baseIters: int(cRes.iterations),
+		mipSt, extraIt := verifyCBCMIPOptimality(ctx, &cbcMIPVerifyReq{
+			p: p, opt: opt, baseIters: totalIters,
 			hasRootLP: cRes.has_root_lp != 0, rootLPMin: float64(cRes.root_lp_min),
 			hasBestBound: cRes.has_best_bound != 0, bestBoundMin: float64(cRes.best_bound_min),
 			primal: primal, deadline: deadline, done: done,
-		}); mipSt != StatusOptimal {
-			cRes.iterations += C.int(extraIt)
+		})
+		totalIters += extraIt
+		if mipSt != StatusOptimal {
 			if ctx != nil && ctx.Err() != nil {
 				return Result{}
 			}
 			if mipSt == StatusUnbounded {
-				return cbcStatusResult(p, StatusUnbounded, start, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+				return cbcStatusResult(p, StatusUnbounded, start, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 			}
 			if mipSt == StatusNumericalError && !droppedTiny && (pc.active || hasCBCScalingRisk(p, p.varLB, p.varUB, noCuts)) {
-				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), int(cRes.iterations), int(cRes.cuts_added))
+				return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, int(cRes.nodes), totalIters, int(cRes.cuts_added))
 			}
 			status = mipSt
 			hasValidSol = false
@@ -798,7 +803,7 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 		Backend:    BackendCBC,
 		Status:     status,
 		Nodes:      int(cRes.nodes),
-		Iterations: int(cRes.iterations),
+		Iterations: totalIters,
 		CutsAdded:  int(cRes.cuts_added),
 		SolveTime:  time.Since(start),
 	}
@@ -855,12 +860,12 @@ func solveUnconstrainedCBC(p *CompiledProblem, start time.Time) Result {
 		lb, ub := p.varLB[j], p.varUB[j]
 		if c < 0 {
 			if math.IsInf(ub, 1) {
-				return Result{modelID: p.modelID, Backend: BackendCBC, Status: StatusUnbounded, SolveTime: time.Since(start)}
+				return Result{modelID: p.modelID, Backend: BackendCBC, FellBackToGo: true, Status: StatusUnbounded, SolveTime: time.Since(start)}
 			}
 			primal[j] = ub
 		} else if c > 0 {
 			if math.IsInf(lb, -1) {
-				return Result{modelID: p.modelID, Backend: BackendCBC, Status: StatusUnbounded, SolveTime: time.Since(start)}
+				return Result{modelID: p.modelID, Backend: BackendCBC, FellBackToGo: true, Status: StatusUnbounded, SolveTime: time.Since(start)}
 			}
 			primal[j] = lb
 		} else {
@@ -888,10 +893,11 @@ func solveUnconstrainedCBC(p *CompiledProblem, start time.Time) Result {
 	obj := p.EvaluateObjective(primal)
 	if math.IsNaN(obj) || math.IsInf(obj, 0) {
 		return Result{
-			modelID:   p.modelID,
-			Backend:   BackendCBC,
-			Status:    StatusNumericalError,
-			SolveTime: time.Since(start),
+			modelID:      p.modelID,
+			Backend:      BackendCBC,
+			FellBackToGo: true,
+			Status:       StatusNumericalError,
+			SolveTime:    time.Since(start),
 		}
 	}
 	var duals []float64
@@ -901,6 +907,7 @@ func solveUnconstrainedCBC(p *CompiledProblem, start time.Time) Result {
 	return Result{
 		modelID:      p.modelID,
 		Backend:      BackendCBC,
+		FellBackToGo: true,
 		Status:       StatusOptimal,
 		Objective:    obj,
 		BestBound:    obj,
@@ -974,6 +981,7 @@ type CBCLPSolver struct {
 	numCut          int
 	invalidBounds   bool
 	invalidCut      bool
+	cutNumErr       bool
 	infeasibleCut   bool
 }
 
@@ -1073,7 +1081,16 @@ func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 		return
 	}
 	n := s.prob.numVars
-	if len(lb) < n || len(ub) < n || len(s.curLB) < n || len(s.curUB) < n {
+	if n < 0 || len(lb) < n || len(ub) < n || len(s.curLB) < n || len(s.curUB) < n {
+		s.invalidBounds = true
+		return
+	}
+	if n == 0 {
+		s.invalidBounds = false
+		return
+	}
+	if s.handle == nil {
+		s.invalidBounds = true
 		return
 	}
 	for j := range n {
@@ -1082,7 +1099,6 @@ func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 			return
 		}
 	}
-	s.invalidBounds = false
 	if cap(s.scratchLBClp) < n {
 		s.scratchLBClp = make([]float64, n)
 		s.scratchUBClp = make([]float64, n)
@@ -1090,14 +1106,22 @@ func (s *CBCLPSolver) SetStructuralBounds(lb, ub []float64) {
 	lbClp := s.scratchLBClp[:n]
 	ubClp := s.scratchUBClp[:n]
 	for j := range n {
-		s.curLB[j] = lb[j]
-		s.curUB[j] = ub[j]
 		lbClp[j] = clampCBCBound(lb[j])
 		ubClp[j] = clampCBCBound(ub[j])
 	}
-	s.withHandleLocked(func(ptr *C.GoblinLPSolver) {
-		C.goblin_lp_set_bounds(ptr, C.int(n), cFloat64Ptr(lbClp), cFloat64Ptr(ubClp))
+	var setOK C.int
+	called := s.withHandleLocked(func(ptr *C.GoblinLPSolver) {
+		setOK = C.goblin_lp_set_bounds(ptr, C.int(n), cFloat64Ptr(lbClp), cFloat64Ptr(ubClp))
 	})
+	if !called || setOK == 0 {
+		s.invalidBounds = true
+		return
+	}
+	for j := range n {
+		s.curLB[j] = lb[j]
+		s.curUB[j] = ub[j]
+	}
+	s.invalidBounds = false
 }
 
 // AddCut appends a linear inequality sum(val[k] * x[colIdx[k]]) <= rhs to the LP
@@ -1123,6 +1147,11 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 			return
 		}
 	}
+	if len(colIdx) != len(val) {
+		s.invalidCut = true
+		s.cutNumErr = true
+		return
+	}
 	if math.IsInf(rhs, 1) {
 		return
 	}
@@ -1136,6 +1165,8 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 		return
 	}
 	if s.handle == nil {
+		s.invalidCut = true
+		s.cutNumErr = true
 		return
 	}
 	pairs := s.scratchCutPairs[:0]
@@ -1177,10 +1208,12 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 	}
 	s.scratchCols32 = cols32
 	if len(cols32) > math.MaxInt32 {
+		s.invalidCut = true
+		s.cutNumErr = true
 		return
 	}
 	var added C.int
-	s.withHandleLocked(func(ptr *C.GoblinLPSolver) {
+	called := s.withHandleLocked(func(ptr *C.GoblinLPSolver) {
 		added = C.goblin_lp_add_cut(
 			ptr,
 			C.int(len(cols32)),
@@ -1189,21 +1222,30 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 			C.double(clampCBCBound(rhs)),
 		)
 	})
-	if added != 0 {
-		colsInt := make([]int, len(cols32))
-		for i, c := range cols32 {
-			colsInt[i] = int(c)
-		}
-		s.cuts.cols = append(s.cuts.cols, colsInt)
-		s.cuts.vals = append(s.cuts.vals, vals)
-		s.cuts.rhs = append(s.cuts.rhs, rhs)
-		s.numCut++
+	if !called || added == 0 {
+		s.invalidCut = true
+		s.cutNumErr = true
+		return
 	}
+	colsInt := make([]int, len(cols32))
+	for i, c := range cols32 {
+		colsInt[i] = int(c)
+	}
+	s.cuts.cols = append(s.cuts.cols, colsInt)
+	s.cuts.vals = append(s.cuts.vals, vals)
+	s.cuts.rhs = append(s.cuts.rhs, rhs)
+	s.numCut++
 }
 
 // Solve solves or warm-start resolves the current LP relaxation via COIN-OR CLP.
 func (s *CBCLPSolver) Solve() LPResult {
-	if s == nil || s.invalidBounds || s.invalidCut {
+	if s == nil || s.invalidBounds {
+		return LPResult{Status: StatusUndefined}
+	}
+	if s.invalidCut {
+		if s.cutNumErr {
+			return LPResult{Status: StatusNumericalError}
+		}
 		return LPResult{Status: StatusUndefined}
 	}
 	p := s.prob
@@ -1358,7 +1400,7 @@ func (s *CBCLPSolver) Solve() LPResult {
 	}
 
 	unresolvedCancel := (rowCancel || objCancel) && !droppedTiny && (!pc.active || pc.unresolved)
-	lpRes, _ := finalizeCBCLP(&cbcLPFinalizeReq{
+	lpRes, _, _ := finalizeCBCLP(&cbcLPFinalizeReq{
 		p: p, lb: s.curLB, ub: s.curUB, cuts: s.cuts,
 		status: Status(cRes.status), primal: primal, duals: duals, rc: rc,
 		totalIters: totalIters, droppedTiny: droppedTiny, unresolvedCancel: unresolvedCancel,
@@ -1528,6 +1570,7 @@ func fallbackCBCMIPToGo(
 	goRes.Iterations += cIters
 	goRes.CutsAdded += cCuts
 	goRes.Backend = BackendCBC
+	goRes.FellBackToGo = true
 	return goRes
 }
 

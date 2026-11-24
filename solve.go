@@ -176,6 +176,9 @@ func applyRootOptionsSlow(opts []Option) Options {
 }
 
 // WithOptions overwrites the solver settings with the supplied struct.
+// Setting Options.Certified to true in a struct literal without calling
+// WithCertified(true) intentionally fails closed with ErrCertificationFailed
+// so default builds dead-code-eliminate the certification engine.
 func WithOptions(o Options) Option {
 	return func(cfg *Options) {
 		*cfg = o
@@ -310,6 +313,8 @@ type Result struct {
 	SolveTime    time.Duration
 	Backend      Backend
 	Status       Status
+	// FellBackToGo reports whether a BackendCBC solve delegated execution to the pure-Go engine.
+	FellBackToGo bool
 }
 
 // Lookup returns the primal value of variable v in the incumbent vector and reports
@@ -498,6 +503,18 @@ func hasEmptyInfeasibleRow(p *CompiledProblem) bool {
 }
 
 func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options, backend Backend, start, deadline time.Time, done <-chan struct{}) Result {
+	res := solveCompensatedEngineCore(ctx, p, opt, backend, start, deadline, done)
+	if ctx != nil && ctx.Err() != nil {
+		return Result{}
+	}
+	res.Backend = backend
+	if backend == BackendCBC {
+		res.FellBackToGo = true
+	}
+	return res
+}
+
+func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Options, backend Backend, start, deadline time.Time, done <-chan struct{}) Result {
 	if (p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas) || hasEmptyInfeasibleRow(p) {
 		if opt.viprTrace != nil {
 			opt.viprTrace.recordRootInfeasibleEqRow(p)
@@ -548,7 +565,7 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 				workProb = preRes.Reduced
 			}
 		}
-	} else if opt.EnablePresolve && !p.isMIP && p.numConstraints > 0 && p.numVars > 0 {
+	} else if opt.EnablePresolve && opt.viprTrace == nil && !p.isMIP && p.numConstraints > 0 && p.numVars > 0 {
 		lpPre = presolveLPWithDeadline(p, defaultPresolveMaxPass, deadline, done)
 		if ctx != nil && ctx.Err() != nil {
 			return Result{}
@@ -563,9 +580,6 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 			}
 		}
 		if lpPre.Infeasible {
-			if opt.viprTrace != nil {
-				opt.viprTrace.recordPresolveInfeasible(p, opt.DisableSIMD)
-			}
 			return Result{
 				modelID:   p.modelID,
 				Backend:   backend,

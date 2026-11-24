@@ -217,15 +217,19 @@ int goblin_cbc_callback(CbcModel *currentSolver, int whereFrom) {
         }
     } else if (whereFrom == 4 || whereFrom == 5) {
         int nGen = currentSolver->numberCutGenerators();
-        int totalCuts = 0;
+        int64_t totalCuts = 0;
         for (int i = 0; i < nGen; ++i) {
             CbcCutGenerator *gen = currentSolver->cutGenerator(i);
             if (gen) {
-                totalCuts += gen->numberCutsInTotal() + gen->numberColumnCuts();
+                totalCuts += static_cast<int64_t>(gen->numberCutsInTotal()) +
+                             static_cast<int64_t>(gen->numberColumnCuts());
             }
         }
-        if (totalCuts > tl_total_cuts) {
-            tl_total_cuts = totalCuts;
+        if (totalCuts > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+            totalCuts = static_cast<int64_t>(std::numeric_limits<int>::max());
+        }
+        if (static_cast<int>(totalCuts) > tl_total_cuts) {
+            tl_total_cuts = static_cast<int>(totalCuts);
         }
         double contObj = currentSolver->getContinuousObjective();
         if (std::fabs(contObj) >= kCutoffWarnLimit && std::fabs(contObj) < 0.5 * COIN_DBL_MAX) {
@@ -1006,6 +1010,7 @@ struct GoblinLPSolver {
     bool presolve_disabled;
     bool has_extreme_col_bound;
     bool has_extreme_row_bound;
+    bool bounds_corrupted;
     int num_cols;
     int num_rows;
     std::vector<double> col_lb;
@@ -1018,6 +1023,7 @@ struct GoblinLPSolver {
           presolve_disabled(false),
           has_extreme_col_bound(false),
           has_extreme_row_bound(false),
+          bounds_corrupted(false),
           num_cols(0),
           num_rows(0) {
         configure_silent_clp(solver);
@@ -1675,16 +1681,21 @@ void goblin_lp_free(GoblinLPSolver *s) {
     }
 }
 
-void goblin_lp_set_bounds(
+int goblin_lp_set_bounds(
     GoblinLPSolver *s,
     int num_cols,
     const double *col_lb,
     const double *col_ub
 ) {
     std::lock_guard<std::mutex> lock(g_cbc_mutex);
-    if (!s || !col_lb || !col_ub) return;
+    if (!s || !col_lb || !col_ub || num_cols < s->num_cols) {
+        if (s) {
+            s->bounds_corrupted = true;
+        }
+        return 0;
+    }
     try {
-        for (int j = 0; j < num_cols && j < s->num_cols; ++j) {
+        for (int j = 0; j < s->num_cols; ++j) {
             s->col_lb[j] = col_lb[j];
             s->col_ub[j] = col_ub[j];
             s->solver.setColBounds(j, col_lb[j], col_ub[j]);
@@ -1692,7 +1703,11 @@ void goblin_lp_set_bounds(
         raise_clp_large_value_if_needed(s->solver, s->num_cols, s->col_lb.data(), s->col_ub.data(), 0, nullptr, nullptr);
         s->has_extreme_col_bound = has_unrepresentable_clp_finite_bound(s->num_cols, s->col_lb.data(), s->col_ub.data(), 0, nullptr, nullptr);
         s->refresh_tiny_obj_and_check_dropped();
+        s->bounds_corrupted = false;
+        return 1;
     } catch (...) {
+        s->bounds_corrupted = true;
+        return 0;
     }
 }
 
@@ -1768,7 +1783,7 @@ void goblin_lp_solve(
         return;
     }
     try {
-        if (s->has_extreme_col_bound || s->has_extreme_row_bound) {
+        if (s->bounds_corrupted || s->has_extreme_col_bound || s->has_extreme_row_bound) {
             out->status = kStatusNumericalError;
             return;
         }

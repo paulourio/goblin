@@ -137,14 +137,18 @@ func capPooledSlice[T any](s []T, maxCap int) []T {
 }
 
 func allocVarHashTable(buf []int32, nVars int) ([]int32, bool) {
-	if nVars <= 0 || nVars >= math.MaxInt32/2 {
+	if nVars <= 0 || uint64(nVars) > (1<<30)/2 {
 		return nil, false
 	}
-	size := 16
-	target := nVars * 2
-	for size < target {
-		size <<= 1
+	size64 := uint64(16)
+	target := uint64(nVars) * 2
+	for size64 < target {
+		size64 <<= 1
 	}
+	if size64 > uint64(math.MaxInt32) || size64 > uint64(math.MaxInt) {
+		return nil, false
+	}
+	size := int(size64)
 	if cap(buf) >= size {
 		table := buf[:size]
 		clear(table)
