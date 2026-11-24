@@ -114,17 +114,17 @@ Every table below renders automatically from canonical JSON telemetry in `bench/
 Keep two corpus properties in mind when reading LP and MILP speedups against the Python `PuLP + cbc` subprocess baseline. First, 10 Tier 1 micro-models are dominated by Python's CBC subprocess startup cost. Second, 8 of the 31 synthetic families are planted-gap MAD models with a zero root LP gap by construction that close without branching. The bold `Tier 2+3 non-planted MILPs` row excludes both groups to isolate solver-dominated branching workloads, while Section 9 of [Benchmark Methodology and Corpus Results](docs/benchmarks.md#9-pure-go-vs-in-process-c-cbc-performance-analysis) compares pure-Go directly against in-process `BackendCBC`. Columns report cumulative end-to-end wall time (`JSON -> solution`) summed across all randomized trials in each subset alongside equal-family geometric-mean speedup (`Python / Go`).
 
 <!-- BEGIN GENERATED:README_CBC_HEADLINE -->
-Across the 14 solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **11.53x** [6.50x-20.46x] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **4.65x** [2.94x-7.35x] total (**4.85x** [2.99x-7.86x] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.
+Across the 14 solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **10.34x** [5.69x-18.78x] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **4.06x** [2.56x-6.46x] total (**4.25x** [2.60x-6.94x] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.
 <!-- END GENERATED:README_CBC_HEADLINE -->
 
 <!-- BEGIN GENERATED:README_MILP_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | Python Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Micro-models (`N <= 26`, spawn-dominated) | 10 (110) | 8.7 | 1058.9 | **436.86x** [185.87x-1026.79x] | 716.29x [39.58x-2961.15x] |
-| Tier 2: Medium MILPs (`30 <= N <= 84`) | 13 (143) | 724.5 | 4302.6 | **17.46x** [9.33x-32.69x] | 23.75x [0.14x-154.57x] |
-| Tier 3: Large MILPs (`145 <= N <= 4036`) | 8 (40) | 785.6 | 6178.4 | **10.39x** [5.24x-20.61x] | 10.36x [1.13x-66.00x] |
-| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | 1201.5 | 6762.7 | **11.53x** [6.50x-20.46x] | 12.36x [0.14x-154.57x] |
-| All 31 synthetic families | 31 (293) | 1518.8 | 11539.9 | **43.15x** [21.31x-87.35x] | 42.19x [0.14x-2961.15x] |
+| Tier 1: Micro-models (`N <= 26`, spawn-dominated) | 10 (110) | 8.8 | 1045.0 | **318.14x** [153.03x-661.40x] | 369.25x [39.20x-3099.07x] |
+| Tier 2: Medium MILPs (`30 <= N <= 84`) | 13 (143) | 810.8 | 4259.5 | **16.22x** [8.52x-30.88x] | 22.46x [0.11x-150.49x] |
+| Tier 3: Large MILPs (`145 <= N <= 4036`) | 8 (40) | 896.9 | 6160.1 | **9.51x** [4.59x-19.74x] | 9.55x [1.03x-71.02x] |
+| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | 1389.0 | 6702.4 | **10.34x** [5.69x-18.78x] | 11.24x [0.11x-150.49x] |
+| All 31 synthetic families | 31 (293) | 1716.6 | 11464.6 | **36.92x** [19.01x-71.71x] | 40.19x [0.11x-3099.07x] |
 <!-- END GENERATED:README_MILP_SUMMARY_TABLE -->
 
 Full provenance, per-family breakdowns across all 31 families, solver-core checkpoints, and pure-Go vs. in-process C++ CBC analysis live in [Benchmark Methodology and Corpus Results](docs/benchmarks.md).
@@ -136,17 +136,17 @@ The synthetic Mean Absolute Deviation (`MAD`) family assigns $I$ items across $G
 <!-- BEGIN GENERATED:README_MAD_SUMMARY_TABLE -->
 | Problem | $G \times I$ | Trials | Go (ms) | Python (ms) | Speedup |
 | :--- | :---: | ---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | 11 | 0.08 | 9.21 | **112.3x** |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | 0.53 | 33.82 | **61.7x** |
-| `t2_mad_g2_i8` | $2 \times 8$ | 11 | 0.16 | 10.06 | **57.0x** |
-| `t2_mad_g3_i9` | $3 \times 9$ | 11 | 0.18 | 9.81 | **52.4x** |
-| `t2_mad_g4_i12` | $4 \times 12$ | 11 | 0.45 | 11.27 | **26.4x** |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | 3.15 | 47.39 | **9.6x** |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | 16.49 | 167.22 | **7.1x** |
-| `t3_mad_g5_i20` | $5 \times 20$ | 5 | 0.57 | 18.18 | **30.8x** |
-| `t3_mad_g6_i30` | $6 \times 30$ | 5 | 1.02 | 18.36 | **17.6x** |
-| `t3_mad_g10_i100` | $10 \times 100$ | 5 | 8.11 | 60.57 | **6.0x** |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | 33.91 | 368.31 | **10.2x** |
+| `t1_mad_g2_i4` | $2 \times 4$ | 11 | 0.06 | 9.28 | **149.2x** |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | 0.51 | 33.29 | **63.5x** |
+| `t2_mad_g2_i8` | $2 \times 8$ | 11 | 0.17 | 8.91 | **53.1x** |
+| `t2_mad_g3_i9` | $3 \times 9$ | 11 | 0.21 | 10.04 | **44.0x** |
+| `t2_mad_g4_i12` | $4 \times 12$ | 11 | 0.36 | 12.38 | **32.7x** |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | 3.18 | 46.65 | **9.1x** |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | 17.66 | 163.63 | **6.5x** |
+| `t3_mad_g5_i20` | $5 \times 20$ | 5 | 0.60 | 18.46 | **28.6x** |
+| `t3_mad_g6_i30` | $6 \times 30$ | 5 | 0.99 | 18.28 | **17.8x** |
+| `t3_mad_g10_i100` | $10 \times 100$ | 5 | 8.39 | 60.23 | **5.8x** |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | 34.70 | 374.49 | **10.0x** |
 <!-- END GENERATED:README_MAD_SUMMARY_TABLE -->
 
 **Note on SIMD**: Experimental `GOEXPERIMENT=simd` builds deliver little overall speedup on MAD and other sparse LP/MILP workloads because scalar matrix factorization dominates runtime. Full dispersion (`Mean ± SD`), prep/solve splits, checkpoint progression, and paired scalar-vs-SIMD benchmarks appear in [MAD Benchmarks](docs/benchmarks.md#3-mad-group-item-allocation-formulation) and [Default Build vs. `GOEXPERIMENT=simd`](docs/benchmarks.md#5-default-build-vs-goexperimentsimd).
@@ -158,10 +158,10 @@ The `goblin/assign` corpus compares in-memory pure-Go execution directly against
 <!-- BEGIN GENERATED:README_ASSIGN_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Small (`N <= 32`) | 6 (66) | 0.214 | 0.319 | **1.56x** [1.17x-2.08x] | 1.52x [0.87x-3.43x] |
-| Tier 2: Medium (`64 <= N <= 256`) | 9 (99) | 9.129 | 32.743 | **2.94x** [1.85x-4.68x] | 2.53x [0.87x-14.88x] |
-| Tier 3: Large (`500 <= N <= 2000`) | 7 (35) | 215.897 | 931.056 | **2.88x** [1.87x-4.44x] | 2.65x [1.47x-6.14x] |
-| **All 22 synthetic LSAP families** | 22 (200) | 225.239 | 964.118 | **2.46x** [1.93x-3.13x] | 2.08x [0.87x-14.88x] |
+| Tier 1: Small (`N <= 32`) | 6 (66) | 0.253 | 0.311 | **1.25x** [0.99x-1.58x] | 1.41x [0.10x-2.49x] |
+| Tier 2: Medium (`64 <= N <= 256`) | 9 (99) | 9.763 | 32.756 | **2.89x** [1.80x-4.64x] | 2.46x [0.93x-17.79x] |
+| Tier 3: Large (`500 <= N <= 2000`) | 7 (35) | 220.156 | 923.240 | **2.85x** [1.86x-4.38x] | 2.57x [1.47x-5.80x] |
+| **All 22 synthetic LSAP families** | 22 (200) | 230.172 | 956.307 | **2.29x** [1.75x-2.99x] | 1.98x [0.10x-17.79x] |
 <!-- END GENERATED:README_ASSIGN_SUMMARY_TABLE -->
 
 Unlike sparse MILPs, dense assignment matrices benefit substantially from AVX2 and AVX-512 vectorization under `GOEXPERIMENT=simd`. Per-family results, square vs. rectangular splits, and scalar-vs-SIMD tables live in [Linear Sum Assignment Benchmarks](docs/benchmarks.md#71-aggregate-lsap-workload-summary) and [LSAP SIMD Analysis](docs/benchmarks.md#73-lsap-scalar-vs-goexperimentsimd).
