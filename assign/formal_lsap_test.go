@@ -795,13 +795,13 @@ func TestExactSmallIntFastPathAndNegativeControls(t *testing.T) {
 		// Place fractional entry inside 12*40 window and check wide & tall maximize paths.
 		rectFrac := slices.Clone(hiddenFrac[:12*40])
 		rectFrac[6*40+21] = -0.25
-		_, _, _, _, _, _, allIntRect, _, err := validateAndPrepareCost(12, 40, rectFrac, false, Minimize, ws, dis)
-		if err != nil || allIntRect {
-			t.Fatalf("hiddenFrac wide (dis=%v): got allInt=%v err=%v, want false", dis, allIntRect, err)
+		prepRect, err := validateAndPrepareCost(12, 40, rectFrac, false, Minimize, ws, dis)
+		if err != nil || prepRect.allSmallInt {
+			t.Fatalf("hiddenFrac wide (dis=%v): got allInt=%v err=%v, want false", dis, prepRect.allSmallInt, err)
 		}
-		_, _, _, _, _, _, allIntTall, _, err := validateAndPrepareCost(40, 12, rectFrac, false, Maximize, ws, dis)
-		if err != nil || allIntTall {
-			t.Fatalf("hiddenFrac tall max (dis=%v): got allInt=%v err=%v, want false", dis, allIntTall, err)
+		prepTall, err := validateAndPrepareCost(40, 12, rectFrac, false, Maximize, ws, dis)
+		if err != nil || prepTall.allSmallInt {
+			t.Fatalf("hiddenFrac tall max (dis=%v): got allInt=%v err=%v, want false", dis, prepTall.allSmallInt, err)
 		}
 	}
 

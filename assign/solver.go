@@ -1238,11 +1238,21 @@ func scanCostExtremeAndInt(vals []float64, intLim float64, checkInt bool) (maxAb
 	return maxAbsFinite, allInt, nil
 }
 
-func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (m, n int, normCost, unscaledCost []float64, transposed, lostSubnormal, allSmallInt bool, scaleExp int, err error) {
+type preparedCost struct {
+	m, n          int
+	normCost      []float64
+	unscaledCost  []float64
+	transposed    bool
+	lostSubnormal bool
+	allSmallInt   bool
+	scaleExp      int
+}
+
+func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, disableSIMD bool) (preparedCost, error) {
 	negate := sense == Maximize
-	transposed = rows > cols
-	m = min(rows, cols)
-	n = max(rows, cols)
+	transposed := rows > cols
+	m := min(rows, cols)
+	n := max(rows, cols)
 	maxAbsFinite := 0.0
 	intLim := exactSmallIntLimit(n)
 	checkInt := probeExactSmallInt(cost[:rows*cols], intLim, negate)
@@ -1250,19 +1260,27 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 	if !transposed && !negate {
 		if checkInt {
 			if ok, allInt := simd.AllAbsLECheckInt64With(cost, hugeCostThreshold, intLim, disableSIMD); ok {
-				return m, n, cost, cost, false, false, allInt, 0, nil
+				return preparedCost{m: m, n: n, normCost: cost, unscaledCost: cost, allSmallInt: allInt}, nil
 			}
 		} else if simd.AllAbsLE64With(cost, hugeCostThreshold, disableSIMD) {
-			return m, n, cost, cost, false, false, false, 0, nil
+			return preparedCost{m: m, n: n, normCost: cost, unscaledCost: cost}, nil
 		}
 		var allInt bool
+		var err error
 		maxAbsFinite, allInt, err = scanCostExtremeAndInt(cost, intLim, checkInt)
 		if err != nil {
-			return 0, 0, nil, nil, false, false, false, 0, err
+			return preparedCost{}, err
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
 		if downExp == 0 {
-			return m, n, cost, cost, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(cost), allInt && !(maxAbsFinite > hugeCostThreshold), 0, nil
+			return preparedCost{
+				m:             m,
+				n:             n,
+				normCost:      cost,
+				unscaledCost:  cost,
+				lostSubnormal: maxAbsFinite > hugeCostThreshold && hasTinyEntry(cost),
+				allSmallInt:   allInt && !(maxAbsFinite > hugeCostThreshold),
+			}, nil
 		}
 		orig := cost
 		var dst []float64
@@ -1273,7 +1291,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 			dst = ws.ensureWorkCost(rows * cols)
 		}
 		lostSub := downscaleSlice(orig, dst, downExp)
-		return m, n, dst, orig, false, lostSub, false, downExp, nil
+		return preparedCost{m: m, n: n, normCost: dst, unscaledCost: orig, lostSubnormal: lostSub, scaleExp: downExp}, nil
 	}
 
 	if !transposed && negate {
@@ -1285,23 +1303,31 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 		}
 		if checkInt {
 			if ok, allInt := simd.ValidateAndNegateCheckInt64With(dst, cost, hugeCostThreshold, intLim, disableSIMD); ok {
-				return m, n, dst, dst, false, false, allInt, 0, nil
+				return preparedCost{m: m, n: n, normCost: dst, unscaledCost: dst, allSmallInt: allInt}, nil
 			}
 		} else if simd.ValidateAndNegate64With(dst, cost, hugeCostThreshold, disableSIMD) {
-			return m, n, dst, dst, false, false, false, 0, nil
+			return preparedCost{m: m, n: n, normCost: dst, unscaledCost: dst}, nil
 		}
 		var allInt bool
+		var err error
 		maxAbsFinite, allInt, err = scanCostExtremeAndInt(dst, intLim, checkInt)
 		if err != nil {
-			return 0, 0, nil, nil, false, false, false, 0, err
+			return preparedCost{}, err
 		}
 		downExp := minimalDownscaleExp(maxAbsFinite, n)
 		if downExp > 0 {
 			orig := slices.Clone(dst)
 			lostSub := downscaleSlice(orig, dst, downExp)
-			return m, n, dst, orig, false, lostSub, false, downExp, nil
+			return preparedCost{m: m, n: n, normCost: dst, unscaledCost: orig, lostSubnormal: lostSub, scaleExp: downExp}, nil
 		}
-		return m, n, dst, dst, false, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), allInt && !(maxAbsFinite > hugeCostThreshold), 0, nil
+		return preparedCost{
+			m:             m,
+			n:             n,
+			normCost:      dst,
+			unscaledCost:  dst,
+			lostSubnormal: maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst),
+			allSmallInt:   allInt && !(maxAbsFinite > hugeCostThreshold),
+		}, nil
 	}
 
 	// Transposed (rows > cols): m = cols, n = rows.
@@ -1324,11 +1350,11 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 	if checkInt {
 		if ok, allInt := simd.AllAbsLECheckInt64With(src, hugeCostThreshold, intLim, disableSIMD); ok {
 			simd.Transpose64With(dst, src, rows, cols, negate, disableSIMD)
-			return m, n, dst, dst, true, false, allInt, 0, nil
+			return preparedCost{m: m, n: n, normCost: dst, unscaledCost: dst, transposed: true, allSmallInt: allInt}, nil
 		}
 	} else if simd.AllAbsLE64With(src, hugeCostThreshold, disableSIMD) {
 		simd.Transpose64With(dst, src, rows, cols, negate, disableSIMD)
-		return m, n, dst, dst, true, false, false, 0, nil
+		return preparedCost{m: m, n: n, normCost: dst, unscaledCost: dst, transposed: true}, nil
 	}
 
 	allInt := checkInt
@@ -1344,7 +1370,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 						val := rowSlice[c]
 						if !(math.Abs(val) <= hugeCostThreshold) {
 							if math.IsNaN(val) || math.IsInf(val, 1) {
-								return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
+								return preparedCost{}, ErrInvalidCost
 							}
 							if !math.IsInf(val, -1) {
 								allInt = false
@@ -1371,7 +1397,7 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 						val := rowSlice[c]
 						if !(math.Abs(val) <= hugeCostThreshold) {
 							if math.IsNaN(val) || math.IsInf(val, -1) {
-								return 0, 0, nil, nil, false, false, false, 0, ErrInvalidCost
+								return preparedCost{}, ErrInvalidCost
 							}
 							if !math.IsInf(val, 1) {
 								allInt = false
@@ -1392,9 +1418,17 @@ func validateAndPrepareCost(rows, cols int, cost []float64, ownedInWork bool, se
 	if downExp > 0 {
 		orig := slices.Clone(dst)
 		lostSub := downscaleSlice(orig, dst, downExp)
-		return m, n, dst, orig, true, lostSub, false, downExp, nil
+		return preparedCost{m: m, n: n, normCost: dst, unscaledCost: orig, transposed: true, lostSubnormal: lostSub, scaleExp: downExp}, nil
 	}
-	return m, n, dst, dst, true, maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst), allInt && !(maxAbsFinite > hugeCostThreshold), 0, nil
+	return preparedCost{
+		m:             m,
+		n:             n,
+		normCost:      dst,
+		unscaledCost:  dst,
+		transposed:    true,
+		lostSubnormal: maxAbsFinite > hugeCostThreshold && hasTinyEntry(dst),
+		allSmallInt:   allInt && !(maxAbsFinite > hugeCostThreshold),
+	}, nil
 }
 
 func solveWithWorkspace(ctx context.Context, rows, cols int, cost []float64, ownedInWork bool, sense Sense, ws *Workspace, cfg Options) (Result, error) {
@@ -1588,22 +1622,16 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 	}
 
 	var (
-		m, n                   int
-		normCost, unscaledCost []float64
-		transposed             bool
-		lostSubnormal          bool
-		allSmallInt            bool
-		scaleExp               int
-		colReduced             bool
-		err                    error
+		prep       preparedCost
+		colReduced bool
+		err        error
 	)
 
 	if rows == cols && rows > 1 && sense == Minimize {
-		m, n = rows, cols
-		ws.ensure(m, n)
-		intLim := exactSmallIntLimit(n)
-		checkInt := probeExactSmallInt(cost[:n*n], intLim, false)
-		ok, allInt, crErr := colReduceValidateSquare(n, cost, ws.v[:n], ws.row4col[:n], intLim, checkInt, cfg.DisableSIMD, done)
+		ws.ensure(rows, cols)
+		intLim := exactSmallIntLimit(cols)
+		checkInt := probeExactSmallInt(cost[:rows*cols], intLim, false)
+		ok, allInt, crErr := colReduceValidateSquare(cols, cost, ws.v[:cols], ws.row4col[:cols], intLim, checkInt, cfg.DisableSIMD, done)
 		if crErr != nil {
 			if errors.Is(crErr, errContextCanceled) {
 				return 0, false, ctx.Err()
@@ -1611,23 +1639,32 @@ func solveCore(ctx context.Context, rows, cols int, cost []float64, ownedInWork 
 			return 0, false, crErr
 		}
 		if ok {
-			normCost = cost
-			unscaledCost = cost
+			prep = preparedCost{
+				m:            rows,
+				n:            cols,
+				normCost:     cost,
+				unscaledCost: cost,
+				allSmallInt:  allInt,
+			}
 			colReduced = true
-			allSmallInt = allInt
 		} else {
-			m, n, normCost, unscaledCost, transposed, lostSubnormal, allSmallInt, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+			prep, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
 			if err != nil {
 				return 0, false, err
 			}
 		}
 	} else {
-		m, n, normCost, unscaledCost, transposed, lostSubnormal, allSmallInt, scaleExp, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
+		prep, err = validateAndPrepareCost(rows, cols, cost, ownedInWork, sense, ws, cfg.DisableSIMD)
 		if err != nil {
 			return 0, false, err
 		}
-		ws.ensure(m, n)
+		ws.ensure(prep.m, prep.n)
 	}
+
+	m, n := prep.m, prep.n
+	normCost, unscaledCost := prep.normCost, prep.unscaledCost
+	transposed, lostSubnormal, allSmallInt := prep.transposed, prep.lostSubnormal, prep.allSmallInt
+	scaleExp := prep.scaleExp
 
 	u := ws.u[:m]
 	v := ws.v[:n]
