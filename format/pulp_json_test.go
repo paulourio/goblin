@@ -396,6 +396,61 @@ func TestWriteMPSPrecisionOffsetAndValidation(t *testing.T) {
 	}
 }
 
+// Verifies that WriteMPS emits the *SENSE:Maximize comment card on line 1 while
+// COLUMNS and RHS already negate Maximize objectives into standard minimization form.
+func TestWriteMPSMaximizeMinimizationForm(t *testing.T) {
+	buildAndWrite := func(sense gb.Sense) string {
+		m := gb.NewModel("mps_sense_form", sense)
+		x := m.AddContVar("x", 0, 5)
+		y := m.AddIntVar("y", 1, 4)
+		m.SetObjective(gb.NewExpr(x.T(3.5), y.T(-2.0)).AddConstant(42.5))
+		m.AddConstraint("cap", gb.NewExpr(x.T(1.0), y.T(2.0)).Le(10.0))
+
+		var buf bytes.Buffer
+		if err := format.WriteMPS(m.Compile(), &buf); err != nil {
+			t.Fatalf("WriteMPS(sense=%v) failed: %v", sense, err)
+		}
+		return buf.String()
+	}
+
+	maxMPS := buildAndWrite(gb.Maximize)
+	maxLines := strings.Split(maxMPS, "\n")
+	if len(maxLines) == 0 || maxLines[0] != "*SENSE:Maximize" {
+		t.Fatalf("line 1 = %q, want *SENSE:Maximize comment card", maxLines[0])
+	}
+	if strings.Contains(maxMPS, "OBJSENSE") {
+		t.Fatalf("unexpected OBJSENSE card in PuLP-compatible MPS:\n%s", maxMPS)
+	}
+	for _, want := range []string{
+		"    x         OBJ       -3.5\n",
+		"    y         OBJ       2\n",
+		"    RHS       OBJ       42.5\n",
+		"    RHS       cap       10\n",
+	} {
+		if !strings.Contains(maxMPS, want) {
+			t.Fatalf("Maximize MPS missing negated minimization card %q:\n%s", want, maxMPS)
+		}
+	}
+	if strings.Contains(maxMPS, "    x         OBJ       3.5\n") || strings.Contains(maxMPS, "    RHS       OBJ       -42.5\n") {
+		t.Fatalf("Maximize MPS emitted unnegated objective card:\n%s", maxMPS)
+	}
+
+	minMPS := buildAndWrite(gb.Minimize)
+	minLines := strings.Split(minMPS, "\n")
+	if len(minLines) == 0 || minLines[0] != "*SENSE:Minimize" {
+		t.Fatalf("line 1 = %q, want *SENSE:Minimize comment card", minLines[0])
+	}
+	for _, want := range []string{
+		"    x         OBJ       3.5\n",
+		"    y         OBJ       -2\n",
+		"    RHS       OBJ       -42.5\n",
+	} {
+		if !strings.Contains(minMPS, want) {
+			t.Fatalf("Minimize MPS missing objective card %q:\n%s", want, minMPS)
+		}
+	}
+}
+
 // Checks non-standard JSON floats, signed zeros, and explicit binary bounds.
 // Specifically, the fast scanner must skip Python `NaN` and `Infinity` tokens on primal/dual
 // outputs, preserve `-0.0` sign bits on input numbers, and honor explicit bounds on `Binary`

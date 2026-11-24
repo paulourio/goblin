@@ -378,9 +378,16 @@ func writeMPSBoundsSection(mw *mpsWriter, p *gb.CompiledProblem, conflictRows []
 	}
 }
 
-// WriteMPS writes a CompiledProblem in free-format MPS (with INTORG/INTEND markers
-// for integer and binary variables) suitable for direct execution by COIN-OR CBC.
-// Like PuLP's writeMPS, the objective is written in minimization form (negated when Maximize).
+// WriteMPS writes a CompiledProblem in MPS format (fixed-column offsets for short names
+// and space-separated fallback for longer identifiers, with INTORG/INTEND markers for
+// integer and binary variables), compatible with COIN-OR CBC and PuLP default
+// writeMPS(with_objsense=False).
+//
+// Line 1 (*SENSE:Minimize or *SENSE:Maximize) is an MPS * comment card, while COLUMNS
+// and RHS already negate Maximize objectives (coefficients -c_j and negated constant
+// offset) into standard MPS minimization form. External MPS solvers (cbc, highs, glpsol)
+// must therefore run in default minimize mode and must NOT pass -max, which
+// double-negates Maximize models.
 func WriteMPS(p *gb.CompiledProblem, w io.Writer) error {
 	probName, objName, conflictRows, err := validateMPSProblem(p)
 	if err != nil {
