@@ -551,6 +551,128 @@ func TestAssignCertifiedNegativeControlsFailClosed(t *testing.T) {
 	assertAllEntrypointsFailClosed(t, "false_invalid_cost", base3, Minimize, func(_, _ int, _ Sense, _ *Result, err *error) {
 		*err = ErrInvalidCost
 	})
+
+	// 11. Tampered dual potential U on a MaxFloat64 staircase matrix (Attack 1B).
+	maxF := math.MaxFloat64
+	c0 := 0x1.0000000000001p1021
+	delta := 0x1p968
+	staircase := [][]float64{
+		{0, -maxF, pInf, pInf},
+		{pInf, 0.5 * maxF, -maxF, pInf},
+		{pInf, pInf, 0.25 * maxF, c0},
+		{pInf, pInf, pInf, -delta},
+	}
+	assertAllEntrypointsFailClosed(t, "tampered_huge_dual_u", staircase, Minimize, func(_, _ int, _ Sense, res *Result, _ *error) {
+		res.U[1] = 1e308
+	})
+}
+
+func TestAssignCertifiedHugeDualRepairStrictRatFeasibility(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	maxF := math.MaxFloat64
+	c0 := 0x1.0000000000001p1021
+	delta := 0x1p968
+	pInf := math.Inf(1)
+	nInf := math.Inf(-1)
+
+	// Attack 1A: exact Bellman-Ford dual span exceeds 2*MaxFloat64 and Stage 2 rounds c - v[j] up.
+	matMin := [][]float64{
+		{0, -maxF, pInf, pInf},
+		{pInf, 0.5 * maxF, -maxF, pInf},
+		{pInf, pInf, 0.25 * maxF, c0},
+		{pInf, pInf, pInf, -delta},
+	}
+	matMax := make([][]float64, 4)
+	for i := range 4 {
+		matMax[i] = make([]float64, 4)
+		for j := range 4 {
+			if math.IsInf(matMin[i][j], 1) {
+				matMax[i][j] = nInf
+			} else {
+				matMax[i][j] = -matMin[i][j]
+			}
+		}
+	}
+
+	verifyStrictRatDuals := func(t *testing.T, label string, mat [][]float64, sense Sense, res Result) {
+		t.Helper()
+		rows, cols := len(mat), len(mat[0])
+		if len(res.U) != rows || len(res.V) != cols {
+			t.Fatalf("%s: bad dual lengths U=%d V=%d", label, len(res.U), len(res.V))
+		}
+		for i := range rows {
+			if math.IsNaN(res.U[i]) || math.IsInf(res.U[i], 0) {
+				t.Fatalf("%s: non-finite U[%d]=%v", label, i, res.U[i])
+			}
+			ru := new(big.Rat).SetFloat64(res.U[i])
+			for j := range cols {
+				if math.IsNaN(res.V[j]) || math.IsInf(res.V[j], 0) {
+					t.Fatalf("%s: non-finite V[%d]=%v", label, j, res.V[j])
+				}
+				raw := mat[i][j]
+				if (sense == Minimize && math.IsInf(raw, 1)) || (sense == Maximize && math.IsInf(raw, -1)) {
+					continue
+				}
+				normC := raw
+				if sense == Maximize {
+					normC = -raw
+				}
+				rv := new(big.Rat).SetFloat64(res.V[j])
+				rc := new(big.Rat).SetFloat64(normC)
+				if new(big.Rat).Add(ru, rv).Cmp(rc) > 0 {
+					t.Fatalf("%s: exact rational dual infeasibility at (%d,%d): U=%g V=%g normC=%g",
+						label, i, j, res.U[i], res.V[j], normC)
+				}
+			}
+		}
+	}
+
+	resMin, err := LinearSum(ctx, matMin, Minimize, WithCertified(true))
+	if err != nil {
+		t.Fatalf("Attack 1A Minimize failed: %v", err)
+	}
+	verifyStrictRatDuals(t, "Attack1A_Min", matMin, Minimize, resMin)
+
+	resMax, err := LinearSum(ctx, matMax, Maximize, WithCertified(true))
+	if err != nil {
+		t.Fatalf("Attack 1A Maximize failed: %v", err)
+	}
+	verifyStrictRatDuals(t, "Attack1A_Max", matMax, Maximize, resMax)
+
+	// Verify rectangular huge-cost staircase matrices satisfy both strict rational dual feasibility and sign invariants.
+	rectWide := [][]float64{
+		{0, -maxF, pInf, pInf, pInf},
+		{pInf, 0.5 * maxF, -maxF, pInf, pInf},
+		{pInf, pInf, 0.25 * maxF, c0, 0.5 * maxF},
+	}
+	resWide, err := LinearSum(ctx, rectWide, Minimize, WithCertified(true))
+	if err != nil {
+		t.Fatalf("rectangular wide huge matrix failed: %v", err)
+	}
+	verifyStrictRatDuals(t, "HugeRectWide_Min", rectWide, Minimize, resWide)
+	matchedCols := make([]bool, 5)
+	for _, c := range resWide.ColInd {
+		matchedCols[c] = true
+	}
+	for j := range 5 {
+		if resWide.V[j] > 0 || (!matchedCols[j] && resWide.V[j] != 0) {
+			t.Fatalf("HugeRectWide_Min: V[%d]=%g violates rectangular invariant (matched=%v)", j, resWide.V[j], matchedCols[j])
+		}
+	}
+
+	// Verify dyadic2304.toFloat64Floor clamps values above MaxFloat64 to MaxFloat64 and keeps -Inf below -MaxFloat64.
+	dMax, _ := dyadicFromFloat(math.MaxFloat64)
+	dOne, _ := dyadicFromFloat(1.0)
+	dOver := dyadicAdd(dMax, dMax)
+	if got := dOver.toFloat64Floor(); got != math.MaxFloat64 {
+		t.Fatalf("(2*MaxFloat64).toFloat64Floor() = %v, want MaxFloat64", got)
+	}
+	dUnder := dyadicNeg(dyadicAdd(dMax, dOne))
+	if got := dUnder.toFloat64Floor(); !math.IsInf(got, -1) {
+		t.Fatalf("(-MaxFloat64-1).toFloat64Floor() = %v, want -Inf", got)
+	}
 }
 
 func TestAssignStructLiteralCertifiedWithoutHookFailsClosed(t *testing.T) {

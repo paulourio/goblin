@@ -149,8 +149,7 @@ func scanVIPRJSONString(b []byte, pos int) (string, int, bool) {
 						}
 					}
 				}
-				sb.WriteRune(utf8.RuneError)
-				continue
+				return "", 0, false
 			}
 			sb.WriteRune(r1)
 		default:
@@ -557,6 +556,15 @@ func decodeVIPRIntPtrField(dst **int, val viprRawJSON) bool {
 	return true
 }
 
+func decodeVIPRStrictIntPtrField(dst **int, val viprRawJSON) bool {
+	p, ok := viprUnmarshalIntPtr(val)
+	if !ok || p == nil {
+		return false
+	}
+	*dst = p
+	return true
+}
+
 func decodeVIPRBoolPtrField(dst **bool, val viprRawJSON) bool {
 	p, ok := viprUnmarshalBoolPtr(val)
 	if !ok {
@@ -572,6 +580,15 @@ func decodeVIPROptStringField(dst *string, val viprRawJSON) bool {
 		return false
 	}
 	*dst = s
+	return true
+}
+
+func decodeVIPRStrictStringPtrField(dst **string, val viprRawJSON) bool {
+	s, ok := viprUnmarshalString(val)
+	if !ok {
+		return false
+	}
+	*dst = &s
 	return true
 }
 
@@ -649,7 +666,7 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 		case "col":
 			return decodeVIPRIntPtrField(&st.Col, val)
 		case "sense":
-			return decodeVIPROptStringField(&st.Sense, val)
+			return decodeVIPRStrictStringPtrField(&st.Sense, val)
 		case "isUpper":
 			return decodeVIPRBoolPtrField(&st.IsUpper, val)
 		case "bound":
@@ -681,13 +698,9 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 			}
 			st.Refs = &refs
 		case "bounds":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
+			elems, _, okA := viprUnmarshalRawArray(val, false)
 			if !okA {
 				return false
-			}
-			if isNull {
-				st.Bounds = nil
-				return true
 			}
 			bnds := make([]certBoundRefDoc, len(elems))
 			for i, el := range elems {
@@ -697,7 +710,7 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 					case "col":
 						return decodeVIPRIntPtrField(&br.Col, bv)
 					case "kind":
-						return decodeVIPROptStringField(&br.Kind, bv)
+						return decodeVIPRStrictStringPtrField(&br.Kind, bv)
 					case "isUpper":
 						return decodeVIPRBoolPtrField(&br.IsUpper, bv)
 					case "mult":
@@ -823,7 +836,7 @@ func unmarshalCertVIPRDoc(raw viprRawJSON) (certVIPRDoc, bool) {
 			}
 			doc.Steps = steps
 		case "rootStep":
-			return decodeVIPRIntPtrField(&doc.RootStep, val)
+			return decodeVIPRStrictIntPtrField(&doc.RootStep, val)
 		}
 		return true
 	})

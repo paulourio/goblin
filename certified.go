@@ -75,12 +75,15 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 	opt.RelGapTol, opt.AbsGapTol = opt.effectiveGapTols()
 	var deadline time.Time
 	if opt.TimeLimit < 0 {
+		trivBnd := trivialDualBound(p.sense)
 		res := Result{
-			modelID:   p.modelID,
-			Backend:   opt.Backend,
-			Status:    StatusTimeLimit,
-			BestBound: trivialDualBound(p.sense),
-			SolveTime: time.Since(start),
+			modelID:      p.modelID,
+			Backend:      opt.Backend,
+			Status:       StatusTimeLimit,
+			BestBound:    trivBnd,
+			RootLPBound:  trivBnd,
+			RootCutBound: trivBnd,
+			SolveTime:    time.Since(start),
 		}
 		var wit *lpCertWitness
 		if !p.isMIP {
@@ -91,12 +94,15 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 	if opt.TimeLimit > 0 {
 		deadline = start.Add(opt.TimeLimit)
 		if !start.Before(deadline) {
+			trivBnd := trivialDualBound(p.sense)
 			res := Result{
-				modelID:   p.modelID,
-				Backend:   opt.Backend,
-				Status:    StatusTimeLimit,
-				BestBound: trivialDualBound(p.sense),
-				SolveTime: time.Since(start),
+				modelID:      p.modelID,
+				Backend:      opt.Backend,
+				Status:       StatusTimeLimit,
+				BestBound:    trivBnd,
+				RootLPBound:  trivBnd,
+				RootCutBound: trivBnd,
+				SolveTime:    time.Since(start),
 			}
 			var wit *lpCertWitness
 			if !p.isMIP {
@@ -153,7 +159,10 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 		switch res.Status {
 		case StatusOptimal, StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
 			polishMIPResultFromTrace(p, trace, &res)
+		case StatusInfeasible:
+			scrubNonFiniteRootBounds(&res)
 		case StatusUnbounded:
+			scrubNonFiniteRootBounds(&res)
 			certUnb, okUnb := extractUnboundedCertificateStop(stop, p, nil, res.Values)
 			mipWit = &lpCertWitness{unbounded: certUnb, hasUnbounded: okUnb}
 		}
@@ -193,7 +202,10 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 				switch res.Status {
 				case StatusOptimal, StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
 					polishMIPResultFromTrace(p, trace, &res)
+				case StatusInfeasible:
+					scrubNonFiniteRootBounds(&res)
 				case StatusUnbounded:
+					scrubNonFiniteRootBounds(&res)
 					certUnb, okUnb := extractUnboundedCertificateStop(stop, p, nil, res.Values)
 					mipWit = &lpCertWitness{unbounded: certUnb, hasUnbounded: okUnb}
 				}
@@ -238,7 +250,17 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 			}
 		}
 	}
-	return finalizeCertifiedSolve(ctx, p, opt, optVIPRTrace(opt), lpWit, res, start)
+	trace := optVIPRTrace(opt)
+	if trace != nil {
+		if res.Status == StatusUnbounded || (isLimitStatus(res.Status) && isTrivialInfBound(p.sense, res.BestBound)) {
+			if trace.TracedProblem() != p {
+				trace.reset(p)
+			}
+		} else if lpWit != nil {
+			populateLPVIPRTraceFromWitness(p, trace, res, lpWit)
+		}
+	}
+	return finalizeCertifiedSolve(ctx, p, opt, trace, lpWit, res, start)
 }
 
 func finalizeCertifiedSolve(
@@ -270,6 +292,11 @@ func finalizeCertifiedSolve(
 	if err := verifyCertifiedLP(p, opt, res, wit); err != nil {
 		return failClosedResult(p, res, backend, start)
 	}
+	if trace != nil && res.Status != StatusUnbounded && !(isLimitStatus(res.Status) && isTrivialInfBound(p.sense, res.BestBound)) {
+		if err := VerifyVIPRTrace(p, trace, res, opt); err != nil {
+			return failClosedResult(p, res, backend, start)
+		}
+	}
 	return res, nil
 }
 
@@ -282,11 +309,89 @@ func finalizeCertifiedSolve(
 // in opt requires bit-exact float64 matches against the rounded rational witness
 // values and defaults unset gap thresholds to zero.
 func VerifyVIPRTrace(p *CompiledProblem, trace *VIPRTrace, res Result, opt Options) error {
-	return verifyCertifiedMIP(exactStop{}, p, trace, nil, res, opt, opt.Certified)
+	if p == nil {
+		return ErrCertificationFailed
+	}
+	if trace == nil && res.Status != StatusUnbounded && !(isLimitStatus(res.Status) && isTrivialInfBound(p.sense, res.BestBound)) {
+		return ErrCertificationFailed
+	}
+	stop := exactStop{deadline: time.Now().Add(5 * time.Second)}
+	return verifyCertifiedMIP(stop, p, trace, nil, res, opt, opt.Certified)
+}
+
+func scrubNonFiniteRootBounds(res *Result) {
+	if isNonFinite(res.RootLPBound) {
+		res.RootLPBound = 0
+	}
+	if isNonFinite(res.RootCutBound) {
+		res.RootCutBound = 0
+	}
+}
+
+func clampRootBoundToBestBound(sense Sense, rootB, bestB float64) float64 {
+	if math.IsNaN(rootB) || isOppositeInfBound(sense, rootB) {
+		return bestB
+	}
+	if isTrivialInfBound(sense, bestB) {
+		return bestB
+	}
+	if isTrivialInfBound(sense, rootB) {
+		return rootB
+	}
+	if math.IsNaN(bestB) || math.IsInf(bestB, 0) {
+		return rootB
+	}
+	if sense == Maximize {
+		if rootB < bestB {
+			return bestB
+		}
+		return rootB
+	}
+	if rootB > bestB {
+		return bestB
+	}
+	return rootB
+}
+
+func verifyRootBoundAgainstBest(sense Sense, rootB, bestB float64, strictPolished bool) bool {
+	if math.IsNaN(rootB) || math.IsNaN(bestB) {
+		return false
+	}
+	if isTrivialInfBound(sense, rootB) {
+		return true
+	}
+	if math.IsInf(rootB, 0) {
+		return false
+	}
+	if isTrivialInfBound(sense, bestB) {
+		return !strictPolished && rootB == 0
+	}
+	if math.IsInf(bestB, 0) {
+		return false
+	}
+	tol := 0.0
+	if !strictPolished {
+		tol = 1e-6 * max(1.0, math.Abs(bestB))
+	}
+	if sense == Maximize {
+		return rootB >= bestB-tol
+	}
+	return rootB <= bestB+tol
 }
 
 func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result) {
-	if p == nil || res == nil || trace == nil || !trace.HasCertificate() {
+	if p == nil || res == nil {
+		return
+	}
+	if trace == nil || !trace.HasCertificate() {
+		if isLimitStatus(res.Status) {
+			res.BestBound = trivialDualBound(p.sense)
+			res.RootLPBound = res.BestBound
+			res.RootCutBound = res.BestBound
+			if len(res.Values) == 0 {
+				res.Objective = 0
+			}
+		}
 		return
 	}
 	raw, err := trace.MarshalVIPRJSON()
@@ -388,29 +493,36 @@ func polishMIPResultFromTrace(p *CompiledProblem, trace *VIPRTrace, res *Result)
 		} else if lbMin := trace.TargetLB(); lbMin != nil {
 			bUser = userBoundFromMinRat(p, lbMin)
 		}
-		if bUser != nil && !isNonFinite(res.BestBound) {
+		if bUser != nil {
 			bf := exactRatToOutwardBound(p.sense, bUser)
-			maxSnap := 1e-5 * max(1.0, math.Abs(bf))
-			if res.Status != StatusOptimal {
-				maxSnap = 1e-2 * max(1.0, math.Abs(bf))
-			}
-			if res.Status == StatusOptimal && doc.Mode == "optimal" {
-				if math.Abs(res.BestBound-bf) <= maxSnap {
+			if isLimitStatus(res.Status) {
+				if isNonFinite(res.BestBound) ||
+					(p.sense == Maximize && res.BestBound < bf) ||
+					(p.sense == Minimize && res.BestBound > bf) {
 					res.BestBound = bf
 				}
-			} else if p.sense == Maximize {
-				if res.BestBound < bf && bf-res.BestBound <= maxSnap {
-					res.BestBound = bf
-				}
-			} else {
-				if res.BestBound > bf && res.BestBound-bf <= maxSnap {
-					res.BestBound = bf
+			} else if !isNonFinite(res.BestBound) {
+				maxSnap := 1e-5 * max(1.0, math.Abs(bf))
+				if doc.Mode == "optimal" {
+					if math.Abs(res.BestBound-bf) <= maxSnap {
+						res.BestBound = bf
+					}
+				} else if p.sense == Maximize {
+					if res.BestBound < bf && bf-res.BestBound <= maxSnap {
+						res.BestBound = bf
+					}
+				} else {
+					if res.BestBound > bf && res.BestBound-bf <= maxSnap {
+						res.BestBound = bf
+					}
 				}
 			}
 			if hasPolishedInc && !isNonFinite(res.Objective) {
 				res.BestBound = clampBestBoundToObj(p.sense, res.BestBound, res.Objective)
 			}
 		}
+		res.RootLPBound = clampRootBoundToBestBound(p.sense, res.RootLPBound, res.BestBound)
+		res.RootCutBound = clampRootBoundToBestBound(p.sense, res.RootCutBound, res.BestBound)
 	}
 }
 
@@ -1053,8 +1165,10 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		return nil
 	}
 	if res.Status == StatusTimeLimit || res.Status == StatusNodeLimit || res.Status == StatusIterationLimit {
+		res.RootLPBound = clampRootBoundToBestBound(p.sense, res.RootLPBound, res.BestBound)
+		res.RootCutBound = clampRootBoundToBestBound(p.sense, res.RootCutBound, res.BestBound)
 		if len(res.Values) == 0 {
-			return &lpCertWitness{}
+			return &lpCertWitness{polished: true}
 		}
 		if len(res.Values) != p.numVars || !approxLPPrimalFeasible(p, res.Values) {
 			return nil
@@ -1087,9 +1201,7 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 			for i := range res.Duals {
 				res.Duals[i] = 0
 			}
-			for j := range res.ReducedCosts {
-				res.ReducedCosts[j] = 0
-			}
+			res.ReducedCosts = nil
 			if objU, okO := evalExactUserObjRat(p, emptyX); okO {
 				res.Objective = exactRatToFloat(objU)
 				res.BestBound = exactRatToOutwardBound(p.sense, objU)
@@ -1097,6 +1209,8 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 				res.Objective = p.objConstant
 				res.BestBound = p.objConstant
 			}
+			res.RootLPBound = res.BestBound
+			res.RootCutBound = res.BestBound
 			return &lpCertWitness{primal: emptyX, dualMin: zeroDuals, polished: true}
 		}
 
@@ -1111,6 +1225,8 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 					res.Objective = exactRatToFloat(objU)
 					res.BestBound = exactRatToOutwardBound(p.sense, userBoundFromMinRat(p, safeBnd))
 					res.BestBound = clampBestBoundToObj(p.sense, res.BestBound, res.Objective)
+					res.RootLPBound = res.BestBound
+					res.RootCutBound = res.BestBound
 					neg := p.sense == Maximize
 					for i, yi := range yDirect {
 						f := exactRatToFloat(yi)
@@ -1119,10 +1235,11 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 						}
 						res.Duals[i] = f
 					}
-					if len(res.ReducedCosts) == p.numVars {
-						for j, r := range rcUser {
-							res.ReducedCosts[j] = exactRatToFloat(r)
-						}
+					if len(res.ReducedCosts) != p.numVars {
+						res.ReducedCosts = make([]float64, p.numVars)
+					}
+					for j, r := range rcUser {
+						res.ReducedCosts[j] = exactRatToFloat(r)
 					}
 					return &lpCertWitness{primal: xDirect, dualMin: yDirect, polished: true}
 				}
@@ -1148,13 +1265,16 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 			for i, r := range sol.DualUser {
 				res.Duals[i] = exactRatToFloat(r)
 			}
-			if len(res.ReducedCosts) == p.numVars {
-				for j, r := range sol.ReducedCost {
-					res.ReducedCosts[j] = exactRatToFloat(r)
-				}
+			if len(res.ReducedCosts) != p.numVars {
+				res.ReducedCosts = make([]float64, p.numVars)
+			}
+			for j, r := range sol.ReducedCost {
+				res.ReducedCosts[j] = exactRatToFloat(r)
 			}
 			res.Objective = solObjF
 			res.BestBound = exactRatToOutwardBound(p.sense, sol.ObjectiveUser)
+			res.RootLPBound = res.BestBound
+			res.RootCutBound = res.BestBound
 			return &lpCertWitness{primal: sol.Primal, dualMin: sol.DualMin, polished: true}
 		}
 
@@ -1165,15 +1285,18 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 						for i, r := range dualUser {
 							res.Duals[i] = exactRatToFloat(r)
 						}
-						if len(res.ReducedCosts) == p.numVars {
-							for j, r := range rcUser {
-								res.ReducedCosts[j] = exactRatToFloat(r)
-							}
+						if len(res.ReducedCosts) != p.numVars {
+							res.ReducedCosts = make([]float64, p.numVars)
+						}
+						for j, r := range rcUser {
+							res.ReducedCosts[j] = exactRatToFloat(r)
 						}
 						objU, _ := evalExactUserObjRat(p, xDirect)
 						res.Objective = exactRatToFloat(objU)
 						res.BestBound = exactRatToOutwardBound(p.sense, userBoundFromMinRat(p, safeBnd))
 						res.BestBound = clampBestBoundToObj(p.sense, res.BestBound, res.Objective)
+						res.RootLPBound = res.BestBound
+						res.RootCutBound = res.BestBound
 						return &lpCertWitness{primal: xDirect, dualMin: yMin, polished: true}
 					}
 				}
@@ -1182,6 +1305,8 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		return nil
 
 	case StatusInfeasible:
+		res.RootLPBound = 0
+		res.RootCutBound = 0
 		if verifyDirectInfeas(p) {
 			return &lpCertWitness{hasDirectInfeas: true}
 		}
@@ -1212,6 +1337,8 @@ func buildCertifiedLPWitness(stop exactStop, p *CompiledProblem, opt Options, re
 		return nil
 
 	case StatusUnbounded:
+		res.RootLPBound = 0
+		res.RootCutBound = 0
 		certUnb, okUnb := extractUnboundedCertificateStop(stop, p, nil, res.Values)
 		if !okUnb {
 			return nil
@@ -1232,10 +1359,7 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 
 	switch res.Status {
 	case StatusOptimal:
-		if len(res.Values) != n || len(res.Duals) != m || len(wit.primal) != n || len(wit.dualMin) != m {
-			return ErrCertificationFailed
-		}
-		if len(res.ReducedCosts) != 0 && len(res.ReducedCosts) != n {
+		if len(res.Values) != n || len(res.Duals) != m || len(res.ReducedCosts) != n || len(wit.primal) != n || len(wit.dualMin) != m {
 			return ErrCertificationFailed
 		}
 		if !verifyExactPrimalRat(p, wit.primal, false) {
@@ -1260,7 +1384,7 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 				return ErrCertificationFailed
 			}
 		}
-		if len(res.ReducedCosts) == n && n > 0 {
+		if n > 0 {
 			rcUser, okRC := exactUserReducedCosts(p, wit.dualMin)
 			if !okRC {
 				return ErrCertificationFailed
@@ -1290,10 +1414,16 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 		if !floatBestBoundValidAndClosed(p, wit.primal, safeMinBnd, res, opt, wit.polished) {
 			return ErrCertificationFailed
 		}
+		if isNonFinite(res.RootLPBound) || isNonFinite(res.RootCutBound) ||
+			res.RootLPBound != res.BestBound || res.RootCutBound != res.BestBound {
+			return ErrCertificationFailed
+		}
 		return nil
 
 	case StatusInfeasible:
-		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) {
+		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 ||
+			res.Objective != 0 || math.IsNaN(res.BestBound) ||
+			res.RootLPBound != 0 || res.RootCutBound != 0 {
 			return ErrCertificationFailed
 		}
 		if wit.hasDirectInfeas && verifyDirectInfeas(p) {
@@ -1305,7 +1435,9 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 		return ErrCertificationFailed
 
 	case StatusUnbounded:
-		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) {
+		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 ||
+			res.Objective != 0 || math.IsNaN(res.BestBound) ||
+			res.RootLPBound != 0 || res.RootCutBound != 0 {
 			return ErrCertificationFailed
 		}
 		if !wit.hasUnbounded || !VerifyUnboundedCertificate(p, wit.unbounded) {
@@ -1315,6 +1447,10 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 
 	case StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
 		if len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.BestBound) || math.IsNaN(res.Objective) {
+			return ErrCertificationFailed
+		}
+		if !verifyRootBoundAgainstBest(p.sense, res.RootLPBound, res.BestBound, wit.polished) ||
+			!verifyRootBoundAgainstBest(p.sense, res.RootCutBound, res.BestBound, wit.polished) {
 			return ErrCertificationFailed
 		}
 		if len(wit.dualMin) == m && m > 0 {
@@ -1369,7 +1505,15 @@ func verifyCertifiedMIP(
 
 	switch res.Status {
 	case StatusInfeasible:
-		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) {
+		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 ||
+			math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) ||
+			isNonFinite(res.RootLPBound) || isNonFinite(res.RootCutBound) {
+			return ErrCertificationFailed
+		}
+		if strictPolished && res.Objective != 0 {
+			return ErrCertificationFailed
+		}
+		if !p.isMIP && strictPolished && (res.RootLPBound != 0 || res.RootCutBound != 0) {
 			return ErrCertificationFailed
 		}
 		if trace == nil || !trace.HasCertificate() {
@@ -1389,7 +1533,27 @@ func verifyCertifiedMIP(
 		if len(res.Values) != n || isNonFinite(res.Objective) || isNonFinite(res.BestBound) {
 			return ErrCertificationFailed
 		}
-		if p.isMIP && (len(res.Duals) != 0 || len(res.ReducedCosts) != 0) {
+		if p.isMIP {
+			if len(res.Duals) != 0 || len(res.ReducedCosts) != 0 {
+				return ErrCertificationFailed
+			}
+		} else {
+			if len(res.Duals) != 0 {
+				if len(res.Duals) != p.numConstraints || slices.ContainsFunc(res.Duals, isNonFinite) {
+					return ErrCertificationFailed
+				}
+			}
+			if len(res.ReducedCosts) != 0 {
+				if len(res.ReducedCosts) != n || slices.ContainsFunc(res.ReducedCosts, isNonFinite) {
+					return ErrCertificationFailed
+				}
+			}
+		}
+		if !verifyRootBoundAgainstBest(p.sense, res.RootLPBound, res.BestBound, strictPolished) ||
+			!verifyRootBoundAgainstBest(p.sense, res.RootCutBound, res.BestBound, strictPolished) {
+			return ErrCertificationFailed
+		}
+		if !p.isMIP && strictPolished && (res.RootLPBound != res.BestBound || res.RootCutBound != res.BestBound) {
 			return ErrCertificationFailed
 		}
 		if trace == nil || !trace.HasCertificate() {
@@ -1434,7 +1598,15 @@ func verifyCertifiedMIP(
 		return nil
 
 	case StatusUnbounded:
-		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) {
+		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 ||
+			math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) ||
+			isNonFinite(res.RootLPBound) || isNonFinite(res.RootCutBound) {
+			return ErrCertificationFailed
+		}
+		if strictPolished && res.Objective != 0 {
+			return ErrCertificationFailed
+		}
+		if !p.isMIP && strictPolished && (res.RootLPBound != 0 || res.RootCutBound != 0) {
 			return ErrCertificationFailed
 		}
 		if wit != nil {
@@ -1451,6 +1623,10 @@ func verifyCertifiedMIP(
 
 	case StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
 		if len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.BestBound) || math.IsNaN(res.Objective) {
+			return ErrCertificationFailed
+		}
+		if !verifyRootBoundAgainstBest(p.sense, res.RootLPBound, res.BestBound, strictPolished) ||
+			!verifyRootBoundAgainstBest(p.sense, res.RootCutBound, res.BestBound, strictPolished) {
 			return ErrCertificationFailed
 		}
 		var traceInc []*big.Rat
@@ -1597,6 +1773,12 @@ type certVIPRVerified struct {
 	certifiedMinLB *big.Rat
 }
 
+const (
+	maxVIPRVerifyVars = 10_000_000
+	maxVIPRRatStrLen  = 8192
+	maxVIPRRatBits    = 16384
+)
+
 type certLinRefDoc struct {
 	ID   *int        `json:"id"`
 	Mult viprRawJSON `json:"mult"`
@@ -1604,7 +1786,7 @@ type certLinRefDoc struct {
 
 type certBoundRefDoc struct {
 	Col     *int        `json:"col"`
-	Kind    string      `json:"kind"`
+	Kind    *string     `json:"kind"`
 	IsUpper *bool       `json:"isUpper"`
 	Mult    viprRawJSON `json:"mult"`
 }
@@ -1620,7 +1802,7 @@ type certStepDoc struct {
 	Rule        string             `json:"rule"`
 	Row         *int               `json:"row"`
 	Col         *int               `json:"col"`
-	Sense       string             `json:"sense"`
+	Sense       *string            `json:"sense"`
 	IsUpper     *bool              `json:"isUpper"`
 	Bound       viprRawJSON        `json:"bound"`
 	Refs        *[]certLinRefDoc   `json:"refs"`
@@ -1678,6 +1860,25 @@ type certLinConJSON struct {
 	RHS    viprRawJSON `json:"rhs"`
 }
 
+func isStrictVIPRDecimalInt(s string, allowNeg bool) bool {
+	if len(s) == 0 || len(s) > maxVIPRRatStrLen {
+		return false
+	}
+	i := 0
+	if s[0] == '-' {
+		if !allowNeg || len(s) == 1 {
+			return false
+		}
+		i = 1
+	}
+	for ; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func parseVIPRBigInt(raw viprRawJSON) (*big.Int, bool) {
 	t, okT := trimVIPRJSON(raw)
 	if !okT {
@@ -1692,13 +1893,16 @@ func parseVIPRBigInt(raw viprRawJSON) (*big.Int, bool) {
 		if !okU {
 			return nil, false
 		}
-		s = strings.TrimSpace(unq)
+		s = unq
 	}
-	if s == "" || strings.ContainsAny(s, "./eE") {
+	if !isStrictVIPRDecimalInt(s, true) {
 		return nil, false
 	}
 	z, ok := new(big.Int).SetString(s, 10)
-	return z, ok
+	if !ok || z.BitLen() > maxVIPRRatBits {
+		return nil, false
+	}
+	return z, true
 }
 
 func parseVIPRRatValue(raw viprRawJSON) (*big.Rat, bool) {
@@ -1724,20 +1928,25 @@ func parseVIPRRatValue(raw viprRawJSON) (*big.Rat, bool) {
 		return new(big.Rat).SetFrac(num, den), true
 	case '"':
 		str, okS := viprUnmarshalString(t)
-		if !okS {
+		if !okS || len(str) > maxVIPRRatStrLen {
 			return nil, false
 		}
-		str = strings.TrimSpace(str)
 		if parts := strings.Split(str, "/"); len(parts) == 1 {
+			if !isStrictVIPRDecimalInt(parts[0], true) {
+				return nil, false
+			}
 			num, ok := new(big.Int).SetString(parts[0], 10)
-			if !ok {
+			if !ok || num.BitLen() > maxVIPRRatBits {
 				return nil, false
 			}
 			return new(big.Rat).SetInt(num), true
 		} else if len(parts) == 2 {
+			if !isStrictVIPRDecimalInt(parts[0], true) || !isStrictVIPRDecimalInt(parts[1], false) {
+				return nil, false
+			}
 			num, okN := new(big.Int).SetString(parts[0], 10)
 			den, okD := new(big.Int).SetString(parts[1], 10)
-			if !okN || !okD || den.Sign() <= 0 || strings.HasPrefix(parts[1], "+") {
+			if !okN || !okD || den.Sign() <= 0 || num.BitLen() > maxVIPRRatBits || den.BitLen() > maxVIPRRatBits {
 				return nil, false
 			}
 			return new(big.Rat).SetFrac(num, den), true
@@ -1748,7 +1957,7 @@ func parseVIPRRatValue(raw viprRawJSON) (*big.Rat, bool) {
 			return nil, false
 		}
 		r, ok := new(big.Rat).SetString(s)
-		if !ok || r.Num().BitLen() > 16384 || r.Denom().BitLen() > 16384 {
+		if !ok || r.Num().BitLen() > maxVIPRRatBits || r.Denom().BitLen() > maxVIPRRatBits {
 			return nil, false
 		}
 		return r, true
@@ -1826,6 +2035,9 @@ func canonicalCertTerms(raw []certRatTerm) []certRatTerm {
 }
 
 func decodeVIPRVec(n int, raw viprRawJSON) (dense []*big.Rat, terms []certRatTerm, ok bool) {
+	if n < 0 || n > maxVIPRVerifyVars {
+		return nil, nil, false
+	}
 	t, okT := trimVIPRJSON(raw)
 	if !okT || len(t) == 0 {
 		return nil, nil, false
@@ -2155,7 +2367,7 @@ func certEvalLinComb(
 	var prod big.Rat
 
 	for _, rf := range refs {
-		if rf.ID == nil {
+		if rf.ID == nil || *rf.ID < 0 {
 			return certDerivedEntry{}, false
 		}
 		mult, okM := parseVIPRRatValue(rf.Mult)
@@ -2166,7 +2378,7 @@ func certEvalLinComb(
 			continue
 		}
 		id := *rf.ID
-		if id < 0 || id >= len(entries) {
+		if id >= len(entries) {
 			return certDerivedEntry{}, false
 		}
 		ent := entries[id]
@@ -2185,7 +2397,7 @@ func certEvalLinComb(
 	}
 
 	for _, br := range bounds {
-		if br.Col == nil {
+		if br.Col == nil || *br.Col < 0 {
 			return certDerivedEntry{}, false
 		}
 		mult, okM := parseVIPRRatValue(br.Mult)
@@ -2193,8 +2405,8 @@ func certEvalLinComb(
 			return certDerivedEntry{}, false
 		}
 		var isUpper bool
-		if br.Kind != "" {
-			switch br.Kind {
+		if br.Kind != nil {
+			switch *br.Kind {
 			case "ub", "<=":
 				isUpper = true
 			case "lb", ">=":
@@ -2211,7 +2423,7 @@ func certEvalLinComb(
 			continue
 		}
 		col := *br.Col
-		if col < 0 || col >= inst.n {
+		if col >= inst.n {
 			return certDerivedEntry{}, false
 		}
 		if isUpper {
@@ -2685,8 +2897,8 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 			return certDerivedEntry{}, false
 		}
 		var isUpper bool
-		if step.Sense != "" {
-			switch step.Sense {
+		if step.Sense != nil {
+			switch *step.Sense {
 			case "<=", "le":
 				isUpper = true
 			case ">=", "ge":
@@ -2715,8 +2927,11 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		ok = true
 
 	case "lincomb":
-		sense, okS := parseVIPRSense(step.Sense)
-		if !okS || step.Refs == nil {
+		if step.Sense == nil || step.Refs == nil {
+			return certDerivedEntry{}, false
+		}
+		sense, okS := parseVIPRSense(*step.Sense)
+		if !okS {
 			return certDerivedEntry{}, false
 		}
 		var bnds []certBoundRefDoc
@@ -2858,9 +3073,13 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		if step.Refs == nil {
 			return certDerivedEntry{}, false
 		}
-		boundAsms, okBA := parseVIPRNatSlice(step.BoundAsms, true)
-		if !okBA {
-			return certDerivedEntry{}, false
+		var boundAsms []int
+		if len(strings.TrimSpace(string(step.BoundAsms))) > 0 {
+			var okBA bool
+			boundAsms, okBA = parseVIPRNatSlice(step.BoundAsms, false)
+			if !okBA {
+				return certDerivedEntry{}, false
+			}
 		}
 		derived, ok = certEvalSafeDual(inst, entries, *step.Refs, boundAsms)
 
@@ -2888,10 +3107,13 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 }
 
 func decodeMiniVIPRInstanceDoc(doc certVIPRDoc) (*certVIPRInstance, bool) {
-	if doc.N == nil || *doc.N < 0 {
+	if doc.N == nil {
 		return nil, false
 	}
 	n := *doc.N
+	if n < 0 || n > maxVIPRVerifyVars || len(doc.IsInt) != n || len(doc.LB) != n || len(doc.UB) != n {
+		return nil, false
+	}
 	objConst := new(big.Rat)
 	if certHasNonNullJSON(doc.ObjConst) {
 		r, ok := parseVIPRRatValue(doc.ObjConst)
@@ -2901,7 +3123,7 @@ func decodeMiniVIPRInstanceDoc(doc certVIPRDoc) (*certVIPRInstance, bool) {
 		objConst = r
 	}
 	objDense, objTerms, okObj := decodeVIPRVec(n, doc.Obj)
-	if !okObj || len(doc.IsInt) != n || len(doc.LB) != n || len(doc.UB) != n {
+	if !okObj {
 		return nil, false
 	}
 	lb := make([]*big.Rat, n)

@@ -1395,6 +1395,8 @@ func TestCertifiedExactZeroGapDefaultAndScaledKnapsack(t *testing.T) {
 		res.Duals[0] = subTolDual
 		res.ReducedCosts[0] = 1.0 - subTolDual
 		res.BestBound = 2.0 * subTolDual
+		res.RootLPBound = res.BestBound
+		res.RootCutBound = res.BestBound
 	}
 	resFail, errFail := mLP.Solve(withGoblinCertFault(ctx, injectSubTolDual), WithCertified(true))
 	if !errors.Is(errFail, ErrCertificationFailed) || resFail.Status != StatusNumericalError {
@@ -1643,4 +1645,237 @@ func TestCertifiedBestBoundOutwardRoundingAndULPSlack(t *testing.T) {
 	if errC != nil || resC.Status != StatusOptimal || resC.Objective != 1e16 {
 		t.Fatalf("large const MIP got status=%v obj=%.17g err=%v", resC.Status, resC.Objective, errC)
 	}
+}
+
+func TestCertifiedHardeningAndParserParity(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	t.Run("CRIT04PreAllocDimensionAndRatLengthCaps", func(t *testing.T) {
+		t.Parallel()
+		hugeNJSON := []byte(`{"n":1000000000000,"obj":{"terms":[]},"isInt":[],"lb":[],"ub":[],"baseRows":[],"mode":"optimal"}`)
+		if _, err := verifyMiniVIPRBytes(hugeNJSON, nil); !errors.Is(err, ErrCertificationFailed) {
+			t.Fatalf("huge n sparse obj got err=%v, want ErrCertificationFailed", err)
+		}
+		if _, _, ok := decodeVIPRVec(maxVIPRVerifyVars+1, viprRawJSON(`{"terms":[]}`)); ok {
+			t.Fatal("decodeVIPRVec accepted n > maxVIPRVerifyVars")
+		}
+		longDigits := strings.Repeat("9", maxVIPRRatStrLen+10)
+		if _, ok := parseVIPRRatValue(viprRawJSON(`"` + longDigits + `/1"`)); ok {
+			t.Fatal("parseVIPRRatValue accepted string exceeding maxVIPRRatStrLen")
+		}
+		hugeBits := strings.Repeat("9", 5000)
+		if _, ok := parseVIPRRatValue(viprRawJSON(`"` + hugeBits + `/1"`)); ok {
+			t.Fatal("parseVIPRRatValue accepted numerator exceeding maxVIPRRatBits")
+		}
+	})
+
+	t.Run("MAJ02PureLPVIPRPresolveAndRootBoundsAndHardening", func(t *testing.T) {
+		t.Parallel()
+		// Pure LP with presolve absorbing a constraint into variable bounds must emit a valid VIPR trace on the original problem.
+		mPre := NewModel("lp_vipr_presolve_orig", Minimize)
+		x := mPre.AddContVar("x", 0, 10)
+		mPre.SetObjective(NewExpr(x.T(1)))
+		mPre.AddConstraint("c1", Ge(NewExpr(x.T(1)), 2))
+		pPre := mPre.Compile()
+		trPre := NewVIPRTrace()
+		resPre, errPre := SolveCompiled(ctx, pPre, WithCertified(true), WithVIPRTrace(trPre))
+		if errPre != nil || resPre.Status != StatusOptimal || !trPre.HasCertificate() {
+			t.Fatalf("presolved LP certified+VIPR failed: status=%v err=%v hasCert=%v", resPre.Status, errPre, trPre.HasCertificate())
+		}
+		if errV := VerifyVIPRTrace(pPre, trPre, resPre, ApplyOptions(WithCertified(true))); errV != nil {
+			t.Fatalf("VerifyVIPRTrace failed on presolved pure LP: %v", errV)
+		}
+
+		// Infeasible pure LP with VIPR trace must emit a valid infeasible certificate on the original problem.
+		mInf := NewModel("lp_vipr_infeas", Minimize)
+		xi := mInf.AddContVar("x", 0, 10)
+		mInf.SetObjective(NewExpr(xi.T(1)))
+		mInf.AddConstraint("lo", Ge(NewExpr(xi.T(1)), 6))
+		mInf.AddConstraint("hi", Le(NewExpr(xi.T(1)), 4))
+		pInf := mInf.Compile()
+		trInf := NewVIPRTrace()
+		resInf, errInf := SolveCompiled(ctx, pInf, WithCertified(true), WithVIPRTrace(trInf))
+		if errInf != nil || resInf.Status != StatusInfeasible || !trInf.HasCertificate() {
+			t.Fatalf("infeasible LP certified+VIPR failed: status=%v err=%v hasCert=%v", resInf.Status, errInf, trInf.HasCertificate())
+		}
+		if resInf.RootLPBound != 0 || resInf.RootCutBound != 0 || resInf.Objective != 0 {
+			t.Fatalf("infeasible LP bounds not zeroed: obj=%v rootLP=%v rootCut=%v", resInf.Objective, resInf.RootLPBound, resInf.RootCutBound)
+		}
+		if errV := VerifyVIPRTrace(pInf, trInf, resInf, ApplyOptions(WithCertified(true))); errV != nil {
+			t.Fatalf("VerifyVIPRTrace failed on infeasible pure LP: %v", errV)
+		}
+
+		// RootLPBound and RootCutBound must match BestBound and stay outward of exact 4/5.
+		mOut := NewModel("lp_root_bound_outward", Minimize)
+		xo := mOut.AddContVar("x", 0, 10)
+		yo := mOut.AddContVar("y", 0, 0)
+		mOut.SetObjective(NewExpr(xo.T(1)))
+		mOut.AddConstraint("c", Ge(NewExpr(xo.T(5), yo.T(5)), 4))
+		pOut := mOut.Compile()
+		trOut := NewVIPRTrace()
+		resOut, errOut := SolveCompiled(ctx, pOut, WithCertified(true), WithVIPRTrace(trOut))
+		if errOut != nil || resOut.Status != StatusOptimal {
+			t.Fatalf("outward LP failed: status=%v err=%v", resOut.Status, errOut)
+		}
+		rTrue := big.NewRat(4, 5)
+		if resOut.RootLPBound != resOut.BestBound || resOut.RootCutBound != resOut.BestBound {
+			t.Fatalf("expected RootLPBound==RootCutBound==BestBound, got (%g, %g, %g)",
+				resOut.RootLPBound, resOut.RootCutBound, resOut.BestBound)
+		}
+		if new(big.Rat).SetFloat64(resOut.RootLPBound).Cmp(rTrue) > 0 {
+			t.Fatalf("RootLPBound %.17g exceeded exact 4/5", resOut.RootLPBound)
+		}
+
+		// VerifyVIPRTrace must reject NaN/Inf Duals, ReducedCosts, RootLPBound, length mismatches, and nil trace on optimal LP.
+		strictOpt := ApplyOptions(WithCertified(true))
+		for _, tc := range []struct {
+			name   string
+			mutate func(*Result)
+		}{
+			{"nan_duals", func(r *Result) { r.Duals = []float64{math.NaN()} }},
+			{"bad_len_duals", func(r *Result) { r.Duals = []float64{0, 0} }},
+			{"inf_rc", func(r *Result) { r.ReducedCosts = []float64{math.Inf(1), 0} }},
+			{"bad_len_rc", func(r *Result) { r.ReducedCosts = []float64{0} }},
+			{"nan_root_lp", func(r *Result) { r.RootLPBound = math.NaN() }},
+			{"overshoot_root_lp", func(r *Result) { r.RootLPBound = math.Nextafter(r.BestBound, math.Inf(1)) }},
+			{"overshoot_root_cut", func(r *Result) { r.RootCutBound = math.Nextafter(r.BestBound, math.Inf(1)) }},
+		} {
+			mut := resOut
+			mut.Duals = append([]float64(nil), resOut.Duals...)
+			mut.ReducedCosts = append([]float64(nil), resOut.ReducedCosts...)
+			tc.mutate(&mut)
+			if errV := VerifyVIPRTrace(pOut, trOut, mut, strictOpt); !errors.Is(errV, ErrCertificationFailed) {
+				t.Fatalf("%s: VerifyVIPRTrace got %v, want ErrCertificationFailed", tc.name, errV)
+			}
+		}
+		if errNil := VerifyVIPRTrace(pOut, nil, resOut, strictOpt); !errors.Is(errNil, ErrCertificationFailed) {
+			t.Fatalf("nil trace on StatusOptimal got %v, want ErrCertificationFailed", errNil)
+		}
+
+		// Fault-injected missing ReducedCosts on optimal LP must fail verifyCertifiedLP.
+		faultNoRC := withGoblinCertFault(ctx, func(_ *CompiledProblem, _ *VIPRTrace, _ *lpCertWitness, res *Result) {
+			res.ReducedCosts = nil
+		})
+		if _, errNoRC := SolveCompiled(faultNoRC, pOut, WithCertified(true)); !errors.Is(errNoRC, ErrCertificationFailed) {
+			t.Fatalf("missing ReducedCosts got %v, want ErrCertificationFailed", errNoRC)
+		}
+		// Fault-injected non-zero Objective on infeasible LP must fail verifyCertifiedLP.
+		faultInfObj := withGoblinCertFault(ctx, func(_ *CompiledProblem, _ *VIPRTrace, _ *lpCertWitness, res *Result) {
+			res.Objective = 1.0
+		})
+		if _, errInfObj := SolveCompiled(faultInfObj, pInf, WithCertified(true)); !errors.Is(errInfObj, ErrCertificationFailed) {
+			t.Fatalf("non-zero Objective on infeasible LP got %v, want ErrCertificationFailed", errInfObj)
+		}
+	})
+
+	t.Run("MIN02VIPRJSONParserParityWithLean", func(t *testing.T) {
+		t.Parallel()
+		// Check negative id/col rejected even with zero multiplier.
+		inst := &certVIPRInstance{
+			n:        1,
+			objConst: new(big.Rat),
+			objDense: []*big.Rat{big.NewRat(1, 1)},
+			objTerms: []certRatTerm{{col: 0, val: big.NewRat(1, 1)}},
+			isInt:    []bool{true},
+			lb:       []*big.Rat{big.NewRat(0, 1)},
+			ub:       []*big.Rat{big.NewRat(1, 1)},
+		}
+		negID := -1
+		if _, ok := certEvalLinComb(inst, nil, GreaterEqual, []certLinRefDoc{{ID: &negID, Mult: viprRawJSON("0")}}, nil); ok {
+			t.Fatal("certEvalLinComb accepted negative ref ID with mult=0")
+		}
+		isUp := true
+		if _, ok := certEvalLinComb(inst, nil, GreaterEqual, nil, []certBoundRefDoc{{Col: &negID, IsUpper: &isUp, Mult: viprRawJSON("0")}}); ok {
+			t.Fatal("certEvalLinComb accepted negative bound col with mult=0")
+		}
+
+		// Check empty/null sense and kind rejected when key is present alongside isUpper.
+		for _, rawStep := range []string{
+			`{"rule":"assume","col":0,"bound":1,"sense":"","isUpper":true}`,
+			`{"rule":"assume","col":0,"bound":1,"sense":null,"isUpper":true}`,
+			`{"rule":"lincomb","sense":"<=","refs":[],"bounds":null}`,
+			`{"rule":"lincomb","sense":"<=","refs":[],"bounds":[{"col":0,"kind":"","isUpper":true,"mult":1}]}`,
+			`{"rule":"lincomb","sense":"<=","refs":[],"bounds":[{"col":0,"kind":null,"isUpper":true,"mult":1}]}`,
+			`{"rule":"safeDual","refs":[],"boundAsms":null}`,
+		} {
+			st, okU := unmarshalCertStepDoc(viprRawJSON(rawStep))
+			if okU {
+				if _, okE := certEvalProofStep(inst, nil, st); okE {
+					t.Fatalf("step %s unexpectedly succeeded", rawStep)
+				}
+			}
+		}
+
+		// Check null rootStep rejected.
+		docNullRoot := `{"n":1,"obj":[1],"isInt":[true],"lb":[0],"ub":[1],"baseRows":[],"mode":"optimal","incumbent":[0],"steps":[{"rule":"safeDual","refs":[]}],"rootStep":null}`
+		if _, err := verifyMiniVIPRBytes([]byte(docNullRoot), nil); !errors.Is(err, ErrCertificationFailed) {
+			t.Fatalf("null rootStep got err=%v, want ErrCertificationFailed", err)
+		}
+
+		// Check leading plus sign and whitespace rejected in parseVIPRBigInt.
+		for _, bad := range []string{`"+1"`, `" 1"`, `"1 "`, `" +2 "`} {
+			if _, ok := parseVIPRBigInt(viprRawJSON(bad)); ok {
+				t.Fatalf("parseVIPRBigInt accepted %s", bad)
+			}
+		}
+
+		// Check unpaired UTF-16 surrogates rejected in scanVIPRJSONString while valid pairs succeed.
+		for _, bad := range []string{`"\uD800"`, `"\uDC00"`, `"\uD800abc"`, `"\uD800\u0041"`} {
+			if _, _, ok := scanVIPRJSONString([]byte(bad), 0); ok {
+				t.Fatalf("scanVIPRJSONString accepted unpaired surrogate %s", bad)
+			}
+		}
+		if s, _, ok := scanVIPRJSONString([]byte(`"\uD83D\uDE00"`), 0); !ok || s != "😀" {
+			t.Fatalf("scanVIPRJSONString failed valid surrogate pair: got (%q, %v)", s, ok)
+		}
+	})
+
+	t.Run("MAJ03SubToleranceFractionalIntLeafAndBoundFallback", func(t *testing.T) {
+		t.Parallel()
+		// Construct a small MILP where binary variable y takes 1 - 1.2e-16 in the exact LP
+		// relaxation, matching the miplib_egout near-degenerate capacity pattern.
+		mFrac := NewModel("sub_tol_frac_binary", Minimize)
+		y := mFrac.AddBinaryVar("y")
+		f := mFrac.AddContVar("f", 0, 100)
+		s := mFrac.AddContVar("s", 0, 100)
+		mFrac.SetObjective(NewExpr(y.T(15.82), f.T(0.025), s.T(100.0)))
+		mFrac.AddConstraint("demand", Eq(NewExpr(f.T(1), s.T(1)), 22.59))
+		mFrac.AddConstraint("cap", Le(NewExpr(f.T(1), y.T(-math.Nextafter(22.59, 23.0))), 0))
+		pFrac := mFrac.Compile()
+		trFrac := NewVIPRTrace()
+		resFrac, errFrac := SolveCompiled(ctx, pFrac, WithCertified(true), WithVIPRTrace(trFrac))
+		if errFrac != nil || resFrac.Status != StatusOptimal || trFrac.Mode() != "optimal" {
+			t.Fatalf("sub-tolerance fractional binary MILP failed: status=%v mode=%q err=%v", resFrac.Status, trFrac.Mode(), errFrac)
+		}
+		if errV := VerifyVIPRTrace(pFrac, trFrac, resFrac, ApplyOptions(WithCertified(true))); errV != nil {
+			t.Fatalf("VerifyVIPRTrace failed on sub-tolerance fractional binary MILP: %v", errV)
+		}
+
+		// Verify post-root limit exit emits a valid bound-mode certificate under WithCertified(true).
+		mLim := NewModel("cert_limit_bound_mode", Maximize)
+		const nVars = 14
+		vars := make([]Var, nVars)
+		objTerms := make([]Term, nVars)
+		capTerms := make([]Term, nVars)
+		for j := range nVars {
+			vars[j] = mLim.AddBinaryVar(string(rune('a' + j)))
+			objTerms[j] = vars[j].T(float64(17 + (j*13)%19))
+			capTerms[j] = vars[j].T(float64(7 + (j*11)%17))
+		}
+		mLim.SetObjective(NewExpr(objTerms...))
+		mLim.AddConstraint("cap", Le(NewExpr(capTerms...), 53.5))
+		pLim := mLim.Compile()
+		trLim := NewVIPRTrace()
+		resLim, errLim := SolveCompiled(ctx, pLim, WithCertified(true), WithVIPRTrace(trLim), WithMaxNodes(2), WithCuts(false))
+		if errLim != nil || (resLim.Status != StatusNodeLimit && resLim.Status != StatusOptimal) {
+			t.Fatalf("certified node-limit MIP failed: status=%v err=%v", resLim.Status, errLim)
+		}
+		if !trLim.HasCertificate() {
+			t.Fatal("expected certified node-limit MIP to emit a VIPR certificate")
+		}
+		if errV := VerifyVIPRTrace(pLim, trLim, resLim, ApplyOptions(WithCertified(true))); errV != nil {
+			t.Fatalf("VerifyVIPRTrace failed on certified node-limit MIP: %v", errV)
+		}
+	})
 }

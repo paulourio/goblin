@@ -366,9 +366,66 @@ func hasInvalidMatrixEntry(rows, cols int, costAt func(int, int) float64, sense 
 	return false
 }
 
+func dyadicNeg(a dyadic2304) dyadic2304 {
+	return dyadicSub(dyadic2304{}, a)
+}
+
+func dyadicHalve(a dyadic2304) dyadic2304 {
+	var out dyadic2304
+	var signExt uint64
+	if (a.w[dyadicWords-1] >> 63) != 0 {
+		signExt = uint64(1) << 63
+	}
+	for i := range dyadicWords - 1 {
+		out.w[i] = (a.w[i] >> 1) | (a.w[i+1] << 63)
+	}
+	out.w[dyadicWords-1] = (a.w[dyadicWords-1] >> 1) | signExt
+	return out
+}
+
+func withinULPs(a, b float64, maxULPs int) bool {
+	if math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	if a == 0 {
+		a = 0
+	}
+	if b == 0 {
+		b = 0
+	}
+	cur := b
+	for range maxULPs {
+		cur = math.Nextafter(cur, a)
+		if cur == a {
+			return true
+		}
+	}
+	return false
+}
+
+func floatULP(x float64) float64 {
+	ax := math.Abs(x)
+	if ax == 0 {
+		return math.SmallestNonzeroFloat64
+	}
+	if ax == math.MaxFloat64 {
+		return math.MaxFloat64 - math.Nextafter(math.MaxFloat64, 0)
+	}
+	return math.Nextafter(ax, math.Inf(1)) - ax
+}
+
 func (d dyadic2304) toFloat64Floor() float64 {
 	f, exact := d.toFloat64()
-	if exact || math.IsNaN(f) || math.IsInf(f, 0) {
+	if exact || math.IsNaN(f) {
+		return f
+	}
+	if math.IsInf(f, 1) {
+		return math.MaxFloat64
+	}
+	if math.IsInf(f, -1) {
 		return f
 	}
 	fd, ok := dyadicFromFloat(f)
@@ -376,6 +433,51 @@ func (d dyadic2304) toFloat64Floor() float64 {
 		return math.Nextafter(f, math.Inf(-1))
 	}
 	return f
+}
+
+func dyadicFitsFloat64(d dyadic2304) bool {
+	f, _ := d.toFloat64()
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return false
+	}
+	ff := d.toFloat64Floor()
+	return !math.IsInf(ff, 0) && !math.IsNaN(ff)
+}
+
+func shiftSquareExactDuals(uExact, vExact []dyadic2304) ([]dyadic2304, []dyadic2304) {
+	m := len(uExact)
+	if m == 0 || len(vExact) != m {
+		return uExact, vExact
+	}
+	sMin := uExact[0]
+	sMax := uExact[0]
+	for i := 1; i < m; i++ {
+		if dyadicCmp(uExact[i], sMin) < 0 {
+			sMin = uExact[i]
+		}
+		if dyadicCmp(uExact[i], sMax) > 0 {
+			sMax = uExact[i]
+		}
+	}
+	for j := range m {
+		nv := dyadicNeg(vExact[j])
+		if dyadicCmp(nv, sMin) < 0 {
+			sMin = nv
+		}
+		if dyadicCmp(nv, sMax) > 0 {
+			sMax = nv
+		}
+	}
+	delta := dyadicNeg(dyadicHalve(dyadicAdd(sMin, sMax)))
+	uShifted := make([]dyadic2304, m)
+	vShifted := make([]dyadic2304, m)
+	for i := range m {
+		uShifted[i] = dyadicAdd(uExact[i], delta)
+	}
+	for j := range m {
+		vShifted[j] = dyadicSub(vExact[j], delta)
+	}
+	return uShifted, vShifted
 }
 
 func convertDyadicSliceFloor(src []dyadic2304) ([]float64, bool) {
@@ -393,73 +495,148 @@ func convertDyadicSliceFloor(src []dyadic2304) ([]float64, bool) {
 	return out, true
 }
 
-func writeRepairedDualsFast(uExact, vExact []dyadic2304, uNormOut, vNormOut []float64) {
-	if len(uNormOut) != len(uExact) || len(vNormOut) != len(vExact) {
-		return
+func writeRepairedDualsFast(
+	m, n int,
+	row4col []int,
+	uExact, vExact []dyadic2304,
+	uNormOut, vNormOut []float64,
+) bool {
+	if len(uNormOut) != m || len(vNormOut) != n || len(uExact) != m || len(vExact) != n || len(row4col) != n {
+		return false
+	}
+	uWork, vWork := uExact, vExact
+	if m == n {
+		needsShift := false
+		for _, d := range uExact {
+			if !dyadicFitsFloat64(d) {
+				needsShift = true
+				break
+			}
+		}
+		if !needsShift {
+			for _, d := range vExact {
+				if !dyadicFitsFloat64(d) {
+					needsShift = true
+					break
+				}
+			}
+		}
+		if needsShift {
+			uWork, vWork = shiftSquareExactDuals(uExact, vExact)
+		}
 	}
 	// Floor rounding preserves uOut[i] + vOut[j] <= C[i,j] over Q
-	// when vExact is already exact in float64.
-	uTmp, okU := convertDyadicSliceFloor(uExact)
+	// and keeps every exact float64 value in vWork bit-identical.
+	uTmp, okU := convertDyadicSliceFloor(uWork)
 	if !okU {
-		return
+		return false
 	}
-	vTmp := make([]float64, len(vExact))
-	for j, d := range vExact {
-		f, _ := d.toFloat64()
-		if math.IsInf(f, 0) || math.IsNaN(f) {
-			return
+	vTmp, okV := convertDyadicSliceFloor(vWork)
+	if !okV {
+		return false
+	}
+	if m < n {
+		for j := range n {
+			if row4col[j] < 0 {
+				if vTmp[j] != 0 {
+					return false
+				}
+			} else if vTmp[j] > 0 {
+				return false
+			}
 		}
-		if f == 0 {
-			f = 0
-		}
-		vTmp[j] = f
 	}
 	copy(uNormOut, uTmp)
 	copy(vNormOut, vTmp)
+	return true
+}
+
+func verifyFloatDualsFeasibleDyadic(
+	m, n int,
+	cMat []dyadic2304,
+	cFin []bool,
+	row4col []int,
+	uTmp, vTmp []float64,
+) bool {
+	if len(uTmp) != m || len(vTmp) != n || len(row4col) != n {
+		return false
+	}
+	vD := make([]dyadic2304, n)
+	for j, vj := range vTmp {
+		if math.IsNaN(vj) || math.IsInf(vj, 0) {
+			return false
+		}
+		if m < n {
+			if row4col[j] < 0 {
+				if vj != 0 {
+					return false
+				}
+			} else if vj > 0 {
+				return false
+			}
+		}
+		d, ok := dyadicFromFloat(vj)
+		if !ok {
+			return false
+		}
+		vD[j] = d
+	}
+	for i, ui := range uTmp {
+		if math.IsNaN(ui) || math.IsInf(ui, 0) {
+			return false
+		}
+		uD, ok := dyadicFromFloat(ui)
+		if !ok {
+			return false
+		}
+		base := i * n
+		for j := range n {
+			if !cFin[base+j] {
+				continue
+			}
+			if dyadicCmp(dyadicAdd(uD, vD[j]), cMat[base+j]) > 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func writeRepairedDualsFromMatrix(
 	m, n int,
 	cMat []dyadic2304,
 	cFin []bool,
+	row4col []int,
 	uExact, vExact []dyadic2304,
 	uNormOut, vNormOut []float64,
-) {
-	if len(uNormOut) != m || len(vNormOut) != n {
-		return
+) bool {
+	if len(uNormOut) != m || len(vNormOut) != n || len(uExact) != m || len(vExact) != n || len(row4col) != n {
+		return false
 	}
-	vTmp := make([]float64, n)
-	vTmpD := make([]dyadic2304, n)
-	vAllExact := true
-	for j, d := range vExact {
-		f, exact := d.toFloat64()
-		if math.IsInf(f, 0) || math.IsNaN(f) {
-			return
+	uWork, vWork := uExact, vExact
+	if m == n {
+		needsShift := false
+		for _, d := range uExact {
+			if !dyadicFitsFloat64(d) {
+				needsShift = true
+				break
+			}
 		}
-		if f == 0 {
-			f = 0
+		if !needsShift {
+			for _, d := range vExact {
+				if !dyadicFitsFloat64(d) {
+					needsShift = true
+					break
+				}
+			}
 		}
-		if !exact {
-			vAllExact = false
+		if needsShift {
+			uWork, vWork = shiftSquareExactDuals(uExact, vExact)
 		}
-		vTmp[j] = f
-		fd, ok := dyadicFromFloat(f)
-		if !ok {
-			return
-		}
-		vTmpD[j] = fd
 	}
-	var uTmp []float64
-	if vAllExact {
-		var okU bool
-		uTmp, okU = convertDyadicSliceFloor(uExact)
-		if !okU {
-			return
-		}
-	} else {
-		// Recompute uSafe[i] = min_{j finite} (C[i,j] - vOut[j]) floored to float64 so the
-		// returned float64 pair (uOut, vOut) remains strictly dual-feasible over Q.
-		uTmp = make([]float64, m)
+
+	recomputeU := func(vTmpD []dyadic2304) ([]float64, bool) {
+		uTmp := make([]float64, m)
 		for i := range m {
 			base := i * n
 			var minU dyadic2304
@@ -475,20 +652,135 @@ func writeRepairedDualsFromMatrix(
 				}
 			}
 			if !hasFin {
-				return
+				return nil, false
 			}
 			f := minU.toFloat64Floor()
 			if math.IsInf(f, 0) || math.IsNaN(f) {
-				return
+				return nil, false
 			}
 			if f == 0 {
 				f = 0
 			}
 			uTmp[i] = f
 		}
+		return uTmp, true
+	}
+
+	vTmp := make([]float64, n)
+	vTmpD := make([]dyadic2304, n)
+	vAllExact := true
+	fitsDirect := true
+	for j, d := range vWork {
+		if m < n && row4col[j] < 0 {
+			vTmp[j] = 0
+			vTmpD[j] = dyadic2304{}
+			continue
+		}
+		f, exact := d.toFloat64()
+		if m < n && f > 0 {
+			f = d.toFloat64Floor()
+			exact = false
+		}
+		if math.IsInf(f, 0) || math.IsNaN(f) {
+			fitsDirect = false
+			break
+		}
+		if f == 0 {
+			f = 0
+		}
+		if !exact {
+			vAllExact = false
+		}
+		fd, ok := dyadicFromFloat(f)
+		if !ok {
+			fitsDirect = false
+			break
+		}
+		vTmp[j] = f
+		vTmpD[j] = fd
+	}
+
+	var uTmp []float64
+	if fitsDirect {
+		if vAllExact {
+			var okU bool
+			uTmp, okU = convertDyadicSliceFloor(uWork)
+			if !okU {
+				fitsDirect = false
+			}
+		} else {
+			// Recompute uSafe[i] as the floor of min over finite j of (C[i,j] - vOut[j])
+			// so the returned float64 pair (uOut, vOut) remains strictly dual-feasible over Q.
+			var okU bool
+			uTmp, okU = recomputeU(vTmpD)
+			if !okU {
+				fitsDirect = false
+			}
+		}
+	}
+
+	if !fitsDirect {
+		// Exact potentials still exceed float64 range after shifting; clamp vTmp into
+		// the finite range that guarantees every C[i,j] - vTmp[j] >= -MaxFloat64.
+		maxFinD, okMax := dyadicFromFloat(math.MaxFloat64)
+		negMaxFinD, okNeg := dyadicFromFloat(-math.MaxFloat64)
+		if !okMax || !okNeg {
+			return false
+		}
+		for j := range n {
+			if m < n && row4col[j] < 0 {
+				vTmp[j] = 0
+				vTmpD[j] = dyadic2304{}
+				continue
+			}
+			hiD := maxFinD
+			if m < n {
+				hiD = dyadic2304{}
+			}
+			for i := range m {
+				idx := i*n + j
+				if !cFin[idx] {
+					continue
+				}
+				bound := dyadicAdd(cMat[idx], maxFinD)
+				if dyadicCmp(bound, hiD) < 0 {
+					hiD = bound
+				}
+			}
+			vClamped := vWork[j]
+			if dyadicCmp(vClamped, negMaxFinD) < 0 {
+				vClamped = negMaxFinD
+			}
+			if dyadicCmp(vClamped, hiD) > 0 {
+				vClamped = hiD
+			}
+			f := vClamped.toFloat64Floor()
+			if math.IsInf(f, 0) || math.IsNaN(f) {
+				return false
+			}
+			if f == 0 {
+				f = 0
+			}
+			fd, ok := dyadicFromFloat(f)
+			if !ok {
+				return false
+			}
+			vTmp[j] = f
+			vTmpD[j] = fd
+		}
+		var okU bool
+		uTmp, okU = recomputeU(vTmpD)
+		if !okU {
+			return false
+		}
+	}
+
+	if !verifyFloatDualsFeasibleDyadic(m, n, cMat, cFin, row4col, uTmp, vTmp) {
+		return false
 	}
 	copy(uNormOut, uTmp)
 	copy(vNormOut, vTmp)
+	return true
 }
 
 type certAssignReq struct {
@@ -685,15 +977,19 @@ func certifyAssignCore(ctx context.Context, req certAssignReq) (float64, error) 
 		} else {
 			uNorm, vNorm = vRaw, uRaw
 		}
-		if maxAbsFinite <= hugeCostThreshold && !approxDualsConsistent(m, n, normEntry, col4row, row4col, uNorm, vNorm) {
+		if maxAbsFinite <= hugeCostThreshold {
+			if !approxDualsConsistent(m, n, normEntry, col4row, row4col, uNorm, vNorm) {
+				return 0, ErrCertificationFailed
+			}
+		} else if !hugeDualsConsistent(m, n, normEntry, row4col, uNorm, vNorm) {
 			return 0, ErrCertificationFailed
 		}
 	}
 
 	if len(vNorm) == n {
-		if uFast, vFast, okFast := verifyFastExactDuals(m, n, normEntry, col4row, row4col, vNorm); okFast {
-			if writeDuals {
-				writeRepairedDualsFast(uFast, vFast, uNorm, vNorm)
+		if uFast, vFast, okFast := verifyFastExactDuals(m, n, normEntry, col4row, row4col, uNorm, vNorm); okFast {
+			if writeDuals && !writeRepairedDualsFast(m, n, row4col, uFast, vFast, uNorm, vNorm) {
+				return 0, ErrCertificationFailed
 			}
 			return exactObjFloat, nil
 		}
@@ -707,6 +1003,66 @@ func certifyAssignCore(ctx context.Context, req certAssignReq) (float64, error) 
 		return 0, err
 	}
 	return exactObjFloat, nil
+}
+
+func hugeDualsConsistent(
+	m, n int,
+	normEntry func(int, int) (float64, bool),
+	row4col []int,
+	uNorm, vNorm []float64,
+) bool {
+	if len(uNorm) != m || len(vNorm) != n || len(row4col) != n {
+		return false
+	}
+	vD := make([]dyadic2304, n)
+	for j, vj := range vNorm {
+		if math.IsNaN(vj) || math.IsInf(vj, 0) {
+			return false
+		}
+		if m < n {
+			if row4col[j] < 0 {
+				if vj != 0 {
+					return false
+				}
+			} else if vj > 0 {
+				return false
+			}
+		}
+		d, ok := dyadicFromFloat(vj)
+		if !ok {
+			return false
+		}
+		vD[j] = d
+	}
+	for i, ui := range uNorm {
+		if math.IsNaN(ui) || math.IsInf(ui, 0) {
+			return false
+		}
+		uD, ok := dyadicFromFloat(ui)
+		if !ok {
+			return false
+		}
+		aui := math.Abs(ui)
+		for j := range n {
+			cij, fin := normEntry(i, j)
+			if !fin {
+				continue
+			}
+			cD, okC := dyadicFromFloat(cij)
+			if !okC {
+				return false
+			}
+			scale := max(aui, math.Abs(vNorm[j]), math.Abs(cij))
+			tolD, okT := dyadicFromFloat(math.Ldexp(floatULP(scale), 2))
+			if !okT {
+				return false
+			}
+			if dyadicCmp(dyadicAdd(uD, vD[j]), dyadicAdd(cD, tolD)) > 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func approxDualsConsistent(
@@ -761,11 +1117,14 @@ func verifyFastExactDuals(
 	m, n int,
 	normEntry func(int, int) (float64, bool),
 	col4row, row4col []int,
-	vFloat []float64,
+	uFloat, vFloat []float64,
 ) ([]dyadic2304, []dyadic2304, bool) {
 	vRat := make([]dyadic2304, n)
 	for j := range n {
 		if m < n && row4col[j] < 0 {
+			if vFloat[j] != 0 {
+				return nil, nil, false
+			}
 			continue
 		}
 		r, ok := dyadicFromFloat(vFloat[j])
@@ -779,6 +1138,7 @@ func verifyFastExactDuals(
 	}
 
 	uRat := make([]dyadic2304, m)
+	checkU := len(uFloat) == m
 	for i := range m {
 		cm, ok := normEntry(i, col4row[i])
 		if !ok {
@@ -789,6 +1149,16 @@ func verifyFastExactDuals(
 			return nil, nil, false
 		}
 		uRat[i] = dyadicSub(cmD, vRat[col4row[i]])
+		if checkU {
+			uNearest, _ := uRat[i].toFloat64()
+			uFloor := uRat[i].toFloat64Floor()
+			if math.IsInf(uNearest, 0) || math.IsNaN(uNearest) || math.IsInf(uFloor, 0) || math.IsNaN(uFloor) {
+				return nil, nil, false
+			}
+			if !withinULPs(uFloat[i], uNearest, 2) && !withinULPs(uFloat[i], uFloor, 2) {
+				return nil, nil, false
+			}
+		}
 	}
 
 	for i := range m {
@@ -956,7 +1326,9 @@ func verifyExactResidualOptimality(
 		return ErrCertificationFailed
 	}
 	if len(uOut) == m && len(vOut) == n {
-		writeRepairedDualsFromMatrix(m, n, cMat, cFin, uExact, vExact, uOut, vOut)
+		if !writeRepairedDualsFromMatrix(m, n, cMat, cFin, row4col, uExact, vExact, uOut, vOut) {
+			return ErrCertificationFailed
+		}
 	}
 	return nil
 }

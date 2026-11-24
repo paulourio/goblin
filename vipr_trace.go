@@ -1980,13 +1980,6 @@ type babVIPRRecorder struct {
 	orbitBranchesCertified int
 }
 
-func (r *babVIPRRecorder) canceled() bool {
-	if r == nil {
-		return false
-	}
-	return stopRequested(r.deadline, r.done)
-}
-
 func (r *babVIPRRecorder) setDeadline(deadline time.Time, done <-chan struct{}) {
 	if r == nil {
 		return
@@ -2376,6 +2369,535 @@ func (r *babVIPRRecorder) solveBasisTransposeActive(basis []int, eqRHS []*big.Ra
 		}
 	}
 	return solveVIPRPeelSystem(m, eqTerms, eqRHS)
+}
+
+func (r *babVIPRRecorder) solveBasisForwardActive(basis []int, rhsRow []*big.Rat) ([]*big.Rat, bool) {
+	rp := r.rp
+	n := rp.n
+	baseM := rp.m
+	numExtra := len(r.activeCutIDs)
+	m := baseM + numExtra
+	if m == 0 {
+		return nil, true
+	}
+	if len(basis) < m || len(rhsRow) < m {
+		return nil, false
+	}
+	rp.ensureCols()
+
+	var cutColTerms [][]viprBasisTerm
+	if numExtra > 0 {
+		cutColTerms = make([][]viprBasisTerm, n)
+		for e, cutID := range r.activeCutIDs {
+			c := &r.allCuts[cutID]
+			actRow := baseM + e
+			for k, col := range c.cols {
+				if col >= 0 && col < n && c.vals[k].Sign() != 0 {
+					cutColTerms[col] = append(cutColTerms[col], viprBasisTerm{col: actRow, val: c.vals[k]})
+				}
+			}
+		}
+	}
+
+	eqTerms := make([][]viprBasisTerm, m)
+	for q := range m {
+		bVar := basis[q]
+		if bVar >= 0 && bVar < n {
+			rows := rp.colRows[bVar]
+			vals := rp.colVals[bVar]
+			for k, ri := range rows {
+				eqTerms[ri] = append(eqTerms[ri], viprBasisTerm{col: q, val: new(big.Rat).Set(vals[k])})
+			}
+			if cutColTerms != nil {
+				for _, ct := range cutColTerms[bVar] {
+					eqTerms[ct.col] = append(eqTerms[ct.col], viprBasisTerm{col: q, val: new(big.Rat).Set(ct.val)})
+				}
+			}
+		} else {
+			si := bVar - n
+			if si < 0 || si >= m {
+				return nil, false
+			}
+			eqTerms[si] = append(eqTerms[si], viprBasisTerm{col: q, val: big.NewRat(1, 1)})
+		}
+	}
+	return solveVIPRPeelSystem(m, eqTerms, rhsRow)
+}
+
+func (r *babVIPRRecorder) polishNodeDualExactSimplex(vn *viprTreeNode, targetObj *big.Rat) (closed, infeas bool, xExact []*big.Rat) {
+	if r == nil || r.invalid || vn == nil || r.rp == nil || stopRequested(time.Time{}, r.done) {
+		return false, false, nil
+	}
+	rp := r.rp
+	lbR, ubR := r.nodeBoundsRat(vn)
+	for j := range rp.n {
+		if lbR[j] != nil && ubR[j] != nil && ubR[j].Cmp(lbR[j]) < 0 {
+			vn.kind = viprNodeLeafBoundConflict
+			vn.conflictCol = j
+			return false, true, nil
+		}
+	}
+	sc, lpRes, ok := r.solveCutScratchNode(lbR, ubR, true)
+	if !ok {
+		return false, false, nil
+	}
+	switch lpRes.Status {
+	case StatusInfeasible:
+		if w, okF := r.extractNodeFarkasActive(sc, lpRes.Dual, lbR, ubR); okF {
+			vn.kind = viprNodeLeafFarkas
+			vn.farkas = w
+			return false, true, nil
+		}
+		return false, false, nil
+	case StatusOptimal:
+		r.recordNodeDual(vn, sc, lpRes)
+		if targetObj != nil && vn.bestDualRHS != nil && targetObj.Cmp(vn.bestDualRHS) <= 0 {
+			return true, false, nil
+		}
+	default:
+		return false, false, nil
+	}
+
+	n := rp.n
+	m := rp.m + len(r.activeCutIDs)
+	if m == 0 || sc.ws == nil || sc.TotalRows() != m || len(sc.ws.basis) < m || len(sc.ws.status) < n+m {
+		return false, false, nil
+	}
+
+	tot := n + m
+	basis := slices.Clone(sc.ws.basis[:m])
+	status := slices.Clone(sc.ws.status[:tot])
+
+	varLB := make([]*big.Rat, tot)
+	varUB := make([]*big.Rat, tot)
+	copy(varLB[:n], lbR)
+	copy(varUB[:n], ubR)
+
+	rowRHS := make([]*big.Rat, m)
+	zeroRat := new(big.Rat)
+	for i := range m {
+		sense, rhs, _, _ := r.rowData(r.activeRowID(i))
+		rowRHS[i] = rhs
+		switch sense {
+		case LessEqual:
+			varLB[n+i] = zeroRat
+		case GreaterEqual:
+			varUB[n+i] = zeroRat
+		case Equal:
+			varLB[n+i] = zeroRat
+			varUB[n+i] = zeroRat
+		}
+	}
+
+	rp.ensureCols()
+	allColRows := make([][]int, n)
+	allColVals := make([][]*big.Rat, n)
+	for j := range n {
+		allColRows[j] = append(allColRows[j], rp.colRows[j]...)
+		allColVals[j] = append(allColVals[j], rp.colVals[j]...)
+	}
+	for e, cutID := range r.activeCutIDs {
+		c := &r.allCuts[cutID]
+		actRow := rp.m + e
+		for k, col := range c.cols {
+			if col >= 0 && col < n && c.vals[k].Sign() != 0 {
+				allColRows[col] = append(allColRows[col], actRow)
+				allColVals[col] = append(allColVals[col], c.vals[k])
+			}
+		}
+	}
+
+	const maxExactDualPivots = 32
+	cB := make([]*big.Rat, m)
+	rc := make([]*big.Rat, tot)
+	rhsAdj := make([]*big.Rat, m)
+	eQ := make([]*big.Rat, m)
+	for i := range m {
+		eQ[i] = new(big.Rat)
+	}
+	var prod, alphaK, candRatio, bestRatio big.Rat
+
+	for range maxExactDualPivots {
+		if stopRequested(time.Time{}, r.done) {
+			break
+		}
+		for q := range m {
+			bVar := basis[q]
+			if bVar >= 0 && bVar < n {
+				cB[q] = rp.objMin[bVar]
+			} else {
+				cB[q] = zeroRat
+			}
+		}
+		y, okY := r.solveBasisTransposeActive(basis, cB)
+		if !okY || len(y) != m {
+			break
+		}
+
+		for j := range n {
+			dot := new(big.Rat)
+			rows := allColRows[j]
+			vals := allColVals[j]
+			for k, ri := range rows {
+				if y[ri].Sign() != 0 {
+					prod.Mul(vals[k], y[ri])
+					dot.Add(dot, &prod)
+				}
+			}
+			rc[j] = new(big.Rat).Sub(rp.objMin[j], dot)
+		}
+		for i := range m {
+			rc[n+i] = new(big.Rat).Neg(y[i])
+		}
+
+		dualFeas := true
+		for v := range tot {
+			if status[v] == statusBasic {
+				continue
+			}
+			if varLB[v] != nil && varUB[v] != nil && varLB[v].Cmp(varUB[v]) == 0 {
+				status[v] = statusFixed
+				continue
+			}
+			sgn := rc[v].Sign()
+			switch {
+			case sgn > 0:
+				if varLB[v] != nil {
+					status[v] = statusAtLower
+				} else {
+					dualFeas = false
+				}
+			case sgn < 0:
+				if varUB[v] != nil {
+					status[v] = statusAtUpper
+				} else {
+					dualFeas = false
+				}
+			default:
+				if status[v] == statusAtLower && varLB[v] == nil {
+					if varUB[v] != nil {
+						status[v] = statusAtUpper
+					} else {
+						status[v] = statusSuperBasic
+					}
+				} else if status[v] == statusAtUpper && varUB[v] == nil {
+					if varLB[v] != nil {
+						status[v] = statusAtLower
+					} else {
+						status[v] = statusSuperBasic
+					}
+				}
+			}
+			if !dualFeas {
+				break
+			}
+		}
+
+		mults := r.clampActiveDualToMults(y)
+		if rhs, _, okE := r.evalSafeDualMults(mults, lbR, ubR); okE {
+			if vn.bestDualRHS == nil || rhs.Cmp(vn.bestDualRHS) > 0 {
+				vn.bestDual = mults
+				vn.bestDualRHS = rhs
+				if vn.kind == viprNodeOpen {
+					vn.kind = viprNodeLeafDual
+				}
+			}
+			if targetObj != nil && vn.bestDualRHS != nil && targetObj.Cmp(vn.bestDualRHS) <= 0 {
+				return true, false, nil
+			}
+		}
+		if !dualFeas {
+			break
+		}
+
+		for i := range m {
+			rhsAdj[i] = new(big.Rat).Set(rowRHS[i])
+		}
+		for j := range n {
+			if status[j] == statusBasic {
+				continue
+			}
+			var xj *big.Rat
+			switch status[j] {
+			case statusAtLower, statusFixed:
+				xj = varLB[j]
+			case statusAtUpper:
+				xj = varUB[j]
+			}
+			if xj == nil || xj.Sign() == 0 {
+				continue
+			}
+			rows := allColRows[j]
+			vals := allColVals[j]
+			for k, ri := range rows {
+				prod.Mul(vals[k], xj)
+				rhsAdj[ri].Sub(rhsAdj[ri], &prod)
+			}
+		}
+
+		xB, okX := r.solveBasisForwardActive(basis, rhsAdj)
+		if !okX || len(xB) != m {
+			break
+		}
+
+		leaveQ := -1
+		leaveVar := tot
+		leaveAtLower := false
+		for q := range m {
+			v := basis[q]
+			if varLB[v] != nil && xB[q].Cmp(varLB[v]) < 0 {
+				if v < leaveVar {
+					leaveQ = q
+					leaveVar = v
+					leaveAtLower = true
+				}
+			} else if varUB[v] != nil && xB[q].Cmp(varUB[v]) > 0 {
+				if v < leaveVar {
+					leaveQ = q
+					leaveVar = v
+					leaveAtLower = false
+				}
+			}
+		}
+		if leaveQ < 0 {
+			xExact = make([]*big.Rat, n)
+			for j := range n {
+				switch status[j] {
+				case statusAtLower, statusFixed:
+					if varLB[j] != nil {
+						xExact[j] = new(big.Rat).Set(varLB[j])
+					} else {
+						xExact[j] = new(big.Rat)
+					}
+				case statusAtUpper:
+					if varUB[j] != nil {
+						xExact[j] = new(big.Rat).Set(varUB[j])
+					} else {
+						xExact[j] = new(big.Rat)
+					}
+				default:
+					xExact[j] = new(big.Rat)
+				}
+			}
+			for q := range m {
+				if bVar := basis[q]; bVar >= 0 && bVar < n {
+					xExact[bVar] = new(big.Rat).Set(xB[q])
+				}
+			}
+			break
+		}
+
+		eQ[leaveQ].SetInt64(1)
+		rho, okRho := r.solveBasisTransposeActive(basis, eQ)
+		eQ[leaveQ].SetInt64(0)
+		if !okRho || len(rho) != m {
+			break
+		}
+
+		enterK := -1
+		for k := range tot {
+			st := status[k]
+			if st == statusBasic || st == statusFixed {
+				continue
+			}
+			if k < n {
+				alphaK.SetInt64(0)
+				rows := allColRows[k]
+				vals := allColVals[k]
+				for idx, ri := range rows {
+					if rho[ri].Sign() != 0 {
+						prod.Mul(vals[idx], rho[ri])
+						alphaK.Add(&alphaK, &prod)
+					}
+				}
+			} else {
+				alphaK.Set(rho[k-n])
+			}
+			aSgn := alphaK.Sign()
+			if aSgn == 0 {
+				continue
+			}
+			blocks := false
+			if st == statusSuperBasic {
+				blocks = true
+				candRatio.SetInt64(0)
+			} else if leaveAtLower {
+				if st == statusAtLower && aSgn < 0 {
+					blocks = true
+					candRatio.Quo(rc[k], &alphaK)
+					candRatio.Neg(&candRatio)
+				} else if st == statusAtUpper && aSgn > 0 {
+					blocks = true
+					candRatio.Quo(rc[k], &alphaK)
+					candRatio.Neg(&candRatio)
+				}
+			} else {
+				if st == statusAtLower && aSgn > 0 {
+					blocks = true
+					candRatio.Quo(rc[k], &alphaK)
+				} else if st == statusAtUpper && aSgn < 0 {
+					blocks = true
+					candRatio.Quo(rc[k], &alphaK)
+				}
+			}
+			if !blocks || candRatio.Sign() < 0 {
+				continue
+			}
+			if enterK < 0 || candRatio.Cmp(&bestRatio) < 0 {
+				enterK = k
+				bestRatio.Set(&candRatio)
+			}
+		}
+
+		if enterK < 0 {
+			wCand := make([]viprRowMult, 0, m)
+			for i := range m {
+				if rho[i].Sign() == 0 {
+					continue
+				}
+				mv := new(big.Rat).Set(rho[i])
+				if leaveAtLower {
+					mv.Neg(mv)
+				}
+				wCand = append(wCand, viprRowMult{rowID: r.activeRowID(i), mult: mv})
+			}
+			if w, _, okF := r.projectFarkasMults(wCand, lbR, ubR); okF {
+				vn.kind = viprNodeLeafFarkas
+				vn.farkas = w
+				return false, true, nil
+			}
+			break
+		}
+
+		basis[leaveQ] = enterK
+		status[enterK] = statusBasic
+		if varLB[leaveVar] != nil && varUB[leaveVar] != nil && varLB[leaveVar].Cmp(varUB[leaveVar]) == 0 {
+			status[leaveVar] = statusFixed
+		} else if leaveAtLower {
+			status[leaveVar] = statusAtLower
+		} else {
+			status[leaveVar] = statusAtUpper
+		}
+	}
+
+	return targetObj != nil && vn.bestDualRHS != nil && targetObj.Cmp(vn.bestDualRHS) <= 0, false, xExact
+}
+
+func (r *babVIPRRecorder) closeNearOptimalLeafExact(vn *viprTreeNode, targetObj *big.Rat, depth int, budget *int) bool {
+	if r == nil || r.invalid || vn == nil || targetObj == nil || stopRequested(time.Time{}, r.done) {
+		return false
+	}
+	closed, infeas, xExact := r.polishNodeDualExactSimplex(vn, targetObj)
+	if closed || infeas {
+		return true
+	}
+	const maxMicroBranchDepth = 8
+	if depth >= maxMicroBranchDepth || budget == nil || *budget <= 0 || len(xExact) != r.rp.n {
+		return false
+	}
+
+	// Select the most fractional integer variable from the exact rational LP optimum,
+	// capturing even sub-1e-15 fractionality ignored by floating-point integrality tolerances.
+	bestCol := -1
+	var bestDist *big.Rat
+	halfRat := big.NewRat(1, 2)
+	oneRat := big.NewRat(1, 1)
+	for j := range r.rp.n {
+		if !r.rp.isInt[j] || xExact[j] == nil || xExact[j].IsInt() {
+			continue
+		}
+		fl := viprRatFloor(xExact[j])
+		frac := new(big.Rat).Sub(xExact[j], fl)
+		dist := frac
+		if frac.Cmp(halfRat) > 0 {
+			dist = new(big.Rat).Sub(oneRat, frac)
+		}
+		if bestCol < 0 || dist.Cmp(bestDist) > 0 {
+			bestCol = j
+			bestDist = dist
+		}
+	}
+	if bestCol < 0 {
+		return false
+	}
+
+	splitRat := viprRatFloor(xExact[bestCol])
+	if !splitRat.IsInt() {
+		return false
+	}
+	splitVal := new(big.Int).Set(splitRat.Num())
+
+	oldKind := vn.kind
+	oldLeft := vn.left
+	oldRight := vn.right
+	oldBrCol := vn.branchCol
+	oldSplit := vn.splitVal
+
+	*budget -= 2
+	left, right := r.recordBranch(vn, bestCol, splitVal)
+	if left == nil || right == nil {
+		vn.kind = oldKind
+		vn.left = oldLeft
+		vn.right = oldRight
+		vn.branchCol = oldBrCol
+		vn.splitVal = oldSplit
+		return false
+	}
+
+	okL := r.closeNearOptimalLeafExact(left, targetObj, depth+1, budget)
+	okR := r.closeNearOptimalLeafExact(right, targetObj, depth+1, budget)
+	if okL && okR {
+		return true
+	}
+
+	childHasProof := func(c *viprTreeNode) bool {
+		if c == nil {
+			return false
+		}
+		return c.kind == viprNodeLeafBoundConflict || c.kind == viprNodeLeafFarkas ||
+			c.kind == viprNodeBranch || c.kind == viprNodeOrbitBranch || c.bestDualRHS != nil
+	}
+	if !childHasProof(left) || !childHasProof(right) {
+		vn.kind = oldKind
+		vn.left = oldLeft
+		vn.right = oldRight
+		vn.branchCol = oldBrCol
+		vn.splitVal = oldSplit
+	}
+	return false
+}
+
+func (r *babVIPRRecorder) polishNearClosedLeavesExact(targetObj *big.Rat) {
+	if r == nil || r.invalid || r.root == nil || targetObj == nil {
+		return
+	}
+	const maxPolishedLeaves = 32
+	polished := 0
+	budget := 64
+	var walk func(vn *viprTreeNode, bestAncRHS *big.Rat)
+	walk = func(vn *viprTreeNode, bestAncRHS *big.Rat) {
+		if vn == nil || polished >= maxPolishedLeaves || stopRequested(time.Time{}, r.done) {
+			return
+		}
+		curBest := bestAncRHS
+		if vn.bestDualRHS != nil && (curBest == nil || vn.bestDualRHS.Cmp(curBest) > 0) {
+			curBest = vn.bestDualRHS
+		}
+		if curBest != nil && targetObj.Cmp(curBest) <= 0 {
+			return
+		}
+		switch vn.kind {
+		case viprNodeLeafBoundConflict, viprNodeLeafFarkas:
+			return
+		case viprNodeLeafDual, viprNodeOpen:
+			polished++
+			r.closeNearOptimalLeafExact(vn, targetObj, 0, &budget)
+		case viprNodeBranch, viprNodeOrbitBranch:
+			walk(vn.left, curBest)
+			walk(vn.right, curBest)
+		}
+	}
+	walk(r.root, nil)
 }
 
 func (r *babVIPRRecorder) clampActiveDualToMults(yActive []*big.Rat) []viprRowMult {
@@ -2859,24 +3381,8 @@ func (r *babVIPRRecorder) tryTightenNodeDualForPrune(vn *viprTreeNode, bestPrima
 	if r.exactNodeGapClosed(vn, bestPrimal) {
 		return true, false
 	}
-	lbR, ubR := r.nodeBoundsRat(vn)
-	sc, res, ok := r.solveCutScratchNode(lbR, ubR, true)
-	if !ok {
-		return false, false
-	}
-	switch res.Status {
-	case StatusInfeasible:
-		if w, okF := r.extractNodeFarkasActive(sc, res.Dual, lbR, ubR); okF {
-			vn.kind = viprNodeLeafFarkas
-			vn.farkas = w
-			return false, true
-		}
-		return false, false
-	case StatusOptimal:
-		r.recordNodeDual(vn, sc, res)
-		return r.exactNodeGapClosed(vn, bestPrimal), false
-	}
-	return false, false
+	closed, infeas, _ = r.polishNodeDualExactSimplex(vn, r.cachedIncObj)
+	return closed, infeas
 }
 
 func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes LPResult) {
@@ -4941,7 +5447,7 @@ type viprEmitter struct {
 }
 
 func (em *viprEmitter) canceled() bool {
-	return em != nil && em.rec != nil && em.rec.canceled()
+	return em != nil && em.rec != nil && stopRequested(time.Time{}, em.rec.done)
 }
 
 func viprMergeAsms(lists ...[]int) []int {
@@ -5675,26 +6181,45 @@ func (r *babVIPRRecorder) collectNeededCuts() []bool {
 	return need
 }
 
-func (r *babVIPRRecorder) finalize(res Result) {
-	if r == nil || r.trace == nil || r.invalid || r.rp == nil || r.root == nil || r.canceled() {
-		return
+func (r *babVIPRRecorder) collectNeededCutsForMults(mults []viprRowMult) []bool {
+	nCuts := len(r.allCuts)
+	if nCuts == 0 {
+		return nil
 	}
-	defer r.close()
+	need := make([]bool, nCuts)
+	baseM := r.rp.m
+	anyNeed := false
+	for _, rm := range mults {
+		if rm.mult != nil && rm.mult.Sign() != 0 && rm.rowID >= baseM {
+			if cutIdx := rm.rowID - baseM; cutIdx < nCuts {
+				need[cutIdx] = true
+				anyNeed = true
+			}
+		}
+	}
+	if !anyNeed {
+		return nil
+	}
+	for k := nCuts - 1; k >= 0; k-- {
+		if !need[k] {
+			continue
+		}
+		for _, rm := range r.allCuts[k].refs {
+			if rm.mult != nil && rm.mult.Sign() != 0 && rm.rowID >= baseM {
+				if dep := rm.rowID - baseM; dep < k {
+					need[dep] = true
+				}
+			}
+		}
+	}
+	return need
+}
 
+func (r *babVIPRRecorder) emitRootDualFallback() (*viprEmitter, int, *big.Rat, bool) {
+	if r == nil || r.rp == nil || r.root == nil || r.root.bestDualRHS == nil {
+		return nil, -1, nil, false
+	}
 	rp := r.rp
-	r.trace.rootCutsCertified = r.rootCutsCertified
-	r.trace.inTreeCutsCertified = r.inTreeCutsCertified
-	r.trace.rcfFixingsCertified = r.rcfFixingsCertified
-	r.trace.unbTightCertified = r.unbTightCertified
-	r.trace.orbitBranchesCertified = r.orbitBranchesCertified
-
-	lbStepID := make([]int, rp.n)
-	ubStepID := make([]int, rp.n)
-	for j := range rp.n {
-		lbStepID[j] = -1
-		ubStepID[j] = -1
-	}
-
 	em := &viprEmitter{
 		rec:       r,
 		rp:        rp,
@@ -5703,47 +6228,51 @@ func (r *babVIPRRecorder) finalize(res Result) {
 	for k := range em.cutStepID {
 		em.cutStepID[k] = -1
 	}
-	if need := r.collectNeededCuts(); need != nil {
+	if need := r.collectNeededCutsForMults(r.root.bestDual); need != nil {
 		for k, want := range need {
 			if !want {
 				continue
 			}
 			sid, okCut := em.emitGlobalCut(r.allCuts[k])
 			if !okCut {
-				return
+				return nil, -1, nil, false
 			}
 			em.cutStepID[k] = sid
 		}
 	}
+	rootID, rootRHS, okD := em.emitSafeDual(r.root.bestDual, rp.lb, rp.ub, nil)
+	if !okD || len(em.steps) == 0 || rootID < rp.m {
+		return nil, -1, nil, false
+	}
+	return em, rootID, rootRHS, true
+}
 
-	rootID, rootUnsat, rootRHS, ok := em.emitNode(r.root, viprEmitState{
-		lb:   rp.lb,
-		ub:   rp.ub,
-		lbID: lbStepID,
-		ubID: ubStepID,
-	})
-	if !ok || len(em.steps) == 0 || rootID < rp.m {
+func (r *babVIPRRecorder) finalize(res Result) {
+	if r == nil || r.trace == nil || r.rp == nil || r.root == nil || stopRequested(time.Time{}, r.done) {
 		return
 	}
-	if !rootUnsat && r.root.bestDualRHS != nil && rootRHS.Cmp(r.root.bestDualRHS) < 0 {
-		if sid, sRHS, sOK := em.emitSafeDual(r.root.bestDual, rp.lb, rp.ub, nil); sOK && sid >= rp.m && sRHS.Cmp(rootRHS) > 0 {
-			rootID = sid
-			rootRHS = sRHS
-		}
-	}
-
-	if rootUnsat {
-		cert := rp.buildBaseCert("infeasible")
-		cert.Steps = em.steps
-		cert.RootStep = rootID - rp.m
-		r.trace.cert = cert
-		r.trace.attachPresolveEnvelope(rp.p)
-		r.trace.targetLB = nil
-		r.trace.hasCert = true
+	if r.invalid && (!isLimitStatus(res.Status) || r.root.bestDualRHS == nil) {
 		return
 	}
+	defer r.close()
 
-	targetLB := new(big.Rat).Add(rp.objConst, rootRHS)
+	// Clear solver time-limit deadline so post-solve emission and exact refinement
+	// finish cleanly while still honoring context cancellation via r.done.
+	r.deadline = time.Time{}
+	if r.baseScratchLP != nil {
+		r.baseScratchLP.Deadline = time.Time{}
+	}
+	if r.cutScratchLP != nil {
+		r.cutScratchLP.Deadline = time.Time{}
+	}
+
+	rp := r.rp
+	r.trace.rootCutsCertified = r.rootCutsCertified
+	r.trace.inTreeCutsCertified = r.inTreeCutsCertified
+	r.trace.rcfFixingsCertified = r.rcfFixingsCertified
+	r.trace.unbTightCertified = r.unbTightCertified
+	r.trace.orbitBranchesCertified = r.orbitBranchesCertified
+
 	var incRat []*big.Rat
 	var incObjNoConst *big.Rat
 	var hasExactInc bool
@@ -5760,6 +6289,95 @@ func (r *babVIPRRecorder) finalize(res Result) {
 			incRat, incObjNoConst, hasExactInc = rp.refineExactIncumbent(res.Values, r.ensureBaseScratchLP)
 		}
 	}
+
+	if !r.invalid && res.Status == StatusOptimal && hasExactInc && !r.exactTreeGapClosed(res.Values) {
+		r.polishNearClosedLeavesExact(incObjNoConst)
+	}
+
+	var em *viprEmitter
+	var rootID int
+	var rootUnsat bool
+	var rootRHS *big.Rat
+	var ok bool
+
+	if !r.invalid {
+		lbStepID := make([]int, rp.n)
+		ubStepID := make([]int, rp.n)
+		for j := range rp.n {
+			lbStepID[j] = -1
+			ubStepID[j] = -1
+		}
+
+		treeEm := &viprEmitter{
+			rec:       r,
+			rp:        rp,
+			cutStepID: make([]int, len(r.allCuts)),
+		}
+		for k := range treeEm.cutStepID {
+			treeEm.cutStepID[k] = -1
+		}
+		cutsOK := true
+		if need := r.collectNeededCuts(); need != nil {
+			for k, want := range need {
+				if !want {
+					continue
+				}
+				sid, okCut := treeEm.emitGlobalCut(r.allCuts[k])
+				if !okCut {
+					cutsOK = false
+					break
+				}
+				treeEm.cutStepID[k] = sid
+			}
+		}
+		if cutsOK {
+			rootID, rootUnsat, rootRHS, ok = treeEm.emitNode(r.root, viprEmitState{
+				lb:   rp.lb,
+				ub:   rp.ub,
+				lbID: lbStepID,
+				ubID: ubStepID,
+			})
+			if ok && len(treeEm.steps) > 0 && rootID >= rp.m {
+				em = treeEm
+			} else {
+				ok = false
+			}
+		}
+	}
+
+	if !ok {
+		if isLimitStatus(res.Status) || r.root.bestDualRHS != nil {
+			fbEm, fbID, fbRHS, fbOK := r.emitRootDualFallback()
+			if !fbOK {
+				return
+			}
+			em = fbEm
+			rootID = fbID
+			rootUnsat = false
+			rootRHS = fbRHS
+		} else {
+			return
+		}
+	} else if !rootUnsat && r.root.bestDualRHS != nil && rootRHS.Cmp(r.root.bestDualRHS) <= 0 {
+		if fbEm, fbID, fbRHS, fbOK := r.emitRootDualFallback(); fbOK && fbRHS.Cmp(rootRHS) >= 0 {
+			em = fbEm
+			rootID = fbID
+			rootRHS = fbRHS
+		}
+	}
+
+	if rootUnsat {
+		cert := rp.buildBaseCert("infeasible")
+		cert.Steps = em.steps
+		cert.RootStep = rootID - rp.m
+		r.trace.cert = cert
+		r.trace.attachPresolveEnvelope(rp.p)
+		r.trace.targetLB = nil
+		r.trace.hasCert = true
+		return
+	}
+
+	targetLB := new(big.Rat).Add(rp.objConst, rootRHS)
 
 	mode := "bound"
 	if hasExactInc && incObjNoConst.Cmp(rootRHS) <= 0 {
@@ -5942,6 +6560,146 @@ func (tr *VIPRTrace) adoptInfeasSteps(p *CompiledProblem, sub *VIPRTrace) {
 	tr.cert = cert
 	tr.attachPresolveEnvelope(p)
 	tr.hasCert = true
+}
+
+func populateLPVIPRTraceFromWitness(p *CompiledProblem, trace *VIPRTrace, res Result, wit *lpCertWitness) {
+	if p == nil || trace == nil || wit == nil {
+		return
+	}
+	rp, ok := buildVIPRRatProblem(p)
+	if !ok {
+		return
+	}
+	rec := &babVIPRRecorder{rp: rp}
+	em := &viprEmitter{rec: rec, rp: rp}
+
+	switch res.Status {
+	case StatusOptimal:
+		if len(wit.primal) != rp.n || len(wit.dualMin) != rp.m {
+			return
+		}
+		mults := make([]viprRowMult, 0, rp.m)
+		for i, yi := range wit.dualMin {
+			if yi != nil && yi.Sign() != 0 {
+				mults = append(mults, viprRowMult{rowID: i, mult: yi})
+			}
+		}
+		id, rhs, okD := em.emitSafeDual(mults, rp.lb, rp.ub, nil)
+		if !okD || len(em.steps) == 0 || id < rp.m {
+			return
+		}
+		incObjNoConst := rp.evalObjNoConst(wit.primal)
+		targetLB := new(big.Rat).Add(rp.objConst, rhs)
+		mode := "bound"
+		if incObjNoConst.Cmp(rhs) <= 0 {
+			mode = "optimal"
+		}
+		cert := rp.buildBaseCert(mode)
+		cert.Steps = em.steps
+		cert.RootStep = id - rp.m
+		incPay := make([]viprRatPayload, rp.n)
+		for j := range rp.n {
+			incPay[j] = viprBigRatToPayload(wit.primal[j])
+		}
+		cert.Incumbent = incPay
+		if mode == "bound" {
+			lbPay := viprBigRatToPayload(targetLB)
+			cert.TargetLB = &lbPay
+		}
+		trace.reset(p)
+		trace.presolveEnv = nil
+		trace.cert = cert
+		trace.targetLB = targetLB
+		trace.hasCert = true
+
+	case StatusInfeasible:
+		if wit.hasDirectInfeas {
+			for j := range rp.n {
+				if rp.lb[j] != nil && rp.ub[j] != nil && rp.ub[j].Cmp(rp.lb[j]) < 0 {
+					cert := rp.buildBaseCert("infeasible")
+					cert.Steps = []viprStepJSON{{Rule: "boundConflict", Col: viprIntPtr(j)}}
+					cert.RootStep = 0
+					trace.reset(p)
+					trace.presolveEnv = nil
+					trace.cert = cert
+					trace.targetLB = nil
+					trace.hasCert = true
+					return
+				}
+			}
+			if steps, rootStep, okGCD := buildGCDInfeasSteps(rp); okGCD {
+				cert := rp.buildBaseCert("infeasible")
+				cert.Steps = steps
+				cert.RootStep = rootStep
+				trace.reset(p)
+				trace.presolveEnv = nil
+				trace.cert = cert
+				trace.targetLB = nil
+				trace.hasCert = true
+				return
+			}
+		}
+		if len(wit.farkasW) != rp.m {
+			return
+		}
+		mults := make([]viprRowMult, 0, rp.m)
+		for i, wi := range wit.farkasW {
+			if wi != nil && wi.Sign() != 0 {
+				mults = append(mults, viprRowMult{rowID: i, mult: wi})
+			}
+		}
+		lbID := make([]int, rp.n)
+		ubID := make([]int, rp.n)
+		for j := range rp.n {
+			lbID[j] = -1
+			ubID[j] = -1
+		}
+		id, okF := em.emitFarkas(mults, rp.lb, rp.ub, lbID, ubID)
+		if !okF || len(em.steps) == 0 || id < rp.m {
+			return
+		}
+		cert := rp.buildBaseCert("infeasible")
+		cert.Steps = em.steps
+		cert.RootStep = id - rp.m
+		trace.reset(p)
+		trace.presolveEnv = nil
+		trace.cert = cert
+		trace.targetLB = nil
+		trace.hasCert = true
+
+	case StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
+		if len(wit.dualMin) != rp.m {
+			return
+		}
+		mults := make([]viprRowMult, 0, rp.m)
+		for i, yi := range wit.dualMin {
+			if yi != nil && yi.Sign() != 0 {
+				mults = append(mults, viprRowMult{rowID: i, mult: yi})
+			}
+		}
+		id, rhs, okD := em.emitSafeDual(mults, rp.lb, rp.ub, nil)
+		if !okD || len(em.steps) == 0 || id < rp.m {
+			return
+		}
+		targetLB := new(big.Rat).Add(rp.objConst, rhs)
+		cert := rp.buildBaseCert("bound")
+		cert.Steps = em.steps
+		cert.RootStep = id - rp.m
+		lbPay := viprBigRatToPayload(targetLB)
+		cert.TargetLB = &lbPay
+		if len(wit.primal) == rp.n {
+			incPay := make([]viprRatPayload, rp.n)
+			for j := range rp.n {
+				incPay[j] = viprBigRatToPayload(wit.primal[j])
+			}
+			cert.Incumbent = incPay
+		}
+		trace.reset(p)
+		trace.presolveEnv = nil
+		trace.cert = cert
+		trace.targetLB = targetLB
+		trace.hasCert = true
+	}
 }
 
 func (tr *VIPRTrace) String() string {
