@@ -162,7 +162,7 @@ linters:
           - unparam
 
       # Intentional 32-bit bit-packing in Var handles, SplitMix64 hashes, and bounds-checked int32 casts
-      - path: (^|/)(model|compiled|cbc_cgo|bab|presolve)\.go$
+      - path: (^|/)(model|compiled|cbc_[^/]+|bab|presolve)\.go$
         linters:
           - gosec
         text: "G115"
