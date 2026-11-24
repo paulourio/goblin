@@ -1740,9 +1740,10 @@ theorem checkPanicBoundsReachability_step_guard (prog : Array Arm64Insn)
       · simp only [hLt, ↓reduceDIte]
         exact ⟨(fun h => by cases h), fun h => by cases h⟩
 
-/-- Trace hypothesis for structural bounds-guard mediation: states that along a `fuel`-step
-execution, every transition across a non-degenerate comparison guard (`isVerifiedBoundsGuard`)
-stays outside the `inPb` panicBounds region (i.e. the runtime bounds checks pass). -/
+/-- Trace hypothesis for structural bounds-guard gating: assumes along a `fuel`-step run that
+runtime comparison guards (`isVerifiedBoundsGuard`) do not branch into `inPb`
+(`runtime.panicBounds`). Because callers supply this premise as a trace hypothesis, it
+assumes rather than proves that runtime slice-bounds checks pass. -/
 def BoundsGuardsHold (prog : Array Arm64Insn) (getInsn : Nat → Option Arm64Insn)
     (ext : Nat → Option String) (inPb : Nat → Bool) :
     Nat → Arm64State → Prop
@@ -1753,9 +1754,13 @@ def BoundsGuardsHold (prog : Array Arm64Insn) (getInsn : Nat → Option Arm64Ins
       isVerifiedBoundsGuard getInsn s.pcIdx s1.pcIdx = true → inPb s1.pcIdx = false) ∧
       BoundsGuardsHold prog getInsn ext inPb k s1
 
-/-- Structural bounds-guard mediation theorem: whenever `verifyPanicBoundsCertWith` passes,
-every CFG edge into `inPb` is mediated by a non-degenerate comparison guard (`isVerifiedBoundsGuard`),
-and `runtime.panicBounds` is unreachable for any `fuel : Nat` whenever those runtime bounds guards pass (`BoundsGuardsHold`). -/
+/-- Syntactic CFG bounds-guard gating theorem: whenever `verifyPanicBoundsCertWith` passes,
+every CFG edge into `inPb` (`runtime.panicBounds`) traverses a compiler-emitted `CMP` plus
+conditional branch (`isVerifiedBoundsGuard`). Under the trace hypothesis `BoundsGuardsHold`
+assuming those runtime comparison guards never branch into `inPb`, `runtime.panicBounds` stays
+unreachable for any `fuel : Nat`. This theorem establishes only the syntactic CFG guard
+property rather than value-level slice-index safety (only the 4 zero-`panicBounds` ARM64
+leaves prove that `runtime.panicBounds` is unconditionally unreachable). -/
 theorem checkPanicBoundsReachability_run_safe (prog : Array Arm64Insn)
     (getInsn : Nat → Option Arm64Insn) (ext : Nat → Option String) (inPb : Nat → Bool)
     (hBound : ∀ j, prog.size ≤ j → inPb j = false)

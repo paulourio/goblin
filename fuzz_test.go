@@ -37,32 +37,33 @@ func exactEvalMinObjRat(p *gb.CompiledProblem, x []float64) (totalMin *big.Rat, 
 	if p == nil || len(x) < p.NumVars() {
 		return nil, 0, false
 	}
-	constMin := p.ObjConstant()
-	if p.Sense() == gb.Maximize && constMin != 0 {
-		constMin = -constMin
-	}
-	totalMin = new(big.Rat).SetFloat64(constMin)
-	if totalMin == nil {
+	objConst, objMinRats, _, _, _, _, okRats := gb.ExactProblemRatsForTest(p)
+	n := p.NumVars()
+	if !okRats || len(objMinRats) != n {
 		return nil, 0, false
 	}
-	cRat := new(big.Rat)
+	totalMin = new(big.Rat).Set(objConst)
 	xRat := new(big.Rat)
 	prod := new(big.Rat)
-	for j := range p.NumVars() {
-		cj := p.ObjMinCoeff(j)
+	for j := range n {
 		xj := x[j]
-		if math.IsNaN(cj) || math.IsInf(cj, 0) || math.IsNaN(xj) || math.IsInf(xj, 0) {
+		if math.IsNaN(xj) || math.IsInf(xj, 0) {
 			return nil, 0, false
 		}
-		if cj == 0 || xj == 0 {
+		cjRat := objMinRats[j]
+		if cjRat == nil {
+			return nil, 0, false
+		}
+		if cjRat.Sign() == 0 || xj == 0 {
 			continue
 		}
-		if cRat.SetFloat64(cj) == nil || xRat.SetFloat64(xj) == nil {
+		if xRat.SetFloat64(xj) == nil {
 			return nil, 0, false
 		}
-		prod.Mul(cRat, xRat)
+		prod.Mul(cjRat, xRat)
 		totalMin.Add(totalMin, prod)
-		if pAbs := math.Abs(cj * xj); !math.IsInf(pAbs, 0) && !math.IsNaN(pAbs) {
+		cjFloat, _ := cjRat.Float64()
+		if pAbs := math.Abs(cjFloat * xj); !math.IsInf(pAbs, 0) && !math.IsNaN(pAbs) {
 			linScale += pAbs
 		}
 	}
@@ -73,20 +74,24 @@ func exactEvalLinearMinRat(p *gb.CompiledProblem, x []float64) (*big.Rat, bool) 
 	if p == nil || len(x) < p.NumVars() {
 		return nil, false
 	}
+	_, objMinRats, _, _, _, _, okRats := gb.ExactProblemRatsForTest(p)
+	n := p.NumVars()
+	if !okRats || len(objMinRats) != n {
+		return nil, false
+	}
 	sum := new(big.Rat)
-	cRat := new(big.Rat)
 	xRat := new(big.Rat)
 	prod := new(big.Rat)
-	for j := range p.NumVars() {
-		cj := p.ObjMinCoeff(j)
+	for j := range n {
+		cjRat := objMinRats[j]
 		xj := x[j]
-		if cj == 0 || xj == 0 {
+		if cjRat == nil || cjRat.Sign() == 0 || xj == 0 {
 			continue
 		}
-		if cRat.SetFloat64(cj) == nil || xRat.SetFloat64(xj) == nil {
+		if xRat.SetFloat64(xj) == nil {
 			return nil, false
 		}
-		prod.Mul(cRat, xRat)
+		prod.Mul(cjRat, xRat)
 		sum.Add(sum, prod)
 	}
 	return sum, true
@@ -109,7 +114,6 @@ func isExactRatMIPFeasible(p *gb.CompiledProblem, x []float64) bool {
 	}
 	n := p.NumVars()
 	xRats := make([]*big.Rat, n)
-	bndRat := new(big.Rat)
 	for j := range n {
 		xj := x[j]
 		if math.IsNaN(xj) || math.IsInf(xj, 0) {
@@ -119,65 +123,9 @@ func isExactRatMIPFeasible(p *gb.CompiledProblem, x []float64) bool {
 		if xr == nil {
 			return false
 		}
-		lb, ub := p.VarBounds(j)
-		if !math.IsInf(lb, -1) {
-			if bndRat.SetFloat64(lb) == nil || xr.Cmp(bndRat) < 0 {
-				return false
-			}
-		}
-		if !math.IsInf(ub, 1) {
-			if bndRat.SetFloat64(ub) == nil || xr.Cmp(bndRat) > 0 {
-				return false
-			}
-		}
 		xRats[j] = xr
 	}
-	for k := range p.NumIntVars() {
-		if !xRats[p.IntCol(k)].IsInt() {
-			return false
-		}
-	}
-	act := new(big.Rat)
-	aRat := new(big.Rat)
-	prod := new(big.Rat)
-	rhsRat := new(big.Rat)
-	for i := range p.NumConstraints() {
-		if rhsRat.SetFloat64(p.RowRHS(i)) == nil {
-			return false
-		}
-		act.SetInt64(0)
-		rowOK := true
-		p.ForEachRowTerm(i, func(col int, coeff float64) {
-			if !rowOK || coeff == 0 || x[col] == 0 {
-				return
-			}
-			if aRat.SetFloat64(coeff) == nil {
-				rowOK = false
-				return
-			}
-			prod.Mul(aRat, xRats[col])
-			act.Add(act, prod)
-		})
-		if !rowOK {
-			return false
-		}
-		cmp := act.Cmp(rhsRat)
-		switch p.RowSense(i) {
-		case gb.LessEqual:
-			if cmp > 0 {
-				return false
-			}
-		case gb.GreaterEqual:
-			if cmp < 0 {
-				return false
-			}
-		case gb.Equal:
-			if cmp != 0 {
-				return false
-			}
-		}
-	}
-	return true
+	return isExactRatSliceMIPFeasible(p, xRats)
 }
 
 func verifyFormalLPResult(tb testing.TB, label string, p *gb.CompiledProblem, lp *gb.LPSolver, res gb.LPResult) {
@@ -960,6 +908,63 @@ func buildAdversarialLPModel(seed uint64, regimeByte, sizeByte, senseConstByte u
 	objConst := objConsts[int(senseConstByte>>1)%len(objConsts)]
 	tag := fmt.Sprintf("adv_lp_r%d_%d", regimeByte%4, seed)
 
+	if sizeByte >= 192 {
+		cSign := 1.0
+		if sense == gb.Maximize {
+			cSign = -1.0
+		}
+		switch (sizeByte - 192) % 4 {
+		case 0:
+			// Non-zero Expr.Constant (4.3 - 0.1) combined with lossy duplicate terms (0.1 + 0.2).
+			m := gb.NewModel(tag+"_exact_orig_43", sense)
+			x := m.AddContVar("x", 0, 10)
+			y := m.AddContVar("y", 0, 10)
+			z := m.AddContVar("z", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(cSign*0.1), x.T(cSign*0.2), y.T(cSign), z.T(cSign)).AddConstant(1))
+			m.AddConstraint("ge_43", gb.Ge(gb.NewExpr(x.T(1), y.T(1), z.T(0.5)).AddConstant(0.1), 4.3))
+			m.AddConstraint("le_03", gb.Le(gb.NewExpr(x.T(0.1), x.T(0.2)), 0.3))
+			if regimeByte&1 == 1 {
+				m.AddConstraint("le_ulp", gb.Le(gb.NewExpr(y.T(1), y.T(0x1p-53), y.T(0x1p-53)), 8))
+			}
+			return m
+		case 1:
+			// Non-zero Expr.Constant (2.1 - 0.1) combined with sticky ULP duplicate terms.
+			m := gb.NewModel(tag+"_exact_orig_21", sense)
+			x := m.AddContVar("x", 0, 10)
+			y := m.AddContVar("y", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(cSign), x.T(cSign*0x1p-53), x.T(cSign*0x1p-53), y.T(cSign*2)).AddConstant(0.1 + float64(seed%5)))
+			m.AddConstraint("ge_21", gb.Ge(gb.NewExpr(x.T(1), y.T(1)).AddConstant(0.1), 2.1))
+			m.AddConstraint("le_ulp", gb.Le(gb.NewExpr(x.T(1), x.T(0x1p-53), x.T(0x1p-53), y.T(0.1), y.T(0.2)), 3.0))
+			return m
+		case 2:
+			// Clearly infeasible LP exercising exactOrig Farkas certification over duplicate terms and Expr.Constant.
+			m := gb.NewModel(tag+"_exact_orig_inf", sense)
+			x := m.AddContVar("x", 0, 10)
+			y := m.AddContVar("y", 0, 10)
+			z := m.AddContVar("z", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(cSign*0.1), x.T(cSign*0.2), y.T(cSign), z.T(cSign)).AddConstant(1))
+			m.AddConstraint("ge_43", gb.Ge(gb.NewExpr(x.T(1), y.T(1), z.T(0.5)).AddConstant(0.1), 4.3))
+			m.AddConstraint("le_03", gb.Le(gb.NewExpr(x.T(0.1), x.T(0.2)), 0.3))
+			m.AddConstraint("le_cap", gb.Le(gb.NewExpr(x.T(1), x.T(0x1p-53), x.T(0x1p-53), y.T(1), z.T(0.5)).AddConstant(0.1), 3.9))
+			return m
+		default:
+			// Randomized lossy exactOrig LP combining non-zero Expr.Constant and duplicate Term sums.
+			m := gb.NewModel(tag+"_exact_orig_rand", sense)
+			x := m.AddContVar("x", 0, 8)
+			y := m.AddContVar("y", 0, 8)
+			z := m.AddContVar("z", 0, 8)
+			m.SetObjective(gb.NewExpr(
+				x.T(cSign*0.1), x.T(cSign*0.2),
+				y.T(cSign), y.T(cSign*0x1p-53), y.T(cSign*0x1p-53),
+				z.T(cSign*0.5),
+			).AddConstant(0.1 + float64(rng.IntN(4))))
+			m.AddConstraint("ge_43", gb.Ge(gb.NewExpr(x.T(1), y.T(1), z.T(0.5)).AddConstant(0.1), 4.3))
+			m.AddConstraint("le_03", gb.Le(gb.NewExpr(x.T(0.1), x.T(0.2)), 0.3+float64(rng.IntN(3))*0.5))
+			m.AddConstraint("le_ulp", gb.Le(gb.NewExpr(y.T(1), y.T(0x1p-53), y.T(0x1p-53), z.T(0.5)).AddConstant(0.1), 6.1+float64(rng.IntN(3))))
+			return m
+		}
+	}
+
 	if sizeByte >= 128 {
 		if sizeByte&1 == 0 {
 			// Free and semi-bounded non-dyadic LP exercising ExactBasisDuals in lp-check.
@@ -1175,6 +1180,10 @@ func FuzzAdversarialLPFormal(f *testing.F) {
 	f.Add(uint64(12), uint8(0), uint8(129), uint8(0))
 	f.Add(uint64(13), uint8(3), uint8(131), uint8(1))
 	f.Add(uint64(14), uint8(1), uint8(133), uint8(2))
+	f.Add(uint64(15), uint8(0), uint8(192), uint8(0))
+	f.Add(uint64(16), uint8(1), uint8(193), uint8(1))
+	f.Add(uint64(17), uint8(2), uint8(194), uint8(2))
+	f.Add(uint64(18), uint8(3), uint8(195), uint8(3))
 
 	f.Fuzz(func(t *testing.T, seed uint64, regimeByte, sizeByte, senseConstByte uint8) {
 		mdl := buildAdversarialLPModel(seed, regimeByte, sizeByte, senseConstByte)
@@ -1934,6 +1943,104 @@ func runAdversarialMIPObjConstRegime(t *testing.T, seed uint64, paramA, paramB u
 	}
 }
 
+func runAdversarialMIPExactOrigRegime(t *testing.T, seed uint64, paramA, paramB uint8) {
+	t.Helper()
+	label := fmt.Sprintf("adv_mip_exact_orig_%d_%d", paramA, seed)
+	sense := gb.Minimize
+	cSign := 1.0
+	if paramB&1 == 1 {
+		sense = gb.Maximize
+		cSign = -1.0
+	}
+
+	var mdl *gb.Model
+	switch paramA % 4 {
+	case 0:
+		// Mixed-integer or pure-integer model with RHS=4.3, Expr.Constant=0.1, and 0.1*x+0.2*x.
+		mdl = gb.NewModel(label+"_43", sense)
+		var x gb.Var
+		rhsDup := 0.3
+		if paramB&2 != 0 {
+			x = mdl.AddIntVar("x", 0, 5)
+			rhsDup = 0.4
+		} else {
+			x = mdl.AddContVar("x", 0, 10)
+		}
+		y := mdl.AddIntVar("y", 0, 10)
+		z := mdl.AddIntVar("z", 0, 10)
+		mdl.SetObjective(gb.NewExpr(x.T(cSign*0.1), x.T(cSign*0.2), y.T(cSign), z.T(cSign)).AddConstant(1))
+		mdl.AddConstraint("ge_43", gb.Ge(gb.NewExpr(x.T(1), y.T(1), z.T(0.5)).AddConstant(0.1), 4.3))
+		mdl.AddConstraint("le_dup", gb.Le(gb.NewExpr(x.T(0.1), x.T(0.2)), rhsDup))
+	case 1:
+		// Pure-integer tightening (RHS=2.1, Expr.Constant=0.1) with sticky duplicate terms.
+		mdl = gb.NewModel(label+"_21", sense)
+		x := mdl.AddIntVar("x", 0, 5)
+		y := mdl.AddIntVar("y", 0, 5)
+		if paramB&2 != 0 {
+			mdl.SetObjective(gb.NewExpr(x.T(cSign*0.1), x.T(cSign*0.2), y.T(cSign)).AddConstant(0.1))
+		} else {
+			mdl.SetObjective(gb.NewExpr(x.T(cSign), x.T(cSign*0x1p-53), x.T(cSign*0x1p-53), y.T(cSign)))
+		}
+		mdl.AddConstraint("ge_21", gb.Ge(gb.NewExpr(x.T(1), y.T(1)).AddConstant(0.1), 2.1))
+		mdl.AddConstraint("le_ulp", gb.Le(gb.NewExpr(x.T(1), x.T(0x1p-53), x.T(0x1p-53), y.T(1)), 6))
+	case 2:
+		// Infeasible integer equality with tiny constant offset (x + 1e-17 == 3).
+		mdl = gb.NewModel(label+"_inteq", sense)
+		x := mdl.AddIntVar("x", 0, 5)
+		if paramB&2 != 0 {
+			y := mdl.AddIntVar("y", 0, 5)
+			mdl.SetObjective(gb.NewExpr(x.T(cSign), y.T(cSign*0.1), y.T(cSign*0.2)))
+			mdl.AddConstraint("le_y", gb.Le(gb.NewExpr(y.T(0.1), y.T(0.2)), 0.3))
+		} else {
+			mdl.SetObjective(gb.NewExpr(x.T(cSign)))
+		}
+		mdl.AddConstraint("eq_1e17", gb.Eq(gb.NewExpr(x.T(1)).AddConstant(1e-17), 3))
+	default:
+		// Mixed-integer combination of 4.3/0.1, 0.1+0.2, and 1+0x1p-53+0x1p-53.
+		mdl = gb.NewModel(label+"_mix", sense)
+		x := mdl.AddIntVar("x", 0, 6)
+		y := mdl.AddIntVar("y", 0, 6)
+		z := mdl.AddContVar("z", 0, 6)
+		mdl.SetObjective(gb.NewExpr(
+			x.T(cSign), x.T(cSign*0x1p-53), x.T(cSign*0x1p-53),
+			y.T(cSign*0.1), y.T(cSign*0.2),
+			z.T(cSign*2),
+		).AddConstant(0.1))
+		mdl.AddConstraint("ge_43", gb.Ge(gb.NewExpr(x.T(1), y.T(1), z.T(0.5)).AddConstant(0.1), 4.3))
+		mdl.AddConstraint("le_mix", gb.Le(gb.NewExpr(x.T(0.1), x.T(0.2), y.T(1), y.T(0x1p-53), y.T(0x1p-53)), 5.3))
+	}
+
+	p, err := mdl.CompileChecked()
+	if err != nil {
+		t.Fatalf("[%s] CompileChecked: %v", label, err)
+	}
+	_, _ = verifyFormalPresolveRules(t, p)
+	verifyFormalRootLP(t, label+"/rootLP", p)
+	workers := [3]int{1, 2, 4}[int(seed+uint64(paramB))%3]
+	_, _, _ = runFullFeatureVsVIPRCheck(t, label, p, workers, 400, 800*time.Millisecond, 1e-6, 1e-6)
+
+	trCert := gb.NewVIPRTrace()
+	certOpts := []gb.Option{
+		gb.WithPureGo(),
+		gb.WithCertified(true),
+		gb.WithPresolve(paramB&4 == 0),
+		gb.WithWorkers(workers),
+		gb.WithMaxNodes(400),
+		gb.WithTimeLimit(800 * time.Millisecond),
+		gb.WithVIPRTrace(trCert),
+	}
+	resCert, errCert := gb.SolveCompiled(t.Context(), p, certOpts...)
+	if errCert != nil {
+		t.Fatalf("[%s] certified SolveCompiled failed: %v", label, errCert)
+	}
+	verifyCertifiedMILPInvariants(t, label+"/cert", p, resCert, trCert, certOpts)
+	if formalFuzzEnabled() {
+		if err := checkFormalVIPRResult(t, label+"/cert_formal", p, resCert, trCert, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func FuzzAdversarialMIPFormal(f *testing.F) {
 	seeds := []struct {
 		seed   uint64
@@ -1972,12 +2079,22 @@ func FuzzAdversarialMIPFormal(f *testing.F) {
 		{21, 4, 6, 0},
 		{22, 4, 6, 1},
 		{23, 4, 7, 2},
+		{24, 200, 0, 0},
+		{25, 200, 1, 1},
+		{26, 200, 2, 0},
+		{27, 200, 3, 1},
+		{28, 201, 4, 2},
+		{29, 202, 5, 3},
 	}
 	for _, s := range seeds {
 		f.Add(s.seed, s.regime, s.a, s.b)
 	}
 
 	f.Fuzz(func(t *testing.T, seed uint64, regimeByte, paramA, paramB uint8) {
+		if regimeByte >= 200 {
+			runAdversarialMIPExactOrigRegime(t, seed, paramA, paramB)
+			return
+		}
 		switch regimeByte % 6 {
 		case 0:
 			runAdversarialMIPActivityRegime(t, seed, paramA, paramB)

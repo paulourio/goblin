@@ -306,25 +306,18 @@ func encodeProblemHeaderForLPCheck(p *gb.CompiledProblem) (
 	if p == nil {
 		return fuzzRatJSON{}, nil, nil, nil, nil, errors.New("nil CompiledProblem")
 	}
-	constMin := p.ObjConstant()
-	if p.Sense() == gb.Maximize && constMin != 0 {
-		constMin = -constMin
-	}
-	oc, ok := fuzzRatFromFloat(constMin)
-	if !ok {
-		return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("non-finite objective constant %v", constMin)
-	}
+	objConstRat, objMinRats, rowRHSRats, rowCols, rowVals, _, okRats := gb.ExactProblemRatsForTest(p)
 	n := p.NumVars()
 	m := p.NumConstraints()
+	if !okRats || len(objMinRats) != n || len(rowRHSRats) != m || len(rowCols) != m || len(rowVals) != m {
+		return fuzzRatJSON{}, nil, nil, nil, nil, errors.New("failed to extract exact CompiledProblem rationals")
+	}
+	oc := fuzzRatFromBigRat(objConstRat)
 	obj = make([]fuzzRatJSON, n)
 	lb = make([]*fuzzRatJSON, n)
 	ub = make([]*fuzzRatJSON, n)
 	for j := range n {
-		cj, okC := fuzzRatFromFloat(p.ObjMinCoeff(j))
-		if !okC {
-			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("non-finite obj coeff at col %d", j)
-		}
-		obj[j] = cj
+		obj[j] = fuzzRatFromBigRat(objMinRats[j])
 		lo, hi := p.VarBounds(j)
 		if math.IsNaN(lo) || math.IsNaN(hi) || math.IsInf(lo, 1) || math.IsInf(hi, -1) {
 			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("invalid bounds [%v, %v] at col %d", lo, hi, j)
@@ -350,780 +343,32 @@ func encodeProblemHeaderForLPCheck(p *gb.CompiledProblem) (
 		if !okS {
 			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("invalid row sense at row %d", i)
 		}
-		rhs, okR := fuzzRatFromFloat(p.RowRHS(i))
-		if !okR {
-			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("non-finite RHS at row %d", i)
+		if len(rowCols[i]) != len(rowVals[i]) {
+			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("row %d column/value length mismatch", i)
 		}
-		terms := make([]lpBridgeTermJSON, 0, p.RowLen(i))
-		termOK := true
-		p.ForEachRowTerm(i, func(col int, coeff float64) {
-			if !termOK {
-				return
-			}
-			cr, okT := fuzzRatFromFloat(coeff)
-			if !okT {
-				termOK = false
-				return
-			}
-			terms = append(terms, lpBridgeTermJSON{Col: col, Coeff: cr})
-		})
-		if !termOK {
-			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("non-finite row term at row %d", i)
+		terms := make([]lpBridgeTermJSON, len(rowCols[i]))
+		for k, col := range rowCols[i] {
+			terms[k] = lpBridgeTermJSON{Col: col, Coeff: fuzzRatFromBigRat(rowVals[i][k])}
 		}
-		rows[i] = lpBridgeRowJSON{Sense: sTok, RHS: rhs, Terms: terms}
+		rows[i] = lpBridgeRowJSON{
+			Sense: sTok,
+			RHS:   fuzzRatFromBigRat(rowRHSRats[i]),
+			Terms: terms,
+		}
 	}
 	return oc, obj, lb, ub, rows, nil
-}
-
-type parsedProblemRow struct {
-	sense  gb.ConstraintSense
-	rhs    *big.Rat
-	coeffs map[int]*big.Rat
-}
-
-func isJSONNullToken(tok jsontext.Value) bool {
-	s := strings.TrimSpace(string(tok))
-	return s == "" || s == "null"
-}
-
-func parseJSONIntField(tok jsontext.Value) (*big.Int, error) {
-	s := strings.TrimSpace(string(tok))
-	if s == "" || s == "null" {
-		return nil, errors.New("missing integer token")
-	}
-	if s[0] == '"' {
-		var str string
-		if err := json.Unmarshal(tok, &str); err != nil {
-			return nil, err
-		}
-		s = strings.TrimSpace(str)
-	}
-	val, ok := new(big.Int).SetString(s, 10)
-	if !ok {
-		return nil, fmt.Errorf("invalid base-10 integer %q", s)
-	}
-	return val, nil
-}
-
-func parseJSONUint64Field(tok jsontext.Value) (uint64, error) {
-	s := strings.TrimSpace(string(tok))
-	if s == "" || s == "null" {
-		return 0, errors.New("missing uint64 token")
-	}
-	if s[0] == '"' {
-		var str string
-		if err := json.Unmarshal(tok, &str); err != nil {
-			return 0, err
-		}
-		s = strings.TrimSpace(str)
-	}
-	return strconv.ParseUint(s, 0, 64)
-}
-
-func parseFormalJSONRat(tok jsontext.Value, allowBits bool) (*big.Rat, error) {
-	s := strings.TrimSpace(string(tok))
-	if s == "" || s == "null" {
-		return nil, errors.New("missing or null rational token")
-	}
-	switch s[0] {
-	case '{':
-		var obj map[string]jsontext.Value
-		if err := json.Unmarshal(tok, &obj); err != nil {
-			return nil, err
-		}
-		if bitsTok, hasBits := obj["bits"]; hasBits && !isJSONNullToken(bitsTok) {
-			if !allowBits {
-				return nil, errors.New("float64 bits rational not permitted here")
-			}
-			bits, err := parseJSONUint64Field(bitsTok)
-			if err != nil {
-				return nil, fmt.Errorf("invalid float64 bits: %w", err)
-			}
-			f := math.Float64frombits(bits)
-			r := new(big.Rat).SetFloat64(f)
-			if r == nil {
-				return nil, fmt.Errorf("non-finite float64 bits %#x", bits)
-			}
-			return r, nil
-		}
-		num, err := parseJSONIntField(obj["num"])
-		if err != nil {
-			return nil, fmt.Errorf("rational num: %w", err)
-		}
-		den, err := parseJSONIntField(obj["den"])
-		if err != nil {
-			return nil, fmt.Errorf("rational den: %w", err)
-		}
-		if den.Sign() <= 0 {
-			return nil, fmt.Errorf("non-positive denominator %s", den.String())
-		}
-		return new(big.Rat).SetFrac(num, den), nil
-	case '"':
-		var str string
-		if err := json.Unmarshal(tok, &str); err != nil {
-			return nil, err
-		}
-		str = strings.TrimSpace(str)
-		r, ok := new(big.Rat).SetString(str)
-		if !ok {
-			return nil, fmt.Errorf("invalid rational string %q", str)
-		}
-		return r, nil
-	default:
-		r, ok := new(big.Rat).SetString(s)
-		if !ok {
-			return nil, fmt.Errorf("invalid rational number %q", s)
-		}
-		return r, nil
-	}
-}
-
-func parseConstraintSenseTokenStrict(s string) (gb.ConstraintSense, error) {
-	switch s {
-	case "le", "<=":
-		return gb.LessEqual, nil
-	case "ge", ">=":
-		return gb.GreaterEqual, nil
-	case "eq", "=", "==":
-		return gb.Equal, nil
-	default:
-		return 0, fmt.Errorf("invalid constraint sense %q", s)
-	}
-}
-
-func parseJSONNonNegInt(tok jsontext.Value, field string) (int, error) {
-	if isJSONNullToken(tok) {
-		return 0, fmt.Errorf("missing required field %q", field)
-	}
-	v, err := parseJSONIntField(tok)
-	if err != nil || v.Sign() < 0 || !v.IsInt64() {
-		return 0, fmt.Errorf("invalid non-negative integer field %q", field)
-	}
-	n := v.Int64()
-	if n > int64(int(^uint(0)>>1)) {
-		return 0, fmt.Errorf("integer overflow in field %q", field)
-	}
-	return int(n), nil
-}
-
-func addRatCoeff(dst map[int]*big.Rat, col, n int, r *big.Rat) error {
-	if col < 0 || col >= n {
-		return fmt.Errorf("column index %d out of range [0,%d)", col, n)
-	}
-	if r.Sign() == 0 {
-		return nil
-	}
-	if prev, exists := dst[col]; exists {
-		sum := new(big.Rat).Add(prev, r)
-		if sum.Sign() == 0 {
-			delete(dst, col)
-		} else {
-			dst[col] = sum
-		}
-		return nil
-	}
-	dst[col] = new(big.Rat).Set(r)
-	return nil
-}
-
-func parseDenseOrSparseRatVec(tok jsontext.Value, n int, allowBits, allowSparse bool, field string) ([]*big.Rat, error) {
-	if isJSONNullToken(tok) {
-		return nil, fmt.Errorf("missing required vector field %q", field)
-	}
-	s := strings.TrimSpace(string(tok))
-	if allowSparse && s[0] == '{' {
-		var obj map[string]jsontext.Value
-		if err := json.Unmarshal(tok, &obj); err != nil {
-			return nil, fmt.Errorf("%s: %w", field, err)
-		}
-		var terms []jsontext.Value
-		if err := json.Unmarshal(obj["terms"], &terms); err != nil || isJSONNullToken(obj["terms"]) {
-			return nil, fmt.Errorf("%s: invalid sparse terms", field)
-		}
-		acc := make(map[int]*big.Rat, len(terms))
-		for _, tTok := range terms {
-			var tm map[string]jsontext.Value
-			if err := json.Unmarshal(tTok, &tm); err != nil {
-				return nil, fmt.Errorf("%s term: %w", field, err)
-			}
-			col, err := parseJSONNonNegInt(tm["col"], "col")
-			if err != nil {
-				return nil, err
-			}
-			cRat, err := parseFormalJSONRat(tm["coeff"], allowBits)
-			if err != nil {
-				return nil, fmt.Errorf("%s coeff: %w", field, err)
-			}
-			if err := addRatCoeff(acc, col, n, cRat); err != nil {
-				return nil, err
-			}
-		}
-		out := make([]*big.Rat, n)
-		for j := range n {
-			if r, ok := acc[j]; ok {
-				out[j] = r
-			} else {
-				out[j] = new(big.Rat)
-			}
-		}
-		return out, nil
-	}
-	var elems []jsontext.Value
-	if err := json.Unmarshal(tok, &elems); err != nil {
-		return nil, fmt.Errorf("%s: %w", field, err)
-	}
-	if len(elems) != n {
-		return nil, fmt.Errorf("%s length %d != %d", field, len(elems), n)
-	}
-	out := make([]*big.Rat, n)
-	for j, el := range elems {
-		r, err := parseFormalJSONRat(el, allowBits)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", field, j, err)
-		}
-		out[j] = r
-	}
-	return out, nil
-}
-
-func parseOptRatSlice(tok jsontext.Value, n int, allowBits bool, field string) ([]*big.Rat, error) {
-	if isJSONNullToken(tok) {
-		return nil, fmt.Errorf("missing required bounds field %q", field)
-	}
-	var elems []jsontext.Value
-	if err := json.Unmarshal(tok, &elems); err != nil {
-		return nil, fmt.Errorf("%s: %w", field, err)
-	}
-	if len(elems) != n {
-		return nil, fmt.Errorf("%s length %d != %d", field, len(elems), n)
-	}
-	out := make([]*big.Rat, n)
-	for j, el := range elems {
-		if isJSONNullToken(el) {
-			continue
-		}
-		r, err := parseFormalJSONRat(el, allowBits)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", field, j, err)
-		}
-		out[j] = r
-	}
-	return out, nil
-}
-
-func parseBitsRatVec(tok jsontext.Value, n int, field string) ([]*big.Rat, error) {
-	var elems []jsontext.Value
-	if err := json.Unmarshal(tok, &elems); err != nil {
-		return nil, fmt.Errorf("%s: %w", field, err)
-	}
-	if len(elems) != n {
-		return nil, fmt.Errorf("%s length %d != %d", field, len(elems), n)
-	}
-	out := make([]*big.Rat, n)
-	for j, el := range elems {
-		bits, err := parseJSONUint64Field(el)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d]: %w", field, j, err)
-		}
-		f := math.Float64frombits(bits)
-		r := new(big.Rat).SetFloat64(f)
-		if r == nil {
-			return nil, fmt.Errorf("%s[%d]: non-finite bits %#x", field, j, bits)
-		}
-		out[j] = r
-	}
-	return out, nil
-}
-
-func parseSparseRowTermArray(tok jsontext.Value, n int, allowBits bool) (map[int]*big.Rat, error) {
-	var terms []jsontext.Value
-	if err := json.Unmarshal(tok, &terms); err != nil {
-		return nil, err
-	}
-	acc := make(map[int]*big.Rat, len(terms))
-	for _, tTok := range terms {
-		var tm map[string]jsontext.Value
-		if err := json.Unmarshal(tTok, &tm); err != nil {
-			return nil, err
-		}
-		col, err := parseJSONNonNegInt(tm["col"], "col")
-		if err != nil {
-			return nil, err
-		}
-		cRat, err := parseFormalJSONRat(tm["coeff"], allowBits)
-		if err != nil {
-			return nil, err
-		}
-		if err := addRatCoeff(acc, col, n, cRat); err != nil {
-			return nil, err
-		}
-	}
-	return acc, nil
-}
-
-func verifyJSONProblemMatchesCompiled(
-	p *gb.CompiledProblem,
-	gotVars, gotRows int,
-	gotObjConst *big.Rat,
-	gotObj, gotLB, gotUB []*big.Rat,
-	gotCon []parsedProblemRow,
-) error {
-	if p == nil {
-		return errors.New("nil CompiledProblem")
-	}
-	wantVars := p.NumVars()
-	wantRows := p.NumConstraints()
-	if gotVars != wantVars {
-		return fmt.Errorf("serialized numVars=%d != CompiledProblem NumVars=%d", gotVars, wantVars)
-	}
-	if gotRows != wantRows || len(gotCon) != wantRows {
-		return fmt.Errorf("serialized numRows=%d != CompiledProblem NumConstraints=%d", gotRows, wantRows)
-	}
-	constMin := p.ObjConstant()
-	if p.Sense() == gb.Maximize && constMin != 0 {
-		constMin = -constMin
-	}
-	wantObjConst := new(big.Rat).SetFloat64(constMin)
-	if wantObjConst == nil {
-		return fmt.Errorf("non-finite CompiledProblem ObjConstant %v", constMin)
-	}
-	if gotObjConst.Cmp(wantObjConst) != 0 {
-		return fmt.Errorf("serialized objConst=%s != CompiledProblem minObjConst=%s",
-			gotObjConst.RatString(), wantObjConst.RatString())
-	}
-	if len(gotObj) != wantVars || len(gotLB) != wantVars || len(gotUB) != wantVars {
-		return fmt.Errorf("serialized column vector lengths mismatch numVars=%d", wantVars)
-	}
-	for j := range wantVars {
-		wantC := new(big.Rat).SetFloat64(p.ObjMinCoeff(j))
-		if wantC == nil {
-			return fmt.Errorf("non-finite CompiledProblem ObjMinCoeff[%d]", j)
-		}
-		if gotObj[j].Cmp(wantC) != 0 {
-			return fmt.Errorf("serialized obj[%d]=%s != CompiledProblem minObj=%s",
-				j, gotObj[j].RatString(), wantC.RatString())
-		}
-		lo, hi := p.VarBounds(j)
-		if math.IsNaN(lo) || math.IsNaN(hi) || math.IsInf(lo, 1) || math.IsInf(hi, -1) {
-			return fmt.Errorf("invalid CompiledProblem bounds [%v,%v] at col %d", lo, hi, j)
-		}
-		if math.IsInf(lo, -1) {
-			if gotLB[j] != nil {
-				return fmt.Errorf("serialized lb[%d]=%s != -Inf", j, gotLB[j].RatString())
-			}
-		} else {
-			wantLB := new(big.Rat).SetFloat64(lo)
-			if wantLB == nil || gotLB[j] == nil || gotLB[j].Cmp(wantLB) != 0 {
-				return fmt.Errorf("serialized lb[%d] mismatch (want %v)", j, lo)
-			}
-		}
-		if math.IsInf(hi, 1) {
-			if gotUB[j] != nil {
-				return fmt.Errorf("serialized ub[%d]=%s != +Inf", j, gotUB[j].RatString())
-			}
-		} else {
-			wantUB := new(big.Rat).SetFloat64(hi)
-			if wantUB == nil || gotUB[j] == nil || gotUB[j].Cmp(wantUB) != 0 {
-				return fmt.Errorf("serialized ub[%d] mismatch (want %v)", j, hi)
-			}
-		}
-	}
-	for i := range wantRows {
-		if gotCon[i].sense != p.RowSense(i) {
-			return fmt.Errorf("serialized row[%d].sense=%v != %v", i, gotCon[i].sense, p.RowSense(i))
-		}
-		wantRHS := new(big.Rat).SetFloat64(p.RowRHS(i))
-		if wantRHS == nil {
-			return fmt.Errorf("non-finite CompiledProblem RowRHS[%d]", i)
-		}
-		if gotCon[i].rhs.Cmp(wantRHS) != 0 {
-			return fmt.Errorf("serialized row[%d].rhs=%s != %s",
-				i, gotCon[i].rhs.RatString(), wantRHS.RatString())
-		}
-		wantCoeffs := make(map[int]*big.Rat, p.RowLen(i))
-		var rowErr error
-		p.ForEachRowTerm(i, func(col int, val float64) {
-			if rowErr != nil {
-				return
-			}
-			vr := new(big.Rat).SetFloat64(val)
-			if vr == nil {
-				rowErr = fmt.Errorf("non-finite CompiledProblem coeff at row %d col %d", i, col)
-				return
-			}
-			rowErr = addRatCoeff(wantCoeffs, col, wantVars, vr)
-		})
-		if rowErr != nil {
-			return rowErr
-		}
-		if len(gotCon[i].coeffs) != len(wantCoeffs) {
-			return fmt.Errorf("serialized row[%d] nonzero count=%d != %d",
-				i, len(gotCon[i].coeffs), len(wantCoeffs))
-		}
-		for col, wv := range wantCoeffs {
-			gv, ok := gotCon[i].coeffs[col]
-			if !ok || gv.Cmp(wv) != 0 {
-				return fmt.Errorf("serialized row[%d] col %d coeff mismatch", i, col)
-			}
-		}
-	}
-	return nil
 }
 
 // verifySerializedVIPRMatchesProblem parses the exact VIPR problem instance inside raw
 // ("orig" when non-null, otherwise top-level instance) and checks it against p.
 func verifySerializedVIPRMatchesProblem(p *gb.CompiledProblem, raw []byte) error {
-	if p == nil {
-		return errors.New("nil CompiledProblem")
-	}
-	var top map[string]jsontext.Value
-	if err := json.Unmarshal(raw, &top); err != nil {
-		return fmt.Errorf("unmarshal VIPR JSON object: %w", err)
-	}
-	inst := top
-	if origTok, hasOrig := top["orig"]; hasOrig && !isJSONNullToken(origTok) {
-		var origMap map[string]jsontext.Value
-		if err := json.Unmarshal(origTok, &origMap); err != nil {
-			return fmt.Errorf("unmarshal VIPR orig instance: %w", err)
-		}
-		inst = origMap
-	} else if preTok, hasPre := top["presolve"]; hasPre && !isJSONNullToken(preTok) {
-		return errors.New("serialized VIPR contains non-null presolve without orig instance")
-	}
-
-	n, err := parseJSONNonNegInt(inst["n"], "n")
-	if err != nil {
-		return err
-	}
-	objConst := new(big.Rat)
-	if ocTok, hasOC := inst["objConst"]; hasOC && !isJSONNullToken(ocTok) {
-		objConst, err = parseFormalJSONRat(ocTok, false)
-		if err != nil {
-			return fmt.Errorf("VIPR objConst: %w", err)
-		}
-	}
-	obj, err := parseDenseOrSparseRatVec(inst["obj"], n, false, true, "obj")
-	if err != nil {
-		return fmt.Errorf("VIPR %w", err)
-	}
-	var isInt []bool
-	if err := json.Unmarshal(inst["isInt"], &isInt); err != nil || isJSONNullToken(inst["isInt"]) {
-		return errors.New("VIPR missing or invalid isInt")
-	}
-	if len(isInt) != n {
-		return fmt.Errorf("VIPR isInt length %d != n=%d", len(isInt), n)
-	}
-	lb, err := parseOptRatSlice(inst["lb"], n, false, "lb")
-	if err != nil {
-		return fmt.Errorf("VIPR %w", err)
-	}
-	ub, err := parseOptRatSlice(inst["ub"], n, false, "ub")
-	if err != nil {
-		return fmt.Errorf("VIPR %w", err)
-	}
-	var rowToks []jsontext.Value
-	if err := json.Unmarshal(inst["baseRows"], &rowToks); err != nil || isJSONNullToken(inst["baseRows"]) {
-		return errors.New("VIPR missing or invalid baseRows")
-	}
-	rows := make([]parsedProblemRow, len(rowToks))
-	for i, rTok := range rowToks {
-		var rm map[string]jsontext.Value
-		if err := json.Unmarshal(rTok, &rm); err != nil {
-			return fmt.Errorf("VIPR baseRows[%d]: %w", i, err)
-		}
-		var senseStr string
-		if err := json.Unmarshal(rm["sense"], &senseStr); err != nil || isJSONNullToken(rm["sense"]) {
-			return fmt.Errorf("VIPR baseRows[%d] invalid sense", i)
-		}
-		sense, err := parseConstraintSenseTokenStrict(senseStr)
-		if err != nil {
-			return fmt.Errorf("VIPR baseRows[%d]: %w", i, err)
-		}
-		rhs, err := parseFormalJSONRat(rm["rhs"], false)
-		if err != nil {
-			return fmt.Errorf("VIPR baseRows[%d].rhs: %w", i, err)
-		}
-		coeffsTok := rTok
-		if ct, hasCoeffs := rm["coeffs"]; hasCoeffs && !isJSONNullToken(ct) {
-			coeffsTok = ct
-		}
-		vec, err := parseDenseOrSparseRatVec(coeffsTok, n, false, true, "baseRows.coeffs")
-		if err != nil {
-			return fmt.Errorf("VIPR baseRows[%d]: %w", i, err)
-		}
-		cmap := make(map[int]*big.Rat, len(vec))
-		for j, v := range vec {
-			if err := addRatCoeff(cmap, j, n, v); err != nil {
-				return err
-			}
-		}
-		rows[i] = parsedProblemRow{sense: sense, rhs: rhs, coeffs: cmap}
-	}
-	if err := verifyJSONProblemMatchesCompiled(p, n, len(rows), objConst, obj, lb, ub, rows); err != nil {
-		return fmt.Errorf("VIPR problem mismatch: %w", err)
-	}
-	for j := range n {
-		wantInt := p.VarCategory(j) != gb.Continuous
-		if isInt[j] != wantInt {
-			return fmt.Errorf("VIPR problem mismatch: isInt[%d]=%v != %v", j, isInt[j], wantInt)
-		}
-	}
-	return nil
-}
-
-func resolveLPCheckMode(top map[string]jsontext.Value) (string, error) {
-	mode := ""
-	setMode := func(next string) error {
-		switch next {
-		case "safe":
-			next = "safe-bound"
-		case "boundConflict", "bound_conflict":
-			next = "bound-conflict"
-		}
-		if mode != "" && mode != next {
-			return fmt.Errorf("conflicting LP check modes %q and %q", mode, next)
-		}
-		mode = next
-		return nil
-	}
-	for _, key := range []string{"mode", "subcommand", "op"} {
-		if tok, ok := top[key]; ok && !isJSONNullToken(tok) {
-			var s string
-			if err := json.Unmarshal(tok, &s); err != nil {
-				return "", fmt.Errorf("invalid LP check %q: %w", key, err)
-			}
-			if err := setMode(s); err != nil {
-				return "", err
-			}
-		}
-	}
-	if tok, ok := top["safe"]; ok && !isJSONNullToken(tok) {
-		var b bool
-		if err := json.Unmarshal(tok, &b); err != nil {
-			return "", fmt.Errorf("invalid LP check safe flag: %w", err)
-		}
-		if b {
-			if err := setMode("safe-bound"); err != nil {
-				return "", err
-			}
-		} else if err := setMode("optimal"); err != nil {
-			return "", err
-		}
-	}
-	if mode != "" {
-		return mode, nil
-	}
-	for _, key := range []string{"reduced", "lpReduced", "presolved"} {
-		if tok, ok := top[key]; ok && !isJSONNullToken(tok) {
-			return "lp-presolve", nil
-		}
-	}
-	return "", errors.New("missing LP check mode")
-}
-
-func parseSerializedLPIntFlags(top map[string]jsontext.Value, n int) ([]bool, error) {
-	parseMask := func(tok jsontext.Value, name string) ([]bool, error) {
-		var mask []bool
-		if err := json.Unmarshal(tok, &mask); err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		if len(mask) != n {
-			return nil, fmt.Errorf("%s length %d != numVars=%d", name, len(mask), n)
-		}
-		return mask, nil
-	}
-	parseCols := func(tok jsontext.Value, name string) ([]bool, error) {
-		var cols []int
-		if err := json.Unmarshal(tok, &cols); err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		mask := make([]bool, n)
-		for _, c := range cols {
-			if c < 0 || c >= n {
-				return nil, fmt.Errorf("%s col %d out of range [0,%d)", name, c, n)
-			}
-			mask[c] = true
-		}
-		return mask, nil
-	}
-	var maskOut, colsOut []bool
-	if t, ok := top["isInt"]; ok && !isJSONNullToken(t) {
-		var err error
-		if maskOut, err = parseMask(t, "isInt"); err != nil {
-			return nil, err
-		}
-	}
-	if t, ok := top["intMask"]; ok && !isJSONNullToken(t) {
-		m2, err := parseMask(t, "intMask")
-		if err != nil {
-			return nil, err
-		}
-		if maskOut != nil {
-			for j := range n {
-				if maskOut[j] != m2[j] {
-					return nil, errors.New("conflicting isInt and intMask")
-				}
-			}
-		}
-		maskOut = m2
-	}
-	if t, ok := top["intCols"]; ok && !isJSONNullToken(t) {
-		var err error
-		if colsOut, err = parseCols(t, "intCols"); err != nil {
-			return nil, err
-		}
-	}
-	if t, ok := top["integerCols"]; ok && !isJSONNullToken(t) {
-		c2, err := parseCols(t, "integerCols")
-		if err != nil {
-			return nil, err
-		}
-		if colsOut != nil {
-			for j := range n {
-				if colsOut[j] != c2[j] {
-					return nil, errors.New("conflicting intCols and integerCols")
-				}
-			}
-		}
-		colsOut = c2
-	}
-	if maskOut != nil && colsOut != nil {
-		for j := range n {
-			if maskOut[j] != colsOut[j] {
-				return nil, errors.New("conflicting integer mask and column list")
-			}
-		}
-	}
-	final := maskOut
-	if final == nil {
-		final = colsOut
-	}
-	if final == nil {
-		return nil, errors.New("milp-unbounded payload missing integer column specification")
-	}
-	return final, nil
+	return gb.VerifySerializedVIPRMatchesProblemForTest(p, raw)
 }
 
 // verifySerializedLPPayloadMatchesProblem parses the serialized problem inside an
 // lp-check payload (resolving "orig"/"lpOrig" for lp-presolve) and checks it against p.
 func verifySerializedLPPayloadMatchesProblem(p *gb.CompiledProblem, payload []byte) error {
-	if p == nil {
-		return errors.New("nil CompiledProblem")
-	}
-	var top map[string]jsontext.Value
-	if err := json.Unmarshal(payload, &top); err != nil {
-		return fmt.Errorf("unmarshal lp-check JSON object: %w", err)
-	}
-	mode, err := resolveLPCheckMode(top)
-	if err != nil {
-		return err
-	}
-
-	inst := top
-	if mode == "lp-presolve" {
-		if ot, ok := top["orig"]; ok && !isJSONNullToken(ot) {
-			var om map[string]jsontext.Value
-			if err := json.Unmarshal(ot, &om); err != nil {
-				return fmt.Errorf("unmarshal lp-presolve orig: %w", err)
-			}
-			inst = om
-		} else if lot, ok := top["lpOrig"]; ok && !isJSONNullToken(lot) {
-			var om map[string]jsontext.Value
-			if err := json.Unmarshal(lot, &om); err != nil {
-				return fmt.Errorf("unmarshal lp-presolve lpOrig: %w", err)
-			}
-			inst = om
-		}
-	}
-
-	numVars, err := parseJSONNonNegInt(inst["numVars"], "numVars")
-	if err != nil {
-		return err
-	}
-	numRows, err := parseJSONNonNegInt(inst["numRows"], "numRows")
-	if err != nil {
-		return err
-	}
-	objConst := new(big.Rat)
-	if ocTok, hasOC := inst["objConst"]; hasOC && !isJSONNullToken(ocTok) {
-		objConst, err = parseFormalJSONRat(ocTok, true)
-		if err != nil {
-			return fmt.Errorf("lp objConst: %w", err)
-		}
-	}
-	var obj []*big.Rat
-	if objTok, hasObj := inst["obj"]; hasObj && !isJSONNullToken(objTok) {
-		obj, err = parseDenseOrSparseRatVec(objTok, numVars, true, false, "obj")
-	} else if allowBits := mode == "lp-presolve" || mode == "unbounded" || mode == "milp-unbounded"; allowBits {
-		if bitsTok, hasBits := inst["objBits"]; hasBits && !isJSONNullToken(bitsTok) {
-			obj, err = parseBitsRatVec(bitsTok, numVars, "objBits")
-		} else {
-			err = errors.New("missing obj")
-		}
-	} else {
-		err = errors.New("missing obj")
-	}
-	if err != nil {
-		return fmt.Errorf("lp %w", err)
-	}
-	lb, err := parseOptRatSlice(inst["lb"], numVars, true, "lb")
-	if err != nil {
-		return fmt.Errorf("lp %w", err)
-	}
-	ub, err := parseOptRatSlice(inst["ub"], numVars, true, "ub")
-	if err != nil {
-		return fmt.Errorf("lp %w", err)
-	}
-	var rowToks []jsontext.Value
-	if err := json.Unmarshal(inst["rows"], &rowToks); err != nil || isJSONNullToken(inst["rows"]) {
-		return errors.New("lp missing or invalid rows")
-	}
-	if len(rowToks) != numRows {
-		return fmt.Errorf("lp rows length %d != numRows=%d", len(rowToks), numRows)
-	}
-	rows := make([]parsedProblemRow, numRows)
-	for i, rTok := range rowToks {
-		var rm map[string]jsontext.Value
-		if err := json.Unmarshal(rTok, &rm); err != nil {
-			return fmt.Errorf("lp rows[%d]: %w", i, err)
-		}
-		var senseStr string
-		if err := json.Unmarshal(rm["sense"], &senseStr); err != nil || isJSONNullToken(rm["sense"]) {
-			return fmt.Errorf("lp rows[%d] invalid sense", i)
-		}
-		sense, err := parseConstraintSenseTokenStrict(senseStr)
-		if err != nil {
-			return fmt.Errorf("lp rows[%d]: %w", i, err)
-		}
-		rhs, err := parseFormalJSONRat(rm["rhs"], true)
-		if err != nil {
-			return fmt.Errorf("lp rows[%d].rhs: %w", i, err)
-		}
-		if isJSONNullToken(rm["terms"]) {
-			return fmt.Errorf("lp rows[%d] missing terms", i)
-		}
-		coeffs, err := parseSparseRowTermArray(rm["terms"], numVars, true)
-		if err != nil {
-			return fmt.Errorf("lp rows[%d].terms: %w", i, err)
-		}
-		rows[i] = parsedProblemRow{sense: sense, rhs: rhs, coeffs: coeffs}
-	}
-	if err := verifyJSONProblemMatchesCompiled(p, numVars, numRows, objConst, obj, lb, ub, rows); err != nil {
-		return fmt.Errorf("lp-check (%s) problem mismatch: %w", mode, err)
-	}
-	if mode == "milp-unbounded" {
-		intFlags, err := parseSerializedLPIntFlags(top, numVars)
-		if err != nil {
-			return fmt.Errorf("milp-unbounded: %w", err)
-		}
-		for j := range numVars {
-			wantInt := p.VarCategory(j) != gb.Continuous
-			if intFlags[j] != wantInt {
-				return fmt.Errorf("milp-unbounded int flag[%d]=%v != %v", j, intFlags[j], wantInt)
-			}
-		}
-	}
-	return nil
+	return gb.VerifySerializedLPPayloadMatchesProblemForTest(p, payload)
 }
 
 func buildPhase1FarkasJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, error) {
@@ -1132,45 +377,10 @@ func buildPhase1FarkasJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, 
 	}
 	n := p.NumVars()
 	m := p.NumConstraints()
-	mdl := gb.NewModel("phase1_farkas", gb.Minimize)
-	xs := make([]gb.Var, n)
-	for j := range n {
-		lo, hi := p.VarBounds(j)
-		xs[j] = mdl.AddContVar("x"+strconv.Itoa(j), lo, hi)
+	pFeas, okBuild := gb.BuildPhase1FarkasProblemForTest(p)
+	if !okBuild || pFeas == nil {
+		return nil, errors.New("Phase-I Farkas builder failed on CompiledProblem")
 	}
-	obj := gb.NewExpr()
-	for i := range m {
-		e := gb.NewExpr()
-		p.ForEachRowTerm(i, func(col int, coeff float64) {
-			if coeff != 0 {
-				e = e.AddTerm(xs[col], coeff)
-			}
-		})
-		rhs := p.RowRHS(i)
-		rName := "r" + strconv.Itoa(i)
-		switch p.RowSense(i) {
-		case gb.LessEqual:
-			sp := mdl.AddContVar("sp"+strconv.Itoa(i), 0, math.Inf(1))
-			e = e.AddTerm(sp, -1.0)
-			obj = obj.AddTerm(sp, 1.0)
-			mdl.AddConstraint(rName, gb.Le(e, rhs))
-		case gb.GreaterEqual:
-			sm := mdl.AddContVar("sm"+strconv.Itoa(i), 0, math.Inf(1))
-			e = e.AddTerm(sm, 1.0)
-			obj = obj.AddTerm(sm, 1.0)
-			mdl.AddConstraint(rName, gb.Ge(e, rhs))
-		case gb.Equal:
-			sp := mdl.AddContVar("sp"+strconv.Itoa(i), 0, math.Inf(1))
-			sm := mdl.AddContVar("sm"+strconv.Itoa(i), 0, math.Inf(1))
-			e = e.AddTerm(sp, -1.0).AddTerm(sm, 1.0)
-			obj = obj.AddTerm(sp, 1.0).AddTerm(sm, 1.0)
-			mdl.AddConstraint(rName, gb.Eq(e, rhs))
-		default:
-			return nil, fmt.Errorf("unsupported row sense at row %d", i)
-		}
-	}
-	mdl.SetObjective(obj)
-	pFeas := mdl.Compile()
 	ws := gb.AcquireWorkspace(pFeas.NumVars(), pFeas.NumConstraints())
 	defer gb.ReleaseWorkspace(ws)
 	lpFeas := gb.NewLPSolver(pFeas, ws)
@@ -1230,11 +440,15 @@ func buildExactFarkasCertJSON(tb testing.TB, p *gb.CompiledProblem, dualHint []f
 }
 
 func zeroVarProblemFeasibleRat(p *gb.CompiledProblem) (bool, error) {
-	rhsRat := new(big.Rat)
+	if p == nil {
+		return false, errors.New("nil CompiledProblem")
+	}
+	_, _, rowRHSRats, _, _, _, okRats := gb.ExactProblemRatsForTest(p)
+	if !okRats || len(rowRHSRats) != p.NumConstraints() {
+		return false, errors.New("failed to extract exact 0-var RHS rationals")
+	}
 	for i := range p.NumConstraints() {
-		if rhsRat.SetFloat64(p.RowRHS(i)) == nil {
-			return false, fmt.Errorf("non-finite RHS on 0-var row %d", i)
-		}
+		rhsRat := rowRHSRats[i]
 		switch p.RowSense(i) {
 		case gb.LessEqual:
 			if rhsRat.Sign() < 0 {
@@ -1961,6 +1175,11 @@ func isExactRatSliceMIPFeasible(p *gb.CompiledProblem, xRats []*big.Rat) bool {
 		return false
 	}
 	n := p.NumVars()
+	m := p.NumConstraints()
+	_, _, rowRHSRats, rowCols, rowVals, _, okRats := gb.ExactProblemRatsForTest(p)
+	if !okRats || len(rowRHSRats) != m || len(rowCols) != m || len(rowVals) != m {
+		return false
+	}
 	bndRat := new(big.Rat)
 	for j := range n {
 		xr := xRats[j]
@@ -1985,30 +1204,23 @@ func isExactRatSliceMIPFeasible(p *gb.CompiledProblem, xRats []*big.Rat) bool {
 		}
 	}
 	act := new(big.Rat)
-	aRat := new(big.Rat)
 	prod := new(big.Rat)
-	rhsRat := new(big.Rat)
-	for i := range p.NumConstraints() {
-		if rhsRat.SetFloat64(p.RowRHS(i)) == nil {
+	for i := range m {
+		if len(rowCols[i]) != len(rowVals[i]) {
 			return false
 		}
 		act.SetInt64(0)
-		rowOK := true
-		p.ForEachRowTerm(i, func(col int, coeff float64) {
-			if !rowOK || coeff == 0 || xRats[col].Sign() == 0 {
-				return
+		for k, col := range rowCols[i] {
+			if col < 0 || col >= n || rowVals[i][k] == nil {
+				return false
 			}
-			if aRat.SetFloat64(coeff) == nil {
-				rowOK = false
-				return
+			if rowVals[i][k].Sign() == 0 || xRats[col].Sign() == 0 {
+				continue
 			}
-			prod.Mul(aRat, xRats[col])
+			prod.Mul(rowVals[i][k], xRats[col])
 			act.Add(act, prod)
-		})
-		if !rowOK {
-			return false
 		}
-		cmp := act.Cmp(rhsRat)
+		cmp := act.Cmp(rowRHSRats[i])
 		switch p.RowSense(i) {
 		case gb.LessEqual:
 			if cmp > 0 {
@@ -2210,6 +1422,9 @@ func checkMILPInvariantsErr(label string, p *gb.CompiledProblem, res gb.Result) 
 }
 
 func evalSerializedVIPRIncumbentMinObj(p *gb.CompiledProblem, rawVIPR []byte) (*big.Rat, error) {
+	if p == nil {
+		return nil, errors.New("nil CompiledProblem")
+	}
 	var parsed struct {
 		Incumbent []fuzzRatJSON `json:"incumbent"`
 	}
@@ -2219,15 +1434,11 @@ func evalSerializedVIPRIncumbentMinObj(p *gb.CompiledProblem, rawVIPR []byte) (*
 	if len(parsed.Incumbent) != p.NumVars() {
 		return nil, fmt.Errorf("VIPR optimal incumbent len=%d, want %d", len(parsed.Incumbent), p.NumVars())
 	}
-	constMin := p.ObjConstant()
-	if p.Sense() == gb.Maximize && constMin != 0 {
-		constMin = -constMin
+	objConst, objMinRats, _, _, _, _, okRats := gb.ExactProblemRatsForTest(p)
+	if !okRats || len(objMinRats) != p.NumVars() {
+		return nil, errors.New("failed to extract exact objective rationals")
 	}
-	total := new(big.Rat).SetFloat64(constMin)
-	if total == nil {
-		return nil, errors.New("non-finite ObjConstant")
-	}
-	cRat := new(big.Rat)
+	total := new(big.Rat).Set(objConst)
 	xRat := new(big.Rat)
 	prod := new(big.Rat)
 	num := new(big.Int)
@@ -2240,14 +1451,11 @@ func evalSerializedVIPRIncumbentMinObj(p *gb.CompiledProblem, rawVIPR []byte) (*
 			return nil, fmt.Errorf("invalid VIPR incumbent den %q", rj.Den)
 		}
 		xRat.SetFrac(num, den)
-		cj := p.ObjMinCoeff(j)
-		if cj == 0 || xRat.Sign() == 0 {
+		cj := objMinRats[j]
+		if cj.Sign() == 0 || xRat.Sign() == 0 {
 			continue
 		}
-		if cRat.SetFloat64(cj) == nil {
-			return nil, fmt.Errorf("non-finite ObjMinCoeff at %d", j)
-		}
-		prod.Mul(cRat, xRat)
+		prod.Mul(cj, xRat)
 		total.Add(total, prod)
 	}
 	return total, nil
@@ -2454,11 +1662,16 @@ func checkFullFeatureVsVIPR(
 		return fmt.Errorf("[%s] VIPR returned StatusUnbounded while full-feature returned %v", label, resFull.Status)
 	}
 
+	_, _, _, _, _, hasInexactOrig, okRats := gb.ExactProblemRatsForTest(p)
+	if !okRats {
+		return fmt.Errorf("[%s] failed to extract exact CompiledProblem rationals", label)
+	}
+
 	var fullMinRat *big.Rat
 	okExactFull := false
 	if len(resFull.Values) == p.NumVars() {
 		fullMinRat, okExactFull = exactMIPIncumbentRat(tb.Context(), p, resFull.Values)
-		if resFull.Status == gb.StatusOptimal && isStandardScaledProblem(p) && !okExactFull {
+		if resFull.Status == gb.StatusOptimal && !hasInexactOrig && isStandardScaledProblem(p) && !okExactFull {
 			return fmt.Errorf("[%s] full-feature StatusOptimal solution is not exact-Q MIP feasible", label)
 		}
 	}

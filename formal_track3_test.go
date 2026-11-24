@@ -2,6 +2,7 @@ package goblin
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -44,81 +45,11 @@ type lpCertPayload struct {
 
 func compiledProblemToLPPayload(tb testing.TB, p *CompiledProblem, mode string) lpCertPayload {
 	tb.Helper()
-	n := p.NumVars()
-	m := p.NumConstraints()
-
-	objConstVal := p.ObjConstant()
-	if p.Sense() == Maximize && objConstVal != 0 {
-		objConstVal = -objConstVal
+	payload, ok := exportCompiledProblemToLPPayload(p, mode)
+	if !ok {
+		tb.Fatalf("exportCompiledProblemToLPPayload(%s) failed", mode)
 	}
-	objConst, err := float64ToPayload(objConstVal)
-	if err != nil {
-		tb.Fatalf("encode objConst: %v", err)
-	}
-
-	obj := make([]ratPayload, n)
-	lb := make([]*ratPayload, n)
-	ub := make([]*ratPayload, n)
-	for j := range n {
-		cRat, cErr := float64ToPayload(p.ObjMinCoeff(j))
-		if cErr != nil {
-			tb.Fatalf("encode obj[%d]: %v", j, cErr)
-		}
-		obj[j] = cRat
-
-		lo, hi := p.VarBounds(j)
-		if !math.IsInf(lo, -1) {
-			loRat, lErr := float64ToPayload(lo)
-			if lErr != nil {
-				tb.Fatalf("encode lb[%d]: %v", j, lErr)
-			}
-			lb[j] = &loRat
-		}
-		if !math.IsInf(hi, 1) {
-			hiRat, uErr := float64ToPayload(hi)
-			if uErr != nil {
-				tb.Fatalf("encode ub[%d]: %v", j, uErr)
-			}
-			ub[j] = &hiRat
-		}
-	}
-
-	rows := make([]lpRowPayload, m)
-	for i := range m {
-		var sense string
-		switch p.RowSense(i) {
-		case LessEqual:
-			sense = "le"
-		case GreaterEqual:
-			sense = "ge"
-		case Equal:
-			sense = "eq"
-		}
-		rhs, rErr := float64ToPayload(p.RowRHS(i))
-		if rErr != nil {
-			tb.Fatalf("encode rhs[%d]: %v", i, rErr)
-		}
-		terms := make([]lpTermPayload, 0, p.RowLen(i))
-		p.ForEachRowTerm(i, func(col int, val float64) {
-			coeff, tErr := float64ToPayload(val)
-			if tErr != nil {
-				tb.Fatalf("encode row %d col %d: %v", i, col, tErr)
-			}
-			terms = append(terms, lpTermPayload{Col: col, Coeff: coeff})
-		})
-		rows[i] = lpRowPayload{Sense: sense, RHS: rhs, Terms: terms}
-	}
-
-	return lpCertPayload{
-		Mode:     mode,
-		NumVars:  n,
-		NumRows:  m,
-		ObjConst: objConst,
-		Obj:      obj,
-		LB:       lb,
-		UB:       ub,
-		Rows:     rows,
-	}
+	return payload
 }
 
 func runLPCheck(tb testing.TB, exe, name string, payload lpCertPayload, printBound bool) (string, error) {
@@ -142,23 +73,21 @@ func runLPCheck(tb testing.TB, exe, name string, payload lpCertPayload, printBou
 }
 
 func evalMinObjRat(p *CompiledProblem, x []float64) (*big.Rat, error) {
-	sum := new(big.Rat)
-	if p.objConstMinVal != 0 {
-		if sum.SetFloat64(p.objConstMinVal) == nil {
-			return nil, fmt.Errorf("non-finite objConstMinVal %v", p.objConstMinVal)
-		}
+	objConst, objMinVec, _, _, _, _, ok := ExactProblemRatsForTest(p)
+	if !ok || len(objMinVec) != p.NumVars() {
+		return nil, errors.New("extract exact objective rationals failed")
 	}
+	sum := new(big.Rat).Set(objConst)
 	term := new(big.Rat)
 	xj := new(big.Rat)
 	for j := range p.NumVars() {
-		c := p.ObjMinCoeff(j)
-		if c == 0 || x[j] == 0 {
+		if objMinVec[j].Sign() == 0 || x[j] == 0 {
 			continue
 		}
-		if term.SetFloat64(c) == nil || xj.SetFloat64(x[j]) == nil {
-			return nil, fmt.Errorf("non-finite objective term at col %d", j)
+		if xj.SetFloat64(x[j]) == nil {
+			return nil, fmt.Errorf("non-finite objective variable at col %d", j)
 		}
-		term.Mul(term, xj)
+		term.Mul(objMinVec[j], xj)
 		sum.Add(sum, term)
 	}
 	return sum, nil
@@ -316,22 +245,29 @@ func isExactRatFarkasValid(p *CompiledProblem, w []*big.Rat) bool {
 			}
 		}
 		projW[i] = wi
-		if wi.Sign() != 0 && p.rowRHS[i] != 0 {
-			tmp.SetFloat64(p.rowRHS[i])
-			tmp.Mul(tmp, wi)
-			wDotB.Add(wDotB, tmp)
+		if wi.Sign() != 0 {
+			rhs, okR := exactRowRHSRat(p, i)
+			if !okR {
+				return false
+			}
+			if rhs.Sign() != 0 {
+				tmp.Mul(rhs, wi)
+				wDotB.Add(wDotB, tmp)
+			}
 		}
 	}
 
+	colRows, colVals, okMat := exactColMatrixRat(p)
+	if !okMat {
+		return false
+	}
 	maxLHS := new(big.Rat)
 	wa := new(big.Rat)
 	for j := range n {
 		wa.SetInt64(0)
-		for idx := p.colPtr[j]; idx < p.colPtr[j+1]; idx++ {
-			r := p.rowIdx[idx]
-			if uint(r) < uint(m) && projW[r].Sign() != 0 && p.colVal[idx] != 0 {
-				tmp.SetFloat64(p.colVal[idx])
-				tmp.Mul(tmp, projW[r])
+		for idx, r := range colRows[j] {
+			if uint(r) < uint(m) && projW[r].Sign() != 0 && colVals[j][idx].Sign() != 0 {
+				tmp.Mul(colVals[j][idx], projW[r])
 				wa.Add(wa, tmp)
 			}
 		}
@@ -383,16 +319,19 @@ func solveExactBasisTranspose(p *CompiledProblem, basis []int, eqRHS []*big.Rat)
 	if len(basis) < m || len(eqRHS) < m {
 		return nil, false
 	}
+	colRows, colVals, okMat := exactColMatrixRat(p)
+	if !okMat {
+		return nil, false
+	}
 
 	eqEntries := make([][]ratEqEntry, m)
 	for q := range m {
 		bVar := basis[q]
 		if bVar < n {
 			var ents []ratEqEntry
-			for idx := p.colPtr[bVar]; idx < p.colPtr[bVar+1]; idx++ {
-				ri := p.rowIdx[idx]
-				if uint(ri) < uint(m) && p.colVal[idx] != 0 {
-					ents = append(ents, ratEqEntry{col: ri, val: new(big.Rat).SetFloat64(p.colVal[idx])})
+			for idx, ri := range colRows[bVar] {
+				if uint(ri) < uint(m) && colVals[bVar][idx].Sign() != 0 {
+					ents = append(ents, ratEqEntry{col: ri, val: new(big.Rat).Set(colVals[bVar][idx])})
 				}
 			}
 			eqEntries[q] = ents
@@ -452,12 +391,16 @@ func extractExactBasisDualsRat(tb testing.TB, s *LPSolver) []*big.Rat {
 	if s.TotalRows() != m {
 		tb.Fatalf("unexpected extra rows %d != %d", s.TotalRows(), m)
 	}
+	objMinVec, okObj := exactMinObjVecRat(p)
+	if !okObj {
+		tb.Fatalf("exact objective vector extraction failed on %s", p.Name())
+	}
 	eqRHS := make([]*big.Rat, m)
 	for q := range m {
 		bVar := s.ws.basis[q]
 		r := new(big.Rat)
-		if bVar < n && p.objMin[bVar] != 0 {
-			r.SetFloat64(p.objMin[bVar])
+		if bVar < n {
+			r.Set(objMinVec[bVar])
 		}
 		eqRHS[q] = r
 	}
@@ -826,6 +769,222 @@ func TestFormalTrack3(t *testing.T) {
 		badGapFarkas.W = []ratPayload{int64ToPayload(-1), int64ToPayload(1)}
 		if out, runErr := runLPCheck(t, exe, "neg_gap_farkas", badGapFarkas, false); runErr == nil {
 			t.Fatalf("expected rejection for non-positive Farkas gap, got: %q", out)
+		}
+	})
+
+	t.Run("LossyExactOrig", func(t *testing.T) {
+		t.Parallel()
+
+		verifyPayload := func(t *testing.T, name string, p *CompiledProblem, payload []byte, wantMode string) {
+			t.Helper()
+			if err := verifySerializedLPPayloadMatchesProblem(p, payload); err != nil {
+				t.Fatalf("%s verifySerializedLPPayloadMatchesProblem failed: %v", name, err)
+			}
+			resp, err := FormalCheckLPJSONL(t, payload)
+			if err != nil {
+				t.Fatalf("%s FormalCheckLPJSONL transport error: %v", name, err)
+			}
+			if !resp.OK {
+				t.Fatalf("%s lp-check rejected payload: %s", name, resp.Error)
+			}
+			if wantMode != "" && resp.Mode != wantMode {
+				t.Fatalf("%s lp-check mode=%q, want %q", name, resp.Mode, wantMode)
+			}
+		}
+
+		// Optimal lossy LP: combine non-zero Expr.Constant (4.3 - 0.1) with duplicate 0.1*x + 0.2*x terms in row and objective.
+		mOpt := NewModel("lossy_exact_orig_opt", Minimize)
+		x := mOpt.AddContVar("x", 0, 10)
+		y := mOpt.AddContVar("y", 0, 10)
+		z := mOpt.AddContVar("z", 0, 10)
+		mOpt.SetObjective(NewExpr(x.T(0.1), x.T(0.2), y.T(1), z.T(1)).AddConstant(1))
+		mOpt.AddConstraint("ge_43", Ge(NewExpr(x.T(1), y.T(1), z.T(0.5)).AddConstant(0.1), 4.3))
+		mOpt.AddConstraint("le_03", Le(NewExpr(x.T(0.1), x.T(0.2)), 0.3))
+		pOpt := mOpt.Compile()
+		if _, _, _, _, _, hasInexact, okR := ExactProblemRatsForTest(pOpt); !okR || !hasInexact {
+			t.Fatalf("expected hasInexactOrig=true on lossy_exact_orig_opt, got ok=%v inexact=%v", okR, hasInexact)
+		}
+
+		wsOpt := AcquireWorkspace(pOpt.NumVars(), pOpt.NumConstraints())
+		defer ReleaseWorkspace(wsOpt)
+		lpOpt := NewLPSolver(pOpt, wsOpt)
+		resOpt := lpOpt.Solve()
+		if resOpt.Status != StatusOptimal {
+			t.Fatalf("lossy_exact_orig_opt status=%v, want Optimal", resOpt.Status)
+		}
+		modeOpt, payOpt, okOpt := ExportLPCheckPayload(pOpt, lpOpt, resOpt)
+		if !okOpt || modeOpt != "optimal" {
+			t.Fatalf("ExportLPCheckPayload(lossy_exact_orig_opt) ok=%v mode=%q, want optimal", okOpt, modeOpt)
+		}
+		verifyPayload(t, "lossy_exact_orig_opt", pOpt, payOpt, "optimal")
+
+		// Sticky ULP case.
+		mULP := NewModel("lossy_exact_orig_ulp", Minimize)
+		xu := mULP.AddContVar("x", 0, 10)
+		yu := mULP.AddContVar("y", 0, 10)
+		mULP.SetObjective(NewExpr(xu.T(1), xu.T(0x1p-53), xu.T(0x1p-53), yu.T(2)).AddConstant(1))
+		mULP.AddConstraint("ge_21", Ge(NewExpr(xu.T(1), yu.T(1)).AddConstant(0.1), 2.1))
+		mULP.AddConstraint("le_ulp", Le(NewExpr(xu.T(1), xu.T(0x1p-53), xu.T(0x1p-53)), 1+0x1p-52))
+		pULP := mULP.Compile()
+
+		wsULP := AcquireWorkspace(pULP.NumVars(), pULP.NumConstraints())
+		defer ReleaseWorkspace(wsULP)
+		lpULP := NewLPSolver(pULP, wsULP)
+		resULP := lpULP.Solve()
+		if resULP.Status != StatusOptimal {
+			t.Fatalf("lossy_exact_orig_ulp status=%v, want Optimal", resULP.Status)
+		}
+		modeULP, payULP, okULP := ExportLPCheckPayload(pULP, lpULP, resULP)
+		if !okULP || modeULP != "optimal" {
+			t.Fatalf("ExportLPCheckPayload(lossy_exact_orig_ulp) ok=%v mode=%q, want optimal", okULP, modeULP)
+		}
+		verifyPayload(t, "lossy_exact_orig_ulp", pULP, payULP, "optimal")
+
+		// Infeasible lossy LPs with non-zero Expr.Constant and duplicate terms.
+		mInf := NewModel("lossy_exact_orig_inf", Minimize)
+		xi := mInf.AddContVar("x", 0, 10)
+		yi := mInf.AddContVar("y", 0, 10)
+		mInf.SetObjective(NewExpr(xi.T(0.1), xi.T(0.2), yi.T(1)).AddConstant(1))
+		mInf.AddConstraint("ge_43", Ge(NewExpr(xi.T(1), yi.T(1)).AddConstant(0.1), 4.3))
+		mInf.AddConstraint("le_03", Le(NewExpr(xi.T(0.1), xi.T(0.2)), 0.3))
+		mInf.AddConstraint("le_cap", Le(NewExpr(xi.T(1), yi.T(1)).AddConstant(0.1), 4.0))
+		pInf := mInf.Compile()
+
+		wsInf := AcquireWorkspace(pInf.NumVars(), pInf.NumConstraints())
+		defer ReleaseWorkspace(wsInf)
+		lpInf := NewLPSolver(pInf, wsInf)
+		resInf := lpInf.Solve()
+		if resInf.Status != StatusInfeasible {
+			t.Fatalf("lossy_exact_orig_inf status=%v, want Infeasible", resInf.Status)
+		}
+		modeInf, payInf, okInf := ExportLPCheckPayload(pInf, lpInf, resInf)
+		if !okInf || modeInf != "farkas" {
+			t.Fatalf("ExportLPCheckPayload(lossy_exact_orig_inf) ok=%v mode=%q, want farkas", okInf, modeInf)
+		}
+		verifyPayload(t, "lossy_exact_orig_inf", pInf, payInf, "farkas")
+
+		mDupDirectInf := NewModel("lossy_exact_dup_direct_inf", Minimize)
+		xdi := mDupDirectInf.AddContVar("x", 0, 10)
+		mDupDirectInf.SetObjective(NewExpr(xdi.T(1)))
+		mDupDirectInf.AddConstraint("le_03", Le(NewExpr(xdi.T(0.1), xdi.T(0.2)), 0.3))
+		mDupDirectInf.AddConstraint("ge_20", Ge(NewExpr(xdi.T(1)), 2.0))
+		pDupDirectInf := mDupDirectInf.Compile()
+		wsDI := AcquireWorkspace(pDupDirectInf.NumVars(), pDupDirectInf.NumConstraints())
+		defer ReleaseWorkspace(wsDI)
+		lpDI := NewLPSolver(pDupDirectInf, wsDI)
+		resDI := lpDI.Solve()
+		if resDI.Status != StatusInfeasible {
+			t.Fatalf("lossy_exact_dup_direct_inf status=%v, want Infeasible", resDI.Status)
+		}
+		modeDI, payDI, okDI := ExportLPCheckPayload(pDupDirectInf, lpDI, resDI)
+		if !okDI || modeDI != "farkas" {
+			t.Fatalf("ExportLPCheckPayload(lossy_exact_dup_direct_inf) ok=%v mode=%q, want farkas", okDI, modeDI)
+		}
+		verifyPayload(t, "lossy_exact_dup_direct_inf", pDupDirectInf, payDI, "farkas")
+
+		// Verify BuildPhase1FarkasProblemForTest preserves exactOrig on an infeasible lossy LP.
+		pFeas, okFeas := BuildPhase1FarkasProblemForTest(pDupDirectInf)
+		if !okFeas || pFeas == nil {
+			t.Fatal("BuildPhase1FarkasProblemForTest failed on lossy_exact_dup_direct_inf")
+		}
+		lpFeas := NewLPSolver(pFeas, nil)
+		defer lpFeas.Close()
+		resFeas := lpFeas.Solve()
+		if resFeas.Status != StatusOptimal {
+			t.Fatalf("Phase-I Farkas LP status=%v, want Optimal", resFeas.Status)
+		}
+		solFeas, okSolFeas := ExactBasisSolution(t.Context(), lpFeas)
+		if !okSolFeas || solFeas.ObjectiveMin == nil || solFeas.ObjectiveMin.Sign() <= 0 || len(solFeas.DualMin) != pDupDirectInf.NumConstraints() {
+			t.Fatalf("Phase-I Farkas ExactBasisSolution failed: ok=%v obj=%v", okSolFeas, solFeas.ObjectiveMin)
+		}
+		dualF := make([]float64, len(solFeas.DualMin))
+		for i, d := range solFeas.DualMin {
+			dualF[i], _ = d.Float64()
+		}
+		modeF, payF, okF := ExportLPCheckPayload(pDupDirectInf, nil, LPResult{Status: StatusInfeasible, Dual: dualF})
+		if !okF || modeF != "farkas" {
+			t.Fatalf("Phase-I Farkas ExportLPCheckPayload ok=%v mode=%q", okF, modeF)
+		}
+		verifyPayload(t, "lossy_exact_dup_phase1", pDupDirectInf, payF, "farkas")
+
+		// Exact-Q infeasible LPs where float64 rounding agrees within 1 ULP, while exact rationals reject every point.
+		checkExactQInfeasibleLP := func(name string, p *CompiledProblem, dualHint []float64) {
+			t.Helper()
+			certRes, errCert := SolveCompiled(t.Context(), p, WithPureGo(), WithCertified(true))
+			if certRes.Status == StatusOptimal && errCert == nil {
+				t.Fatalf("%s unexpectedly certified StatusOptimal on exact-Q infeasible LP", name)
+			}
+			modeF, payF, okF := ExportLPCheckPayload(p, nil, LPResult{Status: StatusInfeasible, Dual: dualHint})
+			if !okF || modeF != "farkas" {
+				t.Fatalf("%s ExportLPCheckPayload(farkas) ok=%v mode=%q", name, okF, modeF)
+			}
+			verifyPayload(t, name, p, payF, "farkas")
+		}
+
+		mExactRHSInf := NewModel("lossy_exact_rhs_inf", Minimize)
+		xr := mExactRHSInf.AddContVar("x", 0, 5)
+		mExactRHSInf.SetObjective(NewExpr(xr.T(1)))
+		mExactRHSInf.AddConstraint("ge_21", Ge(NewExpr(xr.T(1)).AddConstant(0.1), 2.1))
+		mExactRHSInf.AddConstraint("le_20", Le(NewExpr(xr.T(1)), 2.0))
+		checkExactQInfeasibleLP("lossy_exact_rhs_inf", mExactRHSInf.Compile(), []float64{1, -1})
+
+		mExactDupInf := NewModel("lossy_exact_dup_inf", Minimize)
+		xd := mExactDupInf.AddContVar("x", 0, 5)
+		mExactDupInf.SetObjective(NewExpr(xd.T(1)))
+		mExactDupInf.AddConstraint("le_03", Le(NewExpr(xd.T(0.1), xd.T(0.2)), 0.3))
+		mExactDupInf.AddConstraint("ge_10", Ge(NewExpr(xd.T(1)), 1.0))
+		checkExactQInfeasibleLP("lossy_exact_dup_inf", mExactDupInf.Compile(), []float64{-3, 0.9})
+
+		// Negative controls.
+		var decoded lpCertPayload
+		if err := json.Unmarshal(payOpt, &decoded); err != nil {
+			t.Fatalf("unmarshal payOpt: %v", err)
+		}
+
+		badRHS := decoded
+		badRHS.Rows = slices.Clone(decoded.Rows)
+		compRHS0, errCR := float64ToPayload(pOpt.rowRHS[0])
+		if errCR != nil {
+			t.Fatalf("encode compiled rowRHS[0]: %v", errCR)
+		}
+		badRHS.Rows[0].RHS = compRHS0
+		rawBadRHS, err := json.Marshal(badRHS)
+		if err != nil {
+			t.Fatalf("marshal badRHS: %v", err)
+		}
+		if err := verifySerializedLPPayloadMatchesProblem(pOpt, rawBadRHS); err == nil {
+			t.Fatal("verifySerializedLPPayloadMatchesProblem accepted compiled float64 rowRHS substitution")
+		}
+
+		badRowCoeff := decoded
+		badRowCoeff.Rows = slices.Clone(decoded.Rows)
+		badRowCoeff.Rows[1].Terms = slices.Clone(decoded.Rows[1].Terms)
+		compCoeff, errCC := float64ToPayload(pOpt.rowVal[pOpt.rowPtr[1]])
+		if errCC != nil {
+			t.Fatalf("encode compiled rowVal: %v", errCC)
+		}
+		badRowCoeff.Rows[1].Terms[0].Coeff = compCoeff
+		rawBadRowCoeff, err := json.Marshal(badRowCoeff)
+		if err != nil {
+			t.Fatalf("marshal badRowCoeff: %v", err)
+		}
+		if err := verifySerializedLPPayloadMatchesProblem(pOpt, rawBadRowCoeff); err == nil {
+			t.Fatal("verifySerializedLPPayloadMatchesProblem accepted compiled float64 duplicate-term row substitution")
+		}
+
+		badObj := decoded
+		badObj.Obj = slices.Clone(decoded.Obj)
+		compObj0, errCO := float64ToPayload(pOpt.objMin[0])
+		if errCO != nil {
+			t.Fatalf("encode compiled objMin[0]: %v", errCO)
+		}
+		badObj.Obj[0] = compObj0
+		rawBadObj, err := json.Marshal(badObj)
+		if err != nil {
+			t.Fatalf("marshal badObj: %v", err)
+		}
+		if err := verifySerializedLPPayloadMatchesProblem(pOpt, rawBadObj); err == nil {
+			t.Fatal("verifySerializedLPPayloadMatchesProblem accepted compiled float64 duplicate-term objective substitution")
 		}
 	})
 }

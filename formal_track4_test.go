@@ -1,6 +1,7 @@
 package goblin
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"math"
 	"math/big"
@@ -210,25 +211,24 @@ func buildRatCompiledData(tb testing.TB, p *CompiledProblem) *ratCompiledData {
 	tb.Helper()
 	n := p.NumVars()
 	m := p.NumConstraints()
-	constMin := p.ObjConstant()
-	if p.Sense() == Maximize && constMin != 0 {
-		constMin = -constMin
+	objConst, objMinVec, rowRHSVec, rowCols, rowVals, _, okRats := ExactProblemRatsForTest(p)
+	if !okRats || len(objMinVec) != n || len(rowRHSVec) != m || len(rowCols) != m || len(rowVals) != m {
+		tb.Fatalf("ExactProblemRatsForTest failed on %s", p.Name())
 	}
 	d := &ratCompiledData{
 		n:        n,
 		m:        m,
-		objConst: mustRatFromFloat(tb, constMin),
-		objMin:   make([]*big.Rat, n),
+		objConst: objConst,
+		objMin:   objMinVec,
 		isInt:    make([]bool, n),
 		lb:       make([]*big.Rat, n),
 		ub:       make([]*big.Rat, n),
 		rowSense: make([]ConstraintSense, m),
-		rowRHS:   make([]*big.Rat, m),
-		rowCols:  make([][]int, m),
-		rowVals:  make([][]*big.Rat, m),
+		rowRHS:   rowRHSVec,
+		rowCols:  rowCols,
+		rowVals:  rowVals,
 	}
 	for j := range n {
-		d.objMin[j] = mustRatFromFloat(tb, p.ObjMinCoeff(j))
 		d.isInt[j] = p.varCat[j] != Continuous
 		lo, hi := p.VarBounds(j)
 		if !math.IsInf(lo, -1) {
@@ -240,19 +240,6 @@ func buildRatCompiledData(tb testing.TB, p *CompiledProblem) *ratCompiledData {
 	}
 	for i := range m {
 		d.rowSense[i] = p.RowSense(i)
-		d.rowRHS[i] = mustRatFromFloat(tb, p.RowRHS(i))
-		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		cols := make([]int, 0, en-st)
-		vals := make([]*big.Rat, 0, en-st)
-		for k := st; k < en; k++ {
-			if p.rowVal[k] == 0 {
-				continue
-			}
-			cols = append(cols, p.colIdx[k])
-			vals = append(vals, mustRatFromFloat(tb, p.rowVal[k]))
-		}
-		d.rowCols[i] = cols
-		d.rowVals[i] = vals
 	}
 	return d
 }
@@ -1236,6 +1223,198 @@ func TestFormalTrack4(t *testing.T) {
 			RootStep:  0,
 		}
 		requireVIPRRejected(t, exe, "neg_weak_dual_bound", weakBoundCert)
+	})
+
+	t.Run("LossyExactOrig", func(t *testing.T) {
+		t.Parallel()
+
+		solveAndVerifyVIPR := func(t *testing.T, name string, p *CompiledProblem, presolve bool, wantStatus Status) []byte {
+			t.Helper()
+			tr := NewVIPRTrace()
+			opts := []Option{
+				WithPureGo(),
+				WithPresolve(presolve),
+				WithVIPRTrace(tr),
+				WithCertified(true),
+			}
+			res, err := SolveCompiled(t.Context(), p, opts...)
+			if err != nil {
+				t.Fatalf("%s SolveCompiled failed: %v", name, err)
+			}
+			if res.Status != wantStatus {
+				t.Fatalf("%s status=%v, want %v", name, res.Status, wantStatus)
+			}
+			if err := VerifyVIPRTrace(p, tr, res, ApplyOptions(opts...)); err != nil {
+				t.Fatalf("%s VerifyVIPRTrace failed: %v", name, err)
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("%s MarshalVIPRJSON failed: %v", name, err)
+			}
+			if err := verifySerializedVIPRMatchesProblem(p, raw); err != nil {
+				t.Fatalf("%s verifySerializedVIPRMatchesProblem failed: %v", name, err)
+			}
+			resp, err := FormalCheckVIPRJSONL(t, raw)
+			if err != nil {
+				t.Fatalf("%s FormalCheckVIPRJSONL transport error: %v", name, err)
+			}
+			if !resp.OK {
+				t.Fatalf("%s vipr-check rejected certificate: %s", name, resp.Error)
+			}
+			return raw
+		}
+
+		// 1. Mixed-integer and pure-integer MILP with 4.3/0.1 Expr.Constant and 0.1*x + 0.2*x duplicate terms.
+		mMix := NewModel("lossy_mip_mix_43", Minimize)
+		xm := mMix.AddContVar("x", 0, 10)
+		ym := mMix.AddIntVar("y", 0, 10)
+		zm := mMix.AddIntVar("z", 0, 10)
+		mMix.SetObjective(NewExpr(xm.T(0.1), xm.T(0.2), ym.T(1), zm.T(1)).AddConstant(1))
+		mMix.AddConstraint("ge_43", Ge(NewExpr(xm.T(1), ym.T(1), zm.T(0.5)).AddConstant(0.1), 4.3))
+		mMix.AddConstraint("le_03", Le(NewExpr(xm.T(0.1), xm.T(0.2)), 0.3))
+		pMix := mMix.Compile()
+		rawMixNoPre := solveAndVerifyVIPR(t, "lossy_mip_mix_43/nopre", pMix, false, StatusOptimal)
+		_ = solveAndVerifyVIPR(t, "lossy_mip_mix_43/pre", pMix, true, StatusOptimal)
+
+		mPure := NewModel("lossy_mip_pure_43", Minimize)
+		xp := mPure.AddIntVar("x", 0, 10)
+		yp := mPure.AddIntVar("y", 0, 10)
+		zp := mPure.AddIntVar("z", 0, 10)
+		mPure.SetObjective(NewExpr(xp.T(0.1), xp.T(0.2), yp.T(1), zp.T(1)).AddConstant(1))
+		mPure.AddConstraint("ge_43", Ge(NewExpr(xp.T(1), yp.T(1), zp.T(0.5)).AddConstant(0.1), 4.3))
+		mPure.AddConstraint("le_04", Le(NewExpr(xp.T(0.1), xp.T(0.2)), 0.4))
+		pPure := mPure.Compile()
+		_ = solveAndVerifyVIPR(t, "lossy_mip_pure_43/nopre", pPure, false, StatusOptimal)
+		_ = solveAndVerifyVIPR(t, "lossy_mip_pure_43/pre", pPure, true, StatusOptimal)
+
+		// 2. Pure-integer tightening (x + y + 0.1 >= 2.1 -> x + y >= 3) under WithVIPRTrace + WithCertified(true).
+		mTight := NewModel("lossy_mip_tight_21", Minimize)
+		xt := mTight.AddIntVar("x", 0, 5)
+		yt := mTight.AddIntVar("y", 0, 5)
+		mTight.SetObjective(NewExpr(xt.T(1), yt.T(1)))
+		mTight.AddConstraint("ge_21", Ge(NewExpr(xt.T(1), yt.T(1)).AddConstant(0.1), 2.1))
+		pTight := mTight.Compile()
+		for _, pre := range []bool{false, true} {
+			tr := NewVIPRTrace()
+			opts := []Option{WithPureGo(), WithPresolve(pre), WithVIPRTrace(tr), WithCertified(true)}
+			res, err := SolveCompiled(t.Context(), pTight, opts...)
+			if err != nil || res.Status != StatusOptimal || res.Objective != 3.0 || res.BestBound != 3.0 {
+				t.Fatalf("lossy_mip_tight_21(pre=%v) got status=%v obj=%g bnd=%g err=%v, want Optimal 3",
+					pre, res.Status, res.Objective, res.BestBound, err)
+			}
+			if err := VerifyVIPRTrace(pTight, tr, res, ApplyOptions(opts...)); err != nil {
+				t.Fatalf("lossy_mip_tight_21(pre=%v) VerifyVIPRTrace: %v", pre, err)
+			}
+			rawT, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("lossy_mip_tight_21(pre=%v) MarshalVIPRJSON: %v", pre, err)
+			}
+			if err := verifySerializedVIPRMatchesProblem(pTight, rawT); err != nil {
+				t.Fatalf("lossy_mip_tight_21(pre=%v) verifySerializedVIPRMatchesProblem: %v", pre, err)
+			}
+			resp, err := FormalCheckVIPRJSONL(t, rawT)
+			if err != nil || !resp.OK {
+				t.Fatalf("lossy_mip_tight_21(pre=%v) vipr-check failed: ok=%v err=%v respErr=%s", pre, resp.OK, err, resp.Error)
+			}
+			if !pre {
+				// Negative control: rounded compiled float RHS (2/1) must be rejected against 72057594037927939/2^55.
+				var cert21 viprCert
+				if err := json.Unmarshal(rawT, &cert21); err != nil {
+					t.Fatalf("unmarshal cert21: %v", err)
+				}
+				cert21.BaseRows[0].RHS = int64ToPayload(2)
+				badRaw21, err := json.Marshal(cert21)
+				if err != nil {
+					t.Fatalf("marshal badRaw21: %v", err)
+				}
+				if err := verifySerializedVIPRMatchesProblem(pTight, badRaw21); err == nil {
+					t.Fatal("verifySerializedVIPRMatchesProblem accepted compiled float64 RHS 2/1 on x+y+0.1>=2.1")
+				}
+			}
+		}
+
+		// 3. Infeasible integer equality with tiny constant offset (x + 1e-17 == 3).
+		mIntEq := NewModel("lossy_mip_int_eq_1e17", Minimize)
+		xe := mIntEq.AddIntVar("x", 0, 5)
+		mIntEq.SetObjective(NewExpr(xe.T(1)))
+		mIntEq.AddConstraint("eq_1e17", Eq(NewExpr(xe.T(1)).AddConstant(1e-17), 3))
+		pIntEq := mIntEq.Compile()
+		_ = solveAndVerifyVIPR(t, "lossy_mip_int_eq_1e17/nopre", pIntEq, false, StatusInfeasible)
+		_ = solveAndVerifyVIPR(t, "lossy_mip_int_eq_1e17/pre", pIntEq, true, StatusInfeasible)
+
+		// 4. Sticky ULP duplicate-term MILP (x.T(1), x.T(0x1p-53), x.T(0x1p-53), and x.T(0x1p-110)).
+		mULP := NewModel("lossy_mip_ulp_dup", Minimize)
+		xu := mULP.AddIntVar("x", 0, 5)
+		yu := mULP.AddContVar("y", 0, 5)
+		mULP.SetObjective(NewExpr(xu.T(1), xu.T(0x1p-53), xu.T(0x1p-53), yu.T(2)))
+		mULP.AddConstraint("ge_43", Ge(NewExpr(xu.T(1), yu.T(1)).AddConstant(0.1), 4.3))
+		mULP.AddConstraint("le_ulp", Le(NewExpr(xu.T(1), xu.T(0x1p-53), xu.T(0x1p-53), xu.T(0x1p-110)), 2.5))
+		pULP := mULP.Compile()
+		_ = solveAndVerifyVIPR(t, "lossy_mip_ulp_dup/nopre", pULP, false, StatusOptimal)
+		_ = solveAndVerifyVIPR(t, "lossy_mip_ulp_dup/pre", pULP, true, StatusOptimal)
+
+		// 5. Negative controls: rounded compiled RHS 4728779608739021/2^50 (instead of 151320947479648659/2^55)
+		// and merged compiled duplicate coefficients must be rejected by verifySerializedVIPRMatchesProblem.
+		var certMix viprCert
+		if err := json.Unmarshal(rawMixNoPre, &certMix); err != nil {
+			t.Fatalf("unmarshal rawMixNoPre: %v", err)
+		}
+		if certMix.BaseRows[0].RHS.Num != "151320947479648659" || certMix.BaseRows[0].RHS.Den != "36028797018963968" {
+			t.Fatalf("unexpected exact baseRows[0].rhs=%+v, want 151320947479648659/36028797018963968", certMix.BaseRows[0].RHS)
+		}
+
+		badRHS := certMix
+		badRHS.BaseRows = slices.Clone(certMix.BaseRows)
+		// 4728779608739021 / 2^50 is float64(4.3 - 0.1).
+		badRHS.BaseRows[0].RHS = ratPayload{Num: "4728779608739021", Den: "1125899906842624"}
+		rawBadRHS, err := json.Marshal(badRHS)
+		if err != nil {
+			t.Fatalf("marshal badRHS: %v", err)
+		}
+		if err := verifySerializedVIPRMatchesProblem(pMix, rawBadRHS); err == nil {
+			t.Fatal("verifySerializedVIPRMatchesProblem accepted rounded compiled RHS 4728779608739021/2^50")
+		}
+
+		badCoeff := certMix
+		badCoeff.BaseRows = slices.Clone(certMix.BaseRows)
+		badCoeff.BaseRows[1].Coeffs = slices.Clone(certMix.BaseRows[1].Coeffs)
+		compCoeff, errCC := float64ToPayload(pMix.rowVal[pMix.rowPtr[1]])
+		if errCC != nil {
+			t.Fatalf("encode compiled rowVal: %v", errCC)
+		}
+		badCoeff.BaseRows[1].Coeffs[0] = compCoeff
+		rawBadCoeff, err := json.Marshal(badCoeff)
+		if err != nil {
+			t.Fatalf("marshal badCoeff: %v", err)
+		}
+		if err := verifySerializedVIPRMatchesProblem(pMix, rawBadCoeff); err == nil {
+			t.Fatal("verifySerializedVIPRMatchesProblem accepted merged float64 duplicate-term row coeff")
+		}
+
+		// Also verify compiled RHS substitution inside a presolve-enveloped VIPR orig object fails closed.
+		rawMixPre := solveAndVerifyVIPR(t, "lossy_mip_mix_43/pre_neg", pMix, true, StatusOptimal)
+		var env map[string]jsontext.Value
+		if err := json.Unmarshal(rawMixPre, &env); err == nil {
+			if origTok, hasOrig := env["orig"]; hasOrig && !isJSONNullToken(origTok) {
+				var origCert viprCert
+				if err := json.Unmarshal(origTok, &origCert); err != nil {
+					t.Fatalf("unmarshal origCert: %v", err)
+				}
+				origCert.BaseRows[0].RHS = ratPayload{Num: "4728779608739021", Den: "1125899906842624"}
+				mutOrig, err := json.Marshal(origCert)
+				if err != nil {
+					t.Fatalf("marshal mutOrig: %v", err)
+				}
+				env["orig"] = mutOrig
+				rawMutEnv, err := json.Marshal(env)
+				if err != nil {
+					t.Fatalf("marshal rawMutEnv: %v", err)
+				}
+				if err := verifySerializedVIPRMatchesProblem(pMix, rawMutEnv); err == nil {
+					t.Fatal("verifySerializedVIPRMatchesProblem accepted rounded compiled RHS inside VIPR orig envelope")
+				}
+			}
+		}
 	})
 }
 
