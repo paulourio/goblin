@@ -17,17 +17,83 @@ func setRootCertifiedTrue(cfg *Options) {
 func setRootCertifiedFalse(cfg *Options) {
 	cfg.Certified = false
 	cfg.certifyFn = nil
+	cfg.certWitness = nil
+}
+
+// CertifiedWitness stores exact rational primal, dual, reduced-cost, objective,
+// dual-bound, Farkas, and unboundedness certificates populated by WithCertifiedWitness.
+type CertifiedWitness struct {
+	Status       Status
+	Values       []*big.Rat
+	Duals        []*big.Rat
+	ReducedCosts []*big.Rat
+	Objective    *big.Rat
+	BestBound    *big.Rat
+	Farkas       []*big.Rat
+	Unbounded    *UnboundedCertificate
+}
+
+func (w *CertifiedWitness) resetWitness() {
+	if w != nil {
+		*w = CertifiedWitness{}
+	}
+}
+
+func optCertWitness(opt Options) *CertifiedWitness {
+	w, _ := opt.certWitness.(*CertifiedWitness)
+	return w
+}
+
+func cloneExactRatSlice(src []*big.Rat) []*big.Rat {
+	if len(src) == 0 {
+		return nil
+	}
+	return cloneRatSlice(src)
+}
+
+func cloneUnboundedCertificate(u UnboundedCertificate) *UnboundedCertificate {
+	var slope *big.Rat
+	if u.ObjSlope != nil {
+		slope = new(big.Rat).Set(u.ObjSlope)
+	}
+	return &UnboundedCertificate{
+		IsMIP:    u.IsMIP,
+		X0:       cloneExactRatSlice(u.X0),
+		Ray:      cloneExactRatSlice(u.Ray),
+		ObjSlope: slope,
+	}
 }
 
 // WithCertified enables or disables fail-closed exact rational checking at runtime.
 // When enabled is true, any gap threshold not explicitly set via WithRelGapTol or
 // WithAbsGapTol (or overridden in WithOptions) defaults to 0, requiring zero rational
-// dual gap on pure LPs and exact optimal Mini-VIPR proofs on MILPs.
+// dual gap on pure LPs and exact optimal Mini-VIPR proofs on MILPs. Under strict
+// runtime certification, integer coordinates in Result.Values match the exact rational
+// witness, continuous coordinates in Result.Values (and LP Duals, ReducedCosts, and
+// Objective) match the nearest IEEE-754 float64 projection within 0.5 ULP, and
+// Result.BestBound uses outward rounding (floor for Minimize, ceil for Maximize).
+// Callers needing unrounded rational values can pass WithCertifiedWitness.
 func WithCertified(enabled bool) Option {
 	if enabled {
 		return setRootCertifiedTrue
 	}
 	return setRootCertifiedFalse
+}
+
+// WithCertifiedWitness enables fail-closed exact rational certification and writes
+// cloned exact rational certificates into w upon verified solve completion. Passing a
+// non-nil w sets Certified = true and clears *w at solve entry and on fail-closed errors.
+func WithCertifiedWitness(w *CertifiedWitness) Option {
+	if w == nil {
+		return func(cfg *Options) {
+			cfg.certWitness = nil
+		}
+	}
+	return func(cfg *Options) {
+		cfg.Certified = true
+		cfg.certifyFn = solveCertified
+		cfg.certWitness = w
+	}
 }
 
 func optVIPRTrace(opt Options) *VIPRTrace {
@@ -49,7 +115,10 @@ type lpCertWitness struct {
 
 type goblinCertFaultFunc func(p *CompiledProblem, trace *VIPRTrace, lpWit *lpCertWitness, res *Result)
 
-func failClosedResult(p *CompiledProblem, res Result, backend Backend, start time.Time) (Result, error) {
+func failClosedResult(p *CompiledProblem, opt Options, res Result, backend Backend, start time.Time) (Result, error) {
+	if w := optCertWitness(opt); w != nil {
+		*w = CertifiedWitness{}
+	}
 	var modelID uint64
 	if p != nil {
 		modelID = p.modelID
@@ -72,6 +141,9 @@ func failClosedResult(p *CompiledProblem, res Result, backend Backend, start tim
 }
 
 func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start time.Time, done <-chan struct{}) (Result, error) {
+	if w := optCertWitness(opt); w != nil {
+		*w = CertifiedWitness{}
+	}
 	opt.RelGapTol, opt.AbsGapTol = opt.effectiveGapTols()
 	var deadline time.Time
 	if opt.TimeLimit < 0 {
@@ -283,19 +355,26 @@ func finalizeCertifiedSolve(
 	}
 
 	if p.isMIP {
-		if err := verifyCertifiedMIP(exactStopFromCtx(ctx), p, trace, wit, res, opt, true); err != nil {
-			return failClosedResult(p, res, backend, start)
+		cw, err := verifyCertifiedMIPDetail(exactStopFromCtx(ctx), p, trace, wit, res, opt, true)
+		if err != nil {
+			return failClosedResult(p, opt, res, backend, start)
+		}
+		if w := optCertWitness(opt); w != nil {
+			*w = cw
 		}
 		return res, nil
 	}
 
 	if err := verifyCertifiedLP(p, opt, res, wit); err != nil {
-		return failClosedResult(p, res, backend, start)
+		return failClosedResult(p, opt, res, backend, start)
 	}
 	if trace != nil && res.Status != StatusUnbounded && !(isLimitStatus(res.Status) && isTrivialInfBound(p.sense, res.BestBound)) {
 		if err := VerifyVIPRTrace(p, trace, res, opt); err != nil {
-			return failClosedResult(p, res, backend, start)
+			return failClosedResult(p, opt, res, backend, start)
 		}
+	}
+	if w := optCertWitness(opt); w != nil {
+		populateCertifiedLPWitness(p, res, wit, w)
 	}
 	return res, nil
 }
@@ -306,8 +385,11 @@ func finalizeCertifiedSolve(
 // Integer coordinates in res.Values must match the certificate incumbent exactly.
 // When opt.Certified is false, res.Objective, res.BestBound, and continuous coordinates
 // in res.Values allow 1e-6 relative floating-point slack; passing WithCertified(true)
-// in opt requires bit-exact float64 matches against the rounded rational witness
-// values and defaults unset gap thresholds to zero.
+// in opt defaults unset gap thresholds to zero and requires exact float64 projections
+// of the rational witness (nearest IEEE-754 float64 within 0.5 ULP on continuous
+// coordinates and Objective, and outward-rounded BestBound: floor for Minimize, ceil
+// for Maximize). VerifyVIPRTrace runs fallback exact-polishing checks under a
+// deterministic budget of 100,000 LP iterations and 5,000 B&B nodes.
 func VerifyVIPRTrace(p *CompiledProblem, trace *VIPRTrace, res Result, opt Options) error {
 	if p == nil {
 		return ErrCertificationFailed
@@ -315,7 +397,7 @@ func VerifyVIPRTrace(p *CompiledProblem, trace *VIPRTrace, res Result, opt Optio
 	if trace == nil && res.Status != StatusUnbounded && !(isLimitStatus(res.Status) && isTrivialInfBound(p.sense, res.BestBound)) {
 		return ErrCertificationFailed
 	}
-	stop := exactStop{deadline: time.Now().Add(5 * time.Second)}
+	stop := exactStop{maxLPIter: 100_000, maxMIPNodes: 5_000}
 	return verifyCertifiedMIP(stop, p, trace, nil, res, opt, opt.Certified)
 }
 
@@ -1489,6 +1571,119 @@ func verifyCertifiedLP(p *CompiledProblem, opt Options, res Result, wit *lpCertW
 	}
 }
 
+func emptyRowFarkas(p *CompiledProblem) ([]*big.Rat, bool) {
+	if p == nil || p.numConstraints <= 0 {
+		return nil, false
+	}
+	for i := range p.numConstraints {
+		cols, _, okC := exactCanonicalRowTermsRat(p, i)
+		if !okC || len(cols) > 0 {
+			continue
+		}
+		rhs, ok := exactRowRHSRat(p, i)
+		if !ok {
+			continue
+		}
+		sgn := rhs.Sign()
+		var mult int64
+		switch p.rowSense[i] {
+		case LessEqual:
+			if sgn < 0 {
+				mult = 1
+			}
+		case GreaterEqual:
+			if sgn > 0 {
+				mult = -1
+			}
+		case Equal:
+			if sgn < 0 {
+				mult = 1
+			} else if sgn > 0 {
+				mult = -1
+			}
+		}
+		if mult == 0 {
+			continue
+		}
+		w := make([]*big.Rat, p.numConstraints)
+		for k := range w {
+			w[k] = new(big.Rat)
+		}
+		w[i].SetInt64(mult)
+		if verifyExactFarkasRayRat(p, w) {
+			return w, true
+		}
+	}
+	return nil, false
+}
+
+func populateCertifiedLPWitness(p *CompiledProblem, res Result, wit *lpCertWitness, out *CertifiedWitness) {
+	if out == nil {
+		return
+	}
+	*out = CertifiedWitness{Status: res.Status}
+	if p == nil || wit == nil {
+		return
+	}
+	switch res.Status {
+	case StatusOptimal:
+		out.Values = cloneExactRatSlice(wit.primal)
+		if m := len(wit.dualMin); m > 0 {
+			dualsUser := make([]*big.Rat, m)
+			neg := p.sense == Maximize
+			for i, yi := range wit.dualMin {
+				r := new(big.Rat)
+				if yi != nil {
+					r.Set(yi)
+				}
+				if neg && r.Sign() != 0 {
+					r.Neg(r)
+				}
+				dualsUser[i] = r
+			}
+			out.Duals = dualsUser
+		}
+		if p.numVars > 0 {
+			if rcUser, okRC := exactUserReducedCosts(p, wit.dualMin); okRC {
+				out.ReducedCosts = cloneExactRatSlice(rcUser)
+			}
+		}
+		if objUser, okObj := evalExactUserObjRat(p, wit.primal); okObj {
+			out.Objective = new(big.Rat).Set(objUser)
+		}
+		if safeMinBnd, okSafe := ExactSafeDualBound(p, wit.dualMin); okSafe {
+			out.BestBound = userBoundFromMinRat(p, safeMinBnd)
+		}
+
+	case StatusInfeasible:
+		if len(wit.farkasW) == p.numConstraints && p.numConstraints > 0 {
+			out.Farkas = cloneExactRatSlice(wit.farkasW)
+		} else if wit.hasDirectInfeas {
+			if wEmpty, ok := emptyRowFarkas(p); ok {
+				out.Farkas = wEmpty
+			}
+		}
+
+	case StatusUnbounded:
+		if wit.hasUnbounded {
+			out.Unbounded = cloneUnboundedCertificate(wit.unbounded)
+		}
+
+	case StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
+		if len(res.Values) == p.numVars && len(wit.primal) == p.numVars && p.numVars > 0 {
+			out.Values = cloneExactRatSlice(wit.primal)
+			if objUser, okObj := evalExactUserObjRat(p, wit.primal); okObj {
+				out.Objective = new(big.Rat).Set(objUser)
+			}
+		}
+		if len(wit.dualMin) == p.numConstraints && p.numConstraints > 0 {
+			if safeMinBnd, okSafe := ExactSafeDualBound(p, wit.dualMin); okSafe {
+				out.BestBound = userBoundFromMinRat(p, safeMinBnd)
+			}
+		}
+	}
+}
+
 func verifyCertifiedMIP(
 	stop exactStop,
 	p *CompiledProblem,
@@ -1498,8 +1693,21 @@ func verifyCertifiedMIP(
 	opt Options,
 	strictPolished bool,
 ) error {
+	_, err := verifyCertifiedMIPDetail(stop, p, trace, wit, res, opt, strictPolished)
+	return err
+}
+
+func verifyCertifiedMIPDetail(
+	stop exactStop,
+	p *CompiledProblem,
+	trace *VIPRTrace,
+	wit *lpCertWitness,
+	res Result,
+	opt Options,
+	strictPolished bool,
+) (CertifiedWitness, error) {
 	if p == nil || p.invalidErr != nil {
-		return ErrCertificationFailed
+		return CertifiedWitness{}, ErrCertificationFailed
 	}
 	n := p.numVars
 
@@ -1508,166 +1716,183 @@ func verifyCertifiedMIP(
 		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 ||
 			math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) ||
 			isNonFinite(res.RootLPBound) || isNonFinite(res.RootCutBound) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if strictPolished && res.Objective != 0 {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !p.isMIP && strictPolished && (res.RootLPBound != 0 || res.RootCutBound != 0) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if trace == nil || !trace.HasCertificate() {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		raw, err := trace.MarshalVIPRJSON()
 		if err != nil {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		chk, errChk := verifyMiniVIPRProblem(p, raw)
 		if errChk != nil || chk.mode != viprModeInfeasible {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
-		return nil
+		return CertifiedWitness{Status: StatusInfeasible}, nil
 
 	case StatusOptimal:
 		if len(res.Values) != n || isNonFinite(res.Objective) || isNonFinite(res.BestBound) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if p.isMIP {
 			if len(res.Duals) != 0 || len(res.ReducedCosts) != 0 {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 		} else {
 			if len(res.Duals) != 0 {
 				if len(res.Duals) != p.numConstraints || slices.ContainsFunc(res.Duals, isNonFinite) {
-					return ErrCertificationFailed
+					return CertifiedWitness{}, ErrCertificationFailed
 				}
 			}
 			if len(res.ReducedCosts) != 0 {
 				if len(res.ReducedCosts) != n || slices.ContainsFunc(res.ReducedCosts, isNonFinite) {
-					return ErrCertificationFailed
+					return CertifiedWitness{}, ErrCertificationFailed
 				}
 			}
 		}
 		if !verifyRootBoundAgainstBest(p.sense, res.RootLPBound, res.BestBound, strictPolished) ||
 			!verifyRootBoundAgainstBest(p.sense, res.RootCutBound, res.BestBound, strictPolished) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !p.isMIP && strictPolished && (res.RootLPBound != res.BestBound || res.RootCutBound != res.BestBound) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if trace == nil || !trace.HasCertificate() {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		raw, err := trace.MarshalVIPRJSON()
 		if err != nil {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		chk, errChk := verifyMiniVIPRProblem(p, raw)
 		if errChk != nil || (chk.mode != viprModeOptimal && chk.mode != viprModeBound) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if len(chk.incumbent) != n || chk.certifiedMinLB == nil {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !verifyExactIncumbent(p, res.Values, chk.incumbent, strictPolished) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		relTol, absTol := opt.effectiveGapTols()
 		if relTol == 0 && absTol == 0 && chk.mode != viprModeOptimal {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !exactGapClosedRat(p, chk.incumbent, chk.certifiedMinLB, relTol, absTol) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		objUser, okObj := evalExactUserObjRat(p, chk.incumbent)
 		if !okObj {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		objF := exactRatToFloat(objUser)
 		if strictPolished {
 			if res.Objective != objF {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 		} else if math.Abs(res.Objective-objF) > 1e-6*max(1.0, math.Abs(objF)) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !floatBestBoundValidAndClosed(p, chk.incumbent, chk.certifiedMinLB, res, opt, strictPolished) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
-		return nil
+		return CertifiedWitness{
+			Status:    StatusOptimal,
+			Values:    cloneExactRatSlice(chk.incumbent),
+			Objective: new(big.Rat).Set(objUser),
+			BestBound: userBoundFromMinRat(p, chk.certifiedMinLB),
+		}, nil
 
 	case StatusUnbounded:
 		if len(res.Values) != 0 || len(res.Duals) != 0 || len(res.ReducedCosts) != 0 ||
 			math.IsNaN(res.Objective) || math.IsNaN(res.BestBound) ||
 			isNonFinite(res.RootLPBound) || isNonFinite(res.RootCutBound) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if strictPolished && res.Objective != 0 {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !p.isMIP && strictPolished && (res.RootLPBound != 0 || res.RootCutBound != 0) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if wit != nil {
 			if !wit.hasUnbounded || !VerifyUnboundedCertificate(p, wit.unbounded) {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
-			return nil
+			return CertifiedWitness{
+				Status:    StatusUnbounded,
+				Unbounded: cloneUnboundedCertificate(wit.unbounded),
+			}, nil
 		}
 		certUnb, okUnb := extractUnboundedCertificateStop(stop, p, nil, nil)
 		if !okUnb || !VerifyUnboundedCertificate(p, certUnb) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
-		return nil
+		return CertifiedWitness{
+			Status:    StatusUnbounded,
+			Unbounded: cloneUnboundedCertificate(certUnb),
+		}, nil
 
 	case StatusTimeLimit, StatusNodeLimit, StatusIterationLimit:
 		if len(res.Duals) != 0 || len(res.ReducedCosts) != 0 || math.IsNaN(res.BestBound) || math.IsNaN(res.Objective) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		if !verifyRootBoundAgainstBest(p.sense, res.RootLPBound, res.BestBound, strictPolished) ||
 			!verifyRootBoundAgainstBest(p.sense, res.RootCutBound, res.BestBound, strictPolished) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		var traceInc []*big.Rat
+		var certMinLB *big.Rat
 		if trace != nil && trace.HasCertificate() {
 			raw, err := trace.MarshalVIPRJSON()
 			if err != nil {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 			chk, errChk := verifyMiniVIPRProblem(p, raw)
 			if errChk != nil {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 			traceInc = chk.incumbent
 			if chk.mode == viprModeInfeasible {
 				if len(res.Values) != 0 || res.Objective != 0 {
-					return ErrCertificationFailed
+					return CertifiedWitness{}, ErrCertificationFailed
 				}
-				return nil
+				return CertifiedWitness{Status: res.Status}, nil
 			}
 			if !verifyLimitBestBoundAgainstCert(p, chk.certifiedMinLB, res.BestBound, strictPolished) {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
+			certMinLB = chk.certifiedMinLB
 		} else if !isTrivialInfBound(p.sense, res.BestBound) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
+		}
+		out := CertifiedWitness{Status: res.Status}
+		if certMinLB != nil {
+			out.BestBound = userBoundFromMinRat(p, certMinLB)
 		}
 		if len(res.Values) == 0 {
 			if res.Objective != 0 {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
-			return nil
+			return out, nil
 		}
 		if len(res.Values) != n || isNonFinite(res.Objective) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		for j := range n {
 			v := res.Values[j]
 			if isNonFinite(v) {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 			if p.varCat[j] != Continuous && math.Floor(v) != v {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 		}
 		var xVerified []*big.Rat
@@ -1683,24 +1908,26 @@ func verifyCertifiedMIP(
 			}
 		}
 		if xVerified == nil {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		objUser, okObj := evalExactUserObjRat(p, xVerified)
 		if !okObj {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
 		objF := exactRatToFloat(objUser)
 		if strictPolished {
 			if res.Objective != objF {
-				return ErrCertificationFailed
+				return CertifiedWitness{}, ErrCertificationFailed
 			}
 		} else if math.Abs(res.Objective-objF) > 1e-6*max(1.0, math.Abs(objF)) {
-			return ErrCertificationFailed
+			return CertifiedWitness{}, ErrCertificationFailed
 		}
-		return nil
+		out.Values = cloneExactRatSlice(xVerified)
+		out.Objective = new(big.Rat).Set(objUser)
+		return out, nil
 
 	default:
-		return ErrCertificationFailed
+		return CertifiedWitness{}, ErrCertificationFailed
 	}
 }
 

@@ -1989,8 +1989,9 @@ func (r *babVIPRRecorder) setDeadline(deadline time.Time, done <-chan struct{}) 
 }
 
 func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *babVIPRRecorder {
-	tr.reset(p)
-	rp, ok := buildVIPRRatProblem(p)
+	origP := p.canonicalOrigProblem()
+	tr.reset(origP)
+	rp, ok := buildVIPRRatProblem(origP)
 	if !ok {
 		return &babVIPRRecorder{trace: tr, invalid: true}
 	}
@@ -2000,7 +2001,7 @@ func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *ba
 		root:        &viprTreeNode{kind: viprNodeOpen},
 		disableSIMD: disableSIMD,
 	}
-	if eo := p.exactOrig; eo != nil && len(eo.rows) == rp.m {
+	if eo := origP.exactOrig; eo != nil && len(eo.rows) == rp.m {
 		var rounded []int
 		for i := range rp.m {
 			if !eo.rows[i].intTightened {
@@ -2012,7 +2013,7 @@ func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *ba
 					rounded[j] = -1
 				}
 			}
-			tightRHS, okT := exactRatFromFloat(p.rowRHS[i])
+			tightRHS, okT := exactRatFromFloat(eo.rows[i].intTightRHS)
 			if !okT {
 				return &babVIPRRecorder{trace: tr, invalid: true}
 			}
@@ -6416,8 +6417,9 @@ func (tr *VIPRTrace) recordRootInfeasibleEqRow(p *CompiledProblem) {
 	if tr == nil || p == nil {
 		return
 	}
-	tr.reset(p)
-	rp, ok := buildVIPRRatProblem(p)
+	origP := p.canonicalOrigProblem()
+	tr.reset(origP)
+	rp, ok := buildVIPRRatProblem(origP)
 	if !ok {
 		return
 	}
@@ -6429,7 +6431,7 @@ func (tr *VIPRTrace) recordRootInfeasibleEqRow(p *CompiledProblem) {
 	cert.Steps = steps
 	cert.RootStep = rootStep
 	tr.cert = cert
-	tr.attachPresolveEnvelope(p)
+	tr.attachPresolveEnvelope(origP)
 	tr.hasCert = true
 }
 
@@ -6501,9 +6503,10 @@ func (tr *VIPRTrace) recordPresolveInfeasible(p *CompiledProblem, disableSIMD bo
 	if tr == nil || p == nil {
 		return
 	}
-	tr.reset(p)
+	origP := p.canonicalOrigProblem()
+	tr.reset(origP)
 	tr.presolveInfeasible = true
-	rp, ok := buildVIPRRatProblem(p)
+	rp, ok := buildVIPRRatProblem(origP)
 	if !ok {
 		return
 	}
@@ -6549,8 +6552,9 @@ func (tr *VIPRTrace) adoptInfeasSteps(p *CompiledProblem, sub *VIPRTrace) {
 	if tr == nil || p == nil || sub == nil || !sub.hasCert || sub.cert.Mode != viprModeInfeasible {
 		return
 	}
-	tr.reset(p)
-	rp, ok := buildVIPRRatProblem(p)
+	origP := p.canonicalOrigProblem()
+	tr.reset(origP)
+	rp, ok := buildVIPRRatProblem(origP)
 	if !ok {
 		return
 	}
@@ -6558,7 +6562,7 @@ func (tr *VIPRTrace) adoptInfeasSteps(p *CompiledProblem, sub *VIPRTrace) {
 	cert.Steps = slices.Clone(sub.cert.Steps)
 	cert.RootStep = sub.cert.RootStep
 	tr.cert = cert
-	tr.attachPresolveEnvelope(p)
+	tr.attachPresolveEnvelope(origP)
 	tr.hasCert = true
 }
 

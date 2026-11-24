@@ -100,6 +100,7 @@ type Options struct {
 	relGapTolSet         bool
 	absGapTolSet         bool
 	viprTrace            viprTraceHook
+	certWitness          any
 	certifyFn            func(context.Context, *CompiledProblem, Options, time.Time, <-chan struct{}) (Result, error)
 }
 
@@ -350,6 +351,9 @@ func (m *Model) Solve(ctx context.Context, opts ...Option) (Result, error) {
 			}
 		}
 		opt := ApplyOptions(opts...)
+		if rw, ok := opt.certWitness.(interface{ resetWitness() }); ok {
+			rw.resetWitness()
+		}
 		return Result{
 			Backend: opt.Backend,
 			Status:  StatusUndefined,
@@ -384,6 +388,9 @@ func isOppositeInfBound(sense Sense, b float64) bool {
 func SolveCompiled(ctx context.Context, p *CompiledProblem, opts ...Option) (Result, error) {
 	start := time.Now()
 	opt := ApplyOptions(opts...)
+	if rw, ok := opt.certWitness.(interface{ resetWitness() }); ok {
+		rw.resetWitness()
+	}
 	var done <-chan struct{}
 	if ctx != nil {
 		done = ctx.Done()
@@ -470,7 +477,7 @@ func hasEmptyInfeasibleRow(p *CompiledProblem) bool {
 			continue
 		}
 		rhsHi, rhsLo := p.rowRHS[i], 0.0
-		if eo != nil && i < len(eo.rows) && eo.rows[i].rhsInexact && !eo.rows[i].intTightened {
+		if eo != nil && i < len(eo.rows) && eo.rows[i].rhsInexact && (!eo.rows[i].intTightened || eo.origProb == nil) {
 			rhsHi, rhsLo = twoSumExact(eo.rows[i].rhs, -eo.rows[i].exprConst)
 		}
 		sgn := 0
@@ -515,7 +522,8 @@ func solveCompensatedEngine(ctx context.Context, p *CompiledProblem, opt Options
 }
 
 func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Options, backend Backend, start, deadline time.Time, done <-chan struct{}) Result {
-	if (p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas) || hasEmptyInfeasibleRow(p) {
+	exactMode := opt.Certified || opt.viprTrace != nil
+	if (exactMode && p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas) || hasEmptyInfeasibleRow(p) {
 		if opt.viprTrace != nil {
 			opt.viprTrace.recordRootInfeasibleEqRow(p)
 		}
@@ -526,7 +534,11 @@ func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Opt
 			SolveTime: time.Since(start),
 		}
 	}
-	workProb := p
+	baseProb := p
+	if exactMode && p.isMIP {
+		baseProb = p.exactTightenedProblem()
+	}
+	workProb := baseProb
 	var lpPre LPPresolveResult
 	usedLPPresolve := false
 	if opt.EnablePresolve && p.isMIP {
@@ -540,7 +552,7 @@ func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Opt
 				}
 			}
 		} else {
-			preRes := presolveWithDeadline(p, defaultPresolveMaxPass, deadline, done)
+			preRes := presolveWithDeadline(baseProb, defaultPresolveMaxPass, deadline, done)
 			if ctx != nil && ctx.Err() != nil {
 				return Result{}
 			}
@@ -597,7 +609,7 @@ func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Opt
 	if ctx != nil && ctx.Err() != nil {
 		return Result{}
 	}
-	if workProb != p {
+	if workProb != baseProb {
 		needFallback := false
 		if usedLPPresolve {
 			if res.Status == StatusUnbounded || res.Status == StatusNumericalError {
@@ -609,9 +621,9 @@ func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Opt
 			needFallback = true
 		} else if opt.viprTrace != nil && (res.Status == StatusOptimal || res.Status == StatusInfeasible) && !opt.viprTrace.hasCertificate() {
 			needFallback = true
-		} else if len(res.Values) == p.numVars {
-			bV, rV, iV := p.MaxViolation(res.Values, p.isMIP)
-			if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) || (p.isMIP && violatesExactIntRows(p, findExactIntRows(p), res.Values)) {
+		} else if len(res.Values) == baseProb.numVars {
+			bV, rV, iV := baseProb.MaxViolation(res.Values, baseProb.isMIP)
+			if !(bV <= incumbentTol && rV <= incumbentTol && iV <= incumbentTol) || (baseProb.isMIP && violatesExactIntRows(baseProb, findExactIntRows(baseProb), res.Values)) {
 				needFallback = true
 			}
 		}
@@ -651,7 +663,7 @@ func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Opt
 				}
 				fallbackOpt.MaxNodes = remNodes
 			}
-			fbRes := solveBranchAndCutWithDone(p, fallbackOpt, start, deadline, done)
+			fbRes := solveBranchAndCutWithDone(baseProb, fallbackOpt, start, deadline, done)
 			if ctx != nil && ctx.Err() != nil {
 				return Result{}
 			}

@@ -2909,45 +2909,145 @@ func TestRegressionExactModelPreservationAndIntTightening(t *testing.T) {
 	t.Run("int_tiny_rhs_le_tightens_floor", func(t *testing.T) {
 		t.Parallel()
 		for _, pre := range []bool{true, false} {
-			for _, cert := range []bool{false, true} {
-				m := gb.NewModel("int_le_tiny", gb.Maximize)
-				x := m.AddIntVar("x", 0, 10)
-				m.SetObjective(gb.NewExpr(x.T(1)))
-				m.AddConstraint("c", gb.Le(gb.NewExpr(x.T(1)).AddConstant(1e-17), 3))
-				res, err := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(cert))
-				if err != nil || res.Status != gb.StatusOptimal || res.Objective != 2 || len(res.Values) != 1 || res.Values[0] != 2 {
-					t.Fatalf("pre=%v cert=%v: got status=%v obj=%v vals=%v err=%v, want Optimal obj=2",
-						pre, cert, res.Status, res.Objective, res.Values, err)
-				}
+			m := gb.NewModel("int_le_tiny", gb.Maximize)
+			x := m.AddIntVar("x", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(1)))
+			m.AddConstraint("c", gb.Le(gb.NewExpr(x.T(1)).AddConstant(1e-17), 3))
+
+			resDef, errDef := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(false))
+			if errDef != nil || resDef.Status != gb.StatusOptimal || resDef.Objective != 3 || len(resDef.Values) != 1 || resDef.Values[0] != 3 {
+				t.Fatalf("pre=%v cert=false: got status=%v obj=%v vals=%v err=%v, want Optimal obj=3",
+					pre, resDef.Status, resDef.Objective, resDef.Values, errDef)
+			}
+
+			resCert, errCert := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(true))
+			if errCert != nil || resCert.Status != gb.StatusOptimal || resCert.Objective != 2 || len(resCert.Values) != 1 || resCert.Values[0] != 2 {
+				t.Fatalf("pre=%v cert=true: got status=%v obj=%v vals=%v err=%v, want Optimal obj=2",
+					pre, resCert.Status, resCert.Objective, resCert.Values, errCert)
+			}
+
+			tr := gb.NewVIPRTrace()
+			p := m.Compile()
+			resVIPR, errVIPR := gb.SolveCompiled(ctx, p, gb.WithPresolve(pre), gb.WithVIPRTrace(tr))
+			if errVIPR != nil || resVIPR.Status != gb.StatusOptimal || resVIPR.Objective != 2 || len(resVIPR.Values) != 1 || resVIPR.Values[0] != 2 {
+				t.Fatalf("pre=%v vipr: got status=%v obj=%v vals=%v err=%v, want Optimal obj=2",
+					pre, resVIPR.Status, resVIPR.Objective, resVIPR.Values, errVIPR)
+			}
+			if tr.TracedProblem() != p {
+				t.Fatalf("pre=%v vipr: TracedProblem() did not preserve caller CompiledProblem", pre)
 			}
 		}
 	})
 
 	t.Run("int_tiny_rhs_ge_tightens_ceil", func(t *testing.T) {
 		t.Parallel()
-		for _, cert := range []bool{false, true} {
-			m := gb.NewModel("int_ge_tiny", gb.Minimize)
-			x := m.AddIntVar("x", 0, 10)
-			m.SetObjective(gb.NewExpr(x.T(1)))
-			m.AddConstraint("c", gb.Ge(gb.NewExpr(x.T(1)).AddConstant(-1e-17), 3))
-			res, err := m.Solve(ctx, gb.WithCertified(cert))
-			if err != nil || res.Status != gb.StatusOptimal || res.Objective != 4 || len(res.Values) != 1 || res.Values[0] != 4 {
-				t.Fatalf("cert=%v: got status=%v obj=%v vals=%v err=%v, want Optimal obj=4",
-					cert, res.Status, res.Objective, res.Values, err)
-			}
+		m := gb.NewModel("int_ge_tiny", gb.Minimize)
+		x := m.AddIntVar("x", 0, 10)
+		m.SetObjective(gb.NewExpr(x.T(1)))
+		m.AddConstraint("c", gb.Ge(gb.NewExpr(x.T(1)).AddConstant(-1e-17), 3))
+
+		resDef, errDef := m.Solve(ctx, gb.WithCertified(false))
+		if errDef != nil || resDef.Status != gb.StatusOptimal || resDef.Objective != 3 || len(resDef.Values) != 1 || resDef.Values[0] != 3 {
+			t.Fatalf("cert=false: got status=%v obj=%v vals=%v err=%v, want Optimal obj=3",
+				resDef.Status, resDef.Objective, resDef.Values, errDef)
+		}
+
+		resCert, errCert := m.Solve(ctx, gb.WithCertified(true))
+		if errCert != nil || resCert.Status != gb.StatusOptimal || resCert.Objective != 4 || len(resCert.Values) != 1 || resCert.Values[0] != 4 {
+			t.Fatalf("cert=true: got status=%v obj=%v vals=%v err=%v, want Optimal obj=4",
+				resCert.Status, resCert.Objective, resCert.Values, errCert)
+		}
+
+		tr := gb.NewVIPRTrace()
+		resVIPR, errVIPR := m.Solve(ctx, gb.WithVIPRTrace(tr))
+		if errVIPR != nil || resVIPR.Status != gb.StatusOptimal || resVIPR.Objective != 4 || len(resVIPR.Values) != 1 || resVIPR.Values[0] != 4 {
+			t.Fatalf("vipr: got status=%v obj=%v vals=%v err=%v, want Optimal obj=4",
+				resVIPR.Status, resVIPR.Objective, resVIPR.Values, errVIPR)
 		}
 	})
 
 	t.Run("int_tiny_rhs_eq_infeasible", func(t *testing.T) {
 		t.Parallel()
-		for _, cert := range []bool{false, true} {
+		for _, pre := range []bool{true, false} {
 			m := gb.NewModel("int_eq_tiny", gb.Maximize)
 			x := m.AddIntVar("x", 0, 10)
 			m.SetObjective(gb.NewExpr(x.T(1)))
 			m.AddConstraint("c", gb.Eq(gb.NewExpr(x.T(1)).AddConstant(1e-17), 3))
-			res, err := m.Solve(ctx, gb.WithCertified(cert))
-			if err != nil || res.Status != gb.StatusInfeasible {
-				t.Fatalf("cert=%v: got status=%v err=%v, want StatusInfeasible", cert, res.Status, err)
+
+			resDef, errDef := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(false))
+			if errDef != nil || resDef.Status != gb.StatusOptimal || resDef.Objective != 3 || len(resDef.Values) != 1 || resDef.Values[0] != 3 {
+				t.Fatalf("pre=%v cert=false: got status=%v obj=%v vals=%v err=%v, want Optimal obj=3",
+					pre, resDef.Status, resDef.Objective, resDef.Values, errDef)
+			}
+
+			resCert, errCert := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(true))
+			if errCert != nil || resCert.Status != gb.StatusInfeasible {
+				t.Fatalf("pre=%v cert=true: got status=%v err=%v, want StatusInfeasible", pre, resCert.Status, errCert)
+			}
+
+			tr := gb.NewVIPRTrace()
+			resVIPR, errVIPR := m.Solve(ctx, gb.WithPresolve(pre), gb.WithVIPRTrace(tr))
+			if errVIPR != nil || resVIPR.Status != gb.StatusInfeasible {
+				t.Fatalf("pre=%v vipr: got status=%v err=%v, want StatusInfeasible", pre, resVIPR.Status, errVIPR)
+			}
+		}
+	})
+
+	t.Run("int_const_vs_prefolded_rhs_mode_separation", func(t *testing.T) {
+		t.Parallel()
+		buildConst := func() *gb.Model {
+			m := gb.NewModel("ge_expr_const", gb.Minimize)
+			x := m.AddIntVar("x", 0, 10)
+			y := m.AddIntVar("y", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(1), y.T(1)))
+			m.AddConstraint("c", gb.Ge(gb.NewExpr(x.T(1), y.T(1)).AddConstant(0.1), 2.1))
+			return m
+		}
+		buildFolded := func() *gb.Model {
+			m := gb.NewModel("ge_rhs_folded", gb.Minimize)
+			x := m.AddIntVar("x", 0, 10)
+			y := m.AddIntVar("y", 0, 10)
+			m.SetObjective(gb.NewExpr(x.T(1), y.T(1)))
+			m.AddConstraint("c", gb.Ge(gb.NewExpr(x.T(1), y.T(1)), 2.1-0.1))
+			return m
+		}
+
+		resConstDef, err := buildConst().Solve(ctx, gb.WithCertified(false))
+		if err != nil || resConstDef.Status != gb.StatusOptimal || resConstDef.Objective != 2 {
+			t.Fatalf("x+y+0.1>=2.1 default: status=%v obj=%v err=%v, want Optimal 2", resConstDef.Status, resConstDef.Objective, err)
+		}
+		resFoldDef, err := buildFolded().Solve(ctx, gb.WithCertified(false))
+		if err != nil || resFoldDef.Status != gb.StatusOptimal || resFoldDef.Objective != 2 {
+			t.Fatalf("x+y>=2.1-0.1 default: status=%v obj=%v err=%v, want Optimal 2", resFoldDef.Status, resFoldDef.Objective, err)
+		}
+
+		resConstCert, err := buildConst().Solve(ctx, gb.WithCertified(true))
+		if err != nil || resConstCert.Status != gb.StatusOptimal || resConstCert.Objective != 3 {
+			t.Fatalf("x+y+0.1>=2.1 certified: status=%v obj=%v err=%v, want Optimal 3", resConstCert.Status, resConstCert.Objective, err)
+		}
+		resFoldCert, err := buildFolded().Solve(ctx, gb.WithCertified(true))
+		if err != nil || resFoldCert.Status != gb.StatusOptimal || resFoldCert.Objective != 2 {
+			t.Fatalf("x+y>=2.1-0.1 certified: status=%v obj=%v err=%v, want Optimal 2", resFoldCert.Status, resFoldCert.Objective, err)
+		}
+	})
+
+	t.Run("int_dyadic_eq_float_tol_vs_certified_infeasible", func(t *testing.T) {
+		t.Parallel()
+		for _, pre := range []bool{true, false} {
+			m := gb.NewModel("dyadic_eq_7_2_4_1", gb.Minimize)
+			x1 := m.AddIntVar("x1", -5, 5)
+			x2 := m.AddIntVar("x2", -5, 5)
+			m.SetObjective(gb.NewExpr(x1.T(1), x2.T(1)))
+			m.AddConstraint("eq", gb.Eq(gb.NewExpr(x1.T(-7.2), x2.T(-4.1)), -1))
+
+			resDef, errDef := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(false))
+			if errDef != nil || resDef.Status != gb.StatusOptimal {
+				t.Fatalf("pre=%v cert=false: got status=%v err=%v, want StatusOptimal", pre, resDef.Status, errDef)
+			}
+
+			resCert, errCert := m.Solve(ctx, gb.WithPresolve(pre), gb.WithCertified(true))
+			if errCert != nil || resCert.Status != gb.StatusInfeasible {
+				t.Fatalf("pre=%v cert=true: got status=%v err=%v, want StatusInfeasible", pre, resCert.Status, errCert)
 			}
 		}
 	})

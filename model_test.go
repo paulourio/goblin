@@ -65,6 +65,65 @@ func TestModelAndCompile(t *testing.T) {
 	}
 }
 
+func TestExprSumAndCompiledEvalStickyRounding(t *testing.T) {
+	t.Parallel()
+
+	sumCases := []struct {
+		name string
+		vals []float64
+		want float64
+	}{
+		{"half_plus_tiny_rounds_up", []float64{1, 0x1p-53, 0x1p-110}, 1 + 0x1p-52},
+		{"half_minus_tiny_rounds_even", []float64{1, 0x1p-53, -0x1p-110}, 1},
+		{"odd_half_minus_tiny_stays_odd", []float64{1 + 0x1p-52, 0x1p-53, -0x1p-110}, 1 + 0x1p-52},
+		{"half_plus_min_subnormal_rounds_up", []float64{1, 0x1p-53, 0x1p-1074}, 1 + 0x1p-52},
+		{"huge_cancellation_exact", []float64{1e308, 1e308, -1e308}, 1e308},
+	}
+	for _, tc := range sumCases {
+		exprs := make([]gb.Expr, len(tc.vals))
+		for i, v := range tc.vals {
+			exprs[i] = gb.ConstExpr(v)
+		}
+		if got := gb.Sum(exprs...).Constant; got != tc.want {
+			t.Fatalf("%s: Sum = %.17g (0x%x), want %.17g (0x%x)",
+				tc.name, got, math.Float64bits(got), tc.want, math.Float64bits(tc.want))
+		}
+	}
+
+	if got := gb.Sum(gb.ConstExpr(math.Inf(1)), gb.ConstExpr(math.Inf(-1))).Constant; !math.IsNaN(got) {
+		t.Fatalf("Sum(+Inf, -Inf) = %v, want NaN", got)
+	}
+	if got := gb.Sum(gb.ConstExpr(1), gb.ConstExpr(math.Inf(1))).Constant; !math.IsInf(got, 1) {
+		t.Fatalf("Sum(1, +Inf) = %v, want +Inf", got)
+	}
+
+	m := gb.NewModel("sticky_eval", gb.Minimize)
+	x0 := m.AddContVar("x0", -10, 10)
+	x1 := m.AddContVar("x1", -10, 10)
+	x2 := m.AddContVar("x2", -10, 10)
+	m.SetObjective(gb.NewExpr(x0.T(1), x1.T(0x1p-53), x2.T(0x1p-110)))
+	m.AddConstraint("c_up", gb.Le(gb.NewExpr(x0.T(1), x1.T(0x1p-53), x2.T(0x1p-1074)), 1+0x1p-52))
+	m.AddConstraint("c_down", gb.Ge(gb.NewExpr(x0.T(1), x1.T(0x1p-53), x2.T(-0x1p-110)), 1))
+	p := m.Compile()
+
+	pt := []float64{1, 1, 1}
+	wantObj := 1 + 0x1p-52
+	if gotObj := p.EvaluateObjective(pt); gotObj != wantObj {
+		t.Fatalf("EvaluateObjective tie-break = %.17g (0x%x), want %.17g (0x%x)",
+			gotObj, math.Float64bits(gotObj), wantObj, math.Float64bits(wantObj))
+	}
+	bv, rv, _ := p.MaxViolation(pt, false)
+	if bv != 0 || rv != 0 {
+		t.Fatalf("MaxViolation sticky tie-break = (bound=%g, row=%g), want (0, 0)", bv, rv)
+	}
+	if _, rvUp, _ := p.MaxViolation([]float64{1 + 0x1p-52, 1, 1}, false); rvUp != 0x1p-53 {
+		t.Fatalf("MaxViolation shifted odd point = %.17g, want 0x1p-53", rvUp)
+	}
+	if _, rvDown, _ := p.MaxViolation([]float64{1 - 0x1p-53, 1, 1}, false); rvDown != 0x1p-110 {
+		t.Fatalf("MaxViolation sub-halfway point = %.17g, want 0x1p-110", rvDown)
+	}
+}
+
 func TestModelNilReceiverAndEnumString(t *testing.T) {
 	t.Parallel()
 

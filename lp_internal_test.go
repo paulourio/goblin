@@ -1546,6 +1546,82 @@ func TestTwoSumTwoProdFMASafety(t *testing.T) {
 	}
 }
 
+func TestStickyBitRoundingEvalAndWideDotAcc(t *testing.T) {
+	t.Parallel()
+
+	t.Run("expansionTopRem_and_finishDD_sticky", func(t *testing.T) {
+		t.Parallel()
+		topUp, remUp := expansionTopRem([]float64{0x1p-110, 0x1p-53, 1.0})
+		if got := topUp + remUp; got != 1+0x1p-52 {
+			t.Fatalf("expansionTopRem up = %.17g (0x%x), want %.17g", got, math.Float64bits(got), 1+0x1p-52)
+		}
+		topDn, remDn := expansionTopRem([]float64{-0x1p-110, 0x1p-53, 1.0})
+		if got := topDn + remDn; got != 1.0 {
+			t.Fatalf("expansionTopRem down = %.17g (0x%x), want 1.0", got, math.Float64bits(got))
+		}
+
+		// Sub-subnormal product (2^-540 * 2^-540 = 2^-1080) underflows float64 unscaled but
+		// must preserve sticky sign via SmallestNonzeroFloat64 in finishDDMultiBucket.
+		var w wideDotAcc
+		w.addVal(1.0)
+		w.addVal(0x1p-53)
+		w.addProd(0x1p-540, 0x1p-540)
+		if got := w.finish(math.NaN()); got != 1+0x1p-52 {
+			t.Fatalf("wideDotAcc sub-subnormal sticky up = %.17g (0x%x), want %.17g",
+				got, math.Float64bits(got), 1+0x1p-52)
+		}
+
+		var wNeg wideDotAcc
+		wNeg.addVal(1.0)
+		wNeg.addVal(0x1p-53)
+		wNeg.addProd(-0x1p-540, 0x1p-540)
+		if got := wNeg.finish(math.NaN()); got != 1.0 {
+			t.Fatalf("wideDotAcc sub-subnormal sticky down = %.17g (0x%x), want 1.0",
+				got, math.Float64bits(got))
+		}
+	})
+
+	t.Run("evalLinearSum_and_evalSparseRowResidual", func(t *testing.T) {
+		t.Parallel()
+		ones := []float64{1, 1, 1}
+		if got := evalLinearSum(1.0, []float64{0x1p-53, 0x1p-110}, ones[:2], 2); got != 1+0x1p-52 {
+			t.Fatalf("evalLinearSum(1+2^-53+2^-110) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalLinearSum(1.0, []float64{0x1p-53, -0x1p-110}, ones[:2], 2); got != 1.0 {
+			t.Fatalf("evalLinearSum(1+2^-53-2^-110) = %.17g, want 1", got)
+		}
+		if got := evalLinearSum(1+0x1p-52, []float64{0x1p-53, -0x1p-110}, ones[:2], 2); got != 1+0x1p-52 {
+			t.Fatalf("evalLinearSum(1+2^-52+2^-53-2^-110) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalLinearSum(1.0, []float64{0x1p-53, 0x1p-1074}, ones[:2], 2); got != 1+0x1p-52 {
+			t.Fatalf("evalLinearSum(1+2^-53+2^-1074) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalLinearSum(0, []float64{0, 1}, []float64{math.Inf(1), 1}, 2); !math.IsNaN(got) {
+			t.Fatalf("evalLinearSum(0*Inf) = %v, want NaN", got)
+		}
+
+		cols := []int{0, 1}
+		if got := evalSparseRowResidual(cols, []float64{0x1p-53, 0x1p-110}, ones[:2], -1.0); got != 1+0x1p-52 {
+			t.Fatalf("evalSparseRowResidual(1+2^-53+2^-110) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalSparseRowResidual(cols, []float64{0x1p-53, -0x1p-110}, ones[:2], -1.0); got != 1.0 {
+			t.Fatalf("evalSparseRowResidual(1+2^-53-2^-110) = %.17g, want 1", got)
+		}
+		if got := evalSparseRowResidual([]int{0, 1, 2}, []float64{1 + 0x1p-52, 0x1p-53, -0x1p-110}, ones, 0); got != 1+0x1p-52 {
+			t.Fatalf("evalSparseRowResidual(1+2^-52+2^-53-2^-110) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalSparseRowResidual(cols, []float64{0x1p-53, 0x1p-1074}, ones[:2], -1.0); got != 1+0x1p-52 {
+			t.Fatalf("evalSparseRowResidual(1+2^-53+2^-1074) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalSparseRowResidual(cols, []float64{0x1p-53, 0x1p-540}, []float64{1, 0x1p-540}, -1.0); got != 1+0x1p-52 {
+			t.Fatalf("evalSparseRowResidual(sub-subnormal) = %.17g, want %.17g", got, 1+0x1p-52)
+		}
+		if got := evalSparseRowResidual(cols, []float64{0, 1}, []float64{math.Inf(1), 1}, 0); !math.IsNaN(got) {
+			t.Fatalf("evalSparseRowResidual(0*Inf) = %v, want NaN", got)
+		}
+	})
+}
+
 // TestCrashEqualityBasisInvariants verifies Pass 1 zero-cost crash, Pass 2 positive-coefficient
 // GUB crash, exact analytical steepest-edge initialization, dense-coupling skipping, and zero
 // steady-state allocations on repeated InitCrashBasis calls.

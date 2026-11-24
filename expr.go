@@ -41,6 +41,39 @@ func ConstExpr(c float64) Expr {
 	return Expr{Constant: c}
 }
 
+//go:noinline
+func sumExprConstantsWide(exprs []Expr) float64 {
+	hasNaN := false
+	hasPosInf := false
+	hasNegInf := false
+	for i := range exprs {
+		c := exprs[i].Constant
+		if math.IsNaN(c) {
+			hasNaN = true
+			break
+		}
+		if math.IsInf(c, 1) {
+			hasPosInf = true
+		} else if math.IsInf(c, -1) {
+			hasNegInf = true
+		}
+	}
+	switch {
+	case hasNaN || (hasPosInf && hasNegInf):
+		return math.NaN()
+	case hasPosInf:
+		return math.Inf(1)
+	case hasNegInf:
+		return math.Inf(-1)
+	default:
+		var w wideDotAcc
+		for i := range exprs {
+			w.addVal(exprs[i].Constant)
+		}
+		return w.finish(math.NaN())
+	}
+}
+
 // Sum concatenates all terms and sums the constants of exprs into a single Expr.
 func Sum(exprs ...Expr) Expr {
 	totalTerms := 0
@@ -50,38 +83,10 @@ func Sum(exprs ...Expr) Expr {
 		acc.addVal(exprs[i].Constant)
 	}
 	var constant float64
-	if val, eb, ok := acc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
-		constant = val
+	if !acc.nonFin && acc.lowCount == 0 && acc.errL1 == 0 && acc.c == 0 && !isNonFinite(acc.s) {
+		constant = acc.s
 	} else {
-		hasNaN := false
-		hasPosInf := false
-		hasNegInf := false
-		for i := range exprs {
-			c := exprs[i].Constant
-			if math.IsNaN(c) {
-				hasNaN = true
-				break
-			}
-			if math.IsInf(c, 1) {
-				hasPosInf = true
-			} else if math.IsInf(c, -1) {
-				hasNegInf = true
-			}
-		}
-		switch {
-		case hasNaN || (hasPosInf && hasNegInf):
-			constant = math.NaN()
-		case hasPosInf:
-			constant = math.Inf(1)
-		case hasNegInf:
-			constant = math.Inf(-1)
-		default:
-			var w wideDotAcc
-			for i := range exprs {
-				w.addVal(exprs[i].Constant)
-			}
-			constant = w.finish(math.NaN())
-		}
+		constant = sumExprConstantsWide(exprs)
 	}
 	terms := make([]Term, 0, totalTerms)
 	for i := range exprs {

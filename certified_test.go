@@ -1879,3 +1879,366 @@ func TestCertifiedHardeningAndParserParity(t *testing.T) {
 		}
 	})
 }
+
+func assertWitnessZeroed(t *testing.T, label string, w CertifiedWitness) {
+	t.Helper()
+	if w.Status != 0 || w.Values != nil || w.Duals != nil || w.ReducedCosts != nil ||
+		w.Objective != nil || w.BestBound != nil || w.Farkas != nil || w.Unbounded != nil {
+		t.Fatalf("%s: expected zeroed CertifiedWitness, got %+v", label, w)
+	}
+}
+
+func TestCertifiedWitnessAndDeterministicBudget(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	t.Run("OptionWiringAndNilHandling", func(t *testing.T) {
+		t.Parallel()
+		if cfg := ApplyOptions(WithCertifiedWitness(nil)); cfg.Certified || cfg.certWitness != nil {
+			t.Fatalf("WithCertifiedWitness(nil) unexpectedly enabled certification: %+v", cfg)
+		}
+		var w CertifiedWitness
+		if cfg := ApplyOptions(WithCertifiedWitness(&w), WithCertified(false)); cfg.Certified || cfg.certWitness != nil {
+			t.Fatalf("WithCertified(false) did not clear certWitness: %+v", cfg)
+		}
+	})
+
+	t.Run("LPNonDyadicOneThirdAndOutwardMax", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("lp_witness_one_third", Minimize)
+		z := m.AddContVar("z", 0, math.Inf(1))
+		m.SetObjective(VarExpr(z))
+		m.AddConstraint("c", Ge(NewExpr(z.T(3)), 1))
+
+		var wit CertifiedWitness
+		res, err := m.Solve(ctx, WithCertifiedWitness(&wit))
+		if err != nil || res.Status != StatusOptimal || wit.Status != StatusOptimal {
+			t.Fatalf("lp 1/3 solve failed: res.Status=%v wit.Status=%v err=%v", res.Status, wit.Status, err)
+		}
+		oneThird := big.NewRat(1, 3)
+		if len(wit.Values) != 1 || wit.Values[0].Cmp(oneThird) != 0 {
+			t.Fatalf("wit.Values = %v, want [1/3]", wit.Values)
+		}
+		threeZ := new(big.Rat).Mul(big.NewRat(3, 1), wit.Values[0])
+		if threeZ.Cmp(big.NewRat(1, 1)) != 0 {
+			t.Fatalf("3 * wit.Values[0] = %v, want 1", threeZ)
+		}
+		if wit.Objective == nil || wit.Objective.Cmp(oneThird) != 0 {
+			t.Fatalf("wit.Objective = %v, want 1/3", wit.Objective)
+		}
+		if wit.BestBound == nil || wit.BestBound.Cmp(oneThird) != 0 {
+			t.Fatalf("wit.BestBound = %v, want 1/3", wit.BestBound)
+		}
+		if len(wit.Duals) != 1 || wit.Duals[0].Cmp(oneThird) != 0 {
+			t.Fatalf("wit.Duals = %v, want [1/3]", wit.Duals)
+		}
+		if len(wit.ReducedCosts) != 1 || wit.ReducedCosts[0].Sign() != 0 {
+			t.Fatalf("wit.ReducedCosts = %v, want [0]", wit.ReducedCosts)
+		}
+		if wit.Farkas != nil || wit.Unbounded != nil {
+			t.Fatalf("unexpected non-nil Farkas/Unbounded on optimal LP: %+v", wit)
+		}
+		if res.Values[0] != exactRatToFloat(wit.Values[0]) ||
+			res.Objective != exactRatToFloat(wit.Objective) ||
+			res.BestBound != exactRatToOutwardBound(Minimize, wit.BestBound) {
+			t.Fatalf("float projection mismatch: res=(val=%g, obj=%g, bb=%g)",
+				res.Values[0], res.Objective, res.BestBound)
+		}
+
+		// Maximize 2/3 tests ceil outward BestBound and negated user dual sign.
+		mMax := NewModel("lp_witness_max_two_thirds", Maximize)
+		zm := mMax.AddContVar("z", 0, math.Inf(1))
+		mMax.SetObjective(VarExpr(zm))
+		mMax.AddConstraint("c", Le(NewExpr(zm.T(3)), 2))
+
+		var witMax CertifiedWitness
+		resMax, errMax := mMax.Solve(ctx, WithCertifiedWitness(&witMax))
+		if errMax != nil || resMax.Status != StatusOptimal || witMax.Status != StatusOptimal {
+			t.Fatalf("max 2/3 solve failed: res.Status=%v wit.Status=%v err=%v", resMax.Status, witMax.Status, errMax)
+		}
+		twoThirds := big.NewRat(2, 3)
+		if len(witMax.Values) != 1 || witMax.Values[0].Cmp(twoThirds) != 0 {
+			t.Fatalf("witMax.Values = %v, want [2/3]", witMax.Values)
+		}
+		if witMax.BestBound == nil || witMax.BestBound.Cmp(twoThirds) != 0 {
+			t.Fatalf("witMax.BestBound = %v, want 2/3", witMax.BestBound)
+		}
+		if new(big.Rat).SetFloat64(resMax.BestBound).Cmp(twoThirds) < 0 {
+			t.Fatalf("resMax.BestBound = %.17g below exact 2/3", resMax.BestBound)
+		}
+		if len(witMax.Duals) != 1 || witMax.Duals[0].Cmp(oneThird) != 0 {
+			t.Fatalf("witMax.Duals = %v, want [1/3]", witMax.Duals)
+		}
+	})
+
+	t.Run("MILPNonDyadicWitnessAndCloneIndependence", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("milp_witness_one_third", Minimize)
+		z := m.AddContVar("z", 0, math.Inf(1))
+		x := m.AddIntVar("x", 1, 5)
+		m.SetObjective(VarExpr(z))
+		m.AddConstraint("c", Ge(NewExpr(z.T(3), x.T(-1)), 0))
+		p := m.Compile()
+
+		var wit CertifiedWitness
+		tr := NewVIPRTrace()
+		res, err := SolveCompiled(ctx, p, WithCertifiedWitness(&wit), WithVIPRTrace(tr))
+		if err != nil || res.Status != StatusOptimal || wit.Status != StatusOptimal {
+			t.Fatalf("milp 1/3 solve failed: res.Status=%v wit.Status=%v err=%v", res.Status, wit.Status, err)
+		}
+		oneThird := big.NewRat(1, 3)
+		if len(wit.Values) != 2 || wit.Values[0].Cmp(oneThird) != 0 || wit.Values[1].Cmp(big.NewRat(1, 1)) != 0 {
+			t.Fatalf("wit.Values = %v, want [1/3, 1]", wit.Values)
+		}
+		lhs := new(big.Rat).Sub(new(big.Rat).Mul(big.NewRat(3, 1), wit.Values[0]), wit.Values[1])
+		if lhs.Sign() != 0 {
+			t.Fatalf("3*z - x = %v, want 0", lhs)
+		}
+		if wit.Objective == nil || wit.Objective.Cmp(oneThird) != 0 ||
+			wit.BestBound == nil || wit.BestBound.Cmp(oneThird) != 0 {
+			t.Fatalf("wit obj/bound = (%v, %v), want (1/3, 1/3)", wit.Objective, wit.BestBound)
+		}
+		if wit.Duals != nil || wit.ReducedCosts != nil || wit.Farkas != nil || wit.Unbounded != nil {
+			t.Fatalf("expected nil LP/proof-specific fields on optimal MILP: %+v", wit)
+		}
+
+		// Mutating returned witness must not affect internal trace verification.
+		wit.Values[0].SetInt64(999)
+		wit.Objective.SetInt64(999)
+		if errV := VerifyVIPRTrace(p, tr, res, ApplyOptions(WithCertified(true))); errV != nil {
+			t.Fatalf("VerifyVIPRTrace failed after caller mutated witness: %v", errV)
+		}
+	})
+
+	t.Run("InfeasibleFarkasAndEmptyRowAndMILP", func(t *testing.T) {
+		t.Parallel()
+		mLP := NewModel("lp_infeas_farkas", Minimize)
+		x := mLP.AddContVar("x", 0, 10)
+		y := mLP.AddContVar("y", 0, 10)
+		mLP.SetObjective(NewExpr(x.T(1), y.T(1)))
+		mLP.AddConstraint("le", Le(NewExpr(x.T(1), y.T(1)), 1))
+		mLP.AddConstraint("ge", Ge(NewExpr(x.T(1), y.T(1)), 2))
+		pLP := mLP.Compile()
+
+		var witLP CertifiedWitness
+		resLP, errLP := SolveCompiled(ctx, pLP, WithCertifiedWitness(&witLP))
+		if errLP != nil || resLP.Status != StatusInfeasible || witLP.Status != StatusInfeasible {
+			t.Fatalf("infeas LP failed: status=(%v, %v) err=%v", resLP.Status, witLP.Status, errLP)
+		}
+		if len(witLP.Farkas) != 2 || !verifyExactFarkasRayRat(pLP, witLP.Farkas) {
+			t.Fatalf("invalid LP Farkas witness: %v", witLP.Farkas)
+		}
+		if witLP.Values != nil || witLP.Duals != nil || witLP.Objective != nil || witLP.BestBound != nil {
+			t.Fatalf("unexpected fields on infeasible LP: %+v", witLP)
+		}
+
+		// Empty infeasible row produces a valid Farkas ray.
+		mEmpty := NewModel("lp_empty_infeas", Minimize)
+		xe := mEmpty.AddContVar("x", 0, 1)
+		mEmpty.SetObjective(VarExpr(xe))
+		mEmpty.AddConstraint("empty", Le(Expr{}, -1))
+		pEmpty := mEmpty.Compile()
+		var witEmpty CertifiedWitness
+		resEmpty, errEmpty := SolveCompiled(ctx, pEmpty, WithCertifiedWitness(&witEmpty))
+		if errEmpty != nil || resEmpty.Status != StatusInfeasible || witEmpty.Status != StatusInfeasible {
+			t.Fatalf("empty infeas LP failed: status=(%v, %v) err=%v", resEmpty.Status, witEmpty.Status, errEmpty)
+		}
+		if len(witEmpty.Farkas) != 1 || !verifyExactFarkasRayRat(pEmpty, witEmpty.Farkas) {
+			t.Fatalf("invalid empty-row Farkas witness: %v", witEmpty.Farkas)
+		}
+
+		// Pure bound conflict leaves Farkas nil.
+		mBnd := NewModel("lp_bnd_infeas", Minimize)
+		mBnd.AddContVar("x", 3, 2)
+		var witBnd CertifiedWitness
+		resBnd, errBnd := mBnd.Solve(ctx, WithCertifiedWitness(&witBnd))
+		if errBnd != nil || resBnd.Status != StatusInfeasible || witBnd.Status != StatusInfeasible || witBnd.Farkas != nil {
+			t.Fatalf("bound conflict witness got status=(%v, %v) farkas=%v err=%v", resBnd.Status, witBnd.Status, witBnd.Farkas, errBnd)
+		}
+
+		// Infeasible MILP populates StatusInfeasible cleanly.
+		mMIP := NewModel("mip_infeas_wit", Minimize)
+		xm := mMIP.AddIntVar("x", 0, 5)
+		mMIP.SetObjective(VarExpr(xm))
+		mMIP.AddConstraint("odd", Eq(NewExpr(xm.T(2)), 1))
+		var witMIP CertifiedWitness
+		resMIP, errMIP := mMIP.Solve(ctx, WithCertifiedWitness(&witMIP))
+		if errMIP != nil || resMIP.Status != StatusInfeasible || witMIP.Status != StatusInfeasible || witMIP.Values != nil || witMIP.Objective != nil {
+			t.Fatalf("infeas MILP witness got status=(%v, %v) wit=%+v err=%v", resMIP.Status, witMIP.Status, witMIP, errMIP)
+		}
+	})
+
+	t.Run("UnboundedLPAndMILP", func(t *testing.T) {
+		t.Parallel()
+		mLP := NewModel("lp_unb_wit", Maximize)
+		x := mLP.AddContVar("x", 1, math.Inf(1))
+		mLP.SetObjective(VarExpr(x))
+		pLP := mLP.Compile()
+
+		var witLP CertifiedWitness
+		resLP, errLP := SolveCompiled(ctx, pLP, WithCertifiedWitness(&witLP))
+		if errLP != nil || resLP.Status != StatusUnbounded || witLP.Status != StatusUnbounded {
+			t.Fatalf("unbounded LP failed: status=(%v, %v) err=%v", resLP.Status, witLP.Status, errLP)
+		}
+		if witLP.Unbounded == nil || witLP.Unbounded.IsMIP || !VerifyUnboundedCertificate(pLP, *witLP.Unbounded) {
+			t.Fatalf("invalid LP unbounded witness: %+v", witLP.Unbounded)
+		}
+
+		mMIP := NewModel("mip_unb_wit", Minimize)
+		ux := mMIP.AddIntVar("ux", 0, math.Inf(1))
+		uy := mMIP.AddIntVar("uy", 0, math.Inf(1))
+		mMIP.AddConstraint("dio", Eq(NewExpr(ux.T(2), uy.T(-3)), 1))
+		mMIP.SetObjective(NewExpr(ux.T(-1), uy.T(-1)))
+		pMIP := mMIP.Compile()
+
+		var witMIP CertifiedWitness
+		resMIP, errMIP := SolveCompiled(ctx, pMIP, WithCertifiedWitness(&witMIP))
+		if errMIP != nil || resMIP.Status != StatusUnbounded || witMIP.Status != StatusUnbounded {
+			t.Fatalf("unbounded MILP failed: status=(%v, %v) err=%v", resMIP.Status, witMIP.Status, errMIP)
+		}
+		if witMIP.Unbounded == nil || !witMIP.Unbounded.IsMIP || !VerifyUnboundedCertificate(pMIP, *witMIP.Unbounded) {
+			t.Fatalf("invalid MILP unbounded witness: %+v", witMIP.Unbounded)
+		}
+	})
+
+	t.Run("LimitBestBoundAndDeterministicBudget", func(t *testing.T) {
+		t.Parallel()
+		mLim := NewModel("wit_limit_bound_mode", Maximize)
+		const nVars = 14
+		vars := make([]Var, nVars)
+		objTerms := make([]Term, nVars)
+		capTerms := make([]Term, nVars)
+		for j := range nVars {
+			vars[j] = mLim.AddBinaryVar(string(rune('a' + j)))
+			objTerms[j] = vars[j].T(float64(17 + (j*13)%19))
+			capTerms[j] = vars[j].T(float64(7 + (j*11)%17))
+		}
+		mLim.SetObjective(NewExpr(objTerms...))
+		mLim.AddConstraint("cap", Le(NewExpr(capTerms...), 53.5))
+		pLim := mLim.Compile()
+
+		var witLim CertifiedWitness
+		trLim := NewVIPRTrace()
+		resLim, errLim := SolveCompiled(ctx, pLim, WithCertifiedWitness(&witLim), WithVIPRTrace(trLim), WithMaxNodes(2), WithCuts(false))
+		if errLim != nil || resLim.Status != StatusNodeLimit || witLim.Status != StatusNodeLimit {
+			t.Fatalf("limit MILP failed: status=(%v, %v) err=%v", resLim.Status, witLim.Status, errLim)
+		}
+		if witLim.BestBound == nil || resLim.BestBound != exactRatToOutwardBound(Maximize, witLim.BestBound) {
+			t.Fatalf("limit MILP BestBound mismatch: wit=%v res=%.17g", witLim.BestBound, resLim.BestBound)
+		}
+		if len(resLim.Values) > 0 {
+			if len(witLim.Values) != nVars || witLim.Objective == nil || resLim.Objective != exactRatToFloat(witLim.Objective) {
+				t.Fatalf("limit MILP incumbent mismatch: witObj=%v resObj=%.17g len(witVals)=%d",
+					witLim.Objective, resLim.Objective, len(witLim.Values))
+			}
+		}
+
+		// Negative TimeLimit on LP yields trivial infinite BestBound (nil rational bound).
+		mLP := NewModel("wit_lp_tl", Minimize)
+		xl := mLP.AddContVar("x", 0, 10)
+		mLP.SetObjective(VarExpr(xl))
+		mLP.AddConstraint("c", Ge(VarExpr(xl), 1))
+		var witTL CertifiedWitness
+		resTL, errTL := mLP.Solve(ctx, WithCertifiedWitness(&witTL), WithTimeLimit(-time.Millisecond))
+		if errTL != nil || resTL.Status != StatusTimeLimit || witTL.Status != StatusTimeLimit {
+			t.Fatalf("LP time limit failed: status=(%v, %v) err=%v", resTL.Status, witTL.Status, errTL)
+		}
+		if witTL.BestBound != nil || witTL.Values != nil || witTL.Objective != nil {
+			t.Fatalf("expected nil finite fields on trivial LP time limit, got %+v", witTL)
+		}
+
+		// Verify deterministic work-budget enforcement on exactStop.
+		pLP := mLP.Compile()
+		lp := NewLPSolver(pLP, nil)
+		defer lp.Close()
+		detStop := exactStop{maxLPIter: 1, maxMIPNodes: 1}
+		detStop.applyToLPSolver(lp)
+		if lp.MaxIter != 1 || !lp.Deadline.IsZero() {
+			t.Fatalf("exactStop.applyToLPSolver got MaxIter=%d Deadline=%v, want MaxIter=1 and zero Deadline",
+				lp.MaxIter, lp.Deadline)
+		}
+		// Verify findExactMIPFeasibleAnchor respects maxMIPNodes / maxLPIter deterministically.
+		mHard := NewModel("hard_anchor", Minimize)
+		hVars := make([]Var, 10)
+		var oddTerms []Term
+		for j := range hVars {
+			hVars[j] = mHard.AddBinaryVar(string(rune('a' + j)))
+			oddTerms = append(oddTerms, hVars[j].T(2))
+		}
+		mHard.SetObjective(VarExpr(hVars[0]))
+		mHard.AddConstraint("odd_eq", Eq(NewExpr(oddTerms...), 3))
+		if _, okAnchor := findExactMIPFeasibleAnchor(exactStop{maxLPIter: 1, maxMIPNodes: 1}, mHard.Compile()); okAnchor {
+			t.Fatal("findExactMIPFeasibleAnchor unexpectedly succeeded on infeasible odd equality")
+		}
+		if errV := VerifyVIPRTrace(pLim, trLim, resLim, ApplyOptions(WithCertified(true))); errV != nil {
+			t.Fatalf("VerifyVIPRTrace with deterministic budget failed: %v", errV)
+		}
+	})
+
+	t.Run("EntryAndFaultInjectionFailClosedClearsWitness", func(t *testing.T) {
+		t.Parallel()
+		dirtyWitness := func() CertifiedWitness {
+			return CertifiedWitness{
+				Status:       StatusOptimal,
+				Values:       []*big.Rat{big.NewRat(7, 1)},
+				Duals:        []*big.Rat{big.NewRat(2, 1)},
+				ReducedCosts: []*big.Rat{big.NewRat(3, 1)},
+				Objective:    big.NewRat(9, 1),
+				BestBound:    big.NewRat(9, 1),
+				Farkas:       []*big.Rat{big.NewRat(1, 1)},
+				Unbounded:    &UnboundedCertificate{X0: []*big.Rat{big.NewRat(1, 1)}},
+			}
+		}
+
+		// Fault injection on LP must fail closed and clear *w.
+		mLP := NewModel("fault_lp", Minimize)
+		x := mLP.AddContVar("x", 0, 10)
+		mLP.SetObjective(VarExpr(x))
+		mLP.AddConstraint("c", Ge(VarExpr(x), 1))
+		faultLP := withGoblinCertFault(ctx, func(_ *CompiledProblem, _ *VIPRTrace, _ *lpCertWitness, res *Result) {
+			res.Objective = 999
+		})
+		wit := dirtyWitness()
+		res, err := mLP.Solve(faultLP, WithCertifiedWitness(&wit))
+		if !errors.Is(err, ErrCertificationFailed) || res.Status != StatusNumericalError {
+			t.Fatalf("faulted LP got status=%v err=%v, want StatusNumericalError + ErrCertificationFailed", res.Status, err)
+		}
+		assertWitnessZeroed(t, "fault_lp", wit)
+
+		// Fault injection on MILP must fail closed and clear *w.
+		mMIP := NewModel("fault_mip", Minimize)
+		xi := mMIP.AddIntVar("x", 0, 10)
+		mMIP.SetObjective(VarExpr(xi))
+		mMIP.AddConstraint("c", Ge(NewExpr(xi.T(2)), 3))
+		witM := dirtyWitness()
+		resM, errM := mMIP.Solve(faultLP, WithCertifiedWitness(&witM))
+		if !errors.Is(errM, ErrCertificationFailed) || resM.Status != StatusNumericalError {
+			t.Fatalf("faulted MILP got status=%v err=%v, want StatusNumericalError + ErrCertificationFailed", resM.Status, errM)
+		}
+		assertWitnessZeroed(t, "fault_mip", witM)
+
+		// Early-exit errors (nil model, invalid model, canceled context) must also clear *w.
+		witNil := dirtyWitness()
+		if _, errNil := (*Model)(nil).Solve(ctx, WithCertifiedWitness(&witNil)); !errors.Is(errNil, ErrNilModel) {
+			t.Fatalf("nil model got err=%v, want ErrNilModel", errNil)
+		}
+		assertWitnessZeroed(t, "nil_model", witNil)
+
+		mInv := NewModel("invalid_const", Minimize)
+		xiInv := mInv.AddContVar("x", 0, 1)
+		mInv.SetObjective(NewExpr(xiInv.T(1)).AddConstant(math.NaN()))
+		witInv := dirtyWitness()
+		if _, errInv := mInv.Solve(ctx, WithCertifiedWitness(&witInv)); errInv == nil {
+			t.Fatal("expected invalid model error")
+		}
+		assertWitnessZeroed(t, "invalid_model", witInv)
+
+		cancCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		witCanc := dirtyWitness()
+		if _, errCanc := mLP.Solve(cancCtx, WithCertifiedWitness(&witCanc)); !errors.Is(errCanc, context.Canceled) {
+			t.Fatalf("canceled ctx got err=%v, want context.Canceled", errCanc)
+		}
+		assertWitnessZeroed(t, "canceled_ctx", witCanc)
+	})
+}

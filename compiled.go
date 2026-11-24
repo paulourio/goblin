@@ -155,6 +155,7 @@ type exactModelRow struct {
 	termEnd      int
 	rhs          float64
 	exprConst    float64
+	intTightRHS  float64
 	hasDupLoss   bool
 	rhsInexact   bool
 	intTightened bool
@@ -162,12 +163,14 @@ type exactModelRow struct {
 }
 
 type exactModelOrig struct {
-	objConst    float64
-	objHasLoss  bool
-	objTerms    []exactModelTerm
-	rows        []exactModelRow
-	rowTerms    []exactModelTerm
-	intEqInfeas bool
+	objConst        float64
+	objHasLoss      bool
+	objTerms        []exactModelTerm
+	rows            []exactModelRow
+	rowTerms        []exactModelTerm
+	intEqInfeas     bool
+	hasIntTightened bool
+	origProb        *CompiledProblem
 }
 
 func (e *exactModelOrig) cloneZeroObj() *exactModelOrig {
@@ -178,6 +181,7 @@ func (e *exactModelOrig) cloneZeroObj() *exactModelOrig {
 	cp.objConst = 0
 	cp.objHasLoss = false
 	cp.objTerms = nil
+	cp.origProb = nil
 	return &cp
 }
 
@@ -187,6 +191,8 @@ func (e *exactModelOrig) cloneForContRelax(negateObj bool) *exactModelOrig {
 	}
 	cp := *e
 	cp.intEqInfeas = false
+	cp.hasIntTightened = false
+	cp.origProb = nil
 	if negateObj && cp.objConst != 0 {
 		cp.objConst = -cp.objConst
 	}
@@ -200,8 +206,52 @@ func (e *exactModelOrig) cloneForContRelax(negateObj bool) *exactModelOrig {
 		cp.rows = make([]exactModelRow, len(e.rows))
 		copy(cp.rows, e.rows)
 		for i := range cp.rows {
+			cp.rows[i].intTightRHS = 0
 			cp.rows[i].intTightened = false
 			cp.rows[i].intEqInfeas = false
+		}
+	}
+	return &cp
+}
+
+func (p *CompiledProblem) canonicalOrigProblem() *CompiledProblem {
+	if p != nil && p.exactOrig != nil && p.exactOrig.origProb != nil {
+		return p.exactOrig.origProb
+	}
+	return p
+}
+
+func (p *CompiledProblem) exactTightenedProblem() *CompiledProblem {
+	if p == nil || p.exactOrig == nil || !p.exactOrig.hasIntTightened {
+		return p
+	}
+	if p.exactOrig.origProb != nil {
+		return p
+	}
+	cp := *p
+	cp.lazy = nil
+	cp.rowRHS = slices.Clone(p.rowRHS)
+	cp.rowLB = slices.Clone(p.rowLB)
+	cp.rowUB = slices.Clone(p.rowUB)
+	eo := *p.exactOrig
+	eo.origProb = p.canonicalOrigProblem()
+	cp.exactOrig = &eo
+	for i := range cp.numConstraints {
+		if i >= len(eo.rows) || !eo.rows[i].intTightened {
+			continue
+		}
+		tight := eo.rows[i].intTightRHS
+		cp.rowRHS[i] = tight
+		switch cp.rowSense[i] {
+		case LessEqual:
+			cp.rowLB[i] = math.Inf(-1)
+			cp.rowUB[i] = tight
+		case GreaterEqual:
+			cp.rowLB[i] = tight
+			cp.rowUB[i] = math.Inf(1)
+		case Equal:
+			cp.rowLB[i] = tight
+			cp.rowUB[i] = tight
 		}
 	}
 	return &cp
@@ -508,6 +558,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	var origRows []exactModelRow
 	var origRowTerms []exactModelTerm
 	anyRowInexact := false
+	anyIntTightened := false
 	anyIntEqInfeas := false
 
 	for i := range mc {
@@ -569,7 +620,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			}
 		}
 
-		rowRHS := rhsHi
+		tightRHS := rhsHi
 		intTightened := false
 		intEqInfeas := false
 		if !rhsBad && rhsLo != 0 && allIntExactCoeffs &&
@@ -577,14 +628,16 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			switch c.sense {
 			case LessEqual:
 				if rhsLo < 0 {
-					rowRHS = rhsHi - 1
+					tightRHS = rhsHi - 1
 				}
 				intTightened = true
+				anyIntTightened = true
 			case GreaterEqual:
 				if rhsLo > 0 {
-					rowRHS = rhsHi + 1
+					tightRHS = rhsHi + 1
 				}
 				intTightened = true
+				anyIntTightened = true
 			case Equal:
 				intEqInfeas = true
 				anyIntEqInfeas = true
@@ -592,18 +645,18 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		}
 		p.rowNames[i] = c.name
 		p.rowSense[i] = c.sense
-		p.rowRHS[i] = rowRHS
+		p.rowRHS[i] = rhsHi
 
 		switch c.sense {
 		case LessEqual:
 			p.rowLB[i] = math.Inf(-1)
-			p.rowUB[i] = rowRHS
+			p.rowUB[i] = rhsHi
 		case GreaterEqual:
-			p.rowLB[i] = rowRHS
+			p.rowLB[i] = rhsHi
 			p.rowUB[i] = math.Inf(1)
 		case Equal:
-			p.rowLB[i] = rowRHS
-			p.rowUB[i] = rowRHS
+			p.rowLB[i] = rhsHi
+			p.rowUB[i] = rhsHi
 		}
 
 		rhsInexact := !rhsBad && rhsLo != 0
@@ -615,6 +668,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			rowMeta := exactModelRow{
 				rhs:          c.rhs,
 				exprConst:    c.exprConst,
+				intTightRHS:  tightRHS,
 				hasDupLoss:   rowHasDupLoss,
 				rhsInexact:   rhsInexact,
 				intTightened: intTightened,
@@ -635,11 +689,12 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	p.rowPtr[mc] = len(p.colIdx)
 	if objHasDupLoss || anyRowInexact {
 		eo := &exactModelOrig{
-			objConst:    m.objConst,
-			objHasLoss:  objHasDupLoss,
-			rows:        origRows,
-			rowTerms:    origRowTerms,
-			intEqInfeas: anyIntEqInfeas,
+			objConst:        m.objConst,
+			objHasLoss:      objHasDupLoss,
+			rows:            origRows,
+			rowTerms:        origRowTerms,
+			intEqInfeas:     anyIntEqInfeas,
+			hasIntTightened: anyIntTightened,
 		}
 		if objHasDupLoss {
 			eo.objTerms = make([]exactModelTerm, 0, len(m.objTerms))
@@ -776,8 +831,10 @@ func expansionTopRem(comp []float64) (top, rem float64) {
 	if len(comp) == 1 {
 		return comp[0], 0
 	}
-	for i := range len(comp) - 1 {
-		rem += comp[i]
+	rem = comp[0]
+	for i := 1; i < len(comp)-1; i++ {
+		s, e := twoSum(comp[i], rem)
+		rem = roundToOddSticky(s, e)
 	}
 	return twoSum(comp[len(comp)-1], rem)
 }
@@ -1130,17 +1187,16 @@ func (w *wideDotAcc) finishDDMultiBucket() (top, rem float64, ok bool) {
 	}
 
 	loTop, loRem := expansionTopRem(loSmall)
-	loUnscaled := math.Ldexp(math.Ldexp(roundToOddSticky(loTop, loRem), -wideHalfShift), -wideHalfShift)
-	r := 0.0
+	loSticky := roundToOddSticky(loTop, loRem)
+	tailRem := math.Ldexp(math.Ldexp(loSticky, -wideHalfShift), -wideHalfShift)
+	if tailRem == 0 && loSticky != 0 {
+		tailRem = math.Copysign(math.SmallestNonzeroFloat64, loSticky)
+	}
 	for i := range len(midMerged) - 1 {
-		r += midMerged[i]
+		s, e := twoSum(midMerged[i], tailRem)
+		tailRem = roundToOddSticky(s, e)
 	}
-	if r == 0 {
-		r = loUnscaled
-	} else {
-		r += loUnscaled
-	}
-	s, e := twoSum(midMerged[len(midMerged)-1], r)
+	s, e := twoSum(midMerged[len(midMerged)-1], tailRem)
 	return s, e, true
 }
 
@@ -1173,31 +1229,16 @@ func divDDByFloat(numTop, numRem, a, numEB float64) (val, eb float64, ok bool) {
 	return val, eb, true
 }
 
-func evalLinearSum(constant float64, coeffs, x []float64, n int) float64 {
-	k := min(n, min(len(coeffs), len(x)))
-	var acc dot2Acc
-	acc.addVal(constant)
-	for j := range k {
-		c := coeffs[j]
-		xj := x[j]
-		if c == 0 && math.Abs(xj) <= math.MaxFloat64 {
-			continue
-		}
-		if xj == 0 && math.Abs(c) <= math.MaxFloat64 {
-			continue
-		}
-		acc.addProd(c, xj)
-	}
-	if val, eb, ok := acc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
-		return val
-	}
+//go:noinline
+func evalLinearSumWide(constant float64, coeffs, x []float64, k int) float64 {
 	if math.IsNaN(constant) {
 		return math.NaN()
 	}
+	coeffs = coeffs[:k]
+	x = x[:k]
 	hasPosInf := math.IsInf(constant, 1)
 	hasNegInf := math.IsInf(constant, -1)
-	for j := range k {
-		c := coeffs[j]
+	for j, c := range coeffs {
 		xj := x[j]
 		if math.IsNaN(c) || math.IsNaN(xj) {
 			return math.NaN()
@@ -1227,38 +1268,52 @@ func evalLinearSum(constant float64, coeffs, x []float64, n int) float64 {
 	}
 	var w wideDotAcc
 	w.addVal(constant)
-	for j := range k {
-		w.addProd(coeffs[j], x[j])
+	for j, c := range coeffs {
+		w.addProd(c, x[j])
 	}
 	return w.finish(math.NaN())
 }
 
-func evalSparseRowResidual(cols []int, vals, x []float64, rhs float64) float64 {
-	if math.IsNaN(rhs) {
-		return math.NaN()
-	}
-	kLim := min(len(cols), len(vals))
+func evalLinearSum(constant float64, coeffs, x []float64, n int) float64 {
+	k := min(n, min(len(coeffs), len(x)))
+	coeffs = coeffs[:k]
+	x = x[:k]
 	var acc dot2Acc
-	acc.addVal(-rhs)
-	for k := range kLim {
-		c := vals[k]
-		xj := x[cols[k]]
-		if c == 0 && math.Abs(xj) <= math.MaxFloat64 {
-			continue
+	acc.addVal(constant)
+	for j, c := range coeffs {
+		xj := x[j]
+		if c == 0 {
+			if math.Abs(xj) <= math.MaxFloat64 {
+				continue
+			}
+			return math.NaN()
 		}
-		if xj == 0 && math.Abs(c) <= math.MaxFloat64 {
-			continue
+		if xj == 0 {
+			if math.Abs(c) <= math.MaxFloat64 {
+				continue
+			}
+			return math.NaN()
 		}
 		acc.addProd(c, xj)
 	}
-	if val, eb, ok := acc.result(); ok && eb <= 0x1p-20*max(1.0, math.Abs(val)) {
-		return val
+	if !acc.nonFin && acc.lowCount == 0 && acc.errL1 == 0 && acc.c == 0 && !isNonFinite(acc.s) {
+		return acc.s
 	}
+	return evalLinearSumWide(constant, coeffs, x, k)
+}
+
+//go:noinline
+func evalSparseRowResidualWide(cols []int, vals, x []float64, rhs float64, kLim int) float64 {
+	if math.IsNaN(rhs) {
+		return math.NaN()
+	}
+	cols = cols[:kLim]
+	vals = vals[:kLim]
 	hasPosInf := math.IsInf(rhs, -1)
 	hasNegInf := math.IsInf(rhs, 1)
-	for k := range kLim {
+	for k, col := range cols {
 		c := vals[k]
-		xj := x[cols[k]]
+		xj := x[col]
 		if math.IsNaN(c) || math.IsNaN(xj) {
 			return math.NaN()
 		}
@@ -1287,10 +1342,42 @@ func evalSparseRowResidual(cols []int, vals, x []float64, rhs float64) float64 {
 	}
 	var w wideDotAcc
 	w.addVal(-rhs)
-	for k := range kLim {
-		w.addProd(vals[k], x[cols[k]])
+	for k, col := range cols {
+		w.addProd(vals[k], x[col])
 	}
 	return w.finish(math.NaN())
+}
+
+func evalSparseRowResidual(cols []int, vals, x []float64, rhs float64) float64 {
+	if math.IsNaN(rhs) {
+		return math.NaN()
+	}
+	kLim := min(len(cols), len(vals))
+	cols = cols[:kLim]
+	vals = vals[:kLim]
+	var acc dot2Acc
+	acc.addVal(-rhs)
+	for k, col := range cols {
+		c := vals[k]
+		xj := x[col]
+		if c == 0 {
+			if math.Abs(xj) <= math.MaxFloat64 {
+				continue
+			}
+			return math.NaN()
+		}
+		if xj == 0 {
+			if math.Abs(c) <= math.MaxFloat64 {
+				continue
+			}
+			return math.NaN()
+		}
+		acc.addProd(c, xj)
+	}
+	if !acc.nonFin && acc.lowCount == 0 && acc.errL1 == 0 && acc.c == 0 && !isNonFinite(acc.s) {
+		return acc.s
+	}
+	return evalSparseRowResidualWide(cols, vals, x, rhs, kLim)
 }
 
 func evalSparseRowResidualAndTol(cols []int, vals, x, lb, ub []float64, rhs, minTol, relFactor float64) (res, rTol float64, ok bool) {

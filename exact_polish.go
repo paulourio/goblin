@@ -65,6 +65,8 @@ type exactStop struct {
 	deadline        time.Time
 	done            <-chan struct{}
 	alreadyCanceled bool
+	maxLPIter       int
+	maxMIPNodes     int
 }
 
 func exactStopFromCtx(ctx context.Context) exactStop {
@@ -88,6 +90,9 @@ func (st exactStop) applyToLPSolver(lp *LPSolver) {
 	}
 	lp.Done = st.done
 	lp.Deadline = st.deadline
+	if st.maxLPIter > 0 {
+		lp.MaxIter = st.maxLPIter
+	}
 }
 
 func exactRatFromFloat(f float64) (*big.Rat, bool) {
@@ -2475,9 +2480,27 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 	fp := shallowContRelaxProblem(p.zeroObjCopy())
 	fp.sense = Minimize
 	if fp.exactOrig != nil && p.exactOrig != nil {
+		if p.exactOrig.hasIntTightened {
+			fp.rowRHS = slices.Clone(p.rowRHS)
+			fp.rowLB = slices.Clone(p.rowLB)
+			fp.rowUB = slices.Clone(p.rowUB)
+		}
 		for i := range fp.exactOrig.rows {
 			if i < len(p.exactOrig.rows) && p.exactOrig.rows[i].intTightened {
+				tight := p.exactOrig.rows[i].intTightRHS
 				fp.exactOrig.rows[i].rhsInexact = false
+				fp.rowRHS[i] = tight
+				switch fp.rowSense[i] {
+				case LessEqual:
+					fp.rowLB[i] = math.Inf(-1)
+					fp.rowUB[i] = tight
+				case GreaterEqual:
+					fp.rowLB[i] = tight
+					fp.rowUB[i] = math.Inf(1)
+				case Equal:
+					fp.rowLB[i] = tight
+					fp.rowUB[i] = tight
+				}
 			}
 		}
 	}
@@ -2517,15 +2540,21 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 }
 
 func findExactMIPFeasibleAnchor(stop exactStop, p *CompiledProblem) ([]*big.Rat, bool) {
-	if stop.canceled() {
+	if stop.canceled() || (p.exactOrig != nil && p.exactOrig.intEqInfeas) {
 		return nil, false
 	}
-	feasProb := p.zeroObjCopy()
+	feasProb := p.exactTightenedProblem().zeroObjCopy()
 	feasProb.sense = Minimize
 
 	opt := DefaultOptions()
 	opt.EnablePresolve = false
 	opt.Workers = 1
+	if stop.maxMIPNodes > 0 {
+		opt.MaxNodes = stop.maxMIPNodes
+	}
+	if stop.maxLPIter > 0 {
+		opt.MaxIter = stop.maxLPIter
+	}
 
 	feasRes := solveBranchAndCutWithDone(feasProb, opt, time.Now(), stop.deadline, stop.done)
 	if stop.canceled() || feasRes.Status != StatusOptimal || len(feasRes.Values) != p.numVars {

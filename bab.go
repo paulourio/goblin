@@ -563,7 +563,8 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 			SolveTime: time.Since(startTime),
 		}
 	}
-	if (!opts.EnablePresolve && hasInfeasibleIntegerEqRow(p)) || (p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas) || hasEmptyInfeasibleRow(p) {
+	exactMode := opts.Certified || opts.viprTrace != nil
+	if (!opts.EnablePresolve && hasInfeasibleIntegerEqRow(p)) || (exactMode && p.isMIP && p.exactOrig != nil && p.exactOrig.intEqInfeas) || hasEmptyInfeasibleRow(p) {
 		if opts.viprTrace != nil {
 			opts.viprTrace.recordRootInfeasibleEqRow(p)
 		}
@@ -4226,6 +4227,13 @@ func resolveFixedIntLeaf(
 	}
 	if res.Status != StatusOptimal || len(res.Primal) != p.numVars {
 		return res, 0, false, false
+	}
+	if vipr != nil && vn != nil && !exactMIPFeasibleRat(p, res.Primal) {
+		for row := range p.numConstraints {
+			if vipr.certifyRowActivityFarkas(vn, row) {
+				return LPResult{Status: StatusInfeasible, Iterations: res.Iterations}, 0, true, true
+			}
+		}
 	}
 	objMin = lpMinWithShift(p, res, searchShift)
 	if isNonFinite(objMin) {
