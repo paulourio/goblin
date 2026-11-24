@@ -279,8 +279,8 @@ func readJSON(path string, dst any) error {
 	return nil
 }
 
-func isZeroPair(syms int, bytes int64) bool { return syms == 0 && bytes == 0 }
-func isPosPair(syms int, bytes int64) bool  { return syms > 0 && bytes > 0 }
+func isZeroPair(syms int, byteCount int64) bool { return syms == 0 && byteCount == 0 }
+func isPosPair(syms int, byteCount int64) bool  { return syms > 0 && byteCount > 0 }
 
 // ValidateBinarySizeTelemetry checks that all four canonical binary-size profiles are present with
 // positive byte counts and satisfy the linker dead-code-elimination zero-leakage invariants.

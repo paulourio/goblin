@@ -1,3 +1,4 @@
+// Command goblin-bench runs benchmark suites, checks parity, and updates benchmark documentation.
 package main
 
 import (

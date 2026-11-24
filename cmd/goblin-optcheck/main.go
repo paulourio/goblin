@@ -1377,7 +1377,7 @@ const (
 	guardTarget
 )
 
-func extractCpuFeatureSymKind(args, comment string) cpuFeatureSymKind {
+func extractCPUFeatureSymKind(args, comment string) cpuFeatureSymKind {
 	cleanArgs := stripTrailingComment(args)
 	sources := [2]string{cleanArgs, ""}
 	if strings.Contains(strings.ToLower(cleanArgs), "(%rip)") {
@@ -1559,7 +1559,7 @@ func evalCmpTestPolarity(cmpOp string, opnds []string, kind cpuFeatureSymKind, j
 	return guardNone
 }
 
-func isCpuFeatureGuardAt(insns []objdumpInsn, idx int) guardEdge {
+func isCPUFeatureGuardAt(insns []objdumpInsn, idx int) guardEdge {
 	if idx < 0 || idx >= len(insns) {
 		return guardNone
 	}
@@ -1569,14 +1569,14 @@ func isCpuFeatureGuardAt(insns []objdumpInsn, idx int) guardEdge {
 	}
 	if idx >= 1 {
 		prev := insns[idx-1]
-		if kind := extractCpuFeatureSymKind(prev.args, prev.comment); kind != cpuSymNone {
+		if kind := extractCPUFeatureSymKind(prev.args, prev.comment); kind != cpuSymNone {
 			return evalCmpTestPolarity(prev.op, splitATTOperands(prev.args), kind, jccOp)
 		}
 	}
 	if idx >= 2 {
 		loadIns := insns[idx-2]
 		cmpIns := insns[idx-1]
-		kind := extractCpuFeatureSymKind(loadIns.args, loadIns.comment)
+		kind := extractCPUFeatureSymKind(loadIns.args, loadIns.comment)
 		if kind != cpuSymNone && strings.HasPrefix(loadIns.op, "mov") {
 			loadOps := splitATTOperands(loadIns.args)
 			cmpOps := splitATTOperands(cmpIns.args)
@@ -1813,7 +1813,7 @@ func stepEvexFlowState(st evexFlowState, ins objdumpInsn) evexFlowState {
 	}
 	opnds := splitATTOperands(ins.args)
 	if strings.HasPrefix(op, "cmp") || strings.HasPrefix(op, "test") {
-		if kind := extractCpuFeatureSymKind(ins.args, ins.comment); kind != cpuSymNone {
+		if kind := extractCPUFeatureSymKind(ins.args, ins.comment); kind != cpuSymNone {
 			st.flagValid = true
 			st.flagZeroEq = evalCmpTestPolarity(op, opnds, kind, "je")
 			st.flagZeroNe = evalCmpTestPolarity(op, opnds, kind, "jne")
@@ -1844,7 +1844,7 @@ func stepEvexFlowState(st evexFlowState, ins objdumpInsn) evexFlowState {
 				st.zeroValid = false
 				return st
 			}
-			switch extractCpuFeatureSymKind(ins.args, ins.comment) {
+			switch extractCPUFeatureSymKind(ins.args, ins.comment) {
 			case cpuSymBool:
 				st.regs[dstReg] = provAVX512Bool
 				return st
@@ -2071,7 +2071,7 @@ func checkUnguardedEVEXWithZeroRspSlot(
 			continue
 		}
 		if strings.HasPrefix(ins.op, "j") {
-			pol := isCpuFeatureGuardAt(insns, idx)
+			pol := isCPUFeatureGuardAt(insns, idx)
 			if pol == guardNone && inSt.flagValid {
 				switch ins.op {
 				case "je", "jz":
