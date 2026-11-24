@@ -549,6 +549,7 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 		displayRes := r
 		if paired {
 			sr := buildAssignResult(ac, false, &scAcc, prov)
+			sr.PairedABBA = true
 			scalarResults[ac.ID] = sr
 			displayRes = sr
 		}
@@ -1051,6 +1052,7 @@ func benchPairedCorpusCase(
 	}
 
 	scalarBench = buildMILPBenchResult(c, gb.BackendGo, false, true, &scAcc, prov)
+	scalarBench.PairedABBA = true
 	simdBench = buildMILPBenchResult(c, gb.BackendGo, true, false, &smAcc, prov)
 	return simdBench, scalarBench, smAcc.canonRes, scAcc.canonRes
 }

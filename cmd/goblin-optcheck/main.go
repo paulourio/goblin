@@ -1188,9 +1188,10 @@ func collectTopCallers(ctx context.Context, binPath, cpuProf string, targets []s
 }
 
 type objdumpInsn struct {
-	addr string
-	op   string
-	args string
+	addr    string
+	op      string
+	args    string
+	comment string
 }
 
 func normalizeHexAddr(addr string) string {
@@ -1265,6 +1266,11 @@ func isEVEXInsn(op, args string) bool {
 		"vpcmpq", "vpcmpuq", "vscalef", "vrcp14", "vrsqrt14",
 		"vrndscale", "vfixupimm", "vfpclass", "vptestm",
 		"vpmovm2", "vpmovq2m", "vpmovd2m",
+		"vpmullq", "vpopcnt", "vplzcnt", "vcvtqq2p", "vcvtuqq2p",
+		"vcvtpd2qq", "vcvtpd2uqq", "vcvttpd2qq", "vcvttpd2uqq",
+		"vrangep", "vreducep", "vgetmant", "vgetexp", "vdbpsadbw",
+		"vpmultishiftqb", "vpconflict", "vpshufbitqmb", "vpexpand",
+		"vpcompress", "vprol", "vpror",
 	} {
 		if strings.HasPrefix(opL, prefix) {
 			return true
@@ -1339,38 +1345,250 @@ func isMorestackTarget(args string) bool {
 	return strings.HasPrefix(sym, "runtime.morestack")
 }
 
-func isCpuFeatureCheck(args string) bool {
-	for tok := range strings.FieldsSeq(stripTrailingComment(args)) {
-		if strings.HasPrefix(tok, "<") && strings.HasSuffix(tok, ">") && len(tok) > 2 {
-			inner := strings.ToLower(tok[1 : len(tok)-1])
-			if strings.Contains(inner, "hasavx512") ||
-				strings.Contains(inner, "x86hasavx512") ||
-				strings.Contains(inner, "activetier") {
-				return true
+func isAVX512KernelSymbol(sym string) bool {
+	s := strings.ToLower(strings.TrimSpace(sym))
+	s = strings.TrimSuffix(s, ".abi0")
+	s = strings.TrimSuffix(s, ".abiinternal")
+	return strings.HasSuffix(s, "avx512")
+}
+
+func isAVX512HelperCall(op, args string) bool {
+	opL, argsEff := normalizeX86PrefixOpArgs(op, args)
+	if opL != "call" && opL != "callq" && opL != "jmp" && opL != "jmpq" {
+		return false
+	}
+	sym := parseTargetSymbol(argsEff)
+	return sym != "" && strings.Contains(strings.ToLower(sym), "avx512")
+}
+
+type cpuFeatureSymKind uint8
+
+const (
+	cpuSymNone cpuFeatureSymKind = iota
+	cpuSymBool
+	cpuSymActiveTier
+)
+
+type guardEdge uint8
+
+const (
+	guardNone guardEdge = iota
+	guardFallthrough
+	guardTarget
+)
+
+func extractCpuFeatureSymKind(args, comment string) cpuFeatureSymKind {
+	cleanArgs := stripTrailingComment(args)
+	sources := [2]string{cleanArgs, ""}
+	if strings.Contains(strings.ToLower(cleanArgs), "(%rip)") {
+		cTrim, _, _ := strings.Cut(comment, "//")
+		sources[1] = cTrim
+	}
+	for _, src := range sources {
+		if src == "" {
+			continue
+		}
+		for tok := range strings.FieldsSeq(src) {
+			if strings.HasPrefix(tok, "<") && strings.HasSuffix(tok, ">") && len(tok) > 2 {
+				inner := strings.ToLower(tok[1 : len(tok)-1])
+				base, _, _ := strings.Cut(inner, "+")
+				if strings.Contains(base, "hasavx512") || strings.Contains(base, "x86hasavx512") {
+					return cpuSymBool
+				}
+				if strings.Contains(base, "activetier") {
+					return cpuSymActiveTier
+				}
 			}
 		}
 	}
-	return false
+	return cpuSymNone
 }
 
-func isCpuFeatureGuardAt(insns []objdumpInsn, idx int) bool {
-	if idx < 0 || idx >= len(insns) {
-		return false
+func splitATTOperands(args string) []string {
+	clean := strings.TrimSpace(stripTrailingComment(args))
+	if clean == "" {
+		return nil
 	}
-	op := insns[idx].op
-	if op == "jmp" || op == "jmpq" || !strings.HasPrefix(op, "j") {
-		return false
+	var out []string
+	var cur strings.Builder
+	depth := 0
+	for i := range len(clean) {
+		ch := clean[i]
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				if tok := strings.TrimSpace(cur.String()); tok != "" {
+					out = append(out, tok)
+				}
+				cur.Reset()
+				continue
+			}
+		}
+		cur.WriteByte(ch)
 	}
-	if idx >= 1 && isCpuFeatureCheck(insns[idx-1].args) {
-		return true
+	if tok := strings.TrimSpace(cur.String()); tok != "" {
+		out = append(out, tok)
 	}
-	if idx >= 2 && isCpuFeatureCheck(insns[idx-2].args) {
-		prevOp := insns[idx-1].op
-		if strings.HasPrefix(prevOp, "cmp") || strings.HasPrefix(prevOp, "test") {
-			return true
+	return out
+}
+
+func parseATTImm(opnd string) (int64, bool) {
+	t := strings.TrimSpace(opnd)
+	if !strings.HasPrefix(t, "$") {
+		return 0, false
+	}
+	numStr := strings.TrimSpace(t[1:])
+	if v, err := strconv.ParseInt(numStr, 0, 64); err == nil {
+		return v, true
+	}
+	if u, err := strconv.ParseUint(numStr, 0, 64); err == nil {
+		return int64(u), true
+	}
+	return 0, false
+}
+
+var x86GPRIndex = map[string]int{
+	"al": 0, "ah": 0, "ax": 0, "eax": 0, "rax": 0,
+	"bl": 1, "bh": 1, "bx": 1, "ebx": 1, "rbx": 1,
+	"cl": 2, "ch": 2, "cx": 2, "ecx": 2, "rcx": 2,
+	"dl": 3, "dh": 3, "dx": 3, "edx": 3, "rdx": 3,
+	"sil": 4, "si": 4, "esi": 4, "rsi": 4,
+	"dil": 5, "di": 5, "edi": 5, "rdi": 5,
+	"bpl": 6, "bp": 6, "ebp": 6, "rbp": 6,
+	"spl": 7, "sp": 7, "esp": 7, "rsp": 7,
+	"r8b": 8, "r8w": 8, "r8d": 8, "r8": 8,
+	"r9b": 9, "r9w": 9, "r9d": 9, "r9": 9,
+	"r10b": 10, "r10w": 10, "r10d": 10, "r10": 10,
+	"r11b": 11, "r11w": 11, "r11d": 11, "r11": 11,
+	"r12b": 12, "r12w": 12, "r12d": 12, "r12": 12,
+	"r13b": 13, "r13w": 13, "r13d": 13, "r13": 13,
+	"r14b": 14, "r14w": 14, "r14d": 14, "r14": 14,
+	"r15b": 15, "r15w": 15, "r15d": 15, "r15": 15,
+}
+
+func parseGPRIndex(opnd string) int {
+	t := strings.TrimSpace(opnd)
+	if !strings.HasPrefix(t, "%") {
+		return -1
+	}
+	if idx, ok := x86GPRIndex[strings.ToLower(t[1:])]; ok {
+		return idx
+	}
+	return -1
+}
+
+func parseRspDispOffset(opnd string) (int, bool) {
+	t := strings.ToLower(strings.TrimSpace(opnd))
+	dispStr, ok := strings.CutSuffix(t, "(%rsp)")
+	if !ok {
+		return 0, false
+	}
+	dispStr = strings.TrimSpace(dispStr)
+	if dispStr == "" {
+		return 0, true
+	}
+	v, err := strconv.ParseInt(dispStr, 0, 32)
+	if err != nil || v < 0 {
+		return 0, false
+	}
+	return int(v), true
+}
+
+func polarityForEqConst(jccOp string, eqGuardsAVX512 bool) guardEdge {
+	switch jccOp {
+	case "je", "jz":
+		if eqGuardsAVX512 {
+			return guardTarget
+		}
+		return guardFallthrough
+	case "jne", "jnz":
+		if eqGuardsAVX512 {
+			return guardFallthrough
+		}
+		return guardTarget
+	default:
+		return guardNone
+	}
+}
+
+func evalCmpTestPolarity(cmpOp string, opnds []string, kind cpuFeatureSymKind, jccOp string) guardEdge {
+	if len(opnds) != 2 {
+		return guardNone
+	}
+	if strings.HasPrefix(cmpOp, "test") {
+		if kind != cpuSymBool {
+			return guardNone
+		}
+		if imm, ok := parseATTImm(opnds[0]); ok && imm == 0 {
+			return guardNone
+		}
+		if imm, ok := parseATTImm(opnds[1]); ok && imm == 0 {
+			return guardNone
+		}
+		return polarityForEqConst(jccOp, false)
+	}
+	if !strings.HasPrefix(cmpOp, "cmp") {
+		return guardNone
+	}
+	imm, okImm := parseATTImm(opnds[0])
+	if !okImm {
+		imm, okImm = parseATTImm(opnds[1])
+	}
+	if !okImm {
+		return guardNone
+	}
+	switch kind {
+	case cpuSymBool:
+		switch imm {
+		case 0:
+			return polarityForEqConst(jccOp, false)
+		case 1:
+			return polarityForEqConst(jccOp, true)
+		}
+	case cpuSymActiveTier:
+		if imm == 2 {
+			return polarityForEqConst(jccOp, true)
 		}
 	}
-	return false
+	return guardNone
+}
+
+func isCpuFeatureGuardAt(insns []objdumpInsn, idx int) guardEdge {
+	if idx < 0 || idx >= len(insns) {
+		return guardNone
+	}
+	jccOp := insns[idx].op
+	if jccOp == "jmp" || jccOp == "jmpq" || !strings.HasPrefix(jccOp, "j") {
+		return guardNone
+	}
+	if idx >= 1 {
+		prev := insns[idx-1]
+		if kind := extractCpuFeatureSymKind(prev.args, prev.comment); kind != cpuSymNone {
+			return evalCmpTestPolarity(prev.op, splitATTOperands(prev.args), kind, jccOp)
+		}
+	}
+	if idx >= 2 {
+		loadIns := insns[idx-2]
+		cmpIns := insns[idx-1]
+		kind := extractCpuFeatureSymKind(loadIns.args, loadIns.comment)
+		if kind != cpuSymNone && strings.HasPrefix(loadIns.op, "mov") {
+			loadOps := splitATTOperands(loadIns.args)
+			cmpOps := splitATTOperands(cmpIns.args)
+			if len(loadOps) == 2 && len(cmpOps) == 2 {
+				dstReg := parseGPRIndex(loadOps[1])
+				if dstReg >= 0 && (parseGPRIndex(cmpOps[0]) == dstReg || parseGPRIndex(cmpOps[1]) == dstReg) {
+					return evalCmpTestPolarity(cmpIns.op, cmpOps, kind, jccOp)
+				}
+			}
+		}
+	}
+	return guardNone
 }
 
 func parseJumpTargetHex(args string) string {
@@ -1395,26 +1613,513 @@ func parseJumpTargetHex(args string) string {
 	return normalizeHexAddr(hexTok)
 }
 
-func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAuditReport) {
-	hasEVEX := false
-	hasVEXYMM := false
+type regProv uint8
+
+const (
+	provUnvisited regProv = iota
+	provZero
+	provAVX512Bool
+	provActiveTier
+	provUnknown
+)
+
+func joinRegProv(a, b regProv) regProv {
+	if a == provUnvisited {
+		return b
+	}
+	if b == provUnvisited || a == b {
+		return a
+	}
+	if a == provUnknown || b == provUnknown {
+		return provUnknown
+	}
+	if a == provZero {
+		return b
+	}
+	if b == provZero {
+		return a
+	}
+	return provUnknown
+}
+
+type evexFlowState struct {
+	regs       [16]regProv
+	spillOff   int
+	spillProv  regProv
+	zeroRspOff int
+	zeroValid  bool
+	flagValid  bool
+	flagZeroEq guardEdge
+	flagZeroNe guardEdge
+}
+
+func joinGuardEdge(a, b guardEdge) guardEdge {
+	if a == b {
+		return a
+	}
+	return guardNone
+}
+
+func mergeEvexFlowState(dst *evexFlowState, visited bool, src evexFlowState) bool {
+	if !visited {
+		*dst = src
+		return true
+	}
+	changed := false
+	for r := range dst.regs {
+		joined := joinRegProv(dst.regs[r], src.regs[r])
+		if joined != dst.regs[r] {
+			dst.regs[r] = joined
+			changed = true
+		}
+	}
+	if dst.spillOff != src.spillOff {
+		if dst.spillProv != provUnknown || dst.spillOff != -1 {
+			dst.spillOff = -1
+			dst.spillProv = provUnknown
+			changed = true
+		}
+	} else {
+		joined := joinRegProv(dst.spillProv, src.spillProv)
+		if joined != dst.spillProv {
+			dst.spillProv = joined
+			changed = true
+		}
+	}
+	if dst.zeroValid {
+		if !src.zeroValid || dst.zeroRspOff != src.zeroRspOff {
+			dst.zeroValid = false
+			changed = true
+		}
+	}
+	if dst.flagValid {
+		if !src.flagValid {
+			dst.flagValid = false
+			changed = true
+		} else {
+			ze := joinGuardEdge(dst.flagZeroEq, src.flagZeroEq)
+			zn := joinGuardEdge(dst.flagZeroNe, src.flagZeroNe)
+			if ze != dst.flagZeroEq || zn != dst.flagZeroNe {
+				dst.flagZeroEq = ze
+				dst.flagZeroNe = zn
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func clobberMentionedGPRs(st *evexFlowState, args string) {
+	clean := stripTrailingComment(args)
+	for i := range len(clean) {
+		if clean[i] != '%' {
+			continue
+		}
+		end := i + 1
+		for end < len(clean) {
+			c := clean[end]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+				end++
+			} else {
+				break
+			}
+		}
+		if r := parseGPRIndex(clean[i:end]); r >= 0 {
+			st.regs[r] = provUnknown
+		}
+	}
+}
+
+func evalRegCmpTestFlags(st *evexFlowState, op string, opnds []string) {
+	st.flagValid = false
+	if len(opnds) != 2 {
+		return
+	}
+	if strings.HasPrefix(op, "test") {
+		r0 := parseGPRIndex(opnds[0])
+		r1 := parseGPRIndex(opnds[1])
+		p := provUnknown
+		if r0 >= 0 && r0 == r1 {
+			p = st.regs[r0]
+		} else if r0 >= 0 {
+			if imm, ok := parseATTImm(opnds[1]); ok && imm != 0 {
+				p = st.regs[r0]
+			}
+		} else if r1 >= 0 {
+			if imm, ok := parseATTImm(opnds[0]); ok && imm != 0 {
+				p = st.regs[r1]
+			}
+		}
+		switch p {
+		case provZero, provAVX512Bool:
+			st.flagValid = true
+			st.flagZeroEq = guardFallthrough
+			st.flagZeroNe = guardTarget
+		}
+		return
+	}
+	if !strings.HasPrefix(op, "cmp") {
+		return
+	}
+	var imm int64
+	reg := -1
+	if v, ok := parseATTImm(opnds[0]); ok {
+		imm = v
+		reg = parseGPRIndex(opnds[1])
+	} else if v, ok := parseATTImm(opnds[1]); ok {
+		imm = v
+		reg = parseGPRIndex(opnds[0])
+	}
+	if reg < 0 {
+		return
+	}
+	switch st.regs[reg] {
+	case provZero:
+		st.flagValid = true
+		if imm == 0 {
+			st.flagZeroEq = guardFallthrough
+			st.flagZeroNe = guardTarget
+		} else {
+			st.flagZeroEq = guardTarget
+			st.flagZeroNe = guardFallthrough
+		}
+	case provAVX512Bool:
+		switch imm {
+		case 0:
+			st.flagValid = true
+			st.flagZeroEq = guardFallthrough
+			st.flagZeroNe = guardTarget
+		case 1:
+			st.flagValid = true
+			st.flagZeroEq = guardTarget
+			st.flagZeroNe = guardFallthrough
+		}
+	case provActiveTier:
+		if imm == 2 {
+			st.flagValid = true
+			st.flagZeroEq = guardTarget
+			st.flagZeroNe = guardFallthrough
+		}
+	}
+}
+
+func stepEvexFlowState(st evexFlowState, ins objdumpInsn) evexFlowState {
+	op := ins.op
+	if op == "nop" || op == "nopl" || op == "nopw" || op == "endbr64" {
+		return st
+	}
+	if strings.HasPrefix(op, "j") {
+		return st
+	}
+	opnds := splitATTOperands(ins.args)
+	if strings.HasPrefix(op, "cmp") || strings.HasPrefix(op, "test") {
+		if kind := extractCpuFeatureSymKind(ins.args, ins.comment); kind != cpuSymNone {
+			st.flagValid = true
+			st.flagZeroEq = evalCmpTestPolarity(op, opnds, kind, "je")
+			st.flagZeroNe = evalCmpTestPolarity(op, opnds, kind, "jne")
+			return st
+		}
+		evalRegCmpTestFlags(&st, op, opnds)
+		return st
+	}
+	if strings.HasPrefix(op, "ucomi") || strings.HasPrefix(op, "comi") {
+		st.flagValid = false
+		return st
+	}
+	if strings.HasPrefix(op, "xor") && len(opnds) == 2 {
+		r0 := parseGPRIndex(opnds[0])
+		r1 := parseGPRIndex(opnds[1])
+		st.flagValid = false
+		if r0 >= 0 && r0 == r1 {
+			st.regs[r0] = provZero
+			return st
+		}
+	}
+	if strings.HasPrefix(op, "mov") && len(opnds) == 2 {
+		src, dst := opnds[0], opnds[1]
+		if dstReg := parseGPRIndex(dst); dstReg >= 0 {
+			if dstReg == 7 {
+				st.spillOff = -1
+				st.spillProv = provUnknown
+				st.zeroValid = false
+				return st
+			}
+			switch extractCpuFeatureSymKind(ins.args, ins.comment) {
+			case cpuSymBool:
+				st.regs[dstReg] = provAVX512Bool
+				return st
+			case cpuSymActiveTier:
+				st.regs[dstReg] = provActiveTier
+				return st
+			}
+			if imm, ok := parseATTImm(src); ok {
+				if imm == 0 {
+					st.regs[dstReg] = provZero
+				} else {
+					st.regs[dstReg] = provUnknown
+				}
+				return st
+			}
+			if srcReg := parseGPRIndex(src); srcReg >= 0 {
+				st.regs[dstReg] = st.regs[srcReg]
+				return st
+			}
+			if rspOff, ok := parseRspDispOffset(src); ok {
+				if st.zeroValid && rspOff == st.zeroRspOff {
+					st.regs[dstReg] = provZero
+				} else if st.spillOff == rspOff && st.spillProv != provUnvisited {
+					st.regs[dstReg] = st.spillProv
+				} else {
+					st.regs[dstReg] = provUnknown
+				}
+				return st
+			}
+			st.regs[dstReg] = provUnknown
+			return st
+		}
+		if rspOff, ok := parseRspDispOffset(dst); ok {
+			if st.zeroValid && rspOff == st.zeroRspOff {
+				st.zeroValid = false
+			}
+			if srcReg := parseGPRIndex(src); srcReg >= 0 && (st.regs[srcReg] == provAVX512Bool || st.regs[srcReg] == provActiveTier) {
+				st.spillOff = rspOff
+				st.spillProv = st.regs[srcReg]
+			} else if st.spillOff == rspOff {
+				st.spillOff = -1
+				st.spillProv = provUnknown
+			}
+			return st
+		}
+	}
+	if op == "call" || op == "callq" {
+		for r := range st.regs {
+			st.regs[r] = provUnknown
+		}
+		st.flagValid = false
+		return st
+	}
+	if op == "push" || op == "pushq" {
+		shiftTrackedRspOffsets(&st, 8)
+		st.flagValid = false
+		return st
+	}
+	if op == "pop" || op == "popq" {
+		shiftTrackedRspOffsets(&st, -8)
+		st.flagValid = false
+		clobberMentionedGPRs(&st, ins.args)
+		return st
+	}
+	st.flagValid = false
+	if len(opnds) == 2 && parseGPRIndex(opnds[1]) == 7 {
+		if imm, ok := parseATTImm(opnds[0]); ok {
+			switch op {
+			case "sub", "subq", "subl":
+				shiftTrackedRspOffsets(&st, int(imm))
+				return st
+			case "add", "addq", "addl":
+				shiftTrackedRspOffsets(&st, -int(imm))
+				return st
+			}
+		}
+	}
+	if len(opnds) > 0 {
+		last := opnds[len(opnds)-1]
+		if parseGPRIndex(last) == 7 {
+			st.spillOff = -1
+			st.spillProv = provUnknown
+			st.zeroValid = false
+		}
+		if rspOff, ok := parseRspDispOffset(last); ok {
+			if st.zeroValid && rspOff == st.zeroRspOff {
+				st.zeroValid = false
+			}
+			if st.spillOff == rspOff {
+				st.spillOff = -1
+				st.spillProv = provUnknown
+			}
+		}
+	}
+	clobberMentionedGPRs(&st, ins.args)
+	return st
+}
+
+func shiftTrackedRspOffsets(st *evexFlowState, delta int) {
+	if st.spillOff >= 0 {
+		if st.spillOff+delta >= 0 {
+			st.spillOff += delta
+		} else {
+			st.spillOff = -1
+			st.spillProv = provUnknown
+		}
+	}
+	if st.zeroValid {
+		if st.zeroRspOff+delta >= 0 {
+			st.zeroRspOff += delta
+		} else {
+			st.zeroValid = false
+		}
+	}
+}
+
+type unguardedCallSite struct {
+	callee        string
+	zeroArgRspOff int
+	hasConstZero  bool
+}
+
+func detectImmediateZeroStackByteBeforeCall(insns []objdumpInsn, callIdx int) (int, bool) {
+	for back := callIdx - 1; back >= max(0, callIdx-6); back-- {
+		ins := insns[back]
+		if strings.HasPrefix(ins.op, "j") || ins.op == "call" || ins.op == "callq" || isRetInsn(ins.op, ins.args) {
+			break
+		}
+		if ins.op == "movb" {
+			opnds := splitATTOperands(ins.args)
+			if len(opnds) == 2 {
+				imm, okImm := parseATTImm(opnds[0])
+				off, okOff := parseRspDispOffset(opnds[1])
+				if okImm && okOff && imm == 0 {
+					return off, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func checkUnguardedEVEX(insns []objdumpInsn, addrToIdx map[string]int) bool {
+	return checkUnguardedEVEXWithZeroRspSlot(insns, addrToIdx, -1, nil)
+}
+
+func checkUnguardedEVEXWithZeroRspSlot(
+	insns []objdumpInsn,
+	addrToIdx map[string]int,
+	zeroRspOff int,
+	callSites *[]unguardedCallSite,
+) bool {
+	if len(insns) == 0 {
+		return false
+	}
+	visited := make([]bool, len(insns))
+	states := make([]evexFlowState, len(insns))
+	inQueue := make([]bool, len(insns))
+	queue := make([]int, 0, len(insns))
+
+	entry := evexFlowState{
+		spillOff:   -1,
+		spillProv:  provUnknown,
+		zeroRspOff: zeroRspOff,
+		zeroValid:  zeroRspOff >= 0,
+	}
+	for r := range entry.regs {
+		entry.regs[r] = provUnknown
+	}
+	enqueue := func(idx int, st evexFlowState) {
+		if idx < 0 || idx >= len(insns) {
+			return
+		}
+		if mergeEvexFlowState(&states[idx], visited[idx], st) {
+			visited[idx] = true
+			if !inQueue[idx] {
+				inQueue[idx] = true
+				queue = append(queue, idx)
+			}
+		}
+	}
+	enqueue(0, entry)
+
+	foundUnguarded := false
+	for head := 0; head < len(queue); {
+		idx := queue[head]
+		head++
+		inQueue[idx] = false
+
+		ins := insns[idx]
+		inSt := states[idx]
+		if isEVEXInsn(ins.op, ins.args) || isAVX512HelperCall(ins.op, ins.args) {
+			if callSites == nil {
+				return true
+			}
+			foundUnguarded = true
+		}
+		if isRetInsn(ins.op, ins.args) || ins.op == "ud2" || ins.op == "int3" {
+			continue
+		}
+		if ins.op == "call" || ins.op == "callq" {
+			if isNoreturnRuntimeCall(ins.args) || isMorestackTarget(ins.args) {
+				continue
+			}
+			if callSites != nil {
+				if sym := parseTargetSymbol(ins.args); sym != "" {
+					off, ok := detectImmediateZeroStackByteBeforeCall(insns, idx)
+					*callSites = append(*callSites, unguardedCallSite{
+						callee:        sym,
+						zeroArgRspOff: off,
+						hasConstZero:  ok,
+					})
+				}
+			}
+			enqueue(idx+1, stepEvexFlowState(inSt, ins))
+			continue
+		}
+		if ins.op == "jmp" || ins.op == "jmpq" {
+			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
+				if tgtIdx, ok := addrToIdx[tgt]; ok {
+					enqueue(tgtIdx, stepEvexFlowState(inSt, ins))
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(ins.op, "j") {
+			pol := isCpuFeatureGuardAt(insns, idx)
+			if pol == guardNone && inSt.flagValid {
+				switch ins.op {
+				case "je", "jz":
+					pol = inSt.flagZeroEq
+				case "jne", "jnz":
+					pol = inSt.flagZeroNe
+				}
+			}
+			outSt := stepEvexFlowState(inSt, ins)
+			if pol != guardTarget {
+				if tgt := parseJumpTargetHex(ins.args); tgt != "" {
+					if tgtIdx, ok := addrToIdx[tgt]; ok {
+						enqueue(tgtIdx, outSt)
+					}
+				}
+			}
+			if pol != guardFallthrough {
+				enqueue(idx+1, outSt)
+			}
+			continue
+		}
+		enqueue(idx+1, stepEvexFlowState(inSt, ins))
+	}
+	return foundUnguarded
+}
+
+type parsedObjdumpFunc struct {
+	name          string
+	insns         []objdumpInsn
+	addrToIdx     map[string]int
+	hasEVEX       bool
+	hasVEXYMM     bool
+	hasAVX512Call bool
+}
+
+func auditFuncVectorCFG(fn *parsedObjdumpFunc, report *vectorAuditReport) {
+	funcName := fn.name
+	insns := fn.insns
 	for i := range insns {
 		insns[i].op, insns[i].args = normalizeX86PrefixOpArgs(insns[i].op, insns[i].args)
 		if isEVEXInsn(insns[i].op, insns[i].args) {
-			hasEVEX = true
+			fn.hasEVEX = true
 		} else if isVEXYMMInsn(insns[i].op, insns[i].args) {
-			hasVEXYMM = true
+			fn.hasVEXYMM = true
 		}
-	}
-	if !hasEVEX && !hasVEXYMM {
-		return
-	}
-	if hasEVEX {
-		report.EVEXFuncCount++
-		report.EVEXFuncs = append(report.EVEXFuncs, funcName)
-	}
-	if hasVEXYMM {
-		report.VEXYMMFuncCount++
+		if isAVX512HelperCall(insns[i].op, insns[i].args) {
+			fn.hasAVX512Call = true
+		}
 	}
 
 	recorded := make(map[string]bool)
@@ -1432,21 +2137,29 @@ func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAudi
 		})
 	}
 
-	addrToIdx := make(map[string]int, len(insns))
+	fn.addrToIdx = make(map[string]int, len(insns))
 	for i, ins := range insns {
-		if _, dup := addrToIdx[ins.addr]; dup {
-			addHazard(ins, "DUPLICATE_ADDR")
+		if _, dup := fn.addrToIdx[ins.addr]; dup {
+			if fn.hasEVEX || fn.hasVEXYMM {
+				addHazard(ins, "DUPLICATE_ADDR")
+			}
 			continue
 		}
-		addrToIdx[ins.addr] = i
+		fn.addrToIdx[ins.addr] = i
 	}
 
-	if hasEVEX && !strings.Contains(strings.ToLower(funcName), "avx512") {
-		if checkUnguardedEVEX(insns, addrToIdx) {
-			report.UnguardedEVEX = append(report.UnguardedEVEX, funcName)
-		}
+	if !fn.hasEVEX && !fn.hasVEXYMM {
+		return
+	}
+	if fn.hasEVEX {
+		report.EVEXFuncCount++
+		report.EVEXFuncs = append(report.EVEXFuncs, funcName)
+	}
+	if fn.hasVEXYMM {
+		report.VEXYMMFuncCount++
 	}
 
+	addrToIdx := fn.addrToIdx
 	seen := make([]bool, len(insns)*2)
 	type cfgState struct {
 		idx   int
@@ -1541,68 +2254,38 @@ func auditFuncVectorCFG(funcName string, insns []objdumpInsn, report *vectorAudi
 	}
 }
 
-func checkUnguardedEVEX(insns []objdumpInsn, addrToIdx map[string]int) bool {
-	visited := make([]bool, len(insns))
-	queue := make([]int, 0, len(insns))
-	enqueue := func(idx int) {
-		if idx >= 0 && idx < len(insns) && !visited[idx] {
-			visited[idx] = true
-			queue = append(queue, idx)
-		}
+func recordNonBranchSymbolRefs(ins objdumpInsn, addrTaken map[string]bool) {
+	if ins.op == "call" || ins.op == "callq" || strings.HasPrefix(ins.op, "j") {
+		return
 	}
-	enqueue(0)
-
-	for head := 0; head < len(queue); {
-		idx := queue[head]
-		head++
-		ins := insns[idx]
-		if isEVEXInsn(ins.op, ins.args) {
-			return true
-		}
-		if isRetInsn(ins.op, ins.args) || ins.op == "ud2" || ins.op == "int3" {
-			continue
-		}
-		if ins.op == "call" || ins.op == "callq" {
-			if isNoreturnRuntimeCall(ins.args) {
-				continue
-			}
-			enqueue(idx + 1)
-			continue
-		}
-		if ins.op == "jmp" || ins.op == "jmpq" {
-			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
-				if tgtIdx, ok := addrToIdx[tgt]; ok {
-					enqueue(tgtIdx)
+	for _, src := range [2]string{ins.args, ins.comment} {
+		for tok := range strings.FieldsSeq(src) {
+			if strings.HasPrefix(tok, "<") && strings.HasSuffix(tok, ">") && len(tok) > 2 {
+				sym, _, _ := strings.Cut(tok[1:len(tok)-1], "+")
+				if sym != "" {
+					addrTaken[sym] = true
 				}
 			}
-			continue
 		}
-		if strings.HasPrefix(ins.op, "j") {
-			if isCpuFeatureGuardAt(insns, idx) {
-				continue
-			}
-			if tgt := parseJumpTargetHex(ins.args); tgt != "" {
-				if tgtIdx, ok := addrToIdx[tgt]; ok {
-					enqueue(tgtIdx)
-				}
-			}
-			enqueue(idx + 1)
-			continue
-		}
-		enqueue(idx + 1)
 	}
-	return false
 }
 
 func auditObjdumpVectorCFG(raw string) vectorAuditReport {
 	const modPrefix = "github.com/paulourio/goblin"
 	report := vectorAuditReport{Available: true}
 
+	var funcs []parsedObjdumpFunc
+	addrTaken := make(map[string]bool)
 	curFunc := ""
 	var insns []objdumpInsn
 	flushFunc := func() {
 		if curFunc != "" && strings.Contains(curFunc, modPrefix) && len(insns) > 0 {
-			auditFuncVectorCFG(curFunc, insns, &report)
+			copied := make([]objdumpInsn, len(insns))
+			copy(copied, insns)
+			funcs = append(funcs, parsedObjdumpFunc{
+				name:  curFunc,
+				insns: copied,
+			})
 		}
 		curFunc = ""
 		insns = insns[:0]
@@ -1618,18 +2301,68 @@ func auditObjdumpVectorCFG(raw string) vectorAuditReport {
 			continue
 		}
 		codePart := line
-		if before, _, hasComment := strings.Cut(line, "#"); hasComment {
+		commentPart := ""
+		if before, after, hasComment := strings.Cut(line, "#"); hasComment {
 			codePart = before
+			commentPart = strings.TrimSpace(after)
 		}
 		if im := reObjdumpInsn.FindStringSubmatch(codePart); im != nil {
-			insns = append(insns, objdumpInsn{
-				addr: normalizeHexAddr(im[1]),
-				op:   strings.ToLower(im[2]),
-				args: strings.TrimSpace(im[3]),
-			})
+			ins := objdumpInsn{
+				addr:    normalizeHexAddr(im[1]),
+				op:      strings.ToLower(im[2]),
+				args:    strings.TrimSpace(im[3]),
+				comment: commentPart,
+			}
+			recordNonBranchSymbolRefs(ins, addrTaken)
+			insns = append(insns, ins)
 		}
 	}
 	flushFunc()
+
+	for i := range funcs {
+		auditFuncVectorCFG(&funcs[i], &report)
+	}
+
+	unguardedSitesByCallee := make(map[string][]unguardedCallSite)
+	unguardedDirect := make([]bool, len(funcs))
+	for i := range funcs {
+		fn := &funcs[i]
+		if isAVX512KernelSymbol(fn.name) {
+			continue
+		}
+		var sites []unguardedCallSite
+		unguardedDirect[i] = checkUnguardedEVEXWithZeroRspSlot(fn.insns, fn.addrToIdx, -1, &sites)
+		for _, s := range sites {
+			unguardedSitesByCallee[s.callee] = append(unguardedSitesByCallee[s.callee], s)
+		}
+	}
+
+	for i := range funcs {
+		fn := &funcs[i]
+		if isAVX512KernelSymbol(fn.name) {
+			continue
+		}
+		if (!fn.hasEVEX && !fn.hasAVX512Call) || !unguardedDirect[i] {
+			continue
+		}
+		if !fn.hasEVEX && !addrTaken[fn.name] {
+			sites := unguardedSitesByCallee[fn.name]
+			if len(sites) > 0 {
+				allZeroSameSlot := true
+				zeroSlot := sites[0].zeroArgRspOff
+				for _, s := range sites {
+					if !s.hasConstZero || s.zeroArgRspOff != zeroSlot {
+						allZeroSameSlot = false
+						break
+					}
+				}
+				if allZeroSameSlot && !checkUnguardedEVEXWithZeroRspSlot(fn.insns, fn.addrToIdx, zeroSlot+8, nil) {
+					continue
+				}
+			}
+		}
+		report.UnguardedEVEX = append(report.UnguardedEVEX, fn.name)
+	}
 	return report
 }
 

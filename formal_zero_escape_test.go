@@ -681,6 +681,23 @@ func exprContainsBuilderFailCond(e ast.Expr) bool {
 	return found
 }
 
+func exprContainsResourceLimitCond(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "isResourceLimitStatus" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
 func blockHasSilentPassReturn(blk *ast.BlockStmt) bool {
 	if blk == nil {
 		return false
@@ -803,6 +820,10 @@ func auditFormalBridgeSource(filename string, src []byte, onlyFormalNamed bool) 
 						pos := fset.Position(node.Pos())
 						violations = append(violations, fmt.Sprintf("%s:%d: forbidden silent error/!ok return inside %s", filename, pos.Line, name))
 					}
+					if exprContainsResourceLimitCond(node.Cond) {
+						pos := fset.Position(node.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: forbidden silent resource-limit return inside %s", filename, pos.Line, name))
+					}
 				}
 			}
 
@@ -827,8 +848,12 @@ func TestFormalNoSilentFuzzBridgeEscapes(t *testing.T) {
 		onlyFormalNamed bool
 	}{
 		{relPath: "formal_fuzz_bridge_test.go", onlyFormalNamed: false},
+		{relPath: "fuzz_test.go", onlyFormalNamed: true},
+		{relPath: "mad_fuzz_test.go", onlyFormalNamed: true},
+		{relPath: "mad_crafted_fuzz_test.go", onlyFormalNamed: true},
 		{relPath: filepath.Join("assign", "formal_fuzz_bridge_test.go"), onlyFormalNamed: false},
 		{relPath: filepath.Join("assign", "crafted_fuzz_test.go"), onlyFormalNamed: true},
+		{relPath: filepath.Join("assign", "fuzz_test.go"), onlyFormalNamed: true},
 	}
 
 	for _, tgt := range targets {
@@ -896,6 +921,17 @@ func verifyFormalHelper(tb testing.TB) {
 	tb.Skip("too large")
 }`,
 			wantSubstr: "forbidden Skip",
+		},
+		{
+			name: "resource_limit_silent_return",
+			src: `package p
+func checkFormalLimit(st int) error {
+	if isResourceLimitStatus(st) {
+		return nil
+	}
+	return nil
+}`,
+			wantSubstr: "silent resource-limit return",
 		},
 	}
 

@@ -166,6 +166,94 @@ func isResourceLimitStatus(st gb.Status) bool {
 	return st == gb.StatusTimeLimit || st == gb.StatusNodeLimit || st == gb.StatusIterationLimit
 }
 
+func checkResourceLimitLPResult(label string, p *gb.CompiledProblem, res gb.LPResult) error {
+	if p == nil {
+		return fmt.Errorf("[%s] nil CompiledProblem", label)
+	}
+	if math.IsNaN(res.Objective) || math.IsNaN(res.ObjectiveMin) {
+		return fmt.Errorf("[%s] resource-limit LP returned NaN objective (obj=%v min=%v)",
+			label, res.Objective, res.ObjectiveMin)
+	}
+	if len(res.Primal) == 0 {
+		return nil
+	}
+	if len(res.Primal) != p.NumVars() {
+		return fmt.Errorf("[%s] resource-limit LP len(Primal)=%d, want 0 or %d",
+			label, len(res.Primal), p.NumVars())
+	}
+	for j, v := range res.Primal {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("[%s] resource-limit LP Primal[%d]=%v", label, j, v)
+		}
+	}
+	bV, rV, _ := p.MaxViolation(res.Primal, false)
+	if bV > 1e-5 || rV > 1e-5 {
+		return fmt.Errorf("[%s] resource-limit LP returned infeasible Primal: bound=%.2e row=%.2e",
+			label, bV, rV)
+	}
+	evalObj := p.EvaluateObjective(res.Primal)
+	if math.Abs(evalObj-res.Objective) > 1e-5*max(1.0, math.Abs(res.Objective)) {
+		return fmt.Errorf("[%s] resource-limit LP EvaluateObjective=%.8g != Objective=%.8g",
+			label, evalObj, res.Objective)
+	}
+	return nil
+}
+
+func checkResourceLimitResult(label string, p *gb.CompiledProblem, res gb.Result) error {
+	if p == nil {
+		return fmt.Errorf("[%s] nil CompiledProblem", label)
+	}
+	if math.IsNaN(res.BestBound) {
+		return fmt.Errorf("[%s] resource-limit status %v returned NaN BestBound", label, res.Status)
+	}
+	if p.Sense() == gb.Minimize && math.IsInf(res.BestBound, 1) {
+		return fmt.Errorf("[%s] Minimize resource-limit status %v returned +Inf BestBound", label, res.Status)
+	}
+	if p.Sense() == gb.Maximize && math.IsInf(res.BestBound, -1) {
+		return fmt.Errorf("[%s] Maximize resource-limit status %v returned -Inf BestBound", label, res.Status)
+	}
+	if len(res.Values) == 0 {
+		if math.IsNaN(res.Objective) {
+			return fmt.Errorf("[%s] resource-limit status %v returned NaN Objective without incumbent", label, res.Status)
+		}
+		return nil
+	}
+	if len(res.Values) != p.NumVars() {
+		return fmt.Errorf("[%s] resource-limit status %v len(Values)=%d, want 0 or %d",
+			label, res.Status, len(res.Values), p.NumVars())
+	}
+	if math.IsNaN(res.Objective) || math.IsInf(res.Objective, 0) {
+		return fmt.Errorf("[%s] resource-limit status %v returned non-finite Objective %v with incumbent",
+			label, res.Status, res.Objective)
+	}
+	bV, rV, iV := p.MaxViolation(res.Values, p.IsMIP())
+	rowTol := 1e-5
+	if res.Backend == gb.BackendCBC {
+		rowTol = 1e-4
+	}
+	if bV > 1e-5 || rV > rowTol || iV > 1e-5 {
+		return fmt.Errorf("[%s] resource-limit status %v incumbent violates model: bound=%.2e row=%.2e int=%.2e",
+			label, res.Status, bV, rV, iV)
+	}
+	evalObj := p.EvaluateObjective(res.Values)
+	if math.Abs(evalObj-res.Objective) > 1e-5*max(1.0, math.Abs(res.Objective)) {
+		return fmt.Errorf("[%s] resource-limit status %v EvaluateObjective=%.8g != Objective=%.8g",
+			label, res.Status, evalObj, res.Objective)
+	}
+	if !math.IsInf(res.BestBound, 0) {
+		boundTol := 1e-5 * max(1.0, max(math.Abs(res.Objective), math.Abs(res.BestBound)))
+		if p.Sense() == gb.Minimize && res.BestBound > res.Objective+boundTol {
+			return fmt.Errorf("[%s] Minimize resource-limit BestBound %.8g > Objective %.8g",
+				label, res.BestBound, res.Objective)
+		}
+		if p.Sense() == gb.Maximize && res.BestBound < res.Objective-boundTol {
+			return fmt.Errorf("[%s] Maximize resource-limit BestBound %.8g < Objective %.8g",
+				label, res.BestBound, res.Objective)
+		}
+	}
+	return nil
+}
+
 func isTerminalFailureStatus(st gb.Status) bool {
 	switch st {
 	case gb.StatusOptimal, gb.StatusInfeasible, gb.StatusUnbounded,
@@ -1520,7 +1608,7 @@ func checkFormalLPResult(
 		return fmt.Errorf("[%s] uncertified LP terminal status %v", label, res.Status)
 	}
 	if isResourceLimitStatus(res.Status) {
-		return nil
+		return checkResourceLimitLPResult(label, p, res)
 	}
 	if p.NumVars() == 0 {
 		feas, err := zeroVarProblemFeasibleRat(p)
@@ -1647,7 +1735,7 @@ func checkFormalPresolvedLPResult(
 		return fmt.Errorf("[%s] uncertified presolved LP terminal status %v", label, resPre.Status)
 	}
 	if isResourceLimitStatus(resPre.Status) {
-		return nil
+		return checkResourceLimitResult(label, p, resPre)
 	}
 	if p.NumVars() == 0 {
 		feas, err := zeroVarProblemFeasibleRat(p)
@@ -2081,6 +2169,9 @@ func checkMILPInvariantsErr(label string, p *gb.CompiledProblem, res gb.Result) 
 		}
 		return fmt.Errorf("[%s] uncertified MILP terminal status %v", label, res.Status)
 	}
+	if isResourceLimitStatus(res.Status) {
+		return checkResourceLimitResult(label, p, res)
+	}
 	if res.Status != gb.StatusOptimal {
 		return nil
 	}
@@ -2462,6 +2553,40 @@ func TestFormalFuzzBridgeOffline(t *testing.T) {
 		if _, err := callFormalOracleJSONL(t, "lp-check", []byte(`{}`)); err == nil {
 			t.Fatal("expected error calling oracle when GOBLIN_FORMAL != 1")
 		}
+	}
+
+	m := gb.NewModel("limit_check", gb.Minimize)
+	x := m.AddIntVar("x", 0, 5)
+	m.SetObjective(gb.NewExpr(x.T(2)))
+	m.AddConstraint("lb", gb.NewExpr(x.T(1)).Ge(2))
+	p := m.Compile()
+
+	if err := checkResourceLimitResult("trivial_ok", p, gb.Result{
+		Status:    gb.StatusTimeLimit,
+		BestBound: math.Inf(-1),
+	}); err != nil {
+		t.Fatalf("expected trivial -Inf BestBound on Minimize TimeLimit to pass: %v", err)
+	}
+	if err := checkResourceLimitResult("opposite_inf", p, gb.Result{
+		Status:    gb.StatusNodeLimit,
+		BestBound: math.Inf(1),
+	}); err == nil {
+		t.Fatal("expected +Inf BestBound on Minimize NodeLimit to fail")
+	}
+	if err := checkResourceLimitResult("bad_incumbent", p, gb.Result{
+		Status:    gb.StatusTimeLimit,
+		Values:    []float64{1.0},
+		Objective: 2.0,
+		BestBound: 0.0,
+	}); err == nil {
+		t.Fatal("expected infeasible Values on TimeLimit to fail")
+	}
+	if err := checkResourceLimitLPResult("bad_lp_primal", p, gb.LPResult{
+		Status:    gb.StatusIterationLimit,
+		Primal:    []float64{0.0},
+		Objective: 0.0,
+	}); err == nil {
+		t.Fatal("expected infeasible LP Primal on IterationLimit to fail")
 	}
 }
 

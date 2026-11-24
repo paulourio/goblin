@@ -2174,3 +2174,300 @@ func TestAssignStage2AndWideAccRegressions(t *testing.T) {
 		}
 	}
 }
+
+func verifyExactCertifiedAssignResult(
+	tb testing.TB,
+	label string,
+	rows, cols int,
+	cost []float64,
+	sense assign.Sense,
+	res assign.Result,
+) {
+	tb.Helper()
+	k := min(rows, cols)
+	if len(res.RowInd) != k || len(res.ColInd) != k {
+		tb.Fatalf("[%s] len(RowInd)=%d len(ColInd)=%d, want %d", label, len(res.RowInd), len(res.ColInd), k)
+	}
+	if len(res.U) != rows || len(res.V) != cols {
+		tb.Fatalf("[%s] len(U)=%d len(V)=%d, want %d and %d", label, len(res.U), len(res.V), rows, cols)
+	}
+
+	usedRow := make([]bool, rows)
+	usedCol := make([]bool, cols)
+	prevRow := -1
+	for idx := range k {
+		r, c := res.RowInd[idx], res.ColInd[idx]
+		if r < 0 || r >= rows || c < 0 || c >= cols {
+			tb.Fatalf("[%s] out-of-range (%d,%d) for %dx%d", label, r, c, rows, cols)
+		}
+		if r <= prevRow {
+			tb.Fatalf("[%s] RowInd not strictly ascending at %d: %v", label, idx, res.RowInd)
+		}
+		prevRow = r
+		if usedRow[r] || usedCol[c] {
+			tb.Fatalf("[%s] duplicate matched row/col (%d,%d)", label, r, c)
+		}
+		usedRow[r] = true
+		usedCol[c] = true
+		v := cost[r*cols+c]
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			tb.Fatalf("[%s] matched non-finite entry (%d,%d)=%v", label, r, c, v)
+		}
+	}
+
+	gotRat, okGot := exactMatchedObjRat(rows, cols, cost, res.RowInd, res.ColInd)
+	if !okGot {
+		tb.Fatalf("[%s] failed to rationalize matched objective", label)
+	}
+	wantObj, _ := gotRat.Float64()
+	if gotRat.Sign() == 0 {
+		if math.Float64bits(res.Objective) != 0 {
+			tb.Fatalf("[%s] certified zero objective must be +0.0, got %016x", label, math.Float64bits(res.Objective))
+		}
+	} else if math.IsInf(wantObj, 0) {
+		if res.Objective != wantObj {
+			tb.Fatalf("[%s] certified overflow objective = %v, want %v", label, res.Objective, wantObj)
+		}
+	} else if math.Float64bits(res.Objective) != math.Float64bits(wantObj) {
+		tb.Fatalf("[%s] certified objective %.17g (%016x) != exact rounded %.17g (%016x)",
+			label, res.Objective, math.Float64bits(res.Objective), wantObj, math.Float64bits(wantObj))
+	}
+
+	uRats := make([]*big.Rat, rows)
+	vRats := make([]*big.Rat, cols)
+	for r, u := range res.U {
+		if math.IsNaN(u) || math.IsInf(u, 0) {
+			tb.Fatalf("[%s] certified non-finite U[%d]=%v", label, r, u)
+		}
+		uRats[r] = new(big.Rat).SetFloat64(u)
+	}
+	for c, v := range res.V {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			tb.Fatalf("[%s] certified non-finite V[%d]=%v", label, c, v)
+		}
+		vRats[c] = new(big.Rat).SetFloat64(v)
+	}
+
+	if rows < cols {
+		for c := range cols {
+			if vRats[c].Sign() > 0 {
+				tb.Fatalf("[%s] wide certified V[%d]=%.17g > 0", label, c, res.V[c])
+			}
+			if !usedCol[c] && vRats[c].Sign() != 0 {
+				tb.Fatalf("[%s] wide unmatched certified V[%d]=%.17g != 0", label, c, res.V[c])
+			}
+		}
+	} else if rows > cols {
+		for r := range rows {
+			if uRats[r].Sign() > 0 {
+				tb.Fatalf("[%s] tall certified U[%d]=%.17g > 0", label, r, res.U[r])
+			}
+			if !usedRow[r] && uRats[r].Sign() != 0 {
+				tb.Fatalf("[%s] tall unmatched certified U[%d]=%.17g != 0", label, r, res.U[r])
+			}
+		}
+	}
+
+	// Verify exact zero-tolerance rational dual feasibility on every finite cell:
+	// U_r + V_c <= C_{r,c} on Minimize, and (-U_r) + (-V_c) >= C_{r,c} on Maximize.
+	sumRat := new(big.Rat)
+	cRat := new(big.Rat)
+	for r := range rows {
+		for c := range cols {
+			rawVal := cost[r*cols+c]
+			if math.IsNaN(rawVal) || math.IsInf(rawVal, 0) {
+				continue
+			}
+			cRat.SetFloat64(rawVal)
+			if sense == assign.Minimize {
+				sumRat.Add(uRats[r], vRats[c])
+				if sumRat.Cmp(cRat) > 0 {
+					diff := new(big.Rat).Sub(sumRat, cRat)
+					df, _ := diff.Float64()
+					tb.Fatalf("[%s] Minimize rational dual violation at (%d,%d): U=%.17g + V=%.17g > C=%.17g (excess=%.6e)",
+						label, r, c, res.U[r], res.V[c], rawVal, df)
+				}
+			} else {
+				sumRat.Add(uRats[r], vRats[c])
+				sumRat.Neg(sumRat)
+				if sumRat.Cmp(cRat) < 0 {
+					diff := new(big.Rat).Sub(cRat, sumRat)
+					df, _ := diff.Float64()
+					tb.Fatalf("[%s] Maximize rational dual violation at (%d,%d): -(U+V)=%.17g < C=%.17g (deficit=%.6e)",
+						label, r, c, -res.U[r]-res.V[c], rawVal, df)
+				}
+			}
+		}
+	}
+}
+
+func FuzzCertifiedAssign(f *testing.F) {
+	for reg := range uint8(4) {
+		for s := range uint64(3) {
+			f.Add(s+uint64(reg)*11, reg, uint8(s*2+1), uint8(0), reg^uint8(s))
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, regimeByte, dimByte, ulpByte, flagByte uint8) {
+		rng := rand.New(rand.NewPCG(seed^0x7f4a7c159e3779b9, uint64(regimeByte)*41+uint64(dimByte)*13+uint64(flagByte)))
+		sense := assign.Minimize
+		if flagByte&1 == 1 {
+			sense = assign.Maximize
+		}
+		forbid := math.Inf(1)
+		if sense == assign.Maximize {
+			forbid = math.Inf(-1)
+		}
+
+		var rows, cols int
+		var cost []float64
+		allowCertFail := false
+		expectHallInfeas := false
+
+		switch regimeByte % 4 {
+		case 0:
+			// Dense finite square and near-square rational and integer costs.
+			rows = 2 + int(dimByte%10)
+			cols = 2 + int((dimByte>>2)%10)
+			cost = make([]float64, rows*cols)
+			for i := range cost {
+				cost[i] = float64(rng.IntN(201)-100) * 0.125
+			}
+
+		case 1:
+			// Sparse forbidden (+Inf on Minimize, -Inf on Maximize) feasible and Hall-infeasible graphs.
+			n := 3 + int(dimByte%8)
+			rows, cols = n, n
+			cost = make([]float64, rows*cols)
+			for i := range cost {
+				cost[i] = forbid
+			}
+			if (flagByte>>1)&1 == 0 {
+				perm := rng.Perm(n)
+				for r := range n {
+					cost[r*cols+perm[r]] = float64(rng.IntN(81)-40) * 0.25
+					for c := range n {
+						if rng.Float64() < 0.35 {
+							cost[r*cols+c] = float64(rng.IntN(101)-20) * 0.25
+						}
+					}
+				}
+			} else {
+				// Planted Hall bottleneck: two rows compete for at most one finite column.
+				expectHallInfeas = true
+				onlyCol := rng.IntN(n)
+				cost[0*cols+onlyCol] = float64(1 + rng.IntN(10))
+				cost[1*cols+onlyCol] = float64(1 + rng.IntN(10))
+				for r := 2; r < n; r++ {
+					for c := range n {
+						cost[r*cols+c] = float64(rng.IntN(40))
+					}
+				}
+			}
+
+		case 2:
+			// Rectangular wide (rows < cols) and tall (rows > cols) multi-scale matrices.
+			shortDim := 2 + int(dimByte%6)
+			longDim := shortDim + 1 + int((dimByte>>3)%7)
+			if (flagByte>>1)&1 == 0 {
+				rows, cols = shortDim, longDim
+			} else {
+				rows, cols = longDim, shortDim
+			}
+			cost = make([]float64, rows*cols)
+			scales := []float64{1.0, 0x1p30, 0x1p-20, 0.25}
+			for i := range cost {
+				sc := scales[rng.IntN(len(scales))]
+				cost[i] = float64(rng.IntN(65)-32) * sc
+			}
+
+		default:
+			// Upper-triangular staircase in 2^1021..math.MaxFloat64 probing dual-repair overflow and ULP rounding.
+			n := 4 + int(dimByte%4)
+			rows, cols = n, n
+			cost = make([]float64, n*n)
+			for i := range cost {
+				cost[i] = forbid
+			}
+			allowCertFail = ulpByte != 0
+			signMul := 1.0
+			if sense == assign.Maximize {
+				signMul = -1.0
+			}
+			for r := range n {
+				mant := 1.0 + float64(rng.IntN(6))*0x1p-4
+				if ulpByte != 0 {
+					mant += float64(ulpByte&7) * 0x1p-52
+				}
+				exp := 1021
+				if ulpByte != 0 && (ulpByte>>3)&1 == 1 {
+					exp = 1022 + r%2
+				}
+				diag := math.Min(math.MaxFloat64, math.Ldexp(mant, exp))
+				cost[r*n+r] = signMul * diag
+				for c := r + 1; c < n; c++ {
+					hi := math.MaxFloat64
+					if ulpByte == 0 {
+						hi = math.Ldexp(1.75, 1021)
+					}
+					cost[r*n+c] = signMul * hi
+				}
+			}
+		}
+
+		label := fmt.Sprintf("fuzz_cert_assign_r%d_s%d_%dx%d", regimeByte%4, seed, rows, cols)
+		disableSIMD := (flagByte>>2)&1 == 1
+		opts := []assign.Option{
+			assign.WithCertified(true),
+			assign.WithSIMD(!disableSIMD),
+		}
+
+		res, err := assign.LinearSumFlat(t.Context(), rows, cols, cost, sense, opts...)
+		if expectHallInfeas {
+			if !errors.Is(err, assign.ErrInfeasible) {
+				t.Fatalf("[%s] expected ErrInfeasible on Hall bottleneck, got err=%v", label, err)
+			}
+			return
+		}
+		if err != nil {
+			if allowCertFail && errors.Is(err, assign.ErrCertificationFailed) {
+				return
+			}
+			t.Fatalf("[%s] unexpected error from certified LinearSumFlat: %v", label, err)
+		}
+		verifyExactCertifiedAssignResult(t, label+"/flat", rows, cols, cost, sense, res)
+
+		// Exercise 2D LinearSum and preallocated SolveInto certified hooks as well.
+		mat2D := make([][]float64, rows)
+		for r := range rows {
+			mat2D[r] = cost[r*cols : (r+1)*cols]
+		}
+		res2D, err2D := assign.LinearSum(t.Context(), mat2D, sense, opts...)
+		if err2D != nil {
+			t.Fatalf("[%s] certified LinearSum 2D disagreed with LinearSumFlat: %v", label, err2D)
+		}
+		verifyExactCertifiedAssignResult(t, label+"/2d", rows, cols, cost, sense, res2D)
+
+		k := min(rows, cols)
+		var ws assign.Workspace
+		rowBuf := make([]int, k)
+		colBuf := make([]int, k)
+		objInto, errInto := assign.SolveInto(t.Context(), rows, cols, cost, sense, rowBuf, colBuf, &ws, opts...)
+		if errInto != nil {
+			t.Fatalf("[%s] certified SolveInto disagreed with LinearSumFlat: %v", label, errInto)
+		}
+		if math.Float64bits(objInto) != math.Float64bits(res.Objective) {
+			t.Fatalf("[%s] certified SolveInto objective %.17g (%016x) != LinearSumFlat %.17g (%016x)",
+				label, objInto, math.Float64bits(objInto), res.Objective, math.Float64bits(res.Objective))
+		}
+		gotIntoRat, okInto := exactMatchedObjRat(rows, cols, cost, rowBuf, colBuf)
+		gotFlatRat, okFlat := exactMatchedObjRat(rows, cols, cost, res.RowInd, res.ColInd)
+		if !okInto || !okFlat || gotIntoRat.Cmp(gotFlatRat) != 0 {
+			t.Fatalf("[%s] certified SolveInto rational objective %v != LinearSumFlat %v", label, gotIntoRat, gotFlatRat)
+		}
+
+		if formalAssignOracleEnabled() {
+			verifyFormalAssignResult(t, label+"/formal", rows, cols, cost, sense, res, true)
+		}
+	})
+}

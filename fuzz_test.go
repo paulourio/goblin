@@ -2329,3 +2329,354 @@ func FuzzPuLPJSON(f *testing.F) {
 		}
 	})
 }
+
+func buildWellScaledCertifiedFuzzModel(seed uint64, familyByte, sizeByte, flagByte uint8) *gb.Model {
+	rng := rand.New(rand.NewPCG(seed^0x5bf0a8b7959c0c2d, uint64(familyByte)*53+uint64(sizeByte)*17+uint64(flagByte)))
+	sense := gb.Minimize
+	if flagByte&1 == 1 {
+		sense = gb.Maximize
+	}
+	objConsts := []float64{0, 3.5, -12.0, 25.0}
+	objConst := objConsts[int(flagByte>>1)%len(objConsts)]
+	tag := fmt.Sprintf("cert_milp_f%d_%d", familyByte%5, seed)
+
+	switch familyByte % 5 {
+	case 0:
+		// Bounded integer MILP with <=, >=, and == rows.
+		nVars := 3 + int(sizeByte%5)
+		nRows := 2 + int((sizeByte>>3)%4)
+		m := gb.NewModel(tag+"_int", sense)
+		xs := make([]gb.Var, nVars)
+		obj := gb.NewExpr().AddConstant(objConst)
+		for j := range nVars {
+			lo := float64(rng.IntN(4) - 1)
+			hi := lo + float64(1+rng.IntN(6))
+			xs[j] = m.AddIntVar("x"+strconv.Itoa(j), lo, hi)
+			c := float64(rng.IntN(17)-8) * 0.5
+			if c != 0 {
+				obj = obj.AddTerm(xs[j], c)
+			}
+		}
+		m.SetObjective(obj)
+		for i := range nRows {
+			e := gb.NewExpr()
+			for j := range nVars {
+				if rng.Float64() < 0.65 {
+					a := float64(rng.IntN(11) - 5)
+					if a != 0 {
+						e = e.AddTerm(xs[j], a)
+					}
+				}
+			}
+			if len(e.Terms) == 0 {
+				e = e.AddTerm(xs[i%nVars], 1)
+			}
+			rhs := float64(rng.IntN(17) - 4)
+			switch i % 3 {
+			case 0:
+				m.AddConstraint("r"+strconv.Itoa(i), gb.Le(e, rhs))
+			case 1:
+				m.AddConstraint("r"+strconv.Itoa(i), gb.Ge(e, rhs))
+			default:
+				m.AddConstraint("r"+strconv.Itoa(i), gb.Eq(e, rhs))
+			}
+		}
+		return m
+
+	case 1:
+		// Pure continuous LP spanning optimal, infeasible, and unbounded regimes.
+		m := gb.NewModel(tag+"_lp", sense)
+		switch (sizeByte >> 1) % 3 {
+		case 0:
+			nVars := 3 + int(sizeByte%5)
+			xs := make([]gb.Var, nVars)
+			obj := gb.NewExpr().AddConstant(objConst)
+			for j := range nVars {
+				xs[j] = m.AddContVar("x"+strconv.Itoa(j), 0, float64(4+rng.IntN(8)))
+				c := float64(rng.IntN(15)-7) * 0.5
+				if c != 0 {
+					obj = obj.AddTerm(xs[j], c)
+				}
+			}
+			m.SetObjective(obj)
+			m.AddConstraint("ge", gb.Ge(gb.NewExpr(xs[0].T(2), xs[1].T(3), xs[2].T(1)), float64(3+rng.IntN(6))))
+			m.AddConstraint("le", gb.Le(gb.NewExpr(xs[0].T(1), xs[1].T(2)), float64(6+rng.IntN(8))))
+		case 1:
+			x := m.AddContVar("x", 0, 5)
+			y := m.AddContVar("y", 0, 5)
+			m.SetObjective(gb.NewExpr(x.T(2), y.T(3)).AddConstant(objConst))
+			m.AddConstraint("hi", gb.Le(gb.NewExpr(x.T(1), y.T(1)), 3))
+			m.AddConstraint("lo", gb.Ge(gb.NewExpr(x.T(1), y.T(1)), 5))
+		default:
+			dirSign := -1.0
+			if sense == gb.Maximize {
+				dirSign = 1.0
+			}
+			x := m.AddContVar("x", 0, math.Inf(1))
+			y := m.AddContVar("y", 0, math.Inf(1))
+			m.SetObjective(gb.NewExpr(x.T(dirSign*3), y.T(-dirSign)).AddConstant(objConst))
+			m.AddConstraint("ray", gb.Le(gb.NewExpr(x.T(1), y.T(-1)), float64(2+rng.IntN(4))))
+		}
+		return m
+
+	case 2:
+		// Equality and GCD-divisible knapsack MILP exercising integer rounding cuts.
+		m := gb.NewModel(tag+"_gcd", sense)
+		nVars := 4 + int(sizeByte%4)
+		xs := make([]gb.Var, nVars)
+		obj := gb.NewExpr().AddConstant(objConst)
+		gcdRow := gb.NewExpr()
+		stride := float64(2 + int(sizeByte%3))
+		for j := range nVars {
+			xs[j] = m.AddIntVar("z"+strconv.Itoa(j), 0, 4)
+			obj = obj.AddTerm(xs[j], float64(1+rng.IntN(7)))
+			gcdRow = gcdRow.AddTerm(xs[j], stride*float64(1+j%3))
+		}
+		m.SetObjective(obj)
+		if (flagByte>>3)&1 == 0 {
+			m.AddConstraint("gcd_ge", gb.Ge(gcdRow, stride*float64(2+rng.IntN(4))-0.5))
+		} else {
+			// Parity-infeasible integer equality row.
+			evenSum := gb.NewExpr()
+			for j := range nVars {
+				evenSum = evenSum.AddTerm(xs[j], 2)
+			}
+			m.AddConstraint("odd_eq", gb.Eq(evenSum, 3))
+		}
+		return m
+
+	case 3:
+		// Symmetric binary packing and covering MILP exercising orbital fixing.
+		m := gb.NewModel(tag+"_sym", sense)
+		nBins := 4 + int(sizeByte%4)
+		bs := make([]gb.Var, nBins)
+		sumExpr := gb.NewExpr()
+		obj := gb.NewExpr().AddConstant(objConst)
+		w := float64(2 + rng.IntN(5))
+		if sense == gb.Maximize {
+			w = -w
+		}
+		for j := range nBins {
+			bs[j] = m.AddBinaryVar("b" + strconv.Itoa(j))
+			sumExpr = sumExpr.AddTerm(bs[j], 1)
+			obj = obj.AddTerm(bs[j], w)
+		}
+		m.SetObjective(obj)
+		kReq := float64(2 + int(flagByte)%max(1, nBins-1))
+		m.AddConstraint("cover", gb.Ge(sumExpr, kReq))
+		m.AddConstraint("pack", gb.Le(sumExpr, float64(nBins-1)))
+		return m
+
+	default:
+		// Mixed-integer fixed-charge MILP with non-dyadic continuous ratios.
+		m := gb.NewModel(tag+"_mixed", sense)
+		nPairs := 2 + int(sizeByte%3)
+		obj := gb.NewExpr().AddConstant(objConst)
+		demand := gb.NewExpr()
+		for j := range nPairs {
+			y := m.AddBinaryVar("y" + strconv.Itoa(j))
+			capU := float64(4 + 2*(j+1))
+			x := m.AddContVar("x"+strconv.Itoa(j), 0, capU)
+			m.AddConstraint("vub"+strconv.Itoa(j), gb.Le(gb.NewExpr(x.T(1), y.T(-capU)), 0))
+			cFixed := float64(3 + rng.IntN(5))
+			cFlow := float64(1+j) / 1.0
+			if sense == gb.Maximize {
+				cFixed = -cFixed
+				cFlow = -cFlow
+			}
+			obj = obj.AddTerm(y, cFixed).AddTerm(x, cFlow)
+			demand = demand.AddTerm(x, float64(2+j))
+		}
+		m.SetObjective(obj)
+		m.AddConstraint("demand", gb.Ge(demand, float64(5+rng.IntN(7))))
+		return m
+	}
+}
+
+func verifyCertifiedMILPInvariants(
+	tb testing.TB,
+	label string,
+	p *gb.CompiledProblem,
+	res gb.Result,
+	tr *gb.VIPRTrace,
+	opts []gb.Option,
+) {
+	tb.Helper()
+	if math.IsNaN(res.Objective) && len(res.Values) > 0 {
+		tb.Fatalf("[%s] NaN Objective with non-empty Values", label)
+	}
+	if p.IsMIP() && res.Status != gb.StatusUnbounded {
+		if err := gb.VerifyVIPRTrace(p, tr, res, gb.ApplyOptions(opts...)); err != nil {
+			tb.Fatalf("[%s] VerifyVIPRTrace failed on certified status %v: %v", label, res.Status, err)
+		}
+	}
+
+	switch res.Status {
+	case gb.StatusOptimal:
+		if len(res.Values) != p.NumVars() {
+			tb.Fatalf("[%s] StatusOptimal len(Values)=%d, want %d", label, len(res.Values), p.NumVars())
+		}
+		for k := range p.NumIntVars() {
+			col := p.IntCol(k)
+			v := res.Values[col]
+			if math.Floor(v) != v {
+				tb.Fatalf("[%s] non-integral certified integer var[%d]=%.17g", label, col, v)
+			}
+		}
+		minRat, okRat := exactMIPIncumbentRat(tb.Context(), p, res.Values)
+		if !okRat {
+			tb.Fatalf("[%s] certified StatusOptimal Values not exact-Q feasible", label)
+		}
+		userOpt := userBoundFromMinRat(p, minRat)
+		if math.IsNaN(res.BestBound) || math.IsInf(res.BestBound, 0) {
+			tb.Fatalf("[%s] certified StatusOptimal non-finite BestBound=%v", label, res.BestBound)
+		}
+		if p.Sense() == gb.Minimize && res.BestBound > userOpt {
+			tb.Fatalf("[%s] Minimize certified BestBound %.17g > exact optimal %.17g", label, res.BestBound, userOpt)
+		}
+		if p.Sense() == gb.Maximize && res.BestBound < userOpt {
+			tb.Fatalf("[%s] Maximize certified BestBound %.17g < exact optimal %.17g", label, res.BestBound, userOpt)
+		}
+		if tr != nil && tr.HasCertificate() && tr.TargetLB() != nil {
+			if minRat.Cmp(tr.TargetLB()) < 0 {
+				tb.Fatalf("[%s] exact primal minObj %s < VIPR TargetLB %s", label, minRat.RatString(), tr.TargetLB().RatString())
+			}
+			if p.NumVars() == p.NumIntVars() && minRat.Cmp(tr.TargetLB()) != 0 {
+				tb.Fatalf("[%s] pure-integer optimal %s != VIPR TargetLB %s", label, minRat.RatString(), tr.TargetLB().RatString())
+			}
+			rawVIPR, errM := tr.MarshalVIPRJSON()
+			if errM != nil {
+				tb.Fatalf("[%s] MarshalVIPRJSON failed: %v", label, errM)
+			}
+			incObj, errInc := evalSerializedVIPRIncumbentMinObj(p, rawVIPR)
+			if errInc != nil {
+				tb.Fatalf("[%s] evalSerializedVIPRIncumbentMinObj failed: %v", label, errInc)
+			}
+			if incObj.Cmp(tr.TargetLB()) != 0 {
+				tb.Fatalf("[%s] VIPR rational incumbent %s != VIPR TargetLB %s", label, incObj.RatString(), tr.TargetLB().RatString())
+			}
+		}
+
+	case gb.StatusInfeasible:
+		if len(res.Values) != 0 {
+			tb.Fatalf("[%s] certified StatusInfeasible returned %d primal values", label, len(res.Values))
+		}
+		if p.IsMIP() && (tr == nil || !tr.HasCertificate() || tr.Mode() != "infeasible") {
+			tb.Fatalf("[%s] certified MIP StatusInfeasible missing infeasible VIPRTrace", label)
+		}
+
+	case gb.StatusUnbounded:
+		if len(res.Values) != 0 && len(res.Values) != p.NumVars() {
+			tb.Fatalf("[%s] certified StatusUnbounded len(Values)=%d, want 0 or %d", label, len(res.Values), p.NumVars())
+		}
+		for j, v := range res.Values {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				tb.Fatalf("[%s] certified StatusUnbounded non-finite values[%d]=%v", label, j, v)
+			}
+		}
+
+	case gb.StatusTimeLimit, gb.StatusNodeLimit, gb.StatusIterationLimit:
+		if err := checkResourceLimitResult(label, p, res); err != nil {
+			tb.Fatal(err)
+		}
+		if len(res.Values) == p.NumVars() {
+			minRat, okRat := exactMIPIncumbentRat(tb.Context(), p, res.Values)
+			if !okRat {
+				tb.Fatalf("[%s] certified %v incumbent is not exact-Q feasible", label, res.Status)
+			}
+			userObj := userBoundFromMinRat(p, minRat)
+			if !math.IsInf(res.BestBound, 0) {
+				if p.Sense() == gb.Minimize && res.BestBound > userObj {
+					tb.Fatalf("[%s] Minimize certified limit BestBound %.17g > exact incumbent %.17g",
+						label, res.BestBound, userObj)
+				}
+				if p.Sense() == gb.Maximize && res.BestBound < userObj {
+					tb.Fatalf("[%s] Maximize certified limit BestBound %.17g < exact incumbent %.17g",
+						label, res.BestBound, userObj)
+				}
+			}
+		}
+
+	default:
+		tb.Fatalf("[%s] unexpected status %v with err == nil under WithCertified(true)", label, res.Status)
+	}
+}
+
+func FuzzCertifiedMILP(f *testing.F) {
+	for fam := range uint8(5) {
+		for s := range uint64(4) {
+			f.Add(s+uint64(fam)*7, fam, uint8(s*3), fam^uint8(s))
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, familyByte, sizeByte, flagByte uint8) {
+		mdl := buildWellScaledCertifiedFuzzModel(seed, familyByte, sizeByte, flagByte)
+		p, err := mdl.CompileChecked()
+		if err != nil {
+			t.Fatalf("CompileChecked failed: %v", err)
+		}
+		if !isStandardScaledProblem(p) {
+			t.Fatalf("expected standard-scaled model for seed=%d family=%d", seed, familyByte%5)
+		}
+
+		label := fmt.Sprintf("fuzz_cert_milp_f%d_s%d", familyByte%5, seed)
+		enablePresolve := (flagByte>>4)&1 == 0
+		disableSIMD := (flagByte>>5)&1 == 1
+		workers := 1 + int((flagByte>>6)&1)
+
+		opts := []gb.Option{
+			gb.WithPureGo(),
+			gb.WithCertified(true),
+			gb.WithPresolve(enablePresolve),
+			gb.WithSIMD(!disableSIMD),
+			gb.WithWorkers(workers),
+			gb.WithTimeLimit(150 * time.Millisecond),
+			gb.WithMaxNodes(200),
+		}
+		var tr *gb.VIPRTrace
+		if p.IsMIP() {
+			tr = gb.NewVIPRTrace()
+			opts = append(opts, gb.WithVIPRTrace(tr))
+		}
+
+		res, err := gb.SolveCompiled(t.Context(), p, opts...)
+		if err != nil {
+			t.Fatalf("[%s] WithCertified(true) failed on well-scaled model: status=%v err=%v", label, res.Status, err)
+		}
+		verifyCertifiedMILPInvariants(t, label, p, res, tr, opts)
+
+		// Cross-check verdict consistency against default uncertified Pure-Go solve.
+		refRes, refErr := gb.SolveCompiled(t.Context(), p,
+			gb.WithPureGo(),
+			gb.WithTimeLimit(150*time.Millisecond),
+			gb.WithMaxNodes(200),
+		)
+		if refErr != nil {
+			t.Fatalf("[%s] reference SolveCompiled failed: %v", label, refErr)
+		}
+		if res.Status == gb.StatusOptimal && refRes.Status == gb.StatusInfeasible {
+			t.Fatalf("[%s] certified Optimal contradicts reference Infeasible", label)
+		}
+		if res.Status == gb.StatusInfeasible && refRes.Status == gb.StatusOptimal {
+			t.Fatalf("[%s] certified Infeasible contradicts reference Optimal (%.8g)", label, refRes.Objective)
+		}
+		if res.Status == gb.StatusOptimal && refRes.Status == gb.StatusOptimal {
+			tol := 1e-5 * max(1.0, max(math.Abs(res.Objective), math.Abs(refRes.Objective)))
+			if math.Abs(res.Objective-refRes.Objective) > tol {
+				t.Fatalf("[%s] certified Optimal %.8g != reference Optimal %.8g", label, res.Objective, refRes.Objective)
+			}
+		}
+
+		if formalFuzzEnabled() {
+			if p.IsMIP() {
+				if err := checkFormalVIPRResult(t, label+"/formal", p, res, tr, 0, 0); err != nil {
+					t.Fatal(err)
+				}
+			} else if res.Status == gb.StatusUnbounded {
+				if err := checkFormalUnboundedMILP(t, label+"/formal_unb", p, res.Values); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	})
+}

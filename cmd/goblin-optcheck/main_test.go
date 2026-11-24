@@ -214,3 +214,157 @@ func TestAuditObjdumpVectorCFG(t *testing.T) {
 		t.Fatalf("Hazards = %+v, want LEGACY_SSE_WHILE_DIRTY and DIRTY_RET", rep.Hazards)
 	}
 }
+
+func TestCheckUnguardedEVEXPolarityAndOpcodes(t *testing.T) {
+	// Verify Track5C EVEX-only mnemonics on YMM/XMM operands without ZMM or mask tokens.
+	evexOnlyCases := []struct {
+		op   string
+		args string
+	}{
+		{op: "vpmullq", args: "%ymm1,%ymm0,%ymm0"},
+		{op: "vpopcntq", args: "%ymm0,%ymm0"},
+		{op: "vplzcntd", args: "%ymm0,%ymm0"},
+		{op: "vcvtqq2pd", args: "%ymm0,%ymm0"},
+		{op: "vcvtuqq2pd", args: "%ymm0,%ymm0"},
+		{op: "vcvtpd2qq", args: "%ymm0,%ymm0"},
+		{op: "vpermt2pd", args: "%ymm2,%ymm1,%ymm0"},
+		{op: "vpcompressq", args: "%ymm0,(%rdi)"},
+		{op: "vrangepd", args: "$0x0,%ymm1,%ymm0,%ymm0"},
+	}
+	for _, tc := range evexOnlyCases {
+		if !isEVEXInsn(tc.op, tc.args) {
+			t.Errorf("isEVEXInsn(%q, %q) = false, want true", tc.op, tc.args)
+		}
+	}
+	if !checkUnguardedEVEX([]objdumpInsn{
+		{addr: "1000", op: "cmpb", args: "$0x0,0x10(%rip)", comment: "2000 <github.com/paulourio/goblin/internal/simd.x86HasAVX512>"},
+		{addr: "1007", op: "je", args: "100a <f+0xa>"},
+		{addr: "1009", op: "ret"},
+		{addr: "100a", op: "vpmullq", args: "%ymm1,%ymm0,%ymm0"},
+		{addr: "1010", op: "ret"},
+	}, map[string]int{"1000": 0, "1007": 1, "1009": 2, "100a": 3, "1010": 4}) {
+		t.Fatal("checkUnguardedEVEX = false on inverted guard into vpmullq, want true")
+	}
+
+	raw := `0000000000402000 <github.com/paulourio/goblin/internal/simd.dot64AVX512>:
+  402000:	vmovupd (%rsi),%zmm0
+  402006:	vzeroupper
+  402009:	ret
+
+0000000000402100 <github.com/paulourio/goblin/internal/simd.invertedAVX512Dispatch>:
+  402100:	cmpb $0x0,0x200(%rip)        # 602307 <github.com/paulourio/goblin/internal/simd.x86HasAVX512>
+  402107:	je 40210a <github.com/paulourio/goblin/internal/simd.invertedAVX512Dispatch+0xa>
+  402109:	ret
+  40210a:	vmovdqu64 (%rax),%zmm0
+  402110:	vzeroupper
+  402113:	ret
+
+0000000000402200 <github.com/paulourio/goblin/internal/simd.evexOnNonAVX512Fallthrough>:
+  402200:	cmpb $0x0,0x100(%rip)        # 602307 <github.com/paulourio/goblin/internal/simd.x86HasAVX512>
+  402207:	jne 402213 <github.com/paulourio/goblin/internal/simd.evexOnNonAVX512Fallthrough+0x13>
+  402209:	vmovdqu64 (%rax),%zmm0
+  40220f:	vzeroupper
+  402212:	ret
+  402213:	ret
+
+0000000000402300 <github.com/paulourio/goblin/internal/simd.BadUnknownPolarity>:
+  402300:	cmpb $0x0,0x0(%rip)          # 602307 <github.com/paulourio/goblin/internal/simd.x86HasAVX512>
+  402307:	jl 40230a <github.com/paulourio/goblin/internal/simd.BadUnknownPolarity+0xa>
+  402309:	ret
+  40230a:	vmovdqu64 (%rax),%zmm0
+  402310:	vzeroupper
+  402313:	ret
+
+0000000000402400 <github.com/paulourio/goblin/internal/simd.unguardedAVX512DQ>:
+  402400:	vpmullq %ymm1,%ymm0,%ymm0
+  402406:	vzeroupper
+  402409:	ret
+
+0000000000402500 <github.com/paulourio/goblin/internal/simd.BadUnguardedHelperCall>:
+  402500:	call 402000 <github.com/paulourio/goblin/internal/simd.dot64AVX512>
+  402505:	ret
+
+0000000000402600 <github.com/paulourio/goblin/internal/simd.BadActiveTierNonZeroOnly>:
+  402600:	mov 0x100(%rip),%edx         # 602708 <github.com/paulourio/goblin/internal/simd.activeTier>
+  402606:	test %edx,%edx
+  402608:	je 402610 <github.com/paulourio/goblin/internal/simd.BadActiveTierNonZeroOnly+0x10>
+  40260a:	call 402000 <github.com/paulourio/goblin/internal/simd.dot64AVX512>
+  40260f:	ret
+  402610:	ret
+
+0000000000402680 <github.com/paulourio/goblin/internal/simd.BadSpoofedNonRipComment>:
+  402680:	cmp $0x0,%eax                # <github.com/paulourio/goblin/internal/simd.x86HasAVX512>
+  402683:	je 40268f <github.com/paulourio/goblin/internal/simd.BadSpoofedNonRipComment+0xf>
+  402685:	vmovdqu64 (%rax),%zmm0
+  40268b:	vzeroupper
+  40268e:	ret
+  40268f:	ret
+
+0000000000402700 <github.com/paulourio/goblin/internal/simd.GoodFallthroughGuard>:
+  402700:	cmpb $0x0,0x100(%rip)        # 602307 <github.com/paulourio/goblin/internal/simd.x86HasAVX512>
+  402707:	je 402713 <github.com/paulourio/goblin/internal/simd.GoodFallthroughGuard+0x13>
+  402709:	vmovdqu64 (%rax),%zmm0
+  40270f:	vzeroupper
+  402712:	ret
+  402713:	ret
+
+0000000000402800 <github.com/paulourio/goblin/internal/simd.GoodTargetGuard>:
+  402800:	movzbl 0x100(%rip),%edx      # 602307 <github.com/paulourio/goblin/internal/simd.x86HasAVX512>
+  402807:	test %dl,%dl
+  402809:	jne 40280c <github.com/paulourio/goblin/internal/simd.GoodTargetGuard+0xc>
+  40280b:	ret
+  40280c:	call 402000 <github.com/paulourio/goblin/internal/simd.dot64AVX512>
+  402811:	ret
+
+0000000000402900 <github.com/paulourio/goblin/internal/simd.GoodSpilledActiveTier>:
+  402900:	sub $0x28,%rsp
+  402904:	mov 0x100(%rip),%r12d        # 602708 <github.com/paulourio/goblin/internal/simd.activeTier>
+  40290b:	test %r12d,%r12d
+  40290e:	je 402927 <github.com/paulourio/goblin/internal/simd.GoodSpilledActiveTier+0x27>
+  402910:	mov %r12d,0x10(%rsp)
+  402915:	mov 0x10(%rsp),%r12d
+  40291a:	cmp $0x2,%r12d
+  40291e:	jne 402927 <github.com/paulourio/goblin/internal/simd.GoodSpilledActiveTier+0x27>
+  402920:	call 402000 <github.com/paulourio/goblin/internal/simd.dot64AVX512>
+  402925:	jmp 402927 <github.com/paulourio/goblin/internal/simd.GoodSpilledActiveTier+0x27>
+  402927:	add $0x28,%rsp
+  40292b:	ret
+
+0000000000402a00 <github.com/paulourio/goblin/internal/simd.GoodCallerStackBool>:
+  402a00:	sub $0x40,%rsp
+  402a04:	mov 0x100(%rip),%edx         # 602708 <github.com/paulourio/goblin/internal/simd.activeTier>
+  402a0a:	cmp $0x2,%edx
+  402a0d:	jne 402a1b <github.com/paulourio/goblin/internal/simd.GoodCallerStackBool+0x1b>
+  402a0f:	movb $0x1,0x30(%rsp)
+  402a14:	call 402b00 <github.com/paulourio/goblin/internal/simd.goodCalleeStackBool>
+  402a19:	jmp 402a25 <github.com/paulourio/goblin/internal/simd.GoodCallerStackBool+0x25>
+  402a1b:	movb $0x0,0x30(%rsp)
+  402a20:	call 402b00 <github.com/paulourio/goblin/internal/simd.goodCalleeStackBool>
+  402a25:	add $0x40,%rsp
+  402a29:	ret
+
+0000000000402b00 <github.com/paulourio/goblin/internal/simd.goodCalleeStackBool>:
+  402b00:	sub $0x68,%rsp
+  402b04:	movzbl 0xa0(%rsp),%edx
+  402b0c:	test %dl,%dl
+  402b0e:	je 402b17 <github.com/paulourio/goblin/internal/simd.goodCalleeStackBool+0x17>
+  402b10:	call 402000 <github.com/paulourio/goblin/internal/simd.dot64AVX512>
+  402b15:	jmp 402b17 <github.com/paulourio/goblin/internal/simd.goodCalleeStackBool+0x17>
+  402b17:	add $0x68,%rsp
+  402b1b:	ret
+`
+
+	rep := auditObjdumpVectorCFG(raw)
+	wantBad := []string{
+		"github.com/paulourio/goblin/internal/simd.invertedAVX512Dispatch",
+		"github.com/paulourio/goblin/internal/simd.evexOnNonAVX512Fallthrough",
+		"github.com/paulourio/goblin/internal/simd.BadUnknownPolarity",
+		"github.com/paulourio/goblin/internal/simd.unguardedAVX512DQ",
+		"github.com/paulourio/goblin/internal/simd.BadUnguardedHelperCall",
+		"github.com/paulourio/goblin/internal/simd.BadActiveTierNonZeroOnly",
+		"github.com/paulourio/goblin/internal/simd.BadSpoofedNonRipComment",
+	}
+	if !slices.Equal(rep.UnguardedEVEX, wantBad) {
+		t.Fatalf("UnguardedEVEX = %v, want %v", rep.UnguardedEVEX, wantBad)
+	}
+}

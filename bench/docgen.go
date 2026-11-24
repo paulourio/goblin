@@ -3,6 +3,7 @@ package bench
 import (
 	"bytes"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -70,6 +71,7 @@ type ProblemBenchResult struct {
 	IsMIP             bool              `json:"is_mip"`
 	Backend           string            `json:"backend,omitempty"`
 	SIMDEnabled       bool              `json:"simd_enabled"`
+	PairedABBA        bool              `json:"paired_ab_ba,omitzero"`
 	SIMDTier          string            `json:"simd_tier,omitempty"`
 	CPUModel          string            `json:"cpu_model,omitempty"`
 	GOAMD64           string            `json:"goamd64,omitempty"`
@@ -141,6 +143,7 @@ type AssignBenchResult struct {
 	Sense             int       `json:"sense"`
 	Family            string    `json:"family"`
 	SIMDEnabled       bool      `json:"simd_enabled"`
+	PairedABBA        bool      `json:"paired_ab_ba,omitzero"`
 	SIMDTier          string    `json:"simd_tier,omitempty"`
 	CPUModel          string    `json:"cpu_model,omitempty"`
 	GOAMD64           string    `json:"goamd64,omitempty"`
@@ -626,7 +629,7 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 		}
 		return nil
 	}
-	checkGoBuild := func(sourceLabel, id, goVer string, simdEnabled, expectSIMD bool) error {
+	checkGoBuild := func(sourceLabel, id, goVer string, simdEnabled, pairedABBA, expectSIMD bool) error {
 		if goVer == "" {
 			return fmt.Errorf("%s entry %q lacks go_version provenance (re-run benchmark suite)", sourceLabel, id)
 		}
@@ -644,9 +647,26 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 			}
 			return nil
 		}
-		if hasSIMDExp || simdEnabled {
-			return fmt.Errorf("%s entry %q requires non-SIMD default build and simd_enabled=false (got go_version=%q simd_enabled=%v)",
+		if simdEnabled {
+			return fmt.Errorf("%s entry %q requires simd_enabled=false (got go_version=%q simd_enabled=%v)",
 				sourceLabel, id, goVer, simdEnabled)
+		}
+		if hasSIMDExp {
+			if !pairedABBA {
+				return fmt.Errorf("%s entry %q requires non-SIMD default build or paired_ab_ba=true (got go_version=%q simd_enabled=%v)",
+					sourceLabel, id, goVer, simdEnabled)
+			}
+			if pv.simdGoVersion == "" {
+				pv.simdGoVersion = goVer
+			} else if goVer != pv.simdGoVersion {
+				return fmt.Errorf("%s mixes SIMD Go versions (%s vs %s, entry %q)",
+					sourceLabel, pv.simdGoVersion, goVer, id)
+			}
+			return nil
+		}
+		if pairedABBA {
+			return fmt.Errorf("%s entry %q sets paired_ab_ba=true without GOEXPERIMENT=simd go_version=%q",
+				sourceLabel, id, goVer)
 		}
 		if pv.defaultGoVersion == "" {
 			pv.defaultGoVersion = goVer
@@ -669,43 +689,46 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 	}
 
 	maps := []struct {
-		label      string
-		expectSIMD bool
-		m          map[string]ProblemBenchResult
+		label       string
+		expectSIMD  bool
+		allowPaired bool
+		m           map[string]ProblemBenchResult
 	}{
-		{"goblin_scalar", false, tb.Scalar},
-		{"goblin_simd", true, tb.SIMD},
+		{"goblin_scalar", false, true, tb.Scalar},
+		{"goblin_simd", true, false, tb.SIMD},
 	}
 	if len(tb.Goblin) > 0 {
 		maps = append(maps, struct {
-			label      string
-			expectSIMD bool
-			m          map[string]ProblemBenchResult
-		}{"goblin_cbc", false, tb.Goblin})
+			label       string
+			expectSIMD  bool
+			allowPaired bool
+			m           map[string]ProblemBenchResult
+		}{"goblin_cbc", false, false, tb.Goblin})
 	}
 	for _, item := range maps {
 		for id, r := range item.m {
 			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.CPUAffinity, r.GitDirty, true); err != nil {
 				return pv, err
 			}
-			if err := checkGoBuild(item.label, id, r.GoVersion, r.SIMDEnabled, item.expectSIMD); err != nil {
+			if err := checkGoBuild(item.label, id, r.GoVersion, r.SIMDEnabled, item.allowPaired && r.PairedABBA, item.expectSIMD); err != nil {
 				return pv, err
 			}
 		}
 	}
 	for _, item := range []struct {
-		label      string
-		expectSIMD bool
-		m          map[string]AssignBenchResult
+		label       string
+		expectSIMD  bool
+		allowPaired bool
+		m           map[string]AssignBenchResult
 	}{
-		{"goblin_assign_scalar", false, tb.AssignScalar},
-		{"goblin_assign_simd", true, tb.AssignSIMD},
+		{"goblin_assign_scalar", false, true, tb.AssignScalar},
+		{"goblin_assign_simd", true, false, tb.AssignSIMD},
 	} {
 		for id, r := range item.m {
 			if err := checkRec(item.label, id, r.GitCommit, r.SourceFingerprint, r.UnameRelease, r.CPUAffinity, r.GitDirty, true); err != nil {
 				return pv, err
 			}
-			if err := checkGoBuild(item.label, id, r.GoVersion, r.SIMDEnabled, item.expectSIMD); err != nil {
+			if err := checkGoBuild(item.label, id, r.GoVersion, r.SIMDEnabled, item.allowPaired && r.PairedABBA, item.expectSIMD); err != nil {
 				return pv, err
 			}
 		}
@@ -714,10 +737,10 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 		if err := checkRec("goblin_binary_size", id, bs.GitCommit, bs.SourceFingerprint, bs.UnameRelease, "", bs.GitDirty, false); err != nil {
 			return pv, err
 		}
-		if err := checkGoBuild("goblin_binary_size(default)", id, bs.DefaultGoVersion, false, false); err != nil {
+		if err := checkGoBuild("goblin_binary_size(default)", id, bs.DefaultGoVersion, false, false, false); err != nil {
 			return pv, err
 		}
-		if err := checkGoBuild("goblin_binary_size(simd)", id, bs.SIMDGoVersion, true, true); err != nil {
+		if err := checkGoBuild("goblin_binary_size(simd)", id, bs.SIMDGoVersion, true, false, true); err != nil {
 			return pv, err
 		}
 	}
@@ -992,8 +1015,16 @@ func renderBlockWith(blockName string, tb *TelemetryBundle, dc *docgenCorpus) (s
 	switch blockName {
 	case "TIER_SUMMARY_TABLE":
 		renderTierSummaryTable(&b, dc.milp(), tb)
+	case "CBC_SUMMARY_TABLE":
+		if err := renderCBCSummaryTable(&b, dc.milp(), tb); err != nil {
+			return "", err
+		}
 	case "README_MILP_SUMMARY_TABLE":
 		renderReadmeMILPSummaryTable(&b, dc.milp(), tb)
+	case "README_CBC_HEADLINE":
+		if err := renderReadmeCBCHeadline(&b, dc.milp(), tb); err != nil {
+			return "", err
+		}
 	case "SIMD_EFFECT_TABLE":
 		renderSIMDEffectTable(&b, dc.milp(), tb)
 	case "SIMD_SUMMARY":
@@ -1006,6 +1037,10 @@ func renderBlockWith(blockName string, tb *TelemetryBundle, dc *docgenCorpus) (s
 		renderMADCBCGapTable(&b, dc.milp(), tb)
 	case "NON_MAD_CBC_GAP_TABLE":
 		renderNonMADCBCGapTable(&b, tb)
+	case "NON_MAD_CBC_NOTES":
+		if err := renderNonMADCBCNotes(&b, tb); err != nil {
+			return "", err
+		}
 	case "MAD_STATS_TABLE":
 		renderMADStatsTable(&b, dc.milp(), tb)
 	case "MAD_CHECKPOINT_TABLE":
@@ -1158,6 +1193,154 @@ func renderTierSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBu
 			grp.label, st.nFams, st.nInst, st.famGM, st.famLo, st.famHi, st.pooledGM, st.cbcRatio,
 			st.goSum, st.goMedSum, st.cbcSumText, st.pySum, st.pyMedSum, st.medSp, st.minSp, st.maxSp)
 	}
+}
+
+type cbcSummaryStats struct {
+	nFams        int
+	nInst        int
+	famTotGM     float64
+	famTotLo     float64
+	famTotHi     float64
+	famSolveGM   float64
+	famSolveLo   float64
+	famSolveHi   float64
+	goTotSum     float64
+	goTotMedSum  float64
+	cbcTotSum    float64
+	cbcTotMedSum float64
+	medTotSp     float64
+	minTotSp     float64
+	maxTotSp     float64
+}
+
+func summarizeCBCTierSubset(cases []CorpusCase, filter func(CorpusCase) bool, tb *TelemetryBundle) (cbcSummaryStats, error) {
+	var st cbcSummaryStats
+	var famTotGMs, famSolveGMs, instTotSpeedups []float64
+	for _, c := range cases {
+		if !filter(c) {
+			continue
+		}
+		sc, okSc := tb.Scalar[c.ID]
+		gbRes, okCBC := tb.Goblin[c.ID]
+		if !okSc || !okCBC {
+			return st, fmt.Errorf("CBC_SUMMARY_TABLE missing scalar or cbc telemetry for %q", c.ID)
+		}
+		st.nFams++
+		st.goTotMedSum += sc.TTotalMS
+		st.cbcTotMedSum += gbRes.TTotalMS
+
+		nTot := min(len(gbRes.TTotalTrialsMS), len(sc.TTotalTrialsMS))
+		if nTot == 0 {
+			st.nInst++
+			st.goTotSum += sc.TTotalMS
+			st.cbcTotSum += gbRes.TTotalMS
+			totR := gbRes.TTotalMS / max(sc.TTotalMS, geoMeanMinFloor)
+			famTotGMs = append(famTotGMs, totR)
+			instTotSpeedups = append(instTotSpeedups, totR)
+		} else {
+			st.nInst += nTot
+			if fgm, _, _, _ := pairedRatio(gbRes.TTotalTrialsMS[:nTot], sc.TTotalTrialsMS[:nTot]); !math.IsNaN(fgm) {
+				famTotGMs = append(famTotGMs, fgm)
+			}
+			for k := range nTot {
+				gt := sc.TTotalTrialsMS[k]
+				ct := gbRes.TTotalTrialsMS[k]
+				st.goTotSum += gt
+				st.cbcTotSum += ct
+				if gt > 0 {
+					instTotSpeedups = append(instTotSpeedups, ct/gt)
+				}
+			}
+		}
+
+		nSol := min(len(gbRes.TSolveTrialsMS), len(sc.TSolveTrialsMS))
+		if nSol == 0 {
+			solR := gbRes.TSolveMS / max(sc.TSolveMS, geoMeanMinFloor)
+			famSolveGMs = append(famSolveGMs, solR)
+		} else if sgm, _, _, _ := pairedRatio(gbRes.TSolveTrialsMS[:nSol], sc.TSolveTrialsMS[:nSol]); !math.IsNaN(sgm) {
+			famSolveGMs = append(famSolveGMs, sgm)
+		}
+	}
+	st.famTotGM, st.famTotLo, st.famTotHi = familyClusteredRatio(famTotGMs)
+	st.famSolveGM, st.famSolveLo, st.famSolveHi = familyClusteredRatio(famSolveGMs)
+	st.medTotSp, st.minTotSp, st.maxTotSp = medianMinMax(instTotSpeedups)
+	return st, nil
+}
+
+func renderCBCSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) error {
+	groups := []subsetSpec[CorpusCase]{
+		{"Tier 1: Micro-models (`N <= 26`)", func(c CorpusCase) bool { return c.Tier == "tier1_canonical" }},
+		{"Tier 2: Medium MILPs (`30 <= N <= 84`)", func(c CorpusCase) bool { return c.Tier == "tier2_p90" }},
+		{"Tier 3: Large MILPs (`145 <= N <= 4036`)", func(c CorpusCase) bool { return c.Tier == "tier3_large" }},
+		{"**Tier 2+3 non-planted MILPs (solver-dominated)**", func(c CorpusCase) bool {
+			return c.Tier != "tier1_canonical" && !isPlantedMAD(c.ID)
+		}},
+		{"All 31 synthetic families", func(_ CorpusCase) bool { return true }},
+	}
+
+	b.WriteString("| Workload Subset | Families (Trials) | Equal-Family `BackendCBC / BackendGo` Total [Clustered 95% CI] | Equal-Family `BackendCBC / BackendGo` Solve [Clustered 95% CI] | `BackendGo` Trial (Med) Sum (ms) | `BackendCBC` Trial (Med) Sum (ms) | Per-Instance `CBC / Go` Total Median [Min-Max] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, grp := range groups {
+		st, err := summarizeCBCTierSubset(cases, grp.filter, tb)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(b, "| %s | %d (%d) | **%.2fx** [%.2fx-%.2fx] | **%.2fx** [%.2fx-%.2fx] | %.1f (%.1f) | %.1f (%.1f) | %.2fx [%.2fx-%.2fx] |\n",
+			grp.label, st.nFams, st.nInst,
+			st.famTotGM, st.famTotLo, st.famTotHi,
+			st.famSolveGM, st.famSolveLo, st.famSolveHi,
+			st.goTotSum, st.goTotMedSum,
+			st.cbcTotSum, st.cbcTotMedSum,
+			st.medTotSp, st.minTotSp, st.maxTotSp)
+	}
+	return nil
+}
+
+func renderReadmeCBCHeadline(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) error {
+	nonPlanted := func(c CorpusCase) bool {
+		return c.Tier != "tier1_canonical" && !isPlantedMAD(c.ID)
+	}
+	pySt := summarizeTierSubset(cases, nonPlanted, tb)
+	cbcSt, err := summarizeCBCTierSubset(cases, nonPlanted, tb)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(b, "Across the %d solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **%.2fx** [%.2fx-%.2fx] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **%.2fx** [%.2fx-%.2fx] total (**%.2fx** [%.2fx-%.2fx] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.",
+		cbcSt.nFams,
+		pySt.famGM, pySt.famLo, pySt.famHi,
+		cbcSt.famTotGM, cbcSt.famTotLo, cbcSt.famTotHi,
+		cbcSt.famSolveGM, cbcSt.famSolveLo, cbcSt.famSolveHi)
+	return nil
+}
+
+func renderNonMADCBCNotes(b *bytes.Buffer, tb *TelemetryBundle) error {
+	sc, okSc := tb.Scalar["t2_binpack_44"]
+	gbRes, okCBC := tb.Goblin["t2_binpack_44"]
+	if !okSc || !okCBC {
+		return errors.New("NON_MAD_CBC_NOTES missing t2_binpack_44 telemetry")
+	}
+	cbcOverGo := pairedRatioOrFallback(gbRes.TTotalTrialsMS, sc.TTotalTrialsMS, gbRes.TTotalMS, sc.TTotalMS)
+	nTrials := min(len(sc.TTotalTrialsMS), len(gbRes.TTotalTrialsMS))
+	losses := 0
+	worstGo, worstCBC := 0.0, 0.0
+	for k := range nTrials {
+		gt := sc.TTotalTrialsMS[k]
+		ct := gbRes.TTotalTrialsMS[k]
+		if gt > ct {
+			losses++
+		}
+		if gt > worstGo {
+			worstGo = gt
+			worstCBC = ct
+		}
+	}
+	fmt.Fprintf(b, "- **Heavy-tail regression on `t2_binpack_44`**: pure-Go `BackendGo` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) trails in-process `BackendCBC` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) with a **%.2fx** `BackendCBC / BackendGo` geometric-mean ratio (`Go / CBC = %.2fx`), running slower on %d of %d trials (peaking at %.2f ms vs. %.2f ms) while root cuts increase `CP5 +Presolve` (%.2f ms) to `CP6 +Cuts` (%.2f ms).\n",
+		sc.TTotalMeanMS, sc.TTotalSDMS, sc.TTotalMS,
+		gbRes.TTotalMeanMS, gbRes.TTotalSDMS, gbRes.TTotalMS,
+		cbcOverGo, 1.0/max(cbcOverGo, geoMeanMinFloor),
+		losses, nTrials, worstGo, worstCBC,
+		sc.CP5Presolve.TimeMS, sc.CP6Cuts.TimeMS)
+	return nil
 }
 
 func renderReadmeMILPSummaryTable(b *bytes.Buffer, cases []CorpusCase, tb *TelemetryBundle) {
@@ -1415,8 +1598,12 @@ func renderProvenance(b *bytes.Buffer, cases []CorpusCase, assignCases []AssignC
 	if cbcHash == "" {
 		cbcHash = "unrecorded"
 	}
+	defaultGoVer := pv.defaultGoVersion
+	if defaultGoVer == "" && pv.simdGoVersion != "" {
+		defaultGoVer = "paired-ab-ba (" + pv.simdGoVersion + ")"
+	}
 	fmt.Fprintf(b, "- **Unified telemetry source**: fingerprint `%s` (%s), Go toolchains default `%s` and SIMD `%s`, Linux kernel `%s`; the documentation gate rejects any telemetry file whose commit, fingerprint, toolchain SIMD mode, or kernel differs.\n",
-		pv.fingerprint, base, pv.defaultGoVersion, pv.simdGoVersion, kernelStr)
+		pv.fingerprint, base, defaultGoVer, pv.simdGoVersion, kernelStr)
 	fmt.Fprintf(b, "- **CPU affinity**: goblin %s; Python + CBC %s; Python + SciPy %s.\n",
 		affinityList(pv.goblinAffinity),
 		affinityList(map[string]bool{anyPy.CPUAffinity: true}),
@@ -1714,6 +1901,13 @@ Tier 1 micro-models are dominated by Python subprocess spawn overhead, and the p
 
 <!-- BEGIN GENERATED:TIER_SUMMARY_TABLE -->
 <!-- END GENERATED:TIER_SUMMARY_TABLE -->
+
+### 2.1 Pure-Go vs. In-Process C++ CBC Aggregate Summary
+
+Comparing ` + "`BackendGo`" + ` directly against in-process ` + "`BackendCBC`" + ` removes Python MPS formatting and subprocess spawn overhead across the same five workload subsets:
+
+<!-- BEGIN GENERATED:CBC_SUMMARY_TABLE -->
+<!-- END GENERATED:CBC_SUMMARY_TABLE -->
 
 ## 3. End-to-End Pipeline Comparison (` + "`JSON -> Solution`" + `)
 

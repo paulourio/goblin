@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -143,7 +144,57 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 	s.GoVersion = "go1.27.3-X:simd"
 	bBadScalarVer.Scalar["p1"] = s
 	if _, err := telemetryProvenance(bBadScalarVer); err == nil {
-		t.Fatal("expected error for scalar entry built with -X:simd")
+		t.Fatal("expected error for non-paired scalar entry built with -X:simd")
+	}
+
+	bBadAssignScalarVer := baseBundle()
+	asUnpaired := bBadAssignScalarVer.AssignScalar["a1"]
+	asUnpaired.GoVersion = "go1.27.3-X:simd"
+	bBadAssignScalarVer.AssignScalar["a1"] = asUnpaired
+	if _, err := telemetryProvenance(bBadAssignScalarVer); err == nil {
+		t.Fatal("expected error for non-paired assign scalar entry built with -X:simd")
+	}
+
+	bPairedOK := baseBundle()
+	sPaired := bPairedOK.Scalar["p1"]
+	sPaired.GoVersion = "go1.27.3-X:simd"
+	sPaired.PairedABBA = true
+	bPairedOK.Scalar["p1"] = sPaired
+	asPaired := bPairedOK.AssignScalar["a1"]
+	asPaired.GoVersion = "go1.27.3-X:simd"
+	asPaired.PairedABBA = true
+	bPairedOK.AssignScalar["a1"] = asPaired
+	bPairedOK.Goblin = map[string]ProblemBenchResult{
+		"p1": {ID: "p1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:nodwarf5", SIMDEnabled: false},
+	}
+	if _, err := telemetryProvenance(bPairedOK); err != nil {
+		t.Fatalf("expected paired_ab_ba scalar entries with -X:simd to pass provenance, got %v", err)
+	}
+
+	bPairedSIMDTrue := baseBundle()
+	sBadPaired := bPairedSIMDTrue.Scalar["p1"]
+	sBadPaired.GoVersion = "go1.27.3-X:simd"
+	sBadPaired.PairedABBA = true
+	sBadPaired.SIMDEnabled = true
+	bPairedSIMDTrue.Scalar["p1"] = sBadPaired
+	if _, err := telemetryProvenance(bPairedSIMDTrue); err == nil {
+		t.Fatal("expected error for paired_ab_ba scalar entry with simd_enabled=true")
+	}
+
+	bPairedNoSIMDExp := baseBundle()
+	sNoExp := bPairedNoSIMDExp.Scalar["p1"]
+	sNoExp.PairedABBA = true
+	bPairedNoSIMDExp.Scalar["p1"] = sNoExp
+	if _, err := telemetryProvenance(bPairedNoSIMDExp); err == nil {
+		t.Fatal("expected error for paired_ab_ba scalar entry built without -X:simd")
+	}
+
+	bBadCBCPaired := baseBundle()
+	bBadCBCPaired.Goblin = map[string]ProblemBenchResult{
+		"p1": {ID: "p1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:simd", SIMDEnabled: false, PairedABBA: true},
+	}
+	if _, err := telemetryProvenance(bBadCBCPaired); err == nil {
+		t.Fatal("expected error for goblin_cbc entry carrying -X:simd even with paired_ab_ba=true")
 	}
 
 	bBadScalarFlag := baseBundle()
@@ -337,5 +388,58 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	}
 	if !strings.Contains(assignTbl, "| Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) |") {
 		t.Fatalf("unexpected assign README header:\n%s", assignTbl)
+	}
+
+	cases := BuildCorpus()
+	nonPlanted := func(c CorpusCase) bool {
+		return c.Tier != "tier1_canonical" && !isPlantedMAD(c.ID)
+	}
+	pyNP := summarizeTierSubset(cases, nonPlanted, tb)
+	cbcNP, err := summarizeCBCTierSubset(cases, nonPlanted, tb)
+	if err != nil {
+		t.Fatalf("summarizeCBCTierSubset(non-planted): %v", err)
+	}
+	cbcAll, err := summarizeCBCTierSubset(cases, func(_ CorpusCase) bool { return true }, tb)
+	if err != nil {
+		t.Fatalf("summarizeCBCTierSubset(all): %v", err)
+	}
+
+	cbcSummary, err := RenderBlock("CBC_SUMMARY_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(CBC_SUMMARY_TABLE): %v", err)
+	}
+	wantNP := fmt.Sprintf("**Tier 2+3 non-planted MILPs (solver-dominated)** | %d (%d) | **%.2fx** [%.2fx-%.2fx] | **%.2fx** [%.2fx-%.2fx]",
+		cbcNP.nFams, cbcNP.nInst, cbcNP.famTotGM, cbcNP.famTotLo, cbcNP.famTotHi, cbcNP.famSolveGM, cbcNP.famSolveLo, cbcNP.famSolveHi)
+	wantAll := fmt.Sprintf("All 31 synthetic families | %d (%d) | **%.2fx** [%.2fx-%.2fx]",
+		cbcAll.nFams, cbcAll.nInst, cbcAll.famTotGM, cbcAll.famTotLo, cbcAll.famTotHi)
+	for _, want := range []string{
+		"Equal-Family `BackendCBC / BackendGo` Total [Clustered 95% CI]",
+		wantNP,
+		wantAll,
+	} {
+		if !strings.Contains(cbcSummary, want) {
+			t.Fatalf("CBC_SUMMARY_TABLE missing %q:\n%s", want, cbcSummary)
+		}
+	}
+
+	cbcHeadline, err := RenderBlock("README_CBC_HEADLINE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(README_CBC_HEADLINE): %v", err)
+	}
+	wantPyHeadline := fmt.Sprintf("**%.2fx** [%.2fx-%.2fx]", pyNP.famGM, pyNP.famLo, pyNP.famHi)
+	wantCBCHeadline := fmt.Sprintf("**%.2fx** [%.2fx-%.2fx]", cbcNP.famTotGM, cbcNP.famTotLo, cbcNP.famTotHi)
+	if !strings.Contains(cbcHeadline, wantPyHeadline) || !strings.Contains(cbcHeadline, wantCBCHeadline) {
+		t.Fatalf("README_CBC_HEADLINE missing expected ratios %q / %q:\n%s", wantPyHeadline, wantCBCHeadline, cbcHeadline)
+	}
+
+	cbcNotes, err := RenderBlock("NON_MAD_CBC_NOTES", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(NON_MAD_CBC_NOTES): %v", err)
+	}
+	scBP := tb.Scalar["t2_binpack_44"]
+	gbBP := tb.Goblin["t2_binpack_44"]
+	wantBPRatio := fmt.Sprintf("**%.2fx**", pairedRatioOrFallback(gbBP.TTotalTrialsMS, scBP.TTotalTrialsMS, gbBP.TTotalMS, scBP.TTotalMS))
+	if !strings.Contains(cbcNotes, "t2_binpack_44") || !strings.Contains(cbcNotes, wantBPRatio) {
+		t.Fatalf("NON_MAD_CBC_NOTES missing t2_binpack_44 %s disclosure:\n%s", wantBPRatio, cbcNotes)
 	}
 }
