@@ -3294,10 +3294,31 @@ private def parseRowTermsJson (numVars : Nat) (arr : Array JsonVal) (rowIdx : Na
       throw s!"row {rowIdx} column index {col} >= numVars {numVars}"
   return mapped.toList
 
+/-- Upper bound on problem dimensions decoded by standalone JSON verifiers before allocation. -/
+def maxVerifierDim : Nat := 10_000_000
+
+private def checkMinimizationSenseJson (root : JsonVal) : Except String Unit := do
+  match root.getField? "sense" with
+  | none | some .null => pure ()
+  | some sv =>
+    let s ← sv.asString
+    let low := s.trimAscii.toString.toLower
+    if low != "min" && low != "minimize" then
+      throw s!"unsupported objective sense '{s}' (only minimization 'min'/'minimize' is supported)"
+  match root.getField? "maximize" with
+  | none | some .null => pure ()
+  | some mv =>
+    let b ← mv.asBool
+    if b then
+      throw "unsupported 'maximize': true (only minimization is supported)"
+
 /-- Parses an `LPInstance` from JSON matching `Apps/LpCheck.lean` schema. -/
 def parseLPInstanceJson (root : JsonVal) : Except String LPInstance := do
+  checkMinimizationSenseJson root
   let numVars ← root.getNat "numVars"
   let numRows ← root.getNat "numRows"
+  if numVars > maxVerifierDim || numRows > maxVerifierDim then
+    throw s!"LP dimensions (numVars={numVars}, numRows={numRows}) exceed maxVerifierDim ({maxVerifierDim})"
   let objConst ←
     match root.getField? "objConst" with
     | none | some .null => pure (0 : Rat)
@@ -3376,6 +3397,8 @@ private def parseIsIntMaskField (numVars : Nat) (v : JsonVal) (label : String) :
   arr.mapM JsonVal.asBool
 
 private def parseIntColsField (numVars : Nat) (v : JsonVal) : Except String (Array Bool) := do
+  if numVars > maxVerifierDim then
+    throw s!"numVars={numVars} exceeds maxVerifierDim ({maxVerifierDim})"
   let colsJson ← v.asArray
   let cols ← colsJson.mapM JsonVal.asNat
   for c in cols do
@@ -3492,6 +3515,7 @@ def parseLPPresolveStepJson (v : JsonVal) : Except String LPPresolveStep := do
 /-- Verifies a single-step or multi-step LP presolve reduction (and optional reduced-LP
 primal-dual optimality / safe dual postsolve bound) from JSON. -/
 def verifyLPPresolveJson (root : JsonVal) : Except String (Option Rat) := do
+  checkMinimizationSenseJson root
   let lpOrig ←
     match getOptNonNullField root ["orig", "lpOrig"] with
     | some ov => parseLPInstanceJson ov
@@ -3525,40 +3549,31 @@ def verifyLPPresolveJson (root : JsonVal) : Except String (Option Rat) := do
     throw "LP presolve reduction certificate failed checkLPPresolveChain"
   let hasX := (getOptNonNullField root ["xReduced", "xRed", "x", "xReducedBits", "xRedBits", "xBits"]).isSome
   let hasY := (getOptNonNullField root ["yReduced", "yRed", "y", "yReducedBits", "yRedBits", "yBits"]).isSome
-  let xRedOpt : Option (Fin lpRed.numVars → Rat) ←
-    if hasX then
-      let xArr ← parseRatVecJson root ["xReduced", "xRed", "x"]
-        ["xReducedBits", "xRedBits", "xBits"] lpRed.numVars "xReduced"
-      if hx : xArr.size = lpRed.numVars then
-        let xRed : Fin lpRed.numVars → Rat := fun j => xArr[j.val]'(by rw [hx]; exact j.isLt)
-        if !checkPrimalFeasible lpRed xRed then
-          throw "LP presolve certificate rejected: xReduced is not primal-feasible on reduced LP"
-        let xOrig := liftLPPresolvePrimalChain lpOrig chain lpRed xRed
-        if !checkPrimalFeasible lpOrig xOrig then
-          throw "LP presolve certificate rejected: lifted primal vector is not primal-feasible on original LP"
-        pure (some xRed)
-      else throw "internal xReduced size mismatch"
-    else
-      pure none
-  if !hasY then
-    return none
-  let yArr ← parseRatVecJson root ["yReduced", "yRed", "y"]
-    ["yReducedBits", "yRedBits", "yBits"] lpRed.numRows "yReduced"
-  if hy : yArr.size = lpRed.numRows then
-    let yRed : Fin lpRed.numRows → Rat := fun i => yArr[i.val]'(by rw [hy]; exact i.isLt)
-    let yOrig := postsolveLPDualChain lpOrig chain lpRed yRed
-    match xRedOpt with
-    | some xRed =>
+  if !hasX then
+    throw "LP presolve certificate requires a feasible reduced primal vector 'xReduced'"
+  let xArr ← parseRatVecJson root ["xReduced", "xRed", "x"]
+    ["xReducedBits", "xRedBits", "xBits"] lpRed.numVars "xReduced"
+  if hx : xArr.size = lpRed.numVars then
+    let xRed : Fin lpRed.numVars → Rat := fun j => xArr[j.val]'(by rw [hx]; exact j.isLt)
+    if !checkPrimalFeasible lpRed xRed then
+      throw "LP presolve certificate rejected: xReduced is not primal-feasible on reduced LP"
+    let xOrig := liftLPPresolvePrimalChain lpOrig chain lpRed xRed
+    if !checkPrimalFeasible lpOrig xOrig then
+      throw "LP presolve certificate rejected: lifted primal vector is not primal-feasible on original LP"
+    if !hasY then
+      return none
+    let yArr ← parseRatVecJson root ["yReduced", "yRed", "y"]
+      ["yReducedBits", "yRedBits", "yBits"] lpRed.numRows "yReduced"
+    if hy : yArr.size = lpRed.numRows then
+      let yRed : Fin lpRed.numRows → Rat := fun i => yArr[i.val]'(by rw [hy]; exact i.isLt)
+      let yOrig := postsolveLPDualChain lpOrig chain lpRed yRed
       if !checkLPOptimal lpRed xRed yRed then
         throw "LP presolve certificate rejected: (xReduced, yReduced) is not optimal on reduced LP"
       match safeDualBound lpOrig yOrig with
       | some b => return some b
       | none => throw "postsolved dual vector failed safeDualBound on original LP"
-    | none =>
-      match safeDualBound lpOrig yOrig with
-      | some b => return some b
-      | none => throw "postsolved dual vector failed safeDualBound on original LP"
-  else throw "internal yReduced size mismatch"
+    else throw "internal yReduced size mismatch"
+  else throw "internal xReduced size mismatch"
 
 private def parseSignedIntFlexJson (v : JsonVal) : Except String Int :=
   match v with
@@ -3614,6 +3629,10 @@ def handleGcdRowDivJson (v : JsonVal) : Except String String := do
           if !checkGcdRowDiv sense cFn rhs divisor (.reduced dcFn dr) then
             throw "unsound gcd-div-check: divided coefficients or tightened RHS mismatch"
         else throw "internal div_coeffs size mismatch"
+      if let some gv := getOptNonNullField v ["go_infeasible"] then
+        let goInf ← gv.asBool
+        if goInf && !checkGcdRowDiv sense cFn rhs divisor .infeasible then
+          throw s!"unsound gcd-div-check: solver reported infeasible on feasible equality rhs={rhs.num}/{rhs.den} (d={divisor})"
       match getOptNonNullField v ["expect_infeasible", "infeasible"] with
       | some iv =>
         let expInf ← iv.asBool

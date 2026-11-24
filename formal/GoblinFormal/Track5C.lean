@@ -155,11 +155,9 @@ def parseTargetSymbol (args : String) : Option String :=
     else none
   | _ => none
 
-/-- Extracts all `<sym>` tokens appearing in `args` before any comment marker. -/
-private def extractArgSymbols (args : String) : List String :=
-  let clean := stripTrailingComment args
-  let toks := splitWhitespace clean
-  toks.filterMap fun tok =>
+/-- Extracts `<sym>` tokens from a whitespace-tokenized string fragment. -/
+private def extractAngleSymbols (s : String) : List String :=
+  (splitWhitespace s).filterMap fun tok =>
     if tok.startsWith "<" && tok.endsWith ">" then
       let cs := tok.toList
       let inner := String.ofList ((cs.drop 1).dropLast)
@@ -167,28 +165,59 @@ private def extractArgSymbols (args : String) : List String :=
       if base.isEmpty then none else some base
     else none
 
+/-- Extracts all `<sym>` tokens appearing in `args` before any comment marker. -/
+private def extractArgSymbols (args : String) : List String :=
+  extractAngleSymbols (stripTrailingComment args)
+
+/-- Extracts GNU objdump `%rip`-relative `<sym>` annotations appearing after `#` (stripping `//`). -/
+private def extractHashCommentSymbols (s : String) : List String :=
+  let noSlash := (s.splitOn "//").headD s
+  match noSlash.splitOn "#" with
+  | _ :: rest =>
+    if rest.isEmpty then []
+    else extractAngleSymbols (String.intercalate "#" rest)
+  | [] => []
+
+private def isIntelVecReg (low : String) : Bool :=
+  match low.toList with
+  | p :: 'm' :: 'm' :: rest =>
+    if (p == 'x' || p == 'y' || p == 'z') && !rest.isEmpty && rest.all Char.isDigit then
+      match String.toNat? (String.ofList rest) with
+      | some n => n <= 31
+      | none => false
+    else false
+  | _ => false
+
 private def isPlan9RegToken (tok : String) : Bool :=
-  match tok with
-  | "AX" | "BX" | "CX" | "DX" | "SI" | "DI" | "BP" | "SP" | "SB" | "FP"
-  | "R8" | "R9" | "R10" | "R11" | "R12" | "R13" | "R14" | "R15"
-  | "K0" | "K1" | "K2" | "K3" | "K4" | "K5" | "K6" | "K7" => true
+  let low := tok.toLower
+  match low with
+  | "rax" | "rbx" | "rcx" | "rdx" | "rsi" | "rdi" | "rbp" | "rsp" | "rip"
+  | "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi" | "ebp" | "esp"
+  | "r8" | "r9" | "r10" | "r11" | "r12" | "r13" | "r14" | "r15"
+  | "k0" | "k1" | "k2" | "k3" | "k4" | "k5" | "k6" | "k7"
+  | "xmmword" | "ymmword" | "zmmword" | "qword" | "dword" | "byte" | "ptr" => true
   | _ =>
-    match tok.toList with
-    | p :: rest =>
-      if (p == 'X' || p == 'Y' || p == 'Z') && !rest.isEmpty && rest.all Char.isDigit then
-        match String.toNat? (String.ofList rest) with
-        | some n => n <= 31
-        | none => false
-      else false
-    | [] => false
+    if isIntelVecReg low then true
+    else
+      match tok with
+      | "AX" | "BX" | "CX" | "DX" | "SI" | "DI" | "BP" | "SP" | "SB" | "FP" => true
+      | _ =>
+        match tok.toList with
+        | p :: rest =>
+          if (p == 'X' || p == 'Y' || p == 'Z') && !rest.isEmpty && rest.all Char.isDigit then
+            match String.toNat? (String.ofList rest) with
+            | some n => n <= 31
+            | none => false
+          else false
+        | [] => false
 
 private def isPlan9Sep (c : Char) : Bool :=
-  c == ' ' || c == '\t' || c == ',' || c == '(' || c == ')' || c == '+' || c == '-' || c == '*'
+  c == ' ' || c == '\t' || c == ',' || c == '(' || c == ')' ||
+  c == '[' || c == ']' || c == '{' || c == '}' || c == ':' || c == '+' || c == '-' || c == '*'
 
-/-- Detects unparsed Go Plan 9 assembly syntax (bare registers without `%` prefix). -/
+/-- Detects unparsed Go Plan 9 or Intel assembly syntax (bare registers or memory specifiers lacking `%`). -/
 def isPlan9Syntax (args : String) : Bool :=
   let beforeSym := ((stripTrailingComment args).splitOn "<").headD ""
-  let toks := beforeSym.splitOn " "
   let rec splitTokens (cs : List Char) (cur : List Char) (acc : List String) : List String :=
     match cs with
     | [] =>
@@ -199,7 +228,6 @@ def isPlan9Syntax (args : String) : Bool :=
         else splitTokens rest [] (String.ofList cur.reverse :: acc)
       else
         splitTokens rest (c :: cur) acc
-  let _ := toks
   (splitTokens beforeSym.toList [] []).any isPlan9RegToken
 
 /-- Detects AVX-512 EVEX instructions from opcode and operand strings (case-insensitive). -/
@@ -237,7 +265,28 @@ def isEVEXInsn (op args : String) : Bool :=
   opL.startsWith "vptestm" ||
   opL.startsWith "vpmovm2" ||
   opL.startsWith "vpmovq2m" ||
-  opL.startsWith "vpmovd2m"
+  opL.startsWith "vpmovd2m" ||
+  opL.startsWith "vpmullq" ||
+  opL.startsWith "vpopcnt" ||
+  opL.startsWith "vplzcnt" ||
+  opL.startsWith "vcvtqq2p" ||
+  opL.startsWith "vcvtuqq2p" ||
+  opL.startsWith "vcvtpd2qq" ||
+  opL.startsWith "vcvtpd2uqq" ||
+  opL.startsWith "vcvttpd2qq" ||
+  opL.startsWith "vcvttpd2uqq" ||
+  opL.startsWith "vrangep" ||
+  opL.startsWith "vreducep" ||
+  opL.startsWith "vgetmant" ||
+  opL.startsWith "vgetexp" ||
+  opL.startsWith "vdbpsadbw" ||
+  opL.startsWith "vpmultishiftqb" ||
+  opL.startsWith "vpconflict" ||
+  opL.startsWith "vpshufbitqmb" ||
+  opL.startsWith "vpexpand" ||
+  opL.startsWith "vpcompress" ||
+  opL.startsWith "vprol" ||
+  opL.startsWith "vpror"
 
 /-- Detects VEX 256-bit YMM instructions (excluding EVEX and vzeroupper/vzeroall). -/
 def isVEXYMMInsn (op args : String) : Bool :=
@@ -274,10 +323,18 @@ def isNoreturnPanicSymbol (sym : String) : Bool :=
 def isMorestackSymbol (sym : String) : Bool :=
   sym.trimAscii.toString.startsWith "runtime.morestack"
 
+/-- Detects boolean AVX-512 CPU feature check symbols (`hasAVX512`/`x86HasAVX512`). -/
+def isBoolCpuFeatureSymbol (sym : String) : Bool :=
+  let s := sym.trimAscii.toString.toLower
+  hasSubstr s "hasavx512" || hasSubstr s "x86hasavx512"
+
+/-- Detects multi-tier SIMD dispatch symbol (`activeTier`, where tier 2 = AVX-512). -/
+def isActiveTierSymbol (sym : String) : Bool :=
+  hasSubstr sym.trimAscii.toString.toLower "activetier"
+
 /-- Detects explicit AVX-512 CPU feature check symbols (`hasAVX512`/`x86HasAVX512`/`activeTier`). -/
 def isCpuFeatureSymbol (sym : String) : Bool :=
-  let s := sym.trimAscii.toString.toLower
-  hasSubstr s "hasavx512" || hasSubstr s "x86hasavx512" || hasSubstr s "activetier"
+  isBoolCpuFeatureSymbol sym || isActiveTierSymbol sym
 
 /-- Detects non-returning runtime panic calls by inspecting only the parsed call target symbol. -/
 def isNoreturnRuntimeCall (args : String) : Bool :=
@@ -305,6 +362,8 @@ structure Amd64Insn where
   isUncondJmp : Bool
   isCondJmp : Bool
   isCpuFeatureCheck : Bool := false
+  isBoolCpuFeatureCheck : Bool := false
+  isActiveTierCheck : Bool := false
   isFlagTestOrCmp : Bool := false
   hasHexJmpTarget : Bool
   jmpTargetIdx : Option Nat
@@ -324,7 +383,15 @@ def classifyAmd64Insn (addr op args raw : String) (jmpTargetIdx : Option Nat) : 
     match targetSym with
     | some sym => isNoreturnPanicSymbol sym
     | none => false
-  let cpuCheck := (extractArgSymbols argsTrim).any isCpuFeatureSymbol
+  let hasRipMem := hasSubstr (stripTrailingComment argsTrim).toLower "(%rip)"
+  let argSyms :=
+    if hasRipMem then
+      extractArgSymbols argsTrim ++ extractHashCommentSymbols argsTrim ++ extractHashCommentSymbols raw
+    else
+      extractArgSymbols argsTrim
+  let boolCpuCheck := argSyms.any isBoolCpuFeatureSymbol
+  let tierCpuCheck := argSyms.any isActiveTierSymbol
+  let cpuCheck := boolCpuCheck || tierCpuCheck
   let flagCmp := opL.startsWith "cmp" || opL.startsWith "test"
   { addr := normalizeHexAddr addr
     op := opL
@@ -344,6 +411,8 @@ def classifyAmd64Insn (addr op args raw : String) (jmpTargetIdx : Option Nat) : 
     isUncondJmp := uncond
     isCondJmp := cond
     isCpuFeatureCheck := cpuCheck
+    isBoolCpuFeatureCheck := boolCpuCheck
+    isActiveTierCheck := tierCpuCheck
     isFlagTestOrCmp := flagCmp
     hasHexJmpTarget := (parseJumpTargetHex argsTrim).isSome
     jmpTargetIdx := jmpTargetIdx }
@@ -354,9 +423,16 @@ structure Amd64FuncCFG where
   insns : Array Amd64Insn
   deriving DecidableEq, Repr, Inhabited
 
-/-- Returns true when function name explicitly marks an AVX-512 routine. -/
+/-- Returns true when function name explicitly marks a dedicated AVX-512 leaf routine
+(ending with `avx512` after stripping optional `.abi0` / `.abiinternal` suffixes). -/
 def Amd64FuncCFG.isAVX512Name (fn : Amd64FuncCFG) : Bool :=
-  hasSubstr fn.name.toLower "avx512"
+  let low := fn.name.trimAscii.toString.toLower
+  let cs := low.toList
+  let stripped :=
+    if low.endsWith ".abiinternal" then String.ofList (cs.take (cs.length - 12))
+    else if low.endsWith ".abi0" then String.ofList (cs.take (cs.length - 5))
+    else low
+  stripped.endsWith "avx512"
 
 /-- Returns true when function uses EVEX or VEX-YMM instructions. -/
 def Amd64FuncCFG.hasVectorOps (fn : Amd64FuncCFG) : Bool :=
@@ -452,29 +528,142 @@ inductive CfgReachable (fn : Amd64FuncCFG) : Nat → Bool → Prop where
   | entry (hPos : 0 < fn.insns.size) : CfgReachable fn 0 false
   | step {i d i' d'} : CfgReachable fn i d → CfgStep fn i d i' d' → CfgReachable fn i' d'
 
-/-- Returns true iff `fn.insns[idx]` is a conditional branch directly guarded by an
-explicit AVX-512 CPU feature check (`hasAVX512` / `x86HasAVX512` / `activeTier`). -/
-def isCpuFeatureGuardAt (fn : Amd64FuncCFG) (idx : Nat) : Bool :=
+/-- Which outgoing edge of a conditional branch is proven to require AVX-512 support. -/
+inductive CpuGuardPolarity where
+  | none
+  | fallthroughGuarded
+  | targetGuarded
+  deriving DecidableEq, Repr, Inhabited
+
+private def splitTopLevelCommas (s : String) : List String :=
+  let rec go (cs : List Char) (depth : Nat) (cur : List Char) (acc : List String) : List String :=
+    match cs with
+    | [] => (String.ofList cur.reverse |>.trimAscii |>.toString) :: acc |>.reverse
+    | c :: rest =>
+      if c == '(' then go rest (depth + 1) (c :: cur) acc
+      else if c == ')' then go rest (depth - 1) (c :: cur) acc
+      else if c == ',' && depth == 0 then
+        go rest 0 [] ((String.ofList cur.reverse |>.trimAscii |>.toString) :: acc)
+      else go rest depth (c :: cur) acc
+  go s.toList 0 [] []
+
+private def parseHexDigitsNat? (cs : List Char) : Option Nat :=
+  if cs.isEmpty then none
+  else
+    cs.foldl (fun acc c =>
+      match acc with
+      | none => none
+      | some n =>
+        if '0' <= c && c <= '9' then some (n * 16 + (c.toNat - '0'.toNat))
+        else if 'a' <= c && c <= 'f' then some (n * 16 + 10 + (c.toNat - 'a'.toNat))
+        else if 'A' <= c && c <= 'F' then some (n * 16 + 10 + (c.toNat - 'A'.toNat))
+        else none) (some 0)
+
+private def parseAttImm? (opnd : String) : Option Nat :=
+  match splitFirstWord opnd with
+  | none => none
+  | some (tok, _) =>
+    match tok.toList with
+    | '$' :: '0' :: 'x' :: rest => parseHexDigitsNat? rest
+    | '$' :: '0' :: 'X' :: rest => parseHexDigitsNat? rest
+    | '$' :: rest =>
+      if !rest.isEmpty && rest.all Char.isDigit then
+        String.toNat? (String.ofList rest)
+      else none
+    | _ => none
+
+private def isAttRegToken (opnd : String) : Bool :=
+  match opnd.toList with
+  | '%' :: rest => !rest.isEmpty && rest.all (fun c => c.isAlphanum || c == '_')
+  | _ => false
+
+private def isCmpOp (op : String) : Bool :=
+  op == "cmp" || op == "cmpb" || op == "cmpw" || op == "cmpl" || op == "cmpq"
+
+private def isTestOp (op : String) : Bool :=
+  op == "test" || op == "testb" || op == "testw" || op == "testl" || op == "testq"
+
+private def evalBoolFeaturePolarity (flagIns : Amd64Insn) (jmpOp : String) : CpuGuardPolarity :=
+  match splitTopLevelCommas (stripTrailingComment flagIns.args) with
+  | [op0, op1] =>
+    if isTestOp flagIns.op then
+      let validTest :=
+        (isAttRegToken op0 && op0.toLower == op1.toLower) ||
+        (match parseAttImm? op0 with | some k => k > 0 | none => false)
+      if !validTest then .none
+      else if jmpOp == "je" || jmpOp == "jz" then .fallthroughGuarded
+      else if jmpOp == "jne" || jmpOp == "jnz" then .targetGuarded
+      else .none
+    else if isCmpOp flagIns.op then
+      match parseAttImm? op0 with
+      | some 0 =>
+        if jmpOp == "je" || jmpOp == "jz" then .fallthroughGuarded
+        else if jmpOp == "jne" || jmpOp == "jnz" then .targetGuarded
+        else .none
+      | some 1 =>
+        if jmpOp == "je" || jmpOp == "jz" then .targetGuarded
+        else if jmpOp == "jne" || jmpOp == "jnz" then .fallthroughGuarded
+        else .none
+      | _ => .none
+    else .none
+  | _ => .none
+
+private def evalActiveTierPolarity (flagIns : Amd64Insn) (jmpOp : String) : CpuGuardPolarity :=
+  match splitTopLevelCommas (stripTrailingComment flagIns.args) with
+  | [op0, _] =>
+    if isCmpOp flagIns.op then
+      match parseAttImm? op0 with
+      | some 2 =>
+        if jmpOp == "je" || jmpOp == "jz" || jmpOp == "jae" || jmpOp == "jnb" ||
+           jmpOp == "jnc" || jmpOp == "jge" || jmpOp == "jnl" then .targetGuarded
+        else if jmpOp == "jne" || jmpOp == "jnz" || jmpOp == "jb" || jmpOp == "jnae" ||
+                jmpOp == "jc" || jmpOp == "jl" || jmpOp == "jnge" then .fallthroughGuarded
+        else .none
+      | some 1 =>
+        if jmpOp == "ja" || jmpOp == "jnbe" || jmpOp == "jg" || jmpOp == "jnle" then .targetGuarded
+        else if jmpOp == "jbe" || jmpOp == "jna" || jmpOp == "jle" || jmpOp == "jng" then .fallthroughGuarded
+        else .none
+      | _ => .none
+    else .none
+  | _ => .none
+
+/-- Determines which outgoing branch edge at `fn.insns[idx]` (if any) is proven to require
+explicit AVX-512 CPU feature support. Ambiguous forms return `.none`, pruning neither edge. -/
+def cpuFeatureGuardPolarity (fn : Amd64FuncCFG) (idx : Nat) : CpuGuardPolarity :=
   if h : idx < fn.insns.size then
     let ins := fn.insns[idx]
-    if !ins.isCondJmp then false
+    if !ins.isCondJmp then .none
     else
-      let prev1 :=
+      let evalFor (srcIns flagIns : Amd64Insn) : CpuGuardPolarity :=
+        if srcIns.isBoolCpuFeatureCheck then evalBoolFeaturePolarity flagIns ins.op
+        else if srcIns.isActiveTierCheck then evalActiveTierPolarity flagIns ins.op
+        else .none
+      let p1Pol :=
         if idx > 0 then
           match fn.insns[idx - 1]? with
-          | some p1 => p1.isCpuFeatureCheck
-          | none => false
-        else false
-      let prev2 :=
-        if idx > 1 then
-          match fn.insns[idx - 2]?, fn.insns[idx - 1]? with
-          | some p2, some p1 => p2.isCpuFeatureCheck && p1.isFlagTestOrCmp
-          | _, _ => false
-        else false
-      prev1 || prev2
-  else false
+          | some p1 =>
+            if p1.isCpuFeatureCheck && p1.isFlagTestOrCmp then evalFor p1 p1
+            else .none
+          | none => .none
+        else .none
+      if p1Pol != .none then p1Pol
+      else if idx > 1 then
+        match fn.insns[idx - 2]?, fn.insns[idx - 1]? with
+        | some p2, some p1 =>
+          if p2.isCpuFeatureCheck && !p2.isCondJmp && !p2.isUncondJmp &&
+             !p2.isCall && !p2.isRet && !p2.isTrap && p1.isFlagTestOrCmp then
+            evalFor p2 p1
+          else .none
+        | _, _ => .none
+      else .none
+  else .none
 
-/-- Successor list along paths that do not cross an explicit AVX-512 CPU feature guard. -/
+/-- Returns true iff `fn.insns[idx]` is a conditional branch with proven AVX-512 guard polarity. -/
+def isCpuFeatureGuardAt (fn : Amd64FuncCFG) (idx : Nat) : Bool :=
+  cpuFeatureGuardPolarity fn idx != .none
+
+/-- Successor list along paths that do not take a proven AVX-512-guarded branch edge.
+Only the proven-guarded edge is pruned; unguarded edges and ambiguous branches stay traversed. -/
 def unguardedSucc (fn : Amd64FuncCFG) (idx : Nat) : List Nat :=
   if h : idx < fn.insns.size then
     let ins := fn.insns[idx]
@@ -487,22 +676,25 @@ def unguardedSucc (fn : Amd64FuncCFG) (idx : Nat) : List Nat :=
       | some t => if t < fn.insns.size then [t] else []
       | none => []
     else if ins.isCondJmp then
-      if isCpuFeatureGuardAt fn idx then []
-      else
-        let fall := if idx + 1 < fn.insns.size then [idx + 1] else []
+      let fall := if idx + 1 < fn.insns.size then [idx + 1] else []
+      let tgt :=
         match ins.jmpTargetIdx with
-        | some t => if t < fn.insns.size then t :: fall else fall
-        | none => fall
+        | some t => if t < fn.insns.size then [t] else []
+        | none => []
+      match cpuFeatureGuardPolarity fn idx with
+      | .fallthroughGuarded => tgt
+      | .targetGuarded => fall
+      | .none => tgt ++ fall
     else
       if idx + 1 < fn.insns.size then [idx + 1] else []
   else []
 
-/-- Single-step unguarded CFG transition not crossing an explicit AVX-512 CPU feature guard. -/
+/-- Single-step unguarded CFG transition along any edge not proven to require AVX-512 support. -/
 inductive UnguardedStep (fn : Amd64FuncCFG) : Nat → Nat → Prop where
   | mk {idx idx' : Nat} (hLt : idx < fn.insns.size)
       (hMem : idx' ∈ unguardedSucc fn idx) : UnguardedStep fn idx idx'
 
-/-- Instructions reachable from entry without crossing an explicit AVX-512 CPU feature guard. -/
+/-- Instructions reachable from entry without taking a proven AVX-512-guarded branch edge. -/
 inductive UnguardedReachable (fn : Amd64FuncCFG) : Nat → Prop where
   | entry (hPos : 0 < fn.insns.size) : UnguardedReachable fn 0
   | step {i i'} : UnguardedReachable fn i → UnguardedStep fn i i' → UnguardedReachable fn i'
@@ -949,26 +1141,66 @@ private theorem unguardedSucc_lt (fn : Amd64FuncCFG) (idx idx' : Nat)
             · simp at hMem
           · simp at hMem
         · split at hMem
-          · split at hMem
-            · simp at hMem
-            · split at hMem
-              · split at hMem
-                · simp only [List.mem_cons] at hMem
-                  rcases hMem with hEq | hFall
-                  · cases hEq; assumption
-                  · split at hFall
-                    · simp at hFall; omega
-                    · simp at hFall
-                · split at hMem
-                  · simp at hMem; omega
-                  · simp at hMem
-              · split at hMem
-                · simp at hMem; omega
-                · simp at hMem
+          · have hFallLt : ∀ x, x ∈ (if idx + 1 < fn.insns.size then [idx + 1] else []) → x < fn.insns.size := by
+              intro x hx
+              split at hx
+              · simp at hx; omega
+              · simp at hx
+            have hTgtLt : ∀ x, x ∈ (match fn.insns[idx].jmpTargetIdx with
+                | some t => if t < fn.insns.size then [t] else []
+                | none => []) → x < fn.insns.size := by
+              intro x hx
+              split at hx
+              · split at hx
+                · simp at hx; omega
+                · simp at hx
+              · simp at hx
+            split at hMem
+            · exact hTgtLt idx' hMem
+            · exact hFallLt idx' hMem
+            · simp only [List.mem_append] at hMem
+              rcases hMem with hT | hF
+              · exact hTgtLt idx' hT
+              · exact hFallLt idx' hF
           · split at hMem
             · simp at hMem; omega
             · simp at hMem
   · simp at hMem
+
+/-- Polarity soundness: when fallthrough is guarded, an in-bounds jump target remains unguarded. -/
+theorem unguardedSucc_fallthroughGuarded_keeps_target (fn : Amd64FuncCFG) (idx t : Nat)
+    (hLt : idx < fn.insns.size)
+    (hNotRet : fn.insns[idx].isRet = false) (hNotTrap : fn.insns[idx].isTrap = false)
+    (hNotCall : fn.insns[idx].isCall = false) (hNotUncond : fn.insns[idx].isUncondJmp = false)
+    (hCond : fn.insns[idx].isCondJmp = true)
+    (hTgt : fn.insns[idx].jmpTargetIdx = some t) (ht : t < fn.insns.size)
+    (hPol : cpuFeatureGuardPolarity fn idx = .fallthroughGuarded) :
+    t ∈ unguardedSucc fn idx := by
+  unfold unguardedSucc
+  simp [hLt, hNotRet, hNotTrap, hNotCall, hNotUncond, hCond, hTgt, ht, hPol]
+
+/-- Polarity soundness: when jump target is guarded, an in-bounds fallthrough remains unguarded. -/
+theorem unguardedSucc_targetGuarded_keeps_fallthrough (fn : Amd64FuncCFG) (idx : Nat)
+    (hLt : idx < fn.insns.size) (hNext : idx + 1 < fn.insns.size)
+    (hNotRet : fn.insns[idx].isRet = false) (hNotTrap : fn.insns[idx].isTrap = false)
+    (hNotCall : fn.insns[idx].isCall = false) (hNotUncond : fn.insns[idx].isUncondJmp = false)
+    (hCond : fn.insns[idx].isCondJmp = true)
+    (hPol : cpuFeatureGuardPolarity fn idx = .targetGuarded) :
+    idx + 1 ∈ unguardedSucc fn idx := by
+  unfold unguardedSucc
+  simp [hLt, hNext, hNotRet, hNotTrap, hNotCall, hNotUncond, hCond, hPol]
+
+/-- Polarity soundness: ambiguous guards (`.none`) prune neither target nor fallthrough. -/
+theorem unguardedSucc_ambiguous_keeps_both (fn : Amd64FuncCFG) (idx t : Nat)
+    (hLt : idx < fn.insns.size) (hNext : idx + 1 < fn.insns.size)
+    (hNotRet : fn.insns[idx].isRet = false) (hNotTrap : fn.insns[idx].isTrap = false)
+    (hNotCall : fn.insns[idx].isCall = false) (hNotUncond : fn.insns[idx].isUncondJmp = false)
+    (hCond : fn.insns[idx].isCondJmp = true)
+    (hTgt : fn.insns[idx].jmpTargetIdx = some t) (ht : t < fn.insns.size)
+    (hPol : cpuFeatureGuardPolarity fn idx = .none) :
+    t ∈ unguardedSucc fn idx ∧ idx + 1 ∈ unguardedSucc fn idx := by
+  unfold unguardedSucc
+  simp [hLt, hNext, hNotRet, hNotTrap, hNotCall, hNotUncond, hCond, hTgt, ht, hPol]
 
 private def UnguardedBfsInv (fn : Amd64FuncCFG) (seen : Array Bool) (queue : List Nat) : Prop :=
   seen.size = fn.insns.size ∧

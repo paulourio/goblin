@@ -8000,7 +8000,27 @@ private def parseRowSense (s : String) : Except String RowSense :=
   | ">=" | "ge" => .ok .ge
   | _ => .error s!"invalid constraint sense '{s}'"
 
+/-- Upper bound on VIPR instance dimensions decoded from JSON before allocation. -/
+def maxVerifierDim : Nat := 10_000_000
+
+private def checkMinimizationSense (v : JsonVal) : Except String Unit := do
+  match v.getField? "sense" with
+  | none | some .null => pure ()
+  | some sv =>
+    let s ← sv.asString
+    let low := s.trimAscii.toString.toLower
+    if low != "min" && low != "minimize" then
+      throw s!"unsupported objective sense '{s}' (only minimization 'min'/'minimize' is supported)"
+  match v.getField? "maximize" with
+  | none | some .null => pure ()
+  | some mv =>
+    let b ← mv.asBool
+    if b then
+      throw "unsupported 'maximize': true (only minimization is supported)"
+
 private def decodeRatVec (n : Nat) (v : JsonVal) : Except String (RatVec n) := do
+  if n > maxVerifierDim then
+    throw s!"vector dimension {n} exceeds maxVerifierDim ({maxVerifierDim})"
   match v with
   | .arr elems =>
     if hsz : elems.size = n then do
@@ -8228,17 +8248,22 @@ private def decodeOptBool (v : JsonVal) (key : String) (default : Bool) : Except
 
 /-- Decodes a `VIPRInstance` from a parsed `JsonVal` object. -/
 def decodeVIPRInstance (v : JsonVal) : Except String VIPRInstance := do
+  checkMinimizationSense v
   let n ← v.getNat "n"
+  if n > maxVerifierDim then
+    throw s!"VIPR instance dimension n={n} exceeds maxVerifierDim ({maxVerifierDim})"
+  let isIntVec ← decodeBoolVec n "isInt" v
+  let lbVec ← decodeOptRatVec n "lb" v
+  let ubVec ← decodeOptRatVec n "ub" v
   let objConst ←
     match v.getField? "objConst" with
     | none | some .null => .ok (0 : Rat)
     | some ov => ov.asRat
   let objVal ← v.getField "obj"
   let objVec ← decodeRatVec n objVal
-  let isIntVec ← decodeBoolVec n "isInt" v
-  let lbVec ← decodeOptRatVec n "lb" v
-  let ubVec ← decodeOptRatVec n "ub" v
   let rowsArr ← v.getArray "baseRows"
+  if rowsArr.size > maxVerifierDim then
+    throw s!"VIPR baseRows count {rowsArr.size} exceeds maxVerifierDim ({maxVerifierDim})"
   let mut baseRows : Array (LinCon n) := Array.mkEmpty rowsArr.size
   for rv in rowsArr do
     let rc ← decodeLinCon n rv
@@ -8362,7 +8387,7 @@ def verifyMiniVIPRJsonVal (jv : JsonVal) : Except String MiniVIPRCert := do
 
 /-- Parses and verifies a JSON-encoded Mini-VIPR certificate. -/
 def verifyMiniVIPRJson (raw : String) : Except String Unit := do
-  let jv ← parseJson raw
+  let jv ← parseJsonStrict raw
   let _ ← verifyMiniVIPRJsonVal jv
   .ok ()
 
@@ -8376,7 +8401,7 @@ def verifyVIPRWithPresolveJsonVal (jv : JsonVal) : Except String VIPRWithPresolv
 
 /-- Parses and verifies a JSON-encoded presolve-enveloped Mini-VIPR certificate. -/
 def verifyVIPRWithPresolveJson (raw : String) : Except String Unit := do
-  let jv ← parseJson raw
+  let jv ← parseJsonStrict raw
   let _ ← verifyVIPRWithPresolveJsonVal jv
   .ok ()
 

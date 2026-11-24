@@ -63,7 +63,7 @@ private def parseActivityTerms (v : JsonVal) : Except String (Array JsonVal × A
     pure ({ coeff, lb, ub, isInt } : ActivityTerm)
   pure (termsJson, terms)
 
-private def handleDivCeil (v : JsonVal) : Except String String := do
+private def handleDivCeil (requireAssert : Bool) (v : JsonVal) : Except String String := do
   let a ← parseIntFlex (← v.getField "a")
   let d ← parseIntFlex (← v.getField "d")
   if d ≤ 0 then
@@ -71,17 +71,27 @@ private def handleDivCeil (v : JsonVal) : Except String String := do
   else
     let q := divCeilSpec a d
     let fl := divFloorSpec a d
+    let mut hasAssert := false
     if let some eqv := optNonNullField? v "expect_q" then
+      hasAssert := true
       let expQ ← parseIntFlex eqv
       if q != expQ then
         throw s!"divCeil({a}, {d}) = {q}, want {expQ}"
+    if let some ev := optNonNullField? v "expected" then
+      hasAssert := true
+      let expQ ← parseIntFlex ev
+      if q != expQ then
+        throw s!"divCeil({a}, {d}) = {q}, want {expQ}"
     if let some efv := optNonNullField? v "expect_floor" then
+      hasAssert := true
       let expFl ← parseIntFlex efv
       if fl != expFl then
         throw s!"divFloor({a}, {d}) = {fl}, want {expFl}"
+    if requireAssert && !hasAssert then
+      throw "divceil requires an assertion field ('expect_q', 'expect_floor', or 'expected') in standalone/--batch mode"
     .ok s!"\{\"q\":{q},\"floor\":{fl}}"
 
-private def handleGcdInfeas (v : JsonVal) : Except String String := do
+private def handleGcdInfeas (requireAssert : Bool) (v : JsonVal) : Except String String := do
   let coeffsArr ← v.getArray "coeffs"
   let coeffs ← (← parseIntArray coeffsArr).toList |> pure
   let lo ← parseIntFlex (← v.getField "lo")
@@ -93,35 +103,53 @@ private def handleGcdInfeas (v : JsonVal) : Except String String := do
     | some cv => parseIntFlex cv
   let dividesAll := candG != 0 && coeffs.all (fun c => Int.tmod c candG == 0)
   let candInfeas := 0 < candG && dividesAll && (hi < divCeilSpec lo candG * candG)
+  let mut hasAssert := false
   if let some gv := optNonNullField? v "go_infeasible" then
+    hasAssert := true
     let goInf ← gv.asBool
     if goInf && !infeas then
       throw s!"unsound gcd-infeas: solver reported infeasible on feasible range [{lo}, {hi}] (gcd={g})"
   if let some ev := optNonNullField? v "expect_infeasible" then
+    hasAssert := true
     let expInf ← ev.asBool
     if expInf != infeas then
       throw s!"gcd-infeas mismatch: got {infeas}, want {expInf}"
   if let some egv := optNonNullField? v "expect_gcd" then
+    hasAssert := true
     let expG ← parseIntFlex egv
     if expG != g then
       throw s!"gcd mismatch: got {g}, want {expG}"
+  if requireAssert && !hasAssert then
+    throw "gcd-infeas requires an assertion field ('go_infeasible', 'expect_infeasible', or 'expect_gcd') in standalone/--batch mode"
   .ok ("{\"gcd\":" ++ toString g ++
        ",\"divides_all\":" ++ boolJson dividesAll ++
        ",\"infeasible\":" ++ boolJson infeas ++
        ",\"candidate_infeasible\":" ++ boolJson candInfeas ++ "}")
 
-private def handleActivitySummary (v : JsonVal) : Except String String := do
+private def handleGcdDivCheck (requireAssert : Bool) (v : JsonVal) : Except String String := do
+  if requireAssert then
+    let hasAssert :=
+      hasNonNullField v "div_rhs" || hasNonNullField v "divRhs" ||
+      hasNonNullField v "expect_infeasible" || hasNonNullField v "infeasible" ||
+      hasNonNullField v "go_infeasible"
+    if !hasAssert then
+      throw "gcd-div-check requires an assertion field ('div_rhs', 'expect_infeasible', or 'go_infeasible') in standalone/--batch mode"
+  Track3B.handleGcdRowDivJson v
+
+private def handleActivitySummary (requireAssert : Bool) (v : JsonVal) : Except String String := do
   let rhs ← v.getRat "rhs"
   let hasLo ← v.getBool "has_lo"
   let hasHi ← v.getBool "has_hi"
   let (termsJson, terms) ← parseActivityTerms v
   let res := evalActivitySummarySpec rhs hasLo hasHi terms
+  let mut hasGoAssert := false
   for j in [:termsJson.size] do
     if hj : j < res.terms.size ∧ j < terms.size then
       let tv := termsJson[j]!
       let tr := res.terms[j]'(hj.1)
       let origTerm := terms[j]'(hj.2)
       if let some gubVal := optNonNullField? tv "go_ub" then
+        hasGoAssert := true
         let goUB ← gubVal.asRat
         match tr.impliedUB with
         | some exactUB =>
@@ -134,6 +162,7 @@ private def handleActivitySummary (v : JsonVal) : Except String String := do
           if stricter then
             throw s!"term {j}: solver tightened UB to {goUB} without a valid impliedUB"
       if let some glbVal := optNonNullField? tv "go_lb" then
+        hasGoAssert := true
         let goLB ← glbVal.asRat
         match tr.impliedLB with
         | some exactLB =>
@@ -145,6 +174,8 @@ private def handleActivitySummary (v : JsonVal) : Except String String := do
             | some origLB => origLB < goLB
           if stricter then
             throw s!"term {j}: solver tightened LB to {goLB} without a valid impliedLB"
+  if requireAssert && !hasGoAssert then
+    throw "activity-summary requires at least one solver bound assertion ('go_ub' or 'go_lb') in standalone/--batch mode"
   let termObjs := res.terms.map fun t =>
     "{\"quot_upper\":" ++ optRatJson t.quotUpper ++
     ",\"quot_lower\":" ++ optRatJson t.quotLower ++
@@ -159,7 +190,7 @@ private def handleActivitySummary (v : JsonVal) : Except String String := do
        ",\"deficit\":" ++ optRatJson res.deficit ++
        ",\"terms\":" ++ termsStr ++ "}")
 
-private def handleActivitySkip (v : JsonVal) : Except String String := do
+private def handleActivitySkip (requireAssert : Bool) (v : JsonVal) : Except String String := do
   let slackLo ← v.getRat "slack_lo"
   let absA ← v.getRat "abs_a"
   let l ← v.getRat "l"
@@ -168,18 +199,23 @@ private def handleActivitySkip (v : JsonVal) : Except String String := do
   let isInt ← v.getBool "is_int"
   let canSkip := canSkipTermSpec slackLo absA l u targetBound isInt
   let rawStrict := 0 < slackLo && 0 ≤ u - l && absA * (u - l) < slackLo
+  let mut hasAssert := false
   if let some gsv := optNonNullField? v "go_skip" then
+    hasAssert := true
     let goSkip ← gsv.asBool
-    if goSkip && !rawStrict then
-      throw "incomplete skip-term: solver skipped term without abs_a*(u-l) < slack_lo"
+    if goSkip && !canSkip then
+      throw "unsound skip-term: solver skipped term violating canSkipTermSpec"
   if let some esv := optNonNullField? v "expect_can_skip" then
+    hasAssert := true
     let expSkip ← esv.asBool
     if expSkip != canSkip then
       throw s!"can_skip mismatch: got {canSkip}, want {expSkip}"
+  if requireAssert && !hasAssert then
+    throw "activity-skip requires an assertion field ('go_skip' or 'expect_can_skip') in standalone/--batch mode"
   .ok ("{\"can_skip\":" ++ boolJson canSkip ++
        ",\"raw_strict_exceeds\":" ++ boolJson rawStrict ++ "}")
 
-private def handleActivity (v : JsonVal) : Except String String := do
+private def handleActivity (requireAssert : Bool) (v : JsonVal) : Except String String := do
   let op ← match optNonNullField? v "activity_op" with
     | some av => av.asString
     | none =>
@@ -187,11 +223,11 @@ private def handleActivity (v : JsonVal) : Except String String := do
       | none => pure "summary"
       | some ov => ov.asString
   match op with
-  | "summary" | "activity-summary" => handleActivitySummary v
-  | "skip" | "activity-skip" => handleActivitySkip v
+  | "summary" | "activity-summary" => handleActivitySummary requireAssert v
+  | "skip" | "activity-skip" => handleActivitySkip requireAssert v
   | "activity" =>
-    if (v.getField? "slack_lo").isSome then handleActivitySkip v
-    else handleActivitySummary v
+    if (v.getField? "slack_lo").isSome then handleActivitySkip requireAssert v
+    else handleActivitySummary requireAssert v
   | _ => .error s!"unknown activity op '{op}'"
 
 private def handleBinStrengthen (v : JsonVal) : Except String String := do
@@ -244,6 +280,8 @@ private def handleBinStrengthen (v : JsonVal) : Except String String := do
 
 private def handleOrbitCheck (v : JsonVal) : Except String String := do
   let numVars ← v.getNat "num_vars"
+  if numVars > Track3B.maxVerifierDim then
+    throw s!"num_vars={numVars} exceeds maxVerifierDim ({Track3B.maxVerifierDim})"
   let isInt ← parseBoolArray (← v.getArray "is_int")
   let lb ← parseExtRatArray (← v.getArray "lb")
   let ub ← parseExtRatArray (← v.getArray "ub")
@@ -257,6 +295,8 @@ private def handleOrbitCheck (v : JsonVal) : Except String String := do
     let rhs ← rv.getRat "rhs"
     pure ({ active, cols, vals, sense, rhs } : OrbitWorkRow)
   let gCount ← v.getNat "g_count"
+  if gCount > Track3B.maxVerifierDim then
+    throw s!"g_count={gCount} exceeds maxVerifierDim ({Track3B.maxVerifierDim})"
   let orbits ← parseNatArray (← v.getArray "orbits")
   let rowTuples ← parseNatArray (← v.getArray "row_tuples")
   let colOrbit ← parseIntArray (← v.getArray "col_orbit")
@@ -288,37 +328,37 @@ private def isKnownSubcmd (s : String) : Bool :=
   s == "activity-summary" || s == "activity-skip" ||
   s == "bin-strengthen" || s == "orbit-check"
 
-private def handlerForSubcmd (subcmd : String) : Except String (JsonVal → Except String String) :=
+private def handlerForSubcmd (requireAssert : Bool) (subcmd : String) :
+    Except String (JsonVal → Except String String) :=
   match subcmd with
-  | "divceil" => .ok handleDivCeil
-  | "gcd-infeas" => .ok handleGcdInfeas
-  | "gcd-div-check" => .ok Track3B.handleGcdRowDivJson
-  | "activity" => .ok handleActivity
-  | "activity-summary" | "summary" => .ok handleActivitySummary
-  | "activity-skip" | "skip" => .ok handleActivitySkip
+  | "divceil" => .ok (handleDivCeil requireAssert)
+  | "gcd-infeas" => .ok (handleGcdInfeas requireAssert)
+  | "gcd-div-check" => .ok (handleGcdDivCheck requireAssert)
+  | "activity" => .ok (handleActivity requireAssert)
+  | "activity-summary" | "summary" => .ok (handleActivitySummary requireAssert)
+  | "activity-skip" | "skip" => .ok (handleActivitySkip requireAssert)
   | "bin-strengthen" => .ok handleBinStrengthen
   | "orbit-check" => .ok handleOrbitCheck
   | _ => .error s!"unknown subcommand '{subcmd}'"
 
-private def dispatchItem (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
+private def dispatchItem (requireAssert : Bool) (defaultSubcmd : Option String) (v : JsonVal) :
+    Except String String := do
   let sub ← resolveSubcmd defaultSubcmd v "missing required 'op' or 'subcommand' field"
-  let handler ← handlerForSubcmd sub
+  let handler ← handlerForSubcmd requireAssert sub
   handler v
-
-private def runSingleOrBatch (handler : JsonVal → Except String String)
-    (input : JsonVal) : Except String String :=
-  match input with
-  | .arr items => do
-    if items.isEmpty then
-      throw "empty batch array"
-    let outs ← items.mapM handler
-    .ok ("[" ++ String.intercalate "," outs.toList ++ "]")
-  | _ => handler input
 
 private def dispatch (subcmd : String) (payload : String) : Except String String := do
   let v ← parseJsonStrict payload
-  let handler ← handlerForSubcmd subcmd
-  runSingleOrBatch handler v
+  match v with
+  | .arr items => do
+    if items.isEmpty then
+      throw "empty batch array"
+    let queryHandler ← handlerForSubcmd false subcmd
+    let outs ← items.mapM queryHandler
+    .ok ("[" ++ String.intercalate "," outs.toList ++ "]")
+  | _ =>
+    let strictHandler ← handlerForSubcmd true subcmd
+    strictHandler v
 
 private def runSubcommandFrom (subcmd : String) (path : String) : IO UInt32 := do
   let raw ←
@@ -337,7 +377,7 @@ private def runSubcommandFrom (subcmd : String) (path : String) : IO UInt32 := d
 
 private def runJsonl (defaultSubcmd : Option String) : IO UInt32 := do
   runJsonlLoop (← IO.getStdin) (← IO.getStdout) fun jv => do
-    let resJson ← dispatchItem defaultSubcmd jv
+    let resJson ← dispatchItem false defaultSubcmd jv
     pure ("{\"ok\":true,\"detail\":\"VERIFIED\",\"result\":" ++ resJson ++ "}")
 
 private def batchFmt : BatchFormat := {
@@ -347,7 +387,7 @@ private def batchFmt : BatchFormat := {
 }
 
 private def runBatchFlag (defaultSubcmd : Option String) (path : String) : IO UInt32 :=
-  runBatchWith batchFmt path (fun item => dispatchItem defaultSubcmd item *> .ok ())
+  runBatchWith batchFmt path (fun item => dispatchItem true defaultSubcmd item *> .ok ())
 
 end Apps.RulesCheck
 

@@ -150,6 +150,14 @@ if command -v flock >/dev/null 2>&1; then
 else
     (cd formal && lake build --wfail)
 fi
+if command -v leanchecker >/dev/null 2>&1; then
+    (cd formal && lake env leanchecker --fresh GoblinFormal)
+fi
+(cd formal && lake env lean --stdin <<'EOF'
+import GoblinFormal.AxiomAudit
+#eval GoblinFormal.AxiomAudit.auditAllAppsModules
+EOF
+)
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_elf_track5.py --verify
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_amd64_track5e.py --verify
 
@@ -190,6 +198,9 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
 
     check_neg_cli_and_jsonl "${BIN_DIR}/lsap-check" "cols-1e12-oom-guard" "" \
         '{"rows":0,"cols":1000000000000,"cost":[],"row_ind":[],"col_ind":[],"u":[],"v":[]}'
+
+    check_neg_cli_and_jsonl "${BIN_DIR}/lsap-check" "exact-nonzero-tol" "" \
+        '{"rows":1,"cols":1,"sense":"min","mode":"exact","tol":"1/100","cost":[[1]],"row_ind":[0],"col_ind":[0],"u":[1],"v":[0]}'
 
     check_subcmd_pos_neg "${BIN_DIR}/cuts-check" "cover-check" \
         '{"op":"cover-check","numVars":3,"isInt":[true,true,true],"lb":["0/1","0/1","0/1"],"ub":["1/1","1/1","1/1"],"baseRows":[{"terms":[{"col":0,"val":"3/1"},{"col":1,"val":"3/1"},{"col":2,"val":"2/1"}],"sense":"le","rhs":"4/1"}],"rowIdx":0,"row":{"terms":[{"col":0,"val":"3/1"},{"col":1,"val":"3/1"},{"col":2,"val":"2/1"}],"sense":"le","rhs":"4/1"},"sign":"1/1","items":[{"col":0,"weight":"3/1","comp":false,"inCover":true,"alpha":1},{"col":1,"weight":"3/1","comp":false,"inCover":true,"alpha":1},{"col":2,"weight":"2/1","comp":false,"inCover":false,"alpha":0}],"knapRHS":"4/1","scale":"1/1","cut":{"terms":[{"col":0,"val":"1/1"},{"col":1,"val":"1/1"}],"rhs":"1/1"}}' \
@@ -241,6 +252,26 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
     check_neg_cli_and_jsonl "${BIN_DIR}/rules-check" "duplicate-key" "divceil" \
         '{"op":"divceil","a":7,"a":8,"d":2}'
 
+    check_subcmd_pos_neg "${BIN_DIR}/rules-check" "activity-skip" \
+        '{"op":"activity-skip","slack_lo":"3/1","abs_a":"2/1","l":"0/1","u":"1/1","target_bound":"1/1","is_int":true,"go_skip":true}' \
+        '{"op":"activity-skip","slack_lo":"3/1","abs_a":"2/1","l":"0/1","u":"3/2","target_bound":"3/2","is_int":true,"go_skip":true}' \
+        '"can_skip":true' "activity-skip (fractional int target_bound)"
+
+    check_neg_cli_and_jsonl "${BIN_DIR}/rules-check" "activity-skip-missing-margin" "activity-skip" \
+        '{"op":"activity-skip","slack_lo":"2000000000000001/1000000000000000","abs_a":"2/1","l":"0/1","u":"1/1","target_bound":"1/1","is_int":true,"go_skip":true}'
+
+    if printf '%s\n' '[{"op":"gcd-infeas","coeffs":[2,4],"lo":4,"hi":4}]' | "${BIN_DIR}/rules-check" --batch - >/dev/null 2>&1; then
+        echo "ERROR: rules-check --batch accepted unasserted gcd-infeas query." >&2
+        exit 1
+    fi
+    printf '  [OK] rules-check --batch unasserted gcd-infeas rejected\n'
+
+    if printf '%s\n' '[{"op":"mir-use-lower","x":"0","l":"0","u":"0","hasL":false,"hasU":false}]' | "${BIN_DIR}/cuts-check" --batch - >/dev/null 2>&1; then
+        echo "ERROR: cuts-check --batch accepted unasserted mir-use-lower query." >&2
+        exit 1
+    fi
+    printf '  [OK] cuts-check --batch unasserted mir-use-lower rejected\n'
+
     check_subcmd_pos_neg "${BIN_DIR}/lp-check" "bound-conflict" \
         '{"mode":"bound-conflict","numVars":2,"numRows":0,"objConst":"0/1","obj":["1/1","2/1"],"lb":["0/1","7/1"],"ub":["5/1","3/1"],"rows":[],"col":1}' \
         '{"mode":"bound-conflict","numVars":2,"numRows":0,"objConst":"0/1","obj":["1/1","2/1"],"lb":["0/1","7/1"],"ub":["5/1","3/1"],"rows":[],"col":0}' \
@@ -270,6 +301,12 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
     check_neg_cli_and_jsonl "${BIN_DIR}/lp-check" "lp-presolve-infeasible-xReduced-no-yReduced" "lp-presolve" \
         '{"mode":"lp-presolve","orig":{"numVars":2,"numRows":2,"objConst":"0/1","obj":["1/1","1/1"],"lb":["0/1","0/1"],"ub":["10/1","10/1"],"rows":[{"sense":"ge","rhs":"4/1","terms":[{"col":0,"coeff":"1/1"}]},{"sense":"ge","rhs":"6/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"reduced":{"numVars":2,"numRows":1,"objConst":"0/1","obj":["1/1","1/1"],"lb":["4/1","0/1"],"ub":["10/1","10/1"],"rows":[{"sense":"ge","rhs":"6/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"step":{"kind":"singletonRow","origRow":0,"col":0,"origRowIdx":[1]},"xReduced":["0/1","0/1"]}'
 
+    check_neg_cli_and_jsonl "${BIN_DIR}/lp-check" "lp-presolve-missing-xReduced" "lp-presolve" \
+        '{"mode":"lp-presolve","orig":{"numVars":2,"numRows":2,"objConst":"0/1","obj":["1/1","1/1"],"lb":["0/1","0/1"],"ub":["10/1","10/1"],"rows":[{"sense":"ge","rhs":"4/1","terms":[{"col":0,"coeff":"1/1"}]},{"sense":"ge","rhs":"6/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"reduced":{"numVars":2,"numRows":1,"objConst":"0/1","obj":["1/1","1/1"],"lb":["4/1","0/1"],"ub":["10/1","10/1"],"rows":[{"sense":"ge","rhs":"6/1","terms":[{"col":0,"coeff":"1/1"},{"col":1,"coeff":"1/1"}]}]},"step":{"kind":"singletonRow","origRow":0,"col":0,"origRowIdx":[1]}}'
+
+    check_neg_cli_and_jsonl "${BIN_DIR}/lp-check" "optimal-sense-max" "optimal" \
+        '{"mode":"optimal","sense":"max","maximize":true,"numVars":1,"numRows":1,"objConst":"0","obj":["1"],"lb":["0"],"ub":["10"],"rows":[{"terms":[{"col":0,"coeff":"1"}],"sense":"ge","rhs":"0"}],"x":["0"],"y":["0"],"tol":"0"}'
+
     check_stdin_pos_neg "${BIN_DIR}/vipr-check" "orbitBranch" \
         '{"n":2,"objConst":0,"obj":[1,1],"isInt":[true,true],"lb":[0,0],"ub":[1,1],"baseRows":[{"coeffs":[1,1],"sense":">=","rhs":1}],"mode":"optimal","incumbent":[1,0],"steps":[{"rule":"assume","col":0,"sense":"<=","bound":0},{"rule":"assume","col":1,"sense":"<=","bound":0},{"rule":"farkas","refs":[{"id":0,"mult":-1},{"id":1,"mult":1},{"id":2,"mult":1}]},{"rule":"assume","col":0,"sense":">=","bound":1},{"rule":"safeDual","refs":[],"boundAsms":[4]},{"rule":"orbitBranch","col":0,"leftAsm":1,"rightAsm":4,"left":3,"right":5,"orbitAsms":[2],"witnesses":[{"companion":1,"colPerm":[1,0],"rowPerm":[0]}]}],"rootStep":5}' \
         '{"n":2,"objConst":0,"obj":[1,2],"isInt":[true,true],"lb":[0,0],"ub":[1,1],"baseRows":[{"coeffs":[1,1],"sense":">=","rhs":1}],"mode":"optimal","incumbent":[1,0],"steps":[{"rule":"assume","col":0,"sense":"<=","bound":0},{"rule":"assume","col":1,"sense":"<=","bound":0},{"rule":"farkas","refs":[{"id":0,"mult":-1},{"id":1,"mult":1},{"id":2,"mult":1}]},{"rule":"assume","col":0,"sense":">=","bound":1},{"rule":"safeDual","refs":[],"boundAsms":[4]},{"rule":"orbitBranch","col":0,"leftAsm":1,"rightAsm":4,"left":3,"right":5,"orbitAsms":[2],"witnesses":[{"companion":1,"colPerm":[1,0],"rowPerm":[0]}]}],"rootStep":5}' \
@@ -282,6 +319,9 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
 
     check_neg_cli_and_jsonl "${BIN_DIR}/vipr-check" "duplicate-key" "" \
         '{"n":1,"n":1,"objConst":0,"obj":[1],"isInt":[true],"lb":[0],"ub":[1],"baseRows":[],"mode":"optimal","incumbent":[0],"steps":[{"rule":"safeDual","refs":[],"boundAsms":[]}],"rootStep":0}'
+
+    check_neg_cli_and_jsonl "${BIN_DIR}/vipr-check" "n-1e12-sparse-obj-oom-guard" "" \
+        '{"n":1000000000000,"obj":{"terms":[]},"isInt":[],"lb":[],"ub":[],"baseRows":[],"mode":"optimal"}'
 
     printf '%s\n' '{"mode":"match","symbol":"divCeilInt64","words":[4181724048,3945817087,1409286633,4162785278,4162814973,3506447357,3019899169,2596342786,2596342811,2600567649,4043309119,2592265280,4167009277,4165011454,3596551104,2549614137,3573751839,2835384288,2854093795,2549681013,2839578592,402653163],"targets":[{"idx":15,"symbol":"runtime.panicdivide"},{"idx":19,"symbol":"runtime.morestack_noctxt.abi0"}]}' \
         | "${BIN_DIR}/bin-check" - | grep -q '^VERIFIED$'
@@ -314,6 +354,25 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
 
     check_stdin_only_neg "${BIN_DIR}/simd-cfg-check" "vpternlogq-evex" "UNGUARDED_EVEX" \
         '{"functions":[{"name":"pkg.tern","insns":[{"addr":"10","op":"VPTERNLOGQ","args":"$0xff,%ymm0,%ymm1,%ymm2"},{"addr":"16","op":"vzeroupper","args":""},{"addr":"19","op":"ret","args":""}]}]}'
+
+    printf '%s\n' '{"functions":[{"name":"validAVX512Dispatch","insns":[{"addr":"0x0","op":"cmpb","args":"$0x0, 0x1234(%rip) # <x86HasAVX512>"},{"addr":"0x7","op":"je","args":"0x20"},{"addr":"0x9","op":"vaddpd","args":"%zmm0, %zmm1, %zmm2"},{"addr":"0xf","op":"vzeroupper","args":""},{"addr":"0x12","op":"retq","args":""},{"addr":"0x20","op":"retq","args":""}]}]}' \
+        | "${BIN_DIR}/simd-cfg-check" - | grep -q '^VERIFIED (1 vector functions)$'
+    printf '  [OK] simd-cfg-check validAVX512Dispatch control\n'
+
+    check_stdin_only_neg "${BIN_DIR}/simd-cfg-check" "inverted-avx512-guard" "UNGUARDED_EVEX" \
+        '{"functions":[{"name":"invertedAVX512Dispatch","insns":[{"addr":"0x0","op":"cmpb","args":"$0x0, 0x1234(%rip) # <x86HasAVX512>"},{"addr":"0x7","op":"je","args":"0x10"},{"addr":"0x9","op":"retq","args":""},{"addr":"0x10","op":"vaddpd","args":"%zmm0, %zmm1, %zmm2"},{"addr":"0x16","op":"vzeroupper","args":""},{"addr":"0x19","op":"retq","args":""}]}]}'
+
+    check_stdin_only_neg "${BIN_DIR}/simd-cfg-check" "fallthrough-evex-guard" "UNGUARDED_EVEX" \
+        '{"functions":[{"name":"evexOnNonAVX512Fallthrough","insns":[{"addr":"0x0","op":"cmpb","args":"$0x0, 0x1234(%rip) # <x86HasAVX512>"},{"addr":"0x7","op":"jne","args":"0x20"},{"addr":"0x9","op":"vaddpd","args":"%zmm0, %zmm1, %zmm2"},{"addr":"0xf","op":"vzeroupper","args":""},{"addr":"0x12","op":"retq","args":""},{"addr":"0x20","op":"retq","args":""}]}]}'
+
+    check_stdin_only_neg "${BIN_DIR}/simd-cfg-check" "vpmullq-evex" "UNGUARDED_EVEX" \
+        '{"functions":[{"name":"unguardedAVX512DQ","insns":[{"addr":"0x0","op":"vpmullq","args":"%ymm0, %ymm1, %ymm2"},{"addr":"0x6","op":"vzeroupper","args":""},{"addr":"0x9","op":"retq","args":""}]}]}'
+
+    check_stdin_only_neg "${BIN_DIR}/simd-cfg-check" "intel-syntax-ymm" "Plan 9" \
+        '{"functions":[{"name":"pkg.intelDirtyYmm","insns":[{"addr":"0x0","op":"vmovdqu","args":"ymm0, ymmword ptr [rax]"},{"addr":"0x4","op":"ret","args":""}]}]}'
+
+    check_stdin_only_neg "${BIN_DIR}/simd-cfg-check" "intel-opmask-syntax" "Plan 9" \
+        '{"functions":[{"name":"pkg.intelOpmask","insns":[{"addr":"0x0","op":"kmovw","args":"k1, eax"},{"addr":"0x4","op":"vaddpd","args":"%zmm0, %zmm1, %zmm2{k1}"},{"addr":"0xa","op":"ret","args":""}]}]}'
 )
 
 log_step "3/5 Running Go formal differential and certified tests (default build)..."

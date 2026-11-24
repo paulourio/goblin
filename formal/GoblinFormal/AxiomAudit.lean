@@ -9,6 +9,7 @@ every theorem across GoblinFormal depends solely on
 -/
 
 import Lean
+import Apps.Common
 import GoblinFormal.Common.Basic
 import GoblinFormal.Common.Json
 import GoblinFormal.Track1
@@ -99,6 +100,10 @@ import GoblinFormal.Track5E
 /-- info: 'GoblinFormal.Track1.checkLSAPForbiddenSafe_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
 #print axioms GoblinFormal.Track1.checkLSAPForbiddenSafe_sound
+
+/-- info: 'GoblinFormal.Track1.checkLSAPForbiddenSafe_sound_max' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track1.checkLSAPForbiddenSafe_sound_max
 
 /-- info: 'GoblinFormal.Track1.checkLSAPForbiddenTranspose_sound' depends on axioms: [propext, Classical.choice, Quot.sound] -/
 #guard_msgs in
@@ -670,6 +675,26 @@ info: 'GoblinFormal.Track5B.hasInfeasibleIntegerEqRow_feasible_gcd_exec' depends
 #guard_msgs in
 #print axioms GoblinFormal.Track5C.checkVectorCFG_sound
 
+/--
+info: 'GoblinFormal.Track5C.unguardedSucc_fallthroughGuarded_keeps_target' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5C.unguardedSucc_fallthroughGuarded_keeps_target
+
+/--
+info: 'GoblinFormal.Track5C.unguardedSucc_targetGuarded_keeps_fallthrough' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5C.unguardedSucc_targetGuarded_keeps_fallthrough
+
+/-- info: 'GoblinFormal.Track5C.unguardedSucc_ambiguous_keeps_both' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5C.unguardedSucc_ambiguous_keeps_both
+
 /-! ### Track 5D: Tier 5D Phase 2 LSAP Binary Safety & IEEE-754 SIMD Min2 Equivalence -/
 
 /-- info: 'GoblinFormal.Track5D.stepArm64D_proxy_status_pc' depends on axioms: [propext, Classical.choice, Quot.sound] -/
@@ -934,6 +959,62 @@ info: 'GoblinFormal.Track5E.initReducedRow64AVX512_functional_equiv' depends on 
 #guard_msgs in
 #print axioms GoblinFormal.Track5E.initReducedRow64_avx2_eq_avx512_mult8
 
+/-- info: 'GoblinFormal.Track5E.rexB_0x90_not_nop' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.rexB_0x90_not_nop
+
+/-- info: 'GoblinFormal.Track5E.byteRangeDisjoint64_of_aligned_ne' depends on axioms: [propext, Quot.sound] -/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.byteRangeDisjoint64_of_aligned_ne
+
+/--
+info: 'GoblinFormal.Track5E.allAbsLE64AVX2_aligned_byteDisjoint_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX2_aligned_byteDisjoint_equiv
+
+/--
+info: 'GoblinFormal.Track5E.allAbsLE64AVX512_aligned_byteDisjoint_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.allAbsLE64AVX512_aligned_byteDisjoint_equiv
+
+/--
+info: 'GoblinFormal.Track5E.minNoNaN64AVX2_aligned_byteDisjoint_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX2_aligned_byteDisjoint_equiv
+
+/--
+info: 'GoblinFormal.Track5E.minNoNaN64AVX512_aligned_byteDisjoint_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.minNoNaN64AVX512_aligned_byteDisjoint_equiv
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64AVX2_aligned_byteDisjoint_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX2_aligned_byteDisjoint_equiv
+
+/--
+info: 'GoblinFormal.Track5E.initReducedRow64AVX512_aligned_byteDisjoint_equiv' depends on axioms: [propext,
+ Classical.choice,
+ Quot.sound]
+-/
+#guard_msgs in
+#print axioms GoblinFormal.Track5E.initReducedRow64AVX512_aligned_byteDisjoint_equiv
+
 /-! ### Exhaustive Compile-Time Environment Axiom Audit -/
 
 open Lean Elab Command in
@@ -941,7 +1022,8 @@ local elab "#verify_all_goblin_axioms" : command => do
   let env ← getEnv
   let allowed : List Name := [``propext, ``Classical.choice, ``Quot.sound]
   let isGoblinMod (m : String) : Bool :=
-    m == "GoblinFormal" || m.startsWith "GoblinFormal."
+    m == "GoblinFormal" || m.startsWith "GoblinFormal." ||
+    m == "Apps" || m.startsWith "Apps."
   let modNameOf (declName : Name) : String :=
     match env.getModuleIdxFor? declName with
     | some idx =>
@@ -972,10 +1054,50 @@ local elab "#verify_all_goblin_axioms" : command => do
           if !forbidden.isEmpty then
             badDecls := (declName, forbidden) :: badDecls
   if !axiomDecls.isEmpty then
-    throwError m!"GoblinFormal declares forbidden custom/native axioms: {axiomDecls}"
+    throwError m!"GoblinFormal/Apps declares forbidden custom/native axioms: {axiomDecls}"
   if !badDecls.isEmpty then
-    throwError m!"GoblinFormal declarations depend on unpermitted axioms: {badDecls}"
+    throwError m!"GoblinFormal/Apps declarations depend on unpermitted axioms: {badDecls}"
   if thmCount == 0 then
     throwError "GoblinFormal axiom audit found 0 theorems"
 
 #verify_all_goblin_axioms
+
+open Lean Elab Command in
+/-- Audits all 8 `Apps.*` CLI modules individually via `Lean.importModules` (avoiding `_root_.main`
+collisions across the 7 executable roots) and verifies zero custom/forbidden axioms. -/
+def GoblinFormal.AxiomAudit.auditAllAppsModules : CommandElabM Unit := do
+  let allowed : List Name := [``propext, ``Classical.choice, ``Quot.sound]
+  let appMods : List Name := [
+    `Apps.Common, `Apps.BinCheck, `Apps.CutsCheck, `Apps.LpCheck,
+    `Apps.LsapCheck, `Apps.RulesCheck, `Apps.SimdCfgCheck, `Apps.ViprCheck
+  ]
+  for modName in appMods do
+    let mEnv ← importModules #[{ module := modName }] {}
+    let (declCount, axDecls, badDecls) ← liftCoreM <| withEnv mEnv do
+      let mut axDecls : List Name := []
+      let mut badDecls : List (Name × List Name) := []
+      let mut declCount : Nat := 0
+      for (declName, cinfo) in mEnv.constants.toList do
+        let mn :=
+          match mEnv.getModuleIdxFor? declName with
+          | some idx =>
+            if h : idx.toNat < mEnv.header.moduleNames.size then
+              mEnv.header.moduleNames[idx.toNat].toString
+            else ""
+          | none => mEnv.mainModule.toString
+        if mn == "Apps" || mn.startsWith "Apps." then
+          declCount := declCount + 1
+          match cinfo with
+          | .axiomInfo _ => axDecls := declName :: axDecls
+          | _ =>
+            let axs ← collectAxioms declName
+            let forbidden := axs.toList.filter (fun a => !allowed.contains a)
+            if !forbidden.isEmpty then
+              badDecls := (declName, forbidden) :: badDecls
+      pure (declCount, axDecls, badDecls)
+    if declCount == 0 then
+      throwError m!"Apps axiom audit found 0 declarations in {modName}"
+    if !axDecls.isEmpty then
+      throwError m!"{modName} declares forbidden custom/native axioms: {axDecls}"
+    if !badDecls.isEmpty then
+      throwError m!"{modName} declarations depend on unpermitted axioms: {badDecls}"

@@ -187,20 +187,27 @@ private def parseFlatCostMatrix (v : JsonVal) (rows cols : Nat) (negate bitsEnco
         flat := flat.push cell
     .ok flat
 
+private def maxVerifierDim : Nat := 10_000_000
+
 private def parseDims (root : JsonVal) : Except String (Nat × Nat) := do
-  match root.getField? "rows", root.getField? "cols" with
-  | some rv, some cv =>
-    let r ← rv.asNat
-    let c ← cv.asNat
+  let (r, c) ←
+    match root.getField? "rows", root.getField? "cols" with
+    | some rv, some cv =>
+      let r ← rv.asNat
+      let c ← cv.asNat
+      .ok (r, c)
+    | none, none =>
+      match root.getField? "m", root.getField? "n" with
+      | some mv, some nv =>
+        let m ← mv.asNat
+        let n ← nv.asNat
+        .ok (m, n)
+      | _, _ => .error "missing required dimensions ('rows'/'cols' or 'm'/'n')"
+    | _, _ => .error "both 'rows' and 'cols' must be provided together"
+  if r > maxVerifierDim || c > maxVerifierDim then
+    .error s!"dimensions ({r}, {c}) exceed maxVerifierDim ({maxVerifierDim})"
+  else
     .ok (r, c)
-  | none, none =>
-    match root.getField? "m", root.getField? "n" with
-    | some mv, some nv =>
-      let m ← mv.asNat
-      let n ← nv.asNat
-      .ok (m, n)
-    | _, _ => .error "missing required dimensions ('rows'/'cols' or 'm'/'n')"
-  | _, _ => .error "both 'rows' and 'cols' must be provided together"
 
 private def parseSense (root : JsonVal) : Except String Bool := do
   match root.getField? "sense" with
@@ -413,6 +420,8 @@ private def verifyCertCore (root : JsonVal) (args : ParsedArgs) : Except String 
       | some tv => asRatOrBits tv
   if tolRaw < 0 then
     .error "tolerance must be non-negative"
+  if mode == .exact && tolRaw != 0 then
+    .error s!"non-zero tolerance {tolRaw} is not allowed in exact mode"
   let tol : Rat := if mode == .safe then tolRaw else 0
 
   -- Validate cost matrix against declared dimensions before allocating any index or dual buffers.

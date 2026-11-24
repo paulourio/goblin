@@ -602,7 +602,7 @@ def decodeAmd64VecInsnWith (getB : Nat → Option UInt8) (off : Nat) : Option (A
         | none => none
         | some op =>
           let posOp := pos2 + 1
-          if op == 0x90 then
+          if op == 0x90 && !rexB then
             some (.nop, posOp)
           else if 0x50 <= op.toNat && op.toNat <= 0x57 then
             some (.pushReg (BitVec.ofNat 4 ((if rexB then 8 else 0) ||| (op.toNat - 0x50))), posOp)
@@ -12115,5 +12115,357 @@ theorem initReducedRow64_avx2_eq_avx512_mult8 (dstBase costBase vBase : BitVec 6
   refine ⟨fun j hj => (h2.2.2.2.1 j hj).trans (h512.2.2.2.1 j hj).symm,
     fun hF => (h2.2.2.2.2.2.1 hF).trans (h512.2.2.2.2.2.1 hF).symm,
     fun hT => (h2.2.2.2.2.2.2.1 hT).2.trans (h512.2.2.2.2.2.2.1 hT).2.symm⟩
+
+/-! ### REX.B `0x90` Regression & Explicit 8-Byte Alignment / Byte-Range Non-Overlap Corollaries -/
+
+/-- Regression witness: `REX.B` + `0x90` (`0x41 0x90` = `XCHG R8D, EAX`, `0x49 0x90` = `XCHG R8, RAX`)
+is rejected (`none`) rather than decoded as `.nop`, while plain `0x90` and `0x66 0x90` remain `.nop`. -/
+theorem rexB_0x90_not_nop :
+    decodeAmd64VecInsn #[0x41, 0x90] 0 = none ∧
+    decodeAmd64VecInsn #[0x49, 0x90] 0 = none ∧
+    decodeAmd64VecInsn #[0x90] 0 = some (.nop, 1) ∧
+    decodeAmd64VecInsn #[0x66, 0x90] 0 = some (.nop, 2) := by
+  decide
+
+/-- Two 64-bit base addresses `a` and `b` occupy disjoint 8-byte physical byte ranges
+(`[a, a+8) ∩ [b, b+8) = ∅` modulo `2^64`). -/
+def byteRangeDisjoint64 (a b : BitVec 64) : Prop :=
+  ∀ o1 < 8, ∀ o2 < 8, a + BitVec.ofNat 64 o1 ≠ b + BitVec.ofNat 64 o2
+
+/-- Any two distinct 8-byte-aligned 64-bit addresses occupy disjoint 8-byte physical byte ranges. -/
+theorem byteRangeDisjoint64_of_aligned_ne {a b : BitVec 64}
+    (ha : a.toNat % 8 = 0) (hb : b.toNat % 8 = 0) (hne : a ≠ b) :
+    byteRangeDisjoint64 a b := by
+  intro o1 ho1 o2 ho2 hEq
+  have hMod : (a + BitVec.ofNat 64 o1).toNat % 8 = (b + BitVec.ofNat 64 o2).toNat % 8 :=
+    congrArg (fun x => x.toNat % 8) hEq
+  simp only [BitVec.toNat_add, BitVec.toNat_ofNat] at hMod
+  have hoEq : o1 = o2 := by omega
+  subst hoEq
+  apply hne
+  have hSub := congrArg (· - BitVec.ofNat 64 o1) hEq
+  simpa using hSub
+
+/-- Physical 8-byte byte-range disjointness implies 64-bit word base address inequality. -/
+theorem ne_of_byteRangeDisjoint64 {a b : BitVec 64}
+    (h : byteRangeDisjoint64 a b) : a ≠ b := by
+  have h0 := h 0 (by omega) 0 (by omega)
+  simpa using h0
+
+/-- `elemAddr` preserves 8-byte alignment. -/
+theorem elemAddr_aligned {base : BitVec 64} (hb : base.toNat % 8 = 0) (j : Nat) :
+    (elemAddr base j).toNat % 8 = 0 := by
+  unfold elemAddr
+  simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_ofNat]
+  omega
+
+/-- Distinct indices within an 8-byte-aligned slice of length `< 2^61` occupy disjoint 8-byte byte ranges. -/
+theorem elemAddr_byteRangeDisjoint64_self {base : BitVec 64} (hb : base.toNat % 8 = 0)
+    {n j1 j2 : Nat} (hN : n < 2 ^ 61) (hj1 : j1 < n) (hj2 : j2 < n) (hne : j1 ≠ j2) :
+    byteRangeDisjoint64 (elemAddr base j1) (elemAddr base j2) := by
+  apply byteRangeDisjoint64_of_aligned_ne (elemAddr_aligned hb j1) (elemAddr_aligned hb j2)
+  intro hEq
+  unfold elemAddr at hEq
+  have hSub : BitVec.ofNat 64 j1 * 8#64 = BitVec.ofNat 64 j2 * 8#64 := by
+    have h1 := congrArg (fun x => x - base) hEq
+    simpa [BitVec.add_comm] using h1
+  have hNat := congrArg BitVec.toNat hSub
+  simp only [BitVec.toNat_mul, BitVec.toNat_ofNat] at hNat
+  omega
+
+/-- `RSP + 8` preserves 8-byte stack alignment. -/
+theorem rsp_add8_aligned {rsp : BitVec 64} (h : rsp.toNat % 8 = 0) :
+    (rsp + 8#64).toNat % 8 = 0 := by
+  simp only [BitVec.toNat_add, BitVec.toNat_ofNat]
+  omega
+
+/-- 8-byte aligned and byte-range non-overlapping corollary for `allAbsLE64AVX2`. -/
+theorem allAbsLE64AVX2_aligned_byteDisjoint_equiv (base : BitVec 64) (x : Nat → BitVec 64)
+    (limit : BitVec 64) (n fuel : Nat) (s0 : Amd64VecState)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
+    (hPos : 0 < n) (hN : n + 16 < 2 ^ 61)
+    (hAlign : base.toNat % 8 = 0 ∧ (s0.gpr 4#4).toNat % 8 = 0)
+    (hRax : s0.gpr 0#4 = base) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
+    (hLim : (s0.zmm 0#5).l0 = limit)
+    (hX : ∀ j < n, s0.mem (elemAddr base j) = x j)
+    (hByteDisj : ∀ j < n,
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 8#64))
+    (hFuel : allAbsLE64AVX2Steps n ≤ fuel) :
+    let sf := runAmd64Vec fuel allAbsLE64AVX2Bytes allAbsLE64AVX2Rodata allAbsLE64AVX2Targets s0
+    sf.status = .returned ∧
+    sf.upperDirty = false ∧
+    sf.sseHazard = false ∧
+    sf.gpr 0#4 = (if specAllAbsLE x limit (4 * (n / 4)) then 1#64 else 0#64) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    (sf.gpr 4#4).toNat % 8 = 0 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (∀ j < n, (elemAddr base j).toNat % 8 = 0) ∧
+    (∀ j1 < n, ∀ j2 < n, j1 ≠ j2 → byteRangeDisjoint64 (elemAddr base j1) (elemAddr base j2)) := by
+  have hDisj : ∀ j < n, elemAddr base j ≠ s0.gpr 4#4 - 8#64 ∧ elemAddr base j ≠ s0.gpr 4#4 + 8#64 :=
+    fun j hj => ⟨ne_of_byteRangeDisjoint64 (hByteDisj j hj).1, ne_of_byteRangeDisjoint64 (hByteDisj j hj).2⟩
+  have hEq := allAbsLE64AVX2_functional_equiv base x limit n fuel s0
+    hPc hRun hHaz hPos (by omega) hRax hRbx hLim hX hDisj hFuel
+  refine ⟨hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2.1, hEq.2.2.2.2.1, ?_,
+    hEq.2.2.2.2.2.1, hEq.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2,
+    fun j _ => elemAddr_aligned hAlign.1 j,
+    fun j1 hj1 j2 hj2 hne => elemAddr_byteRangeDisjoint64_self hAlign.1 (by omega) hj1 hj2 hne⟩
+  rw [hEq.2.2.2.2.1]
+  exact rsp_add8_aligned hAlign.2
+
+/-- 8-byte aligned and byte-range non-overlapping corollary for `allAbsLE64AVX512`. -/
+theorem allAbsLE64AVX512_aligned_byteDisjoint_equiv (base : BitVec 64) (x : Nat → BitVec 64)
+    (limit : BitVec 64) (n fuel : Nat) (s0 : Amd64VecState)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
+    (hPos : 0 < n) (hN : n + 32 < 2 ^ 61)
+    (hAlign : base.toNat % 8 = 0 ∧ (s0.gpr 4#4).toNat % 8 = 0)
+    (hRax : s0.gpr 0#4 = base) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
+    (hLim : (s0.zmm 0#5).l0 = limit)
+    (hX : ∀ j < n, s0.mem (elemAddr base j) = x j)
+    (hByteDisj : ∀ j < n,
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 8#64))
+    (hFuel : allAbsLE64AVX512Steps n ≤ fuel) :
+    let sf := runAmd64Vec fuel allAbsLE64AVX512Bytes allAbsLE64AVX512Rodata allAbsLE64AVX512Targets s0
+    sf.status = .returned ∧
+    sf.upperDirty = false ∧
+    sf.sseHazard = false ∧
+    sf.gpr 0#4 = (if specAllAbsLE x limit (8 * (n / 8)) then 1#64 else 0#64) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    (sf.gpr 4#4).toNat % 8 = 0 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (∀ j < n, (elemAddr base j).toNat % 8 = 0) ∧
+    (∀ j1 < n, ∀ j2 < n, j1 ≠ j2 → byteRangeDisjoint64 (elemAddr base j1) (elemAddr base j2)) := by
+  have hDisj : ∀ j < n, elemAddr base j ≠ s0.gpr 4#4 - 8#64 ∧ elemAddr base j ≠ s0.gpr 4#4 + 8#64 :=
+    fun j hj => ⟨ne_of_byteRangeDisjoint64 (hByteDisj j hj).1, ne_of_byteRangeDisjoint64 (hByteDisj j hj).2⟩
+  have hEq := allAbsLE64AVX512_functional_equiv base x limit n fuel s0
+    hPc hRun hHaz hPos (by omega) hRax hRbx hLim hX hDisj hFuel
+  refine ⟨hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2.1, hEq.2.2.2.2.1, ?_,
+    hEq.2.2.2.2.2.1, hEq.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2,
+    fun j _ => elemAddr_aligned hAlign.1 j,
+    fun j1 hj1 j2 hj2 hne => elemAddr_byteRangeDisjoint64_self hAlign.1 (by omega) hj1 hj2 hne⟩
+  rw [hEq.2.2.2.2.1]
+  exact rsp_add8_aligned hAlign.2
+
+/-- 8-byte aligned and byte-range non-overlapping corollary for `minNoNaN64AVX2`. -/
+theorem minNoNaN64AVX2_aligned_byteDisjoint_equiv (base : BitVec 64) (x : Nat → BitVec 64)
+    (n fuel : Nat) (s0 : Amd64VecState)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
+    (hPos : 0 < n) (hN : n + 16 < 2 ^ 61)
+    (hAlign : base.toNat % 8 = 0 ∧ (s0.gpr 4#4).toNat % 8 = 0)
+    (hRax : s0.gpr 0#4 = base) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
+    (hX : ∀ j < n, s0.mem (elemAddr base j) = x j)
+    (hByteDisj : ∀ j < n,
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 8#64) ∧
+      ∀ k < 8, byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 72#64 + BitVec.ofNat 64 (k * 8)))
+    (hFuel : minNoNaN64AVX2FuelBound n ≤ fuel) :
+    let sf := runAmd64Vec fuel minNoNaN64AVX2Bytes minNoNaN64AVX2Rodata minNoNaN64AVX2Targets s0
+    sf.status = .returned ∧
+    sf.upperDirty = false ∧
+    sf.sseHazard = false ∧
+    (sf.zmm 0#5).l0 = specMinNoNaN64 x n ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    (sf.gpr 4#4).toNat % 8 = 0 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (∀ j < n, (elemAddr base j).toNat % 8 = 0) ∧
+    (∀ j1 < n, ∀ j2 < n, j1 ≠ j2 → byteRangeDisjoint64 (elemAddr base j1) (elemAddr base j2)) := by
+  have hDisj : ∀ j < n,
+      elemAddr base j ≠ s0.gpr 4#4 - 8#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 8#64 ∧
+      ∀ k < 8, elemAddr base j ≠ s0.gpr 4#4 - 72#64 + BitVec.ofNat 64 (k * 8) :=
+    fun j hj => ⟨ne_of_byteRangeDisjoint64 (hByteDisj j hj).1,
+      ne_of_byteRangeDisjoint64 (hByteDisj j hj).2.1,
+      fun k hk => ne_of_byteRangeDisjoint64 ((hByteDisj j hj).2.2 k hk)⟩
+  have hEq := minNoNaN64AVX2_functional_equiv base x n fuel s0
+    hPc hRun hHaz hPos (by omega) hRax hRbx hX hDisj hFuel
+  refine ⟨hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2.1, hEq.2.2.2.2.1, ?_,
+    hEq.2.2.2.2.2.1, hEq.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2,
+    fun j _ => elemAddr_aligned hAlign.1 j,
+    fun j1 hj1 j2 hj2 hne => elemAddr_byteRangeDisjoint64_self hAlign.1 (by omega) hj1 hj2 hne⟩
+  rw [hEq.2.2.2.2.1]
+  exact rsp_add8_aligned hAlign.2
+
+/-- 8-byte aligned and byte-range non-overlapping corollary for `minNoNaN64AVX512`. -/
+theorem minNoNaN64AVX512_aligned_byteDisjoint_equiv (base : BitVec 64) (x : Nat → BitVec 64)
+    (n fuel : Nat) (s0 : Amd64VecState)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
+    (hGuard : BitVec.ult (s0.mem (s0.gpr 14#4 + 16#64)) (s0.gpr 4#4 - 8#64) = true)
+    (hPos : 0 < n) (hN : n + 32 < 2 ^ 61)
+    (hAlign : base.toNat % 8 = 0 ∧ (s0.gpr 4#4).toNat % 8 = 0)
+    (hRax : s0.gpr 0#4 = base) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
+    (hX : ∀ j < n, s0.mem (elemAddr base j) = x j)
+    (hByteDisj : ∀ j < n,
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 8#64) ∧
+      ∀ k < 16, byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 136#64 + BitVec.ofNat 64 (k * 8)))
+    (hFuel : minNoNaN64AVX512FuelBound n ≤ fuel) :
+    let sf := runAmd64Vec fuel minNoNaN64AVX512Bytes minNoNaN64AVX512Rodata minNoNaN64AVX512Targets s0
+    sf.status = .returned ∧
+    sf.upperDirty = false ∧
+    sf.sseHazard = false ∧
+    (sf.zmm 0#5).l0 = specMinNoNaN64 x n ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    (sf.gpr 4#4).toNat % 8 = 0 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (∀ j < n, (elemAddr base j).toNat % 8 = 0) ∧
+    (∀ j1 < n, ∀ j2 < n, j1 ≠ j2 → byteRangeDisjoint64 (elemAddr base j1) (elemAddr base j2)) := by
+  have hDisj : ∀ j < n,
+      elemAddr base j ≠ s0.gpr 4#4 - 8#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 8#64 ∧
+      ∀ k < 16, elemAddr base j ≠ s0.gpr 4#4 - 136#64 + BitVec.ofNat 64 (k * 8) :=
+    fun j hj => ⟨ne_of_byteRangeDisjoint64 (hByteDisj j hj).1,
+      ne_of_byteRangeDisjoint64 (hByteDisj j hj).2.1,
+      fun k hk => ne_of_byteRangeDisjoint64 ((hByteDisj j hj).2.2 k hk)⟩
+  have hEq := minNoNaN64AVX512_functional_equiv base x n fuel s0
+    hPc hRun hHaz hGuard hPos (by omega) hRax hRbx hX hDisj hFuel
+  refine ⟨hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2.1, hEq.2.2.2.2.1, ?_,
+    hEq.2.2.2.2.2.1, hEq.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2,
+    fun j _ => elemAddr_aligned hAlign.1 j,
+    fun j1 hj1 j2 hj2 hne => elemAddr_byteRangeDisjoint64_self hAlign.1 (by omega) hj1 hj2 hne⟩
+  rw [hEq.2.2.2.2.1]
+  exact rsp_add8_aligned hAlign.2
+
+/-- 8-byte aligned (including `RSP`) and byte-range non-overlapping corollary for `initReducedRow64AVX2`. -/
+theorem initReducedRow64AVX2_aligned_byteDisjoint_equiv (dstBase costBase vBase : BitVec 64)
+    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n lenDst lenCost lenV fuel : Nat) (s0 : Amd64VecState)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
+    (hPos : 0 < n) (hLenDst : n ≤ lenDst) (hLenCost : n ≤ lenCost) (hLenV : n ≤ lenV)
+    (hN : n + 16 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV64 : lenV < 2 ^ 64)
+    (hAlign : dstBase.toNat % 8 = 0 ∧ costBase.toNat % 8 = 0 ∧ vBase.toNat % 8 = 0 ∧ (s0.gpr 4#4).toNat % 8 = 0)
+    (hRax : s0.gpr 0#4 = dstBase) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
+    (hRdi : s0.gpr 7#4 = costBase) (hRsi : s0.gpr 6#4 = BitVec.ofNat 64 lenCost)
+    (hR9 : s0.gpr 9#4 = vBase) (hR10 : s0.gpr 10#4 = BitVec.ofNat 64 lenV)
+    (hUi : (s0.zmm 0#5).l0 = ui)
+    (hMemC : ∀ j < n, s0.mem (elemAddr costBase j) = c j)
+    (hMemV : ∀ j < n, s0.mem (elemAddr vBase j) = v j)
+    (hMemD : ∀ j < n, s0.mem (elemAddr dstBase j) = dst0 j)
+    (hByteDisjCD : ∀ j1 < n, ∀ j2 < n, byteRangeDisjoint64 (elemAddr costBase j1) (elemAddr dstBase j2))
+    (hByteDisjVD : ∀ j1 < n, ∀ j2 < n, byteRangeDisjoint64 (elemAddr vBase j1) (elemAddr dstBase j2))
+    (hByteDisjPro : ∀ j < n, ∀ base ∈ ([dstBase, costBase, vBase] : List (BitVec 64)),
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 32#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 56#64))
+    (hByteDisjSpill : ∀ j < n, ∀ k < 4,
+      byteRangeDisjoint64 (elemAddr dstBase j) (s0.gpr 4#4 - 40#64 + BitVec.ofNat 64 (k * 8)))
+    (hFuel : initReducedRow64AVX2FuelBound n ≤ fuel) :
+    let sf := runAmd64Vec fuel initReducedRow64AVX2Bytes initReducedRow64AVX2Rodata initReducedRow64AVX2Targets s0
+    sf.status = .returned ∧ sf.upperDirty = false ∧ sf.sseHazard = false ∧
+    (∀ j < 4 * (n / 4), sf.mem (elemAddr dstBase j) = specReducedElem c v ui j) ∧
+    (∀ j, 4 * (n / 4) ≤ j → j < n → sf.mem (elemAddr dstBase j) = dst0 j) ∧
+    (specAllReducedNotNaN c v ui (4 * (n / 4)) = false → (sf.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
+    (specAllReducedNotNaN c v ui (4 * (n / 4)) = true →
+      f64NotNaN (sf.zmm 0#5).l0 = true ∧
+      canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui (4 * (n / 4))) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    (sf.gpr 4#4).toNat % 8 = 0 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (∀ j1 < n, ∀ j2 < n, j1 ≠ j2 → byteRangeDisjoint64 (elemAddr dstBase j1) (elemAddr dstBase j2)) := by
+  have hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2 :=
+    fun j1 hj1 j2 hj2 => ne_of_byteRangeDisjoint64 (hByteDisjCD j1 hj1 j2 hj2)
+  have hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2 :=
+    fun j1 hj1 j2 hj2 => ne_of_byteRangeDisjoint64 (hByteDisjVD j1 hj1 j2 hj2)
+  have hDisjPro : ∀ j < n, ∀ base ∈ ([dstBase, costBase, vBase] : List (BitVec 64)),
+      elemAddr base j ≠ s0.gpr 4#4 - 8#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 8#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 32#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 56#64 :=
+    fun j hj b hb => ⟨ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).1,
+      ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).2.1,
+      ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).2.2.1,
+      ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).2.2.2⟩
+  have hDisjSpill : ∀ j < n, ∀ k < 4, elemAddr dstBase j ≠ s0.gpr 4#4 - 40#64 + BitVec.ofNat 64 (k * 8) :=
+    fun j hj k hk => ne_of_byteRangeDisjoint64 (hByteDisjSpill j hj k hk)
+  have hEq := initReducedRow64AVX2_functional_equiv dstBase costBase vBase c v dst0 ui n lenDst lenCost lenV fuel s0
+    hPc hRun hHaz hPos hLenDst hLenCost hLenV hN hLenC hLenV64
+    ⟨hAlign.1, hAlign.2.1, hAlign.2.2.1⟩ hRax hRbx hRdi hRsi hR9 hR10 hUi
+    hMemC hMemV hMemD hDisjCD hDisjVD hDisjPro hDisjSpill hFuel
+  refine ⟨hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2.1, hEq.2.2.2.2.1, hEq.2.2.2.2.2.1, hEq.2.2.2.2.2.2.1,
+    hEq.2.2.2.2.2.2.2.1, ?_,
+    hEq.2.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2.2.2.2,
+    fun j1 hj1 j2 hj2 hne => elemAddr_byteRangeDisjoint64_self hAlign.1 (by omega) hj1 hj2 hne⟩
+  rw [hEq.2.2.2.2.2.2.2.1]
+  exact rsp_add8_aligned hAlign.2.2.2
+
+/-- 8-byte aligned (including `RSP`) and byte-range non-overlapping corollary for `initReducedRow64AVX512`. -/
+theorem initReducedRow64AVX512_aligned_byteDisjoint_equiv (dstBase costBase vBase : BitVec 64)
+    (c v dst0 : Nat → BitVec 64) (ui : BitVec 64) (n lenDst lenCost lenV fuel : Nat) (s0 : Amd64VecState)
+    (hPc : s0.pc = 0) (hRun : s0.status = .running) (hHaz : s0.sseHazard = false)
+    (hPos : 0 < n) (hLenDst : n ≤ lenDst) (hLenCost : n ≤ lenCost) (hLenV : n ≤ lenV)
+    (hN : n + 32 < 2 ^ 61) (hLenC : lenCost < 2 ^ 64) (hLenV64 : lenV < 2 ^ 64)
+    (hAlign : dstBase.toNat % 8 = 0 ∧ costBase.toNat % 8 = 0 ∧ vBase.toNat % 8 = 0 ∧ (s0.gpr 4#4).toNat % 8 = 0)
+    (hRax : s0.gpr 0#4 = dstBase) (hRbx : s0.gpr 3#4 = BitVec.ofNat 64 n)
+    (hRdi : s0.gpr 7#4 = costBase) (hRsi : s0.gpr 6#4 = BitVec.ofNat 64 lenCost)
+    (hR9 : s0.gpr 9#4 = vBase) (hR10 : s0.gpr 10#4 = BitVec.ofNat 64 lenV)
+    (hUi : (s0.zmm 0#5).l0 = ui)
+    (hMemC : ∀ j < n, s0.mem (elemAddr costBase j) = c j)
+    (hMemV : ∀ j < n, s0.mem (elemAddr vBase j) = v j)
+    (hMemD : ∀ j < n, s0.mem (elemAddr dstBase j) = dst0 j)
+    (hByteDisjCD : ∀ j1 < n, ∀ j2 < n, byteRangeDisjoint64 (elemAddr costBase j1) (elemAddr dstBase j2))
+    (hByteDisjVD : ∀ j1 < n, ∀ j2 < n, byteRangeDisjoint64 (elemAddr vBase j1) (elemAddr dstBase j2))
+    (hByteDisjPro : ∀ j < n, ∀ base ∈ ([dstBase, costBase, vBase] : List (BitVec 64)),
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 - 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 8#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 32#64) ∧
+      byteRangeDisjoint64 (elemAddr base j) (s0.gpr 4#4 + 56#64))
+    (hByteDisjSpill : ∀ j < n, ∀ k < 8,
+      byteRangeDisjoint64 (elemAddr dstBase j) (s0.gpr 4#4 - 72#64 + BitVec.ofNat 64 (k * 8)))
+    (hFuel : initReducedRow64AVX512FuelBound n ≤ fuel) :
+    let sf := runAmd64Vec fuel initReducedRow64AVX512Bytes initReducedRow64AVX512Rodata initReducedRow64AVX512Targets s0
+    sf.status = .returned ∧ sf.upperDirty = false ∧ sf.sseHazard = false ∧
+    (∀ j < 8 * (n / 8), sf.mem (elemAddr dstBase j) = specReducedElem c v ui j) ∧
+    (∀ j, 8 * (n / 8) ≤ j → j < n → sf.mem (elemAddr dstBase j) = dst0 j) ∧
+    (specAllReducedNotNaN c v ui (8 * (n / 8)) = false → (sf.zmm 0#5).l0 = 0x7ff8000000000001#64) ∧
+    (specAllReducedNotNaN c v ui (8 * (n / 8)) = true →
+      f64NotNaN (sf.zmm 0#5).l0 = true ∧
+      canonZero64 (sf.zmm 0#5).l0 = specInitReducedMin c v ui (8 * (n / 8))) ∧
+    sf.gpr 4#4 = s0.gpr 4#4 + 8#64 ∧
+    (sf.gpr 4#4).toNat % 8 = 0 ∧
+    sf.gpr 5#4 = s0.gpr 5#4 ∧
+    sf.gpr 14#4 = s0.gpr 14#4 ∧
+    (sf.zmm 15#5).l0 = (s0.zmm 15#5).l0 ∧
+    (sf.zmm 15#5).l1 = (s0.zmm 15#5).l1 ∧
+    (∀ j1 < n, ∀ j2 < n, j1 ≠ j2 → byteRangeDisjoint64 (elemAddr dstBase j1) (elemAddr dstBase j2)) := by
+  have hDisjCD : ∀ j1 < n, ∀ j2 < n, elemAddr costBase j1 ≠ elemAddr dstBase j2 :=
+    fun j1 hj1 j2 hj2 => ne_of_byteRangeDisjoint64 (hByteDisjCD j1 hj1 j2 hj2)
+  have hDisjVD : ∀ j1 < n, ∀ j2 < n, elemAddr vBase j1 ≠ elemAddr dstBase j2 :=
+    fun j1 hj1 j2 hj2 => ne_of_byteRangeDisjoint64 (hByteDisjVD j1 hj1 j2 hj2)
+  have hDisjPro : ∀ j < n, ∀ base ∈ ([dstBase, costBase, vBase] : List (BitVec 64)),
+      elemAddr base j ≠ s0.gpr 4#4 - 8#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 8#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 32#64 ∧
+      elemAddr base j ≠ s0.gpr 4#4 + 56#64 :=
+    fun j hj b hb => ⟨ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).1,
+      ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).2.1,
+      ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).2.2.1,
+      ne_of_byteRangeDisjoint64 (hByteDisjPro j hj b hb).2.2.2⟩
+  have hDisjSpill : ∀ j < n, ∀ k < 8, elemAddr dstBase j ≠ s0.gpr 4#4 - 72#64 + BitVec.ofNat 64 (k * 8) :=
+    fun j hj k hk => ne_of_byteRangeDisjoint64 (hByteDisjSpill j hj k hk)
+  have hEq := initReducedRow64AVX512_functional_equiv dstBase costBase vBase c v dst0 ui n lenDst lenCost lenV fuel s0
+    hPc hRun hHaz hPos hLenDst hLenCost hLenV hN hLenC hLenV64
+    ⟨hAlign.1, hAlign.2.1, hAlign.2.2.1⟩ hRax hRbx hRdi hRsi hR9 hR10 hUi
+    hMemC hMemV hMemD hDisjCD hDisjVD hDisjPro hDisjSpill hFuel
+  refine ⟨hEq.1, hEq.2.1, hEq.2.2.1, hEq.2.2.2.1, hEq.2.2.2.2.1, hEq.2.2.2.2.2.1, hEq.2.2.2.2.2.2.1,
+    hEq.2.2.2.2.2.2.2.1, ?_,
+    hEq.2.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2.2.2.1, hEq.2.2.2.2.2.2.2.2.2.2.2,
+    fun j1 hj1 j2 hj2 hne => elemAddr_byteRangeDisjoint64_self hAlign.1 (by omega) hj1 hj2 hne⟩
+  rw [hEq.2.2.2.2.2.2.2.1]
+  exact rsp_add8_aligned hAlign.2.2.2
 
 end GoblinFormal.Track5E

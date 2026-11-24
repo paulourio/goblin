@@ -469,9 +469,6 @@ theorem checkLSAPSafe_sound_max {m n : Nat} {C : Fin m → Fin n → Rat}
     simpa [Rat.neg_add, Rat.sub_eq_add_neg] using hneg
   exact ⟨h1, Rat.neg_le_neg_iff.mp hstep⟩
 
-#print axioms checkLSAP_sound
-#print axioms checkLSAPSafe_sound
-
 /-! ### Transpose Checkers (`n ≤ m`, covering tall `m > n` matrices) -/
 
 /-- Exact LSAP optimality checker for tall matrices (`n ≤ m`, in particular `m > n`),
@@ -1207,14 +1204,5 @@ theorem safe_objective_within_tol {lb opt primal obj tol : Rat}
     exact h1
   · rw [Rat.abs_of_nonpos hnonpos]
     exact h2
-
-#print axioms checkLSAPTranspose_sound
-#print axioms checkLSAPForbidden_sound
-#print axioms checkLSAPForbidden_sound_max
-#print axioms checkLSAPForbiddenSafe_sound
-#print axioms checkLSAPForbiddenSafe_sound_max
-#print axioms checkHallInfeasible_sound
-#print axioms checkHallInfeasibleTranspose_sound
-#print axioms safe_objective_within_tol
 
 end GoblinFormal.Track1

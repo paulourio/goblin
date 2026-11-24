@@ -39,10 +39,11 @@ private def parseRawInsns (funcName : String) (arr : Array JsonVal) : Except Str
     let addr ← item.getString "addr"
     let op ← item.getString "op"
     let args ← item.getString "args"
-    let raw :=
+    let raw ←
       match item.getField? "raw" with
-      | some v => match v.asString with | .ok s => s | .error _ => ""
-      | none => ""
+      | none | some .null => pure ""
+      | some (.str s) => pure s
+      | some _ => throw s!"function '{funcName}' @ {addr}: field 'raw' must be a string or null"
     if !isValidHexAddr addr then
       throw s!"function '{funcName}': invalid instruction address '{addr}'"
     let (effOp, effArgs) := normalizeX86PrefixOpArgs op args

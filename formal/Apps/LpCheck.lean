@@ -115,9 +115,27 @@ private def parseRowTerms (numVars : Nat) (arr : Array JsonVal) (rowIdx : Nat) :
       throw s!"row {rowIdx} term {k} column index {col} >= numVars {numVars}"
   return acc.reverse
 
+private def checkMinimizationSense (root : JsonVal) : Except String Unit := do
+  match root.getField? "sense" with
+  | none | some .null => pure ()
+  | some sv =>
+    let s ← sv.asString
+    let low := s.trimAscii.toString.toLower
+    if low != "min" && low != "minimize" then
+      throw s!"unsupported objective sense '{s}' (only minimization 'min'/'minimize' is supported)"
+  match root.getField? "maximize" with
+  | none | some .null => pure ()
+  | some mv =>
+    let b ← mv.asBool
+    if b then
+      throw "unsupported 'maximize': true (only minimization is supported)"
+
 private def parseLPInstance (root : JsonVal) : Except String LPInstance := do
+  checkMinimizationSense root
   let numVars ← root.getNat "numVars"
   let numRows ← root.getNat "numRows"
+  if numVars > Track3B.maxVerifierDim || numRows > Track3B.maxVerifierDim then
+    throw s!"LP dimensions (numVars={numVars}, numRows={numRows}) exceed maxVerifierDim ({Track3B.maxVerifierDim})"
   let objConst ← match optNonNullField? root "objConst" with
     | none => pure (0 : Rat)
     | some v => asRatOrBits v

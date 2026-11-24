@@ -97,7 +97,16 @@ private def handleRowLegalMu (v : JsonVal) : Except String String := do
         throw s!"illegal multiplier mu={mu} for sense={repr sense}"
       pure "VERIFIED"
 
-private def handleMirUseLower (v : JsonVal) : Except String String := do
+private def maxVerifierDim : Nat := 10_000_000
+
+private def checkDimBounds (v : JsonVal) : Except String Unit := do
+  for key in ["numVars", "numRows"] do
+    if let some fv := optNonNullField? v key then
+      let n ← fv.asNat
+      if n > maxVerifierDim then
+        throw s!"{key}={n} exceeds maxVerifierDim ({maxVerifierDim}) (arrays must have length <= {maxVerifierDim})"
+
+private def handleMirUseLower (requireAssert : Bool) (v : JsonVal) : Except String String := do
   let checkOne (c : JsonVal) : Except String (Bool × Option Bool) := do
     let x ← c.getRat "x"
     let l ← match c.getField? "l" with
@@ -118,7 +127,7 @@ private def handleMirUseLower (v : JsonVal) : Except String String := do
         match c.getField? "u" with
         | none | some .null => pure false
         | some _ => pure true
-    let expOpt ← match c.getField? "expected" with
+    let expOpt ← match optNonNullField? c "expected" with
       | some ev => some <$> ev.asBool
       | none => pure none
     pure (mirUseLowerSpec x l u hasL hasU, expOpt)
@@ -141,7 +150,10 @@ private def handleMirUseLower (v : JsonVal) : Except String String := do
         throw s!"mirUseLowerSpec = {got}, want {expected}"
       pure "VERIFIED"
     | none =>
-      pure (if got then "true" else "false")
+      if requireAssert then
+        throw "mir-use-lower requires 'expected' assertion field in standalone/--batch mode"
+      else
+        pure (if got then "true" else "false")
 
 private def handleGmiCheck (v : JsonVal) : Except String String := do
   if (v.getField? "cuts").isSome then
@@ -242,10 +254,12 @@ private def isKnownSubcmd (s : String) : Bool :=
   s == "cmir-check" || s == "vub-check" || s == "cover-check" ||
   s == "lotsizing-check" || s == "agg-cmir-check" || s == "drop-check"
 
-private def dispatchSubcmd (subcmd : String) (v : JsonVal) : Except String String :=
+private def dispatchSubcmd (requireAssert : Bool) (subcmd : String) (v : JsonVal) :
+    Except String String := do
+  checkDimBounds v
   match subcmd with
   | "row-legal-mu" => handleRowLegalMu v
-  | "mir-use-lower" => handleMirUseLower v
+  | "mir-use-lower" => handleMirUseLower requireAssert v
   | "gmi-check" => handleGmiCheck v
   | "cmir-check" => handleCmirCheck v
   | "vub-check" => handleVubCheck v
@@ -255,13 +269,14 @@ private def dispatchSubcmd (subcmd : String) (v : JsonVal) : Except String Strin
   | "drop-check" => Track2C.checkFinalizedCutJson v
   | _ => .error s!"unknown subcommand '{subcmd}'"
 
-private def dispatchItem (defaultSubcmd : Option String) (v : JsonVal) : Except String String := do
+private def dispatchItem (requireAssert : Bool) (defaultSubcmd : Option String) (v : JsonVal) :
+    Except String String := do
   let sub ← resolveSubcmd defaultSubcmd v "missing required 'op', 'subcommand', or 'mode' field"
-  dispatchSubcmd sub v
+  dispatchSubcmd requireAssert sub v
 
 private def runJsonl (defaultSubcmd : Option String) : IO UInt32 := do
   runJsonlLoop (← IO.getStdin) (← IO.getStdout) fun jv => do
-    let detail ← dispatchItem defaultSubcmd jv
+    let detail ← dispatchItem false defaultSubcmd jv
     pure ("{\"ok\":true,\"detail\":" ++ jsonQuote detail ++ "}")
 
 private def batchFmt : BatchFormat := {
@@ -271,7 +286,7 @@ private def batchFmt : BatchFormat := {
 }
 
 private def runBatch (defaultSubcmd : Option String) (path : String) : IO UInt32 :=
-  runBatchWith batchFmt path (fun item => dispatchItem defaultSubcmd item *> .ok ())
+  runBatchWith batchFmt path (fun item => dispatchItem true defaultSubcmd item *> .ok ())
 
 private def runSingleFile (path : String) (handler : JsonVal → Except String String) : IO UInt32 := do
   try
@@ -320,15 +335,15 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln "FAIL: missing path after --batch"
     pure 1
   | [subcmd, path] =>
-    runSingleFile path (dispatchSubcmd subcmd)
+    runSingleFile path (dispatchSubcmd true subcmd)
   | [path] =>
     if isKnownSubcmd path then
-      runSingleFile "-" (dispatchSubcmd path)
+      runSingleFile "-" (dispatchSubcmd true path)
     else if path.startsWith "-" && path != "-" then
       IO.eprintln usageText
       return 1
     else
-      runSingleFile path (dispatchItem none)
+      runSingleFile path (dispatchItem true none)
   | _ =>
     IO.eprintln usageText
     pure 1
