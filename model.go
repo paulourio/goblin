@@ -45,12 +45,14 @@ const (
 // String returns the variable category name ("Continuous", "Integer", or "Binary").
 func (c VarCategory) String() string {
 	switch c {
+	case Continuous:
+		return "Continuous"
 	case Integer:
 		return "Integer"
 	case Binary:
 		return "Binary"
 	default:
-		return "Continuous"
+		return fmt.Sprintf("VarCategory(%d)", c)
 	}
 }
 
@@ -73,10 +75,12 @@ func (s ConstraintSense) String() string {
 	switch s {
 	case LessEqual:
 		return "<="
+	case Equal:
+		return "="
 	case GreaterEqual:
 		return ">="
 	default:
-		return "="
+		return fmt.Sprintf("ConstraintSense(%d)", int(s))
 	}
 }
 
@@ -240,6 +244,9 @@ func (m *Model) ensureInit() {
 }
 
 func (m *Model) validVar(v Var) (int, bool) {
+	if m == nil {
+		return -1, false
+	}
 	idx := v.Index()
 	if v == 0 || v.modelTag() != m.varTag || idx < 0 || idx >= len(m.vars) {
 		return -1, false
@@ -267,10 +274,20 @@ func (m *Model) Sense() Sense {
 }
 
 // NumVars returns the number of variables in the model.
-func (m *Model) NumVars() int { return len(m.vars) }
+func (m *Model) NumVars() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.vars)
+}
 
 // NumConstraints returns the number of constraints in the model.
-func (m *Model) NumConstraints() int { return len(m.constraints) }
+func (m *Model) NumConstraints() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.constraints)
+}
 
 // Reserve preallocates internal variable and constraint storage when the model dimensions are known ahead of time.
 func (m *Model) Reserve(numVars, numConstraints int) {
@@ -411,6 +428,9 @@ func (m *Model) AddBinaryVar(name string) Var {
 
 // VarByName looks up a variable handle by name.
 func (m *Model) VarByName(name string) (Var, bool) {
+	if m == nil {
+		return 0, false
+	}
 	v, ok := m.varByName[name]
 	return v, ok
 }
@@ -516,6 +536,9 @@ func (m *Model) AddConstraint(name string, c Constraint) {
 
 // IsMIP returns true if any variable in the model is Integer or Binary.
 func (m *Model) IsMIP() bool {
+	if m == nil {
+		return false
+	}
 	for i := range m.vars {
 		if m.vars[i].cat != Continuous {
 			return true

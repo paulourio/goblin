@@ -64,3 +64,49 @@ func TestModelAndCompile(t *testing.T) {
 		t.Fatalf("expected zero violations for feasible integer point, got bound=%v row=%v int=%v", bViol, rViol, iViol)
 	}
 }
+
+func TestModelNilReceiverAndEnumString(t *testing.T) {
+	t.Parallel()
+
+	var m *gb.Model
+	if got := m.Name(); got != "" {
+		t.Fatalf("nil.Name() = %q, want empty", got)
+	}
+	if got := m.Sense(); got != gb.Minimize {
+		t.Fatalf("nil.Sense() = %v, want Minimize", got)
+	}
+	if got := m.NumVars(); got != 0 {
+		t.Fatalf("nil.NumVars() = %d, want 0", got)
+	}
+	if got := m.NumConstraints(); got != 0 {
+		t.Fatalf("nil.NumConstraints() = %d, want 0", got)
+	}
+	if _, ok := m.VarByName("x"); ok {
+		t.Fatalf("nil.VarByName() ok = true, want false")
+	}
+	if got := m.VarName(gb.Var(1)); got != "" {
+		t.Fatalf("nil.VarName() = %q, want empty", got)
+	}
+	if lb, ub := m.VarBounds(gb.Var(1)); lb != 0 || ub != 0 {
+		t.Fatalf("nil.VarBounds() = (%v, %v), want (0, 0)", lb, ub)
+	}
+	if got := m.VarCategoryOf(gb.Var(1)); got != gb.Continuous {
+		t.Fatalf("nil.VarCategoryOf() = %v, want Continuous", got)
+	}
+	if m.IsMIP() {
+		t.Fatalf("nil.IsMIP() = true, want false")
+	}
+
+	if got := gb.Continuous.String(); got != "Continuous" {
+		t.Fatalf("Continuous.String() = %q", got)
+	}
+	if got := gb.VarCategory(7).String(); got != "VarCategory(7)" {
+		t.Fatalf("VarCategory(7).String() = %q, want VarCategory(7)", got)
+	}
+	if got := gb.Equal.String(); got != "=" {
+		t.Fatalf("Equal.String() = %q", got)
+	}
+	if got := gb.ConstraintSense(7).String(); got != "ConstraintSense(7)" {
+		t.Fatalf("ConstraintSense(7).String() = %q, want ConstraintSense(7)", got)
+	}
+}
