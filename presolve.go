@@ -135,7 +135,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 	m := orig.numConstraints
 	if n == 0 {
 		for i := range m {
-			if 0 < orig.rowLB[i]-presolveFeasTol || 0 > orig.rowUB[i]+presolveFeasTol {
+			if 0 < orig.rowLB[i] || 0 > orig.rowUB[i] {
 				return PresolveResult{Infeasible: true}
 			}
 		}
@@ -468,7 +468,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 			if s.extreme || s.maxInfCount > 0 {
 				continue
 			}
-			binTol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, s.l1Max))
+			binTol := max(presolveFeasTol*min(1.0, s.domainMaxAbs()), presolveRelScaleTol*max(math.Abs(r.rhs), s.l1Max))
 			surplusLo := -s.deficitHi
 			surplusHi := -s.deficitLo
 			if surplusLo > binTol {
@@ -498,7 +498,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 							if s.extreme || s.maxInfCount > 0 {
 								break
 							}
-							binTol = max(presolveFeasTol, presolveRelScaleTol*max(1.0, s.l1Max))
+							binTol = max(presolveFeasTol*min(1.0, s.domainMaxAbs()), presolveRelScaleTol*max(math.Abs(r.rhs), s.l1Max))
 							surplusLo = -s.deficitHi
 							surplusHi = -s.deficitLo
 							if surplusLo <= binTol {
@@ -518,7 +518,7 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 							if s.extreme || s.maxInfCount > 0 {
 								break
 							}
-							binTol = max(presolveFeasTol, presolveRelScaleTol*max(1.0, s.l1Max))
+							binTol = max(presolveFeasTol*min(1.0, s.domainMaxAbs()), presolveRelScaleTol*max(math.Abs(r.rhs), s.l1Max))
 							surplusLo = -s.deficitHi
 							surplusHi = -s.deficitLo
 							if surplusLo <= binTol {
@@ -552,11 +552,27 @@ func presolveWithObserver(orig *CompiledProblem, maxPasses int, deadline time.Ti
 // rows and variable bounds, bypassing symbolic Model construction, map lookups,
 // validation, and redundant sorting.
 func buildCompiledDirect(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64) (red *CompiledProblem, droppedEmpty int, infeas bool) {
-	red, _, droppedEmpty, infeas = buildCompiledDirectWithRowMap(orig, rows, lb, ub, false)
+	red, _, droppedEmpty, infeas = buildCompiledDirectWithRowMap(orig, rows, lb, ub, nil, nil, false)
 	return red, droppedEmpty, infeas
 }
 
-func buildCompiledDirectWithRowMap(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64, trackOrigRows bool) (red *CompiledProblem, origRowIdx []int, droppedEmpty int, infeas bool) {
+func emptyRowInfeasible(sense ConstraintSense, rhs, rowMaxA, fixedL1 float64) bool {
+	emptyTol := 0.0
+	if rowMaxA > 0 || fixedL1 > 0 {
+		emptyTol = max(primalTol*min(1.0, rowMaxA), presolveRelScaleTol*max(math.Abs(rhs), fixedL1))
+	}
+	switch sense {
+	case LessEqual:
+		return 0 > rhs+emptyTol
+	case GreaterEqual:
+		return 0 < rhs-emptyTol
+	case Equal:
+		return math.Abs(rhs) > emptyTol
+	}
+	return false
+}
+
+func buildCompiledDirectWithRowMap(orig *CompiledProblem, rows []presolveWorkRow, lb, ub []float64, origRowMaxA, origFixedL1 []float64, trackOrigRows bool) (red *CompiledProblem, origRowIdx []int, droppedEmpty int, infeas bool) {
 	n := orig.numVars
 	mc := 0
 	totalNNZ := 0
@@ -567,7 +583,11 @@ func buildCompiledDirectWithRowMap(orig *CompiledProblem, rows []presolveWorkRow
 		}
 		keptTerms := 0
 		rowNNZ := 0
+		rowMaxA := 0.0
 		for k, col := range r.cols {
+			if av := math.Abs(r.vals[k]); av > rowMaxA {
+				rowMaxA = av
+			}
 			if lb[col] == 0 && ub[col] == 0 {
 				continue
 			}
@@ -577,19 +597,23 @@ func buildCompiledDirectWithRowMap(orig *CompiledProblem, rows []presolveWorkRow
 			}
 		}
 		if keptTerms == 0 {
-			switch r.sense {
-			case LessEqual:
-				if 0 > r.rhs+presolveFeasTol {
-					return nil, nil, 0, true
+			if origRowMaxA != nil && i < len(origRowMaxA) {
+				if origRowMaxA[i] > rowMaxA {
+					rowMaxA = origRowMaxA[i]
 				}
-			case GreaterEqual:
-				if 0 < r.rhs-presolveFeasTol {
-					return nil, nil, 0, true
+			} else if i < orig.numConstraints && i+1 < len(orig.rowPtr) {
+				for _, v := range orig.rowVal[orig.rowPtr[i]:orig.rowPtr[i+1]] {
+					if av := math.Abs(v); av > rowMaxA {
+						rowMaxA = av
+					}
 				}
-			case Equal:
-				if math.Abs(r.rhs) > presolveFeasTol {
-					return nil, nil, 0, true
-				}
+			}
+			var fixedL1 float64
+			if origFixedL1 != nil && i < len(origFixedL1) {
+				fixedL1 = origFixedL1[i]
+			}
+			if emptyRowInfeasible(r.sense, r.rhs, rowMaxA, fixedL1) {
+				return nil, nil, 0, true
 			}
 			r.active = false
 			droppedEmpty++
@@ -1224,8 +1248,9 @@ func runActivityTightening(
 				continue
 			}
 
-			rowScale := max(1.0, max(s.l1Min, s.l1Max))
-			rowFeasTol := max(presolveFeasTol, presolveRelScaleTol*rowScale)
+			rowActScale := max(math.Abs(r.rhs), max(s.l1Min, s.l1Max))
+			domScale := min(1.0, s.domainMaxAbs())
+			rowFeasTol := max(presolveFeasTol*domScale, presolveRelScaleTol*rowActScale)
 
 			if hasUpper && s.minInfCount == 0 && s.slackHi < -rowFeasTol {
 				return tightened, removedRows, true, false
@@ -1254,7 +1279,7 @@ func runActivityTightening(
 			lowerTightenedRow := false
 			if hasUpper && s.minInfCount <= 1 {
 				tSide, infSide := tightenActivityRowSide(
-					orig, i, r, &s, lb, ub, s.minInfCount, s.slackLo, rowScale, rowFeasTol,
+					orig, i, r, &s, lb, ub, s.minInfCount, s.slackLo, rowActScale, rowFeasTol,
 					s.minInfCount == 0 && !s.useWideSlack, true, obs, markColDirty,
 				)
 				tightened += tSide
@@ -1272,8 +1297,9 @@ func runActivityTightening(
 				if s.extreme {
 					continue
 				}
-				rowScale = max(1.0, s.l1Max)
-				rowFeasTol = max(presolveFeasTol, presolveRelScaleTol*rowScale)
+				rowActScale = max(math.Abs(r.rhs), s.l1Max)
+				domScale = min(1.0, s.domainMaxAbs())
+				rowFeasTol = max(presolveFeasTol*domScale, presolveRelScaleTol*rowActScale)
 				if s.maxInfCount == 0 && s.deficitLo > rowFeasTol {
 					return tightened, removedRows, true, false
 				}
@@ -1281,7 +1307,7 @@ func runActivityTightening(
 
 			if hasLower && s.maxInfCount <= 1 {
 				tSide, infSide := tightenActivityRowSide(
-					orig, i, r, &s, lb, ub, s.maxInfCount, -s.deficitHi, rowScale, rowFeasTol,
+					orig, i, r, &s, lb, ub, s.maxInfCount, -s.deficitHi, rowActScale, rowFeasTol,
 					s.maxInfCount == 0 && !s.useWideDeficit, false, obs, markColDirty,
 				)
 				tightened += tSide
@@ -3609,17 +3635,27 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 	}
 
 	rows := make([]presolveWorkRow, m)
+	rowMaxA := make([]float64, m)
+	rowFixedL1 := make([]float64, m)
 	for i := range m {
 		s, e := orig.rowPtr[i], orig.rowPtr[i+1]
+		vals := orig.rowVal[s:e:e]
 		rows[i] = presolveWorkRow{
 			name:   orig.rowNames[i],
 			cols:   orig.colIdx[s:e:e],
-			vals:   orig.rowVal[s:e:e],
+			vals:   vals,
 			rhs:    orig.rowRHS[i],
 			sense:  orig.rowSense[i],
 			active: true,
 			shared: true,
 		}
+		maxA := 0.0
+		for _, v := range vals {
+			if av := math.Abs(v); av > maxA {
+				maxA = av
+			}
+		}
+		rowMaxA[i] = maxA
 	}
 
 	colSubstDone := make([]bool, n)
@@ -3715,14 +3751,19 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 				}
 				if len(nzSubstIdx) > 0 {
 					var w wideDotAcc
-					w.addVal(r.rhs)
+					oldRHS := r.rhs
+					substL1 := 0.0
+					w.addVal(oldRHS)
 					for _, idx := range nzSubstIdx {
+						prod := -r.vals[idx] * lb[r.cols[idx]]
+						substL1 += math.Abs(prod)
 						w.addProd(-r.vals[idx], lb[r.cols[idx]])
 					}
 					top, rem, ok := w.finishDD()
 					if ok && !isNonFinite(top) && math.Abs(top) <= lpFixedMaxRHSMag && math.Abs(rem) <= lpFixedMaxRHSErr {
 						r.ensureOwned()
 						r.rhs = top
+						rowFixedL1[i] += math.Abs(oldRHS) + substL1
 						for _, pos := range slices.Backward(nzSubstIdx) {
 							if colTouched != nil && r.vals[pos] != 0 {
 								colTouched[r.cols[pos]] = true
@@ -3759,19 +3800,8 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 				continue
 			}
 			if len(r.cols) == 0 {
-				switch r.sense {
-				case LessEqual:
-					if 0 > r.rhs+presolveFeasTol {
-						return LPPresolveResult{Infeasible: true}
-					}
-				case GreaterEqual:
-					if 0 < r.rhs-presolveFeasTol {
-						return LPPresolveResult{Infeasible: true}
-					}
-				case Equal:
-					if math.Abs(r.rhs) > presolveFeasTol {
-						return LPPresolveResult{Infeasible: true}
-					}
+				if emptyRowInfeasible(r.sense, r.rhs, rowMaxA[i], rowFixedL1[i]) {
+					return LPPresolveResult{Infeasible: true}
 				}
 				r.active = false
 				removedRows++
@@ -3791,51 +3821,54 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 						// Convert negative-coefficient inequality into implied bound direction.
 						isUpper := (sense == LessEqual && a > 0) || (sense == GreaterEqual && a < 0)
 						isLower := (sense == GreaterEqual && a > 0) || (sense == LessEqual && a < 0)
-						colFeasTol := presolveFeasTol / max(1.0, math.Abs(a))
+						sngRowTol := max(primalTol*min(1.0, math.Abs(a)), presolveRelScaleTol*max(math.Abs(r.rhs), rowFixedL1[i]))
+						colFeasTol := primalTol / max(1.0, math.Abs(a))
+						if rowFixedL1[i] > 0 {
+							colFeasTol = max(colFeasTol, sngRowTol/math.Abs(a))
+						}
 						if sense == Equal {
 							if imp < lb[col]-colFeasTol || imp > ub[col]+colFeasTol {
 								return LPPresolveResult{Infeasible: true}
 							}
 							clamped := min(max(imp, lb[col]), ub[col])
-							if res := exactSingletonRes(a, clamped, r.rhs); math.IsNaN(res) || math.Abs(res) > presolveFeasTol {
+							if res := exactSingletonRes(a, clamped, r.rhs); math.IsNaN(res) || math.Abs(res) > sngRowTol {
 								return LPPresolveResult{Infeasible: true}
 							}
-							if lb[col] < clamped-presolveBoundChangeTol || ub[col] > clamped+presolveBoundChangeTol {
-								lb[col] = clamped
-								ub[col] = clamped
-								tightened++
-								singletons = append(singletons, lpSingletonAction{
-									origRow: i,
-									col:     col,
-									coeff:   a,
-									sense:   sense,
-									isUpper: true,
-								})
+							if imp >= lb[col] && imp <= ub[col] {
+								if lb[col] < clamped-presolveBoundChangeTol || ub[col] > clamped+presolveBoundChangeTol {
+									lb[col] = clamped
+									ub[col] = clamped
+									tightened++
+									singletons = append(singletons, lpSingletonAction{
+										origRow: i,
+										col:     col,
+										coeff:   a,
+										sense:   sense,
+										isUpper: true,
+									})
+								}
+								r.active = false
+								removedRows++
+								progress = true
+								if obs != nil && obs.onLPStep != nil {
+									obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
+								}
+								continue
 							}
-							r.active = false
-							removedRows++
-							progress = true
-							if obs != nil && obs.onLPStep != nil {
-								obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
-							}
-							continue
-						}
-						if isUpper {
+						} else if isUpper {
 							if imp < lb[col]-colFeasTol {
 								return LPPresolveResult{Infeasible: true}
 							}
-							if imp < ub[col]-presolveBoundChangeTol {
-								if imp < lb[col] {
-									imp = lb[col]
-									res := exactSingletonRes(a, imp, r.rhs)
-									viol := res
-									if sense == GreaterEqual {
-										viol = -res
-									}
-									if math.IsNaN(viol) || viol > presolveFeasTol {
-										return LPPresolveResult{Infeasible: true}
-									}
+							if imp < lb[col] {
+								res := exactSingletonRes(a, lb[col], r.rhs)
+								viol := res
+								if sense == GreaterEqual {
+									viol = -res
 								}
+								if math.IsNaN(viol) || viol > sngRowTol {
+									return LPPresolveResult{Infeasible: true}
+								}
+							} else if imp < ub[col]-presolveBoundChangeTol {
 								ub[col] = imp
 								tightened++
 								singletons = append(singletons, lpSingletonAction{
@@ -3852,32 +3885,32 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 									obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
 								}
 								continue
-							}
-							if imp >= ub[col]+lpRedundMargin {
-								r.active = false
-								removedRows++
-								progress = true
-								if obs != nil && obs.onLPStep != nil {
-									obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+							} else {
+								upperRedundTol := max(lpRedundMargin, presolveRelScaleTol*max(1.0, math.Abs(ub[col])))
+								if imp > ub[col] && imp >= ub[col]+upperRedundTol {
+									r.active = false
+									removedRows++
+									progress = true
+									if obs != nil && obs.onLPStep != nil {
+										obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+									}
+									continue
 								}
-								continue
 							}
 						} else if isLower {
 							if imp > ub[col]+colFeasTol {
 								return LPPresolveResult{Infeasible: true}
 							}
-							if imp > lb[col]+presolveBoundChangeTol {
-								if imp > ub[col] {
-									imp = ub[col]
-									res := exactSingletonRes(a, imp, r.rhs)
-									viol := res
-									if sense == GreaterEqual {
-										viol = -res
-									}
-									if math.IsNaN(viol) || viol > presolveFeasTol {
-										return LPPresolveResult{Infeasible: true}
-									}
+							if imp > ub[col] {
+								res := exactSingletonRes(a, ub[col], r.rhs)
+								viol := res
+								if sense == GreaterEqual {
+									viol = -res
 								}
+								if math.IsNaN(viol) || viol > sngRowTol {
+									return LPPresolveResult{Infeasible: true}
+								}
+							} else if imp > lb[col]+presolveBoundChangeTol {
 								lb[col] = imp
 								tightened++
 								singletons = append(singletons, lpSingletonAction{
@@ -3894,15 +3927,17 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 									obs.onLPStep(lpPresolveEvent{kind: lpStepSingletonRow, row: i, col: col})
 								}
 								continue
-							}
-							if imp <= lb[col]-lpRedundMargin {
-								r.active = false
-								removedRows++
-								progress = true
-								if obs != nil && obs.onLPStep != nil {
-									obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+							} else {
+								lowerRedundTol := max(lpRedundMargin, presolveRelScaleTol*max(1.0, math.Abs(lb[col])))
+								if imp < lb[col] && imp <= lb[col]-lowerRedundTol {
+									r.active = false
+									removedRows++
+									progress = true
+									if obs != nil && obs.onLPStep != nil {
+										obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+									}
+									continue
 								}
-								continue
 							}
 						}
 					}
@@ -3915,11 +3950,14 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 			case LessEqual:
 				early := evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, true, true, true)
 				if !early && !s.extreme {
-					tol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, max(s.l1Min, s.l1Max)))
-					if s.minInfCount == 0 && s.slackHi < -tol {
+					rowActScale := max(math.Abs(r.rhs), max(max(s.l1Min, s.l1Max), rowFixedL1[i]))
+					domScale := min(1.0, s.domainMaxAbs())
+					infeasTol := max(presolveFeasTol*domScale, presolveRelScaleTol*rowActScale)
+					redundTol := max(lpRedundMargin, max(presolveFeasTol, presolveRelScaleTol*max(1.0, rowActScale)))
+					if s.minInfCount == 0 && s.slackHi < -infeasTol {
 						return LPPresolveResult{Infeasible: true}
 					}
-					if s.maxInfCount == 0 && s.deficitLo > max(lpRedundMargin, tol) {
+					if s.maxInfCount == 0 && s.deficitLo > redundTol {
 						r.active = false
 						removedRows++
 						progress = true
@@ -3931,11 +3969,14 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 			case GreaterEqual:
 				early := evalRowActivitySummaryInto(&s, r.cols, r.vals, lb, ub, r.rhs, true, true, true)
 				if !early && !s.extreme {
-					tol := max(presolveFeasTol, presolveRelScaleTol*max(1.0, max(s.l1Min, s.l1Max)))
-					if s.maxInfCount == 0 && s.deficitLo > tol {
+					rowActScale := max(math.Abs(r.rhs), max(max(s.l1Min, s.l1Max), rowFixedL1[i]))
+					domScale := min(1.0, s.domainMaxAbs())
+					infeasTol := max(presolveFeasTol*domScale, presolveRelScaleTol*rowActScale)
+					redundTol := max(lpRedundMargin, max(presolveFeasTol, presolveRelScaleTol*max(1.0, rowActScale)))
+					if s.maxInfCount == 0 && s.deficitLo > infeasTol {
 						return LPPresolveResult{Infeasible: true}
 					}
-					if s.minInfCount == 0 && s.slackHi < -max(lpRedundMargin, tol) {
+					if s.minInfCount == 0 && s.slackHi < -redundTol {
 						r.active = false
 						removedRows++
 						progress = true
@@ -4054,6 +4095,28 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 		return LPPresolveResult{Reduced: orig}
 	}
 
+	for i := range rows {
+		r := &rows[i]
+		if !r.active {
+			continue
+		}
+		kept := 0
+		for _, col := range r.cols {
+			if lb[col] == 0 && ub[col] == 0 {
+				continue
+			}
+			kept++
+		}
+		if kept == 0 {
+			if emptyRowInfeasible(r.sense, r.rhs, rowMaxA[i], rowFixedL1[i]) {
+				return LPPresolveResult{Infeasible: true}
+			}
+			if obs != nil && obs.onLPStep != nil {
+				obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
+			}
+		}
+	}
+
 	if obs != nil && obs.onLPStep != nil {
 		clear(colTouched)
 		for i := range rows {
@@ -4072,25 +4135,9 @@ func presolveLPWithObserver(orig *CompiledProblem, maxPasses int, deadline time.
 				obs.onLPStep(lpPresolveEvent{kind: lpStepFixedSubst, col: j, val: 0})
 			}
 		}
-		for i := range rows {
-			r := &rows[i]
-			if !r.active {
-				continue
-			}
-			kept := 0
-			for _, col := range r.cols {
-				if lb[col] == 0 && ub[col] == 0 {
-					continue
-				}
-				kept++
-			}
-			if kept == 0 {
-				obs.onLPStep(lpPresolveEvent{kind: lpStepDropRedundantRow, row: i})
-			}
-		}
 	}
 
-	red, origRowIdx, droppedEmpty, infeas := buildCompiledDirectWithRowMap(orig, rows, lb, ub, true)
+	red, origRowIdx, droppedEmpty, infeas := buildCompiledDirectWithRowMap(orig, rows, lb, ub, rowMaxA, rowFixedL1, true)
 	if infeas {
 		return LPPresolveResult{Infeasible: true}
 	}
