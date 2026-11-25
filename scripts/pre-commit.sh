@@ -278,11 +278,14 @@ elif [ -n "${HOME:-}" ] && [ -x "${HOME}/.elan/bin/lake" ]; then
 fi
 
 run_lake_build() {
-    if command -v flock >/dev/null 2>&1; then
-        (cd formal && flock /tmp/goblin-formal-lake.lock bash -c 'lake build --wfail && lake lint')
-    else
-        (cd formal && lake build --wfail && lake lint)
-    fi
+    (
+        unset $(git rev-parse --local-env-vars)
+        if command -v flock >/dev/null 2>&1; then
+            (cd formal && flock /tmp/goblin-formal-lake.lock bash -c 'lake build --wfail && lake lint')
+        else
+            (cd formal && lake build --wfail && lake lint)
+        fi
+    )
 }
 
 if [ "${HAS_LAKE}" -eq 1 ]; then
