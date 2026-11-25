@@ -2151,6 +2151,7 @@ func (s *LPSolver) validatePreSolveBounds() (Status, bool) {
 		lbj := s.unscaledBound(j, false)
 		ubj := s.unscaledBound(j, true)
 		if math.IsNaN(lbj) || math.IsNaN(ubj) || math.IsInf(lbj, 1) || math.IsInf(ubj, -1) {
+			debugUnreachable("validatePreSolveBounds observed invalid bound on col=%d (lb=%g ub=%g)", j, lbj, ubj)
 			return StatusUndefined, false
 		}
 		if lbj > ubj {

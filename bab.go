@@ -3463,6 +3463,15 @@ func (b *babEngine) finalizeResult() Result {
 		status = b.limitStatus()
 		if status == StatusOptimal {
 			// Unreachable in exact bookkeeping: an open gap implies an open or unsolved node.
+			debugUnreachable(
+				"finalizeResult reached StatusOptimal with open gap (bestBoundMin=%g bestObjMin=%g searchShift=%g relGapTol=%g absGapTol=%g nodesExplored=%d)",
+				bestBoundMin,
+				b.bestObjMin,
+				b.searchShift,
+				b.opts.RelGapTol,
+				b.opts.AbsGapTol,
+				b.nodesExplored,
+			)
 			status = StatusUndefined
 		}
 	}

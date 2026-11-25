@@ -1,19 +1,23 @@
 package goblin_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	gb "github.com/paulourio/goblin"
 )
@@ -389,6 +393,9 @@ func buildPhase1FarkasJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, 
 		return nil, fmt.Errorf("Phase-I Farkas LP returned status %v", resFeas.Status)
 	}
 	sol, ok := gb.ExactBasisSolution(ctx, lpFeas)
+	if !ok || len(sol.DualMin) != m || sol.ObjectiveMin == nil || sol.ObjectiveMin.Sign() <= 0 {
+		sol, ok = gb.ExactPolishBasisSlackFallbackForTest(ctx, lpFeas)
+	}
 	if !ok || len(sol.DualMin) != m {
 		return nil, fmt.Errorf("Phase-I Farkas ExactBasisSolution failed (ok=%v len=%d want=%d)", ok, len(sol.DualMin), m)
 	}
@@ -623,7 +630,10 @@ func hasAllFiniteVarBounds(p *gb.CompiledProblem) bool {
 	return true
 }
 
-func solveElasticFeasibleBaseRat(ctx context.Context, p *gb.CompiledProblem, boxInf bool) ([]*big.Rat, bool) {
+func solveElasticPhase1Problem(ctx context.Context, p *gb.CompiledProblem, boxInf bool) (gb.ExactLPSolution, bool) {
+	if p == nil {
+		return gb.ExactLPSolution{}, false
+	}
 	n := p.NumVars()
 	m := p.NumConstraints()
 	mdl := gb.NewModel("feas_base", gb.Minimize)
@@ -672,7 +682,7 @@ func solveElasticFeasibleBaseRat(ctx context.Context, p *gb.CompiledProblem, box
 			obj = obj.AddTerm(sp, 1).AddTerm(sm, 1)
 			mdl.AddConstraint(rName, gb.Eq(e, rhs))
 		default:
-			return nil, false
+			return gb.ExactLPSolution{}, false
 		}
 	}
 	mdl.SetObjective(obj)
@@ -680,16 +690,60 @@ func solveElasticFeasibleBaseRat(ctx context.Context, p *gb.CompiledProblem, box
 	lpFeas := gb.NewLPSolver(pFeas, nil)
 	defer lpFeas.Close()
 	if lpFeas.Solve().Status != gb.StatusOptimal {
-		return nil, false
+		return gb.ExactLPSolution{}, false
 	}
 	sol, ok := gb.ExactBasisSolution(ctx, lpFeas)
-	if !ok || sol.ObjectiveMin == nil || sol.ObjectiveMin.Sign() != 0 || len(sol.Primal) < n {
-		return nil, false
+	if !ok || sol.ObjectiveMin == nil || len(sol.Primal) < n {
+		sol, ok = gb.ExactPolishBasisSlackFallbackForTest(ctx, lpFeas)
 	}
-	return sol.Primal[:n], true
+	if !ok || sol.ObjectiveMin == nil || len(sol.Primal) < n {
+		return gb.ExactLPSolution{}, false
+	}
+	return sol, true
 }
 
-func buildSubTolUnboundedCertJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, error) {
+func solveElasticFeasibleBaseRat(ctx context.Context, p *gb.CompiledProblem, boxInf bool) ([]*big.Rat, bool) {
+	sol, ok := solveElasticPhase1Problem(ctx, p, boxInf)
+	if !ok || sol.ObjectiveMin.Sign() != 0 {
+		return nil, false
+	}
+	return sol.Primal[:p.NumVars()], true
+}
+
+func problemRowDataScale(p *gb.CompiledProblem) float64 {
+	scale := 1.0
+	for i := range p.NumConstraints() {
+		scale = max(scale, math.Abs(p.RowRHS(i)))
+		p.ForEachRowTerm(i, func(_ int, coeff float64) {
+			scale = max(scale, math.Abs(coeff))
+		})
+	}
+	return scale
+}
+
+func hasSubTolPhase1L1Violation(ctx context.Context, p *gb.CompiledProblem) bool {
+	if p == nil || p.NumConstraints() == 0 {
+		return false
+	}
+	rowScale := problemRowDataScale(p)
+	if math.IsInf(rowScale, 0) || math.IsNaN(rowScale) {
+		return false
+	}
+	tolRat := new(big.Rat).SetFloat64(1e-6 * rowScale)
+	if tolRat == nil {
+		return false
+	}
+	sol, ok := solveElasticPhase1Problem(ctx, p, false)
+	if !ok || sol.ObjectiveMin == nil || sol.ObjectiveMin.Sign() < 0 {
+		return false
+	}
+	return sol.ObjectiveMin.Cmp(tolRat) <= 0
+}
+
+func solveExactImprovingRecessionRay(ctx context.Context, p *gb.CompiledProblem) ([]*big.Rat, bool) {
+	if p == nil || p.NumVars() == 0 {
+		return nil, false
+	}
 	n := p.NumVars()
 	m := p.NumConstraints()
 	mRay := gb.NewModel("recession_ray", gb.Minimize)
@@ -726,17 +780,30 @@ func buildSubTolUnboundedCertJSON(ctx context.Context, p *gb.CompiledProblem) ([
 		case gb.Equal:
 			mRay.AddConstraint(rName, gb.Eq(e, 0))
 		default:
-			return nil, fmt.Errorf("invalid row sense at row %d", i)
+			return nil, false
 		}
 	}
 	pRay := mRay.Compile()
 	lpRay := gb.NewLPSolver(pRay, nil)
 	defer lpRay.Close()
 	if lpRay.Solve().Status != gb.StatusOptimal {
-		return nil, errors.New("recession ray LP did not solve to StatusOptimal")
+		return nil, false
 	}
 	solRay, okR := gb.ExactBasisSolution(ctx, lpRay)
 	if !okR || solRay.ObjectiveMin == nil || solRay.ObjectiveMin.Sign() >= 0 || len(solRay.Primal) < n {
+		solRay, okR = gb.ExactPolishBasisSlackFallbackForTest(ctx, lpRay)
+	}
+	if !okR || solRay.ObjectiveMin == nil || solRay.ObjectiveMin.Sign() >= 0 || len(solRay.Primal) < n {
+		return nil, false
+	}
+	return solRay.Primal[:n], true
+}
+
+func buildSubTolUnboundedCertJSON(ctx context.Context, p *gb.CompiledProblem) ([]byte, error) {
+	n := p.NumVars()
+	m := p.NumConstraints()
+	ray, okR := solveExactImprovingRecessionRay(ctx, p)
+	if !okR {
 		return nil, errors.New("no strictly improving recession ray exists over Q")
 	}
 	x0, okX := solveElasticFeasibleBaseRat(ctx, p, false)
@@ -754,7 +821,7 @@ func buildSubTolUnboundedCertJSON(ctx context.Context, p *gb.CompiledProblem) ([
 	dPay := make([]fuzzRatJSON, n)
 	for j := range n {
 		x0Pay[j] = fuzzRatFromBigRat(x0[j])
-		dPay[j] = fuzzRatFromBigRat(solRay.Primal[j])
+		dPay[j] = fuzzRatFromBigRat(ray[j])
 	}
 	return json.Marshal(lpUnboundedReqJSON{
 		Mode:     "unbounded",
@@ -768,6 +835,142 @@ func buildSubTolUnboundedCertJSON(ctx context.Context, p *gb.CompiledProblem) ([
 		X0:       x0Pay,
 		D:        dPay,
 	})
+}
+
+func buildUnboundedOrSubTolFarkasLPJSON(
+	ctx context.Context,
+	p *gb.CompiledProblem,
+	primal []float64,
+) (mode string, payload []byte, ok bool) {
+	if p == nil {
+		return "", nil, false
+	}
+	if uPay, errU := buildSubTolUnboundedCertJSON(ctx, p); errU == nil {
+		return "unbounded", uPay, true
+	}
+	if hasAllFiniteVarBounds(p) {
+		return "", nil, false
+	}
+	if len(primal) == p.NumVars() {
+		bV, rV, _ := p.MaxViolation(primal, false)
+		if bV > 1e-5 || rV > 1e-5 {
+			return "", nil, false
+		}
+	}
+	if _, okRay := solveExactImprovingRecessionRay(ctx, p); !okRay {
+		return "", nil, false
+	}
+	if !hasSubTolPhase1L1Violation(ctx, p) {
+		return "", nil, false
+	}
+	fPay, errF := buildPhase1FarkasJSON(ctx, p)
+	if errF != nil {
+		return "", nil, false
+	}
+	return "farkas", fPay, true
+}
+
+func isNonStdFloatFalseInfeasibleLP(ctx context.Context, p *gb.CompiledProblem) bool {
+	if p == nil || p.IsMIP() || isStandardScaledProblem(p) {
+		return false
+	}
+	xRat, okX := solveElasticFeasibleBaseRat(ctx, p, false)
+	if !okX || len(xRat) != p.NumVars() {
+		return false
+	}
+	xFloat := make([]float64, p.NumVars())
+	for j, r := range xRat {
+		if r == nil {
+			return false
+		}
+		fv, _ := r.Float64()
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			return false
+		}
+		xFloat[j] = fv
+	}
+	bV, rV, _ := p.MaxViolation(xFloat, false)
+	return max(bV, rV) > 1e-6
+}
+
+func resolveInfeasibleLPCheckPayload(
+	tb testing.TB,
+	p *gb.CompiledProblem,
+	lp *gb.LPSolver,
+	res gb.LPResult,
+) (mode string, payload []byte, skipNonStdFalseInf, ok bool) {
+	tb.Helper()
+	mode, payload, ok = gb.ExportLPCheckPayload(p, lp, res)
+	if ok {
+		return mode, payload, false, true
+	}
+	if lp != nil && (res.Iterations > 0 || lp.HasSolvedInfeasWitnessForTest()) {
+		if p.NumConstraints() > 0 {
+			if p1Pay, p1Err := buildPhase1FarkasJSON(tb.Context(), p); p1Err == nil {
+				return "farkas", p1Pay, false, true
+			}
+		}
+		if isNonStdFloatFalseInfeasibleLP(tb.Context(), p) {
+			return "", nil, true, true
+		}
+	}
+	return "", nil, false, false
+}
+
+func resolvePresolvedInfeasibleLPCheckPayload(
+	tb testing.TB,
+	p *gb.CompiledProblem,
+	dualHint []float64,
+) (mode string, payload []byte, skipNonStdFalseInf, ok bool) {
+	tb.Helper()
+	if modeBC, bcPayload, okBC := gb.ExportLPCheckPayload(p, nil, gb.LPResult{Status: gb.StatusInfeasible, Dual: dualHint}); okBC &&
+		(modeBC == "bound-conflict" || modeBC == "farkas") {
+		return modeBC, bcPayload, false, true
+	}
+	if p.NumConstraints() > 0 {
+		if fPayload, errF := buildExactFarkasCertJSON(tb, p, dualHint); errF == nil {
+			return "farkas", fPayload, false, true
+		}
+	}
+	if isNonStdFloatFalseInfeasibleLP(tb.Context(), p) {
+		return "", nil, true, true
+	}
+	return "", nil, false, false
+}
+
+func resolvePresolvedSubTolSafeBoundOrError(
+	tb testing.TB,
+	p *gb.CompiledProblem,
+	safeBoundPayload []byte,
+	auxLP *gb.LPSolver,
+	auxRes gb.LPResult,
+) (handled bool, err error) {
+	tb.Helper()
+	isAllowedAux := auxRes.Status == gb.StatusInfeasible || auxRes.Status == gb.StatusNumericalError
+	if isStandardScaledProblem(p) || !isAllowedAux || !hasSubTolPhase1L1Violation(tb.Context(), p) {
+		return false, nil
+	}
+	if _, errSB := checkFormalLPJSONLForProblem(tb, p, safeBoundPayload); errSB != nil {
+		return false, errSB
+	}
+	var farkasPay []byte
+	if auxRes.Status == gb.StatusInfeasible {
+		fMode, fRaw, okF := gb.ExportLPCheckPayload(p, auxLP, auxRes)
+		if okF && fMode == "farkas" {
+			farkasPay = fRaw
+		}
+	}
+	if len(farkasPay) == 0 {
+		var errF error
+		farkasPay, errF = buildPhase1FarkasJSON(tb.Context(), p)
+		if errF != nil {
+			return false, errF
+		}
+	}
+	if _, errLean := checkFormalLPJSONLForProblem(tb, p, farkasPay); errLean != nil {
+		return false, errLean
+	}
+	return true, nil
 }
 
 func certifySubTolLPNumericalError(tb testing.TB, label string, p *gb.CompiledProblem, iters, primalLen int) error {
@@ -883,21 +1086,16 @@ func checkFormalLPResult(
 		return nil
 
 	case gb.StatusInfeasible:
-		mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
+		mode, payload, skipNonStdFalseInf, ok := resolveInfeasibleLPCheckPayload(tb, p, lp, res)
 		if !ok {
 			if p.NumConstraints() == 0 {
 				return fmt.Errorf("[%s] 0-constraint LP without bound conflict declared StatusInfeasible", label)
 			}
-			if lp != nil && res.Iterations > 0 {
-				p1Pay, p1Err := buildPhase1FarkasJSON(tb.Context(), p)
-				if p1Err == nil {
-					mode, payload, ok = "farkas", p1Pay, true
-				}
-			}
-			if !ok {
-				return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusInfeasible LP (vars=%d rows=%d)",
-					label, p.NumVars(), p.NumConstraints())
-			}
+			return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusInfeasible LP (vars=%d rows=%d)",
+				label, p.NumVars(), p.NumConstraints())
+		}
+		if skipNonStdFalseInf {
+			return nil
 		}
 		if mode != "farkas" && mode != "bound-conflict" {
 			return fmt.Errorf("[%s] expected farkas or bound-conflict LP certificate, got mode=%q", label, mode)
@@ -915,11 +1113,14 @@ func checkFormalLPResult(
 		}
 		mode, payload, ok := gb.ExportLPCheckPayload(p, lp, res)
 		if !ok {
+			mode, payload, ok = buildUnboundedOrSubTolFarkasLPJSON(tb.Context(), p, res.Primal)
+		}
+		if !ok {
 			return fmt.Errorf("[%s] ExportLPCheckPayload failed on StatusUnbounded LP (vars=%d rows=%d)",
 				label, p.NumVars(), p.NumConstraints())
 		}
-		if mode != "unbounded" && mode != "milp-unbounded" {
-			return fmt.Errorf("[%s] expected unbounded LP certificate, got mode=%q", label, mode)
+		if mode != "unbounded" && mode != "milp-unbounded" && mode != "farkas" {
+			return fmt.Errorf("[%s] expected unbounded or sub-tol farkas LP certificate, got mode=%q", label, mode)
 		}
 		if _, err := checkFormalLPJSONLForProblem(tb, p, payload); err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
@@ -969,7 +1170,10 @@ func checkFormalPresolvedLPResult(
 	case gb.StatusUnbounded:
 		if formalFuzzEnabled() {
 			uMode, uPayload, okU := gb.ExportUnboundedCheckPayload(p, nil, resPre.Values)
-			if !okU || (uMode != "unbounded" && uMode != "milp-unbounded") {
+			if !okU {
+				uMode, uPayload, okU = buildUnboundedOrSubTolFarkasLPJSON(tb.Context(), p, resPre.Values)
+			}
+			if !okU || (uMode != "unbounded" && uMode != "milp-unbounded" && uMode != "farkas") {
 				return fmt.Errorf("[%s] ExportUnboundedCheckPayload failed on presolved unbounded LP: ok=%v mode=%q",
 					label, okU, uMode)
 			}
@@ -983,21 +1187,17 @@ func checkFormalPresolvedLPResult(
 		if !formalFuzzEnabled() {
 			return nil
 		}
-		if mode, bcPayload, okBC := gb.ExportLPCheckPayload(p, nil, gb.LPResult{Status: gb.StatusInfeasible, Dual: resPre.Duals}); okBC &&
-			(mode == "bound-conflict" || mode == "farkas") {
-			if _, err := checkFormalLPJSONLForProblem(tb, p, bcPayload); err != nil {
-				return fmt.Errorf("[%s] %w", label, err)
+		_, infPayload, skipNonStdFalseInf, okInf := resolvePresolvedInfeasibleLPCheckPayload(tb, p, resPre.Duals)
+		if !okInf {
+			if p.NumConstraints() == 0 {
+				return fmt.Errorf("[%s] presolved 0-constraint LP without bound conflict declared StatusInfeasible", label)
 			}
+			return fmt.Errorf("[%s] presolved StatusInfeasible LP failed Farkas certification on original model", label)
+		}
+		if skipNonStdFalseInf {
 			return nil
 		}
-		if p.NumConstraints() == 0 {
-			return fmt.Errorf("[%s] presolved 0-constraint LP without bound conflict declared StatusInfeasible", label)
-		}
-		fPayload, err := buildExactFarkasCertJSON(tb, p, resPre.Duals)
-		if err != nil {
-			return fmt.Errorf("[%s] presolved StatusInfeasible LP failed Farkas certification on original model: %w", label, err)
-		}
-		if _, err := checkFormalLPJSONLForProblem(tb, p, fPayload); err != nil {
+		if _, err := checkFormalLPJSONLForProblem(tb, p, infPayload); err != nil {
 			return fmt.Errorf("[%s] %w", label, err)
 		}
 		return nil
@@ -1028,18 +1228,33 @@ func checkFormalPresolvedLPResult(
 			Dual:      resPre.Duals,
 		}
 		mode, payload, ok := gb.ExportLPCheckPayload(p, nil, lpRes)
+		subTolSafeBoundDone := false
 		if !ok || mode != "optimal" {
 			ws := gb.AcquireWorkspace(p.NumVars(), p.NumConstraints())
 			defer gb.ReleaseWorkspace(ws)
 			auxLP := gb.NewLPSolver(p, ws)
 			auxRes := auxLP.Solve()
 			if auxRes.Status != gb.StatusOptimal {
-				return fmt.Errorf("[%s] presolved StatusOptimal LP solved to %v on original model", label, auxRes.Status)
+				if !ok || mode != "safe-bound" {
+					return fmt.Errorf("[%s] presolved StatusOptimal LP solved to %v on original model", label, auxRes.Status)
+				}
+				handled, errSub := resolvePresolvedSubTolSafeBoundOrError(tb, p, payload, auxLP, auxRes)
+				if errSub != nil {
+					return fmt.Errorf("[%s] %w", label, errSub)
+				}
+				if !handled {
+					return fmt.Errorf("[%s] presolved StatusOptimal LP solved to %v on original model", label, auxRes.Status)
+				}
+				subTolSafeBoundDone = true
+			} else {
+				auxMode, auxPayload, okAux := gb.ExportLPCheckPayload(p, auxLP, auxRes)
+				if okAux {
+					mode, payload, ok = auxMode, auxPayload, true
+				}
 			}
-			auxMode, auxPayload, okAux := gb.ExportLPCheckPayload(p, auxLP, auxRes)
-			if okAux {
-				mode, payload, ok = auxMode, auxPayload, true
-			}
+		}
+		if subTolSafeBoundDone {
+			return nil
 		}
 		if !ok {
 			return fmt.Errorf("[%s] failed to export certificate for presolved LP", label)
@@ -1804,6 +2019,151 @@ func TestFormalFuzzBridgeOffline(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected infeasible LP Primal on IterationLimit to fail")
 	}
+
+	// Sub-ULP Q-infeasible StatusUnbounded fallback positive and negative controls (crasher_struct_f7bb).
+	mSubULP := gb.NewModel("sub_ulp_unb", gb.Minimize)
+	suX0 := mSubULP.AddContVar("x0", 3, 3)
+	suX1 := mSubULP.AddContVar("x1", math.Inf(-1), math.Inf(1))
+	mSubULP.SetObjective(gb.NewExpr(suX0.T(5e-6), suX1.T(5e-6)).AddConstant(-0.1))
+	mSubULP.AddConstraint("r0", gb.Le(gb.NewExpr(suX0.T(-5e-6)), -1.5000000000000002e-05))
+	pSubULP := mSubULP.Compile()
+	lpSubULP := gb.NewLPSolver(pSubULP, nil)
+	resSubULP := lpSubULP.Solve()
+	lpSubULP.Close()
+	modeSubULP, paySubULP, okSubULP := buildUnboundedOrSubTolFarkasLPJSON(t.Context(), pSubULP, resSubULP.Primal)
+	if !okSubULP || modeSubULP != "farkas" || len(paySubULP) == 0 {
+		t.Fatalf("expected sub-ULP Q-infeasible unbounded fallback to produce farkas certificate (ok=%v mode=%q)", okSubULP, modeSubULP)
+	}
+	if formalFuzzEnabled() {
+		if err := checkFormalLPResult(t, "sub_ulp_unb_lp", pSubULP, nil, resSubULP); err != nil {
+			t.Fatalf("checkFormalLPResult rejected sub-ULP Q-infeasible StatusUnbounded LP: %v", err)
+		}
+		if err := checkFormalPresolvedLPResult(t, "sub_ulp_unb_pre", pSubULP, gb.Result{Status: gb.StatusUnbounded, Values: resSubULP.Primal}, false); err != nil {
+			t.Fatalf("checkFormalPresolvedLPResult rejected sub-ULP Q-infeasible StatusUnbounded LP: %v", err)
+		}
+	}
+
+	mGrossInf := gb.NewModel("gross_inf_unb", gb.Minimize)
+	giX0 := mGrossInf.AddContVar("x0", 5, 5)
+	giX1 := mGrossInf.AddContVar("x1", math.Inf(-1), math.Inf(1))
+	mGrossInf.SetObjective(gb.NewExpr(giX1.T(-1)))
+	mGrossInf.AddConstraint("r0", gb.Le(gb.NewExpr(giX0.T(1)), 0))
+	pGrossInf := mGrossInf.Compile()
+	if modeBad, _, okBad := buildUnboundedOrSubTolFarkasLPJSON(t.Context(), pGrossInf, []float64{5, 0}); okBad {
+		t.Fatalf("expected grossly infeasible LP with free var to fail unbounded fallback, got ok=true mode=%q", modeBad)
+	}
+
+	mBoundedSub := gb.NewModel("bounded_sub_ulp", gb.Minimize)
+	bsX0 := mBoundedSub.AddContVar("x0", 3, 3)
+	bsX1 := mBoundedSub.AddContVar("x1", 0, 10)
+	mBoundedSub.SetObjective(gb.NewExpr(bsX0.T(5e-6), bsX1.T(5e-6)))
+	mBoundedSub.AddConstraint("r0", gb.Le(gb.NewExpr(bsX0.T(-5e-6)), -1.5000000000000002e-05))
+	pBoundedSub := mBoundedSub.Compile()
+	if modeBad, _, okBad := buildUnboundedOrSubTolFarkasLPJSON(t.Context(), pBoundedSub, []float64{3, 0}); okBad {
+		t.Fatalf("expected bounded LP to fail unbounded fallback, got ok=true mode=%q", modeBad)
+	}
+
+	// #128 item 2: 370516fcda6dcbb4 sub-ULP Q-infeasible presolved StatusOptimal ("safe-bound") vs auxLP=Infeasible.
+	m3705 := gb.NewModel("sub_ulp_pre_opt_3705", gb.Minimize)
+	x3705 := m3705.AddContVar("x0", math.Inf(-1), math.Inf(1))
+	m3705.SetObjective(gb.NewExpr(x3705.T(1e12)).AddConstant(-0.1))
+	m3705.AddConstraint("r0", gb.Le(gb.NewExpr(x3705.T(1e12)), -1))
+	m3705.AddConstraint("r1", gb.Le(gb.NewExpr(x3705.T(-1e-8)), 0))
+	p3705 := m3705.Compile()
+	res3705, err3705 := gb.SolveCompiled(t.Context(), p3705, gb.WithPureGo(), gb.WithPresolve(true))
+	if err3705 != nil || res3705.Status != gb.StatusOptimal {
+		t.Fatalf("370516fcda6dcbb4 presolved solve failed: status=%s err=%v", res3705.Status, err3705)
+	}
+	if formalFuzzEnabled() {
+		if err := checkFormalPresolvedLPResult(t, "sub_ulp_pre_opt_3705", p3705, res3705, false); err != nil {
+			t.Fatalf("checkFormalPresolvedLPResult rejected 370516fcda6dcbb4: %v", err)
+		}
+	}
+
+	// Negative control for #128 item 2: grossly infeasible presolved StatusOptimal must fail.
+	mGrossPre := gb.NewModel("gross_pre_opt", gb.Minimize)
+	gpX := mGrossPre.AddContVar("x0", math.Inf(-1), math.Inf(1))
+	mGrossPre.SetObjective(gb.NewExpr(gpX.T(1)))
+	mGrossPre.AddConstraint("r0", gb.Le(gb.NewExpr(gpX.T(1)), -1))
+	mGrossPre.AddConstraint("r1", gb.Ge(gb.NewExpr(gpX.T(1)), 5))
+	pGrossPre := mGrossPre.Compile()
+	if err := checkLPPrimalAndDualKKT("gross_pre_kkt", pGrossPre, []float64{-1}, []float64{-1, 0}, false); err == nil {
+		t.Fatal("expected grossly infeasible presolved primal to fail KKT violation check")
+	}
+	if formalFuzzEnabled() {
+		wsG := gb.AcquireWorkspace(pGrossPre.NumVars(), pGrossPre.NumConstraints())
+		auxG := gb.NewLPSolver(pGrossPre, wsG)
+		resG := auxG.Solve()
+		safePay, _ := json.Marshal(lpOptimalJSONReq{})
+		handledG, _ := resolvePresolvedSubTolSafeBoundOrError(t, pGrossPre, safePay, auxG, resG)
+		gb.ReleaseWorkspace(wsG)
+		if handledG {
+			t.Fatal("expected resolvePresolvedSubTolSafeBoundOrError to reject grossly infeasible LP")
+		}
+	}
+
+	// #128 item 3: 0-iteration solved StatusInfeasible LP resolves via buildPhase1FarkasJSON, and
+	// feasible !stdScaled LP with MaxViolation <= 1e-6 fails loudly under StatusInfeasible.
+	mZeroIterInf := gb.NewModel("zero_iter_inf", gb.Minimize)
+	ziX := mZeroIterInf.AddContVar("x0", 0, 10)
+	mZeroIterInf.SetObjective(gb.NewExpr(ziX.T(1)))
+	mZeroIterInf.AddConstraint("r0", gb.Le(gb.NewExpr(), -1))
+	pZeroIterInf := mZeroIterInf.Compile()
+	wsZI := gb.AcquireWorkspace(pZeroIterInf.NumVars(), pZeroIterInf.NumConstraints())
+	lpZI := gb.NewLPSolver(pZeroIterInf, wsZI)
+	resZI := lpZI.Solve()
+	if resZI.Status != gb.StatusInfeasible || resZI.Iterations != 0 || !lpZI.HasSolvedInfeasWitnessForTest() {
+		gb.ReleaseWorkspace(wsZI)
+		t.Fatalf("expected 0-iter solved StatusInfeasible LP, got status=%s iters=%d witness=%v",
+			resZI.Status, resZI.Iterations, lpZI.HasSolvedInfeasWitnessForTest())
+	}
+	if formalFuzzEnabled() {
+		if err := checkFormalLPResult(t, "zero_iter_inf", pZeroIterInf, lpZI, gb.LPResult{Status: gb.StatusInfeasible, Iterations: 0}); err != nil {
+			gb.ReleaseWorkspace(wsZI)
+			t.Fatalf("checkFormalLPResult rejected 0-iteration solved StatusInfeasible LP: %v", err)
+		}
+	}
+	gb.ReleaseWorkspace(wsZI)
+
+	mFeasNonStd := gb.NewModel("feas_nonstd", gb.Minimize)
+	fnX := mFeasNonStd.AddContVar("x0", 0, 1e12)
+	mFeasNonStd.SetObjective(gb.NewExpr(fnX.T(1e12)))
+	mFeasNonStd.AddConstraint("r0", gb.Ge(gb.NewExpr(fnX.T(1e-8)), 0))
+	pFeasNonStd := mFeasNonStd.Compile()
+	if isNonStdFloatFalseInfeasibleLP(t.Context(), pFeasNonStd) {
+		t.Fatal("expected feasible non-standard LP with MaxViolation <= 1e-6 to be rejected as false infeasible")
+	}
+	if formalFuzzEnabled() {
+		if err := checkFormalLPResult(t, "feas_nonstd_inf", pFeasNonStd, nil, gb.LPResult{Status: gb.StatusInfeasible, Iterations: 0}); err == nil {
+			t.Fatal("expected checkFormalLPResult to reject StatusInfeasible on feasible !stdScaled LP")
+		}
+		if err := checkFormalPresolvedLPResult(t, "feas_nonstd_pre_inf", pFeasNonStd, gb.Result{Status: gb.StatusInfeasible}, false); err == nil {
+			t.Fatal("expected checkFormalPresolvedLPResult to reject StatusInfeasible on feasible !stdScaled LP")
+		}
+	}
+
+	// Positive control for #128 item 3: exact-Q feasible !stdScaled LP whose nearest float64 projection violates > 1e-6.
+	mFalseInf := gb.NewModel("float_false_inf_nonstd", gb.Minimize)
+	fiX := mFalseInf.AddContVar("x0", 0, 1)
+	mFalseInf.SetObjective(gb.NewExpr(fiX.T(1)))
+	mFalseInf.AddConstraint("r0", gb.Eq(gb.NewExpr(fiX.T(1e27)), 1e14))
+	pFalseInf := mFalseInf.Compile()
+	if !isNonStdFloatFalseInfeasibleLP(t.Context(), pFalseInf) {
+		t.Fatal("expected !stdScaled exact-Q feasible LP with >1e-6 float64 projection violation to pass isNonStdFloatFalseInfeasibleLP")
+	}
+	if formalFuzzEnabled() {
+		wsFI := gb.AcquireWorkspace(pFalseInf.NumVars(), pFalseInf.NumConstraints())
+		lpFI := gb.NewLPSolver(pFalseInf, wsFI)
+		_ = lpFI.Solve()
+		if err := checkFormalLPResult(t, "float_false_inf_ok", pFalseInf, lpFI, gb.LPResult{Status: gb.StatusInfeasible, Iterations: 0}); err != nil {
+			gb.ReleaseWorkspace(wsFI)
+			t.Fatalf("checkFormalLPResult rejected !stdScaled float-false-infeasible LP: %v", err)
+		}
+		gb.ReleaseWorkspace(wsFI)
+		if err := checkFormalPresolvedLPResult(t, "float_false_inf_pre_ok", pFalseInf, gb.Result{Status: gb.StatusInfeasible}, false); err != nil {
+			t.Fatalf("checkFormalPresolvedLPResult rejected !stdScaled float-false-infeasible LP: %v", err)
+		}
+	}
 }
 
 func TestFormalFuzzBridgeConcurrent(t *testing.T) {
@@ -2129,4 +2489,774 @@ func TestFormalFuzzBridgeSerializedProblemMismatch(t *testing.T) {
 			t.Fatal("checkFormalLPJSONLForProblem accepted weakened lp-presolve orig JSON")
 		}
 	})
+}
+
+const (
+	viprBudgetMaxRatStrLen = 8192
+	viprBudgetMaxRatBits   = 16384
+)
+
+// assertAllowedStatus enforces the solver status lattice on res.
+// Unlimited standard-scaled problems forbid StatusUndefined, StatusNumericalError,
+// and resource-limit statuses. Resource-limited runs validate limits via checkResourceLimitResult.
+func assertAllowedStatus(tb testing.TB, label string, p *gb.CompiledProblem, hasLimits bool, res gb.Result) {
+	tb.Helper()
+	if p == nil {
+		tb.Fatalf("[%s] nil CompiledProblem", label)
+	}
+	stdScaled := isStandardScaledProblem(p)
+	switch res.Status {
+	case gb.StatusOptimal, gb.StatusInfeasible, gb.StatusUnbounded:
+		// Terminal outcome allowed for all solver configurations.
+	case gb.StatusTimeLimit, gb.StatusIterationLimit, gb.StatusNodeLimit:
+		if !hasLimits && (stdScaled || res.Status != gb.StatusIterationLimit) {
+			tb.Fatalf("[%s] unexpected limit status %s without active limits (stdScaled=%v)", label, res.Status, stdScaled)
+		}
+		if err := checkResourceLimitResult(label, p, res); err != nil {
+			tb.Fatalf("%v", err)
+		}
+	case gb.StatusNumericalError:
+		if stdScaled {
+			tb.Fatalf("[%s] forbidden StatusNumericalError on standard-scaled problem (hasLimits=%v)", label, hasLimits)
+		}
+	case gb.StatusUndefined, gb.StatusNotSolved, gb.StatusGapLimit:
+		tb.Fatalf("[%s] forbidden solver status %s (hasLimits=%v stdScaled=%v)", label, res.Status, hasLimits, stdScaled)
+	default:
+		tb.Fatalf("[%s] unknown solver status %d (%s)", label, int(res.Status), res.Status)
+	}
+}
+
+// assertVIPRComplexityBudget checks step counts, rational operand sizes, and
+// VerifyVIPRTrace verification runtime against problem dimensions and NNZ.
+func assertVIPRComplexityBudget(
+	tb testing.TB,
+	label string,
+	p *gb.CompiledProblem,
+	tr *gb.VIPRTrace,
+	verifyElapsed time.Duration,
+) {
+	tb.Helper()
+	if p == nil {
+		tb.Fatalf("[%s] nil CompiledProblem", label)
+	}
+	if tr != nil && tr.HasCertificate() {
+		workScale := max(1, p.NumVars()+p.NumConstraints()+p.NNZ())
+		stepCount := tr.StepCount()
+		maxSteps := max(65536, 512*workScale)
+		if stepCount < 0 || stepCount > maxSteps {
+			tb.Fatalf("[%s] VIPR trace step count %d exceeds complexity budget %d (vars=%d rows=%d nnz=%d)",
+				label, stepCount, maxSteps, p.NumVars(), p.NumConstraints(), p.NNZ())
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			tb.Fatalf("[%s] MarshalVIPRJSON failed: %v", label, err)
+		}
+		maxStrLen, maxBits, errScan := scanVIPRJSONRationalSizes(raw)
+		if errScan != nil {
+			tb.Fatalf("[%s] invalid VIPR JSON while auditing complexity budget: %v", label, errScan)
+		}
+		if maxStrLen > viprBudgetMaxRatStrLen {
+			tb.Fatalf("[%s] VIPR rational string length %d exceeds budget %d",
+				label, maxStrLen, viprBudgetMaxRatStrLen)
+		}
+		if maxBits > viprBudgetMaxRatBits {
+			tb.Fatalf("[%s] VIPR rational bit length %d exceeds budget %d",
+				label, maxBits, viprBudgetMaxRatBits)
+		}
+		timeBudget := 10*time.Second + time.Duration(workScale)*10*time.Millisecond + time.Duration(stepCount)*2*time.Millisecond
+		if raceEnabled {
+			timeBudget *= 4
+		}
+		if verifyElapsed > timeBudget {
+			tb.Fatalf("[%s] VerifyVIPRTrace elapsed %v exceeds budget %v (steps=%d workScale=%d race=%v)",
+				label, verifyElapsed, timeBudget, stepCount, workScale, raceEnabled)
+		}
+	}
+}
+
+func scanVIPRJSONRationalSizes(raw []byte) (maxStrLen, maxBits int, err error) {
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
+	var z big.Int
+	lastKey := ""
+	expectKey := false
+	stack := make([]byte, 0, 16)
+	for {
+		tok, errTok := dec.ReadToken()
+		if errTok != nil {
+			if errors.Is(errTok, io.EOF) {
+				break
+			}
+			return 0, 0, errTok
+		}
+		switch tok.Kind() {
+		case '{':
+			stack = append(stack, '{')
+			expectKey = true
+		case '}':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			expectKey = len(stack) > 0 && stack[len(stack)-1] == '{'
+			lastKey = ""
+		case '[':
+			stack = append(stack, '[')
+			expectKey = false
+			lastKey = ""
+		case ']':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			expectKey = len(stack) > 0 && stack[len(stack)-1] == '{'
+			lastKey = ""
+		case '"':
+			s := tok.String()
+			if len(stack) > 0 && stack[len(stack)-1] == '{' && expectKey {
+				lastKey = s
+				expectKey = false
+				continue
+			}
+			if len(s) > maxStrLen {
+				maxStrLen = len(s)
+			}
+			if lastKey == "num" || lastKey == "den" {
+				if _, ok := z.SetString(s, 10); ok {
+					if bl := z.BitLen(); bl > maxBits {
+						maxBits = bl
+					}
+				}
+			}
+			expectKey = len(stack) > 0 && stack[len(stack)-1] == '{'
+			lastKey = ""
+		case '0':
+			s := tok.String()
+			if len(s) > maxStrLen {
+				maxStrLen = len(s)
+			}
+			if _, ok := z.SetString(s, 10); ok {
+				if bl := z.BitLen(); bl > maxBits {
+					maxBits = bl
+				}
+			}
+			expectKey = len(stack) > 0 && stack[len(stack)-1] == '{'
+			lastKey = ""
+		default:
+			expectKey = len(stack) > 0 && stack[len(stack)-1] == '{'
+			lastKey = ""
+		}
+	}
+	return maxStrLen, maxBits, nil
+}
+
+func exactEvalProblemObjRat(objConst *big.Rat, objMin []*big.Rat, x []*big.Rat) *big.Rat {
+	tot := new(big.Rat).Set(objConst)
+	var prod big.Rat
+	for j, cj := range objMin {
+		if cj != nil && cj.Sign() != 0 && x[j] != nil && x[j].Sign() != 0 {
+			prod.Mul(cj, x[j])
+			tot.Add(tot, &prod)
+		}
+	}
+	return tot
+}
+
+func exactEvalProblemZeroCont(
+	p *gb.CompiledProblem,
+	objConst *big.Rat,
+	objMin []*big.Rat,
+	zRat []*big.Rat,
+) (*big.Rat, []*big.Rat, bool, bool) {
+	n := p.NumVars()
+	x := make([]*big.Rat, n)
+	for j := range n {
+		if p.VarCategory(j) != gb.Continuous {
+			if zRat[j] == nil {
+				return nil, nil, false, false
+			}
+			x[j] = new(big.Rat).Set(zRat[j])
+			continue
+		}
+		lb, ub := p.VarBounds(j)
+		if math.IsNaN(lb) || math.IsNaN(ub) || lb > ub {
+			return nil, nil, false, true
+		}
+		cj := objMin[j]
+		switch {
+		case cj.Sign() > 0:
+			if math.IsInf(lb, -1) {
+				return nil, nil, false, false
+			}
+			r := new(big.Rat).SetFloat64(lb)
+			if r == nil {
+				return nil, nil, false, false
+			}
+			x[j] = r
+		case cj.Sign() < 0:
+			if math.IsInf(ub, 1) {
+				return nil, nil, false, false
+			}
+			r := new(big.Rat).SetFloat64(ub)
+			if r == nil {
+				return nil, nil, false, false
+			}
+			x[j] = r
+		default:
+			if 0 >= lb && 0 <= ub {
+				x[j] = new(big.Rat)
+			} else if !math.IsInf(lb, 0) {
+				r := new(big.Rat).SetFloat64(lb)
+				if r == nil {
+					return nil, nil, false, false
+				}
+				x[j] = r
+			} else if !math.IsInf(ub, 0) {
+				r := new(big.Rat).SetFloat64(ub)
+				if r == nil {
+					return nil, nil, false, false
+				}
+				x[j] = r
+			} else {
+				x[j] = new(big.Rat)
+			}
+		}
+	}
+	if !isExactRatSliceMIPFeasible(p, x) {
+		return nil, nil, false, true
+	}
+	return exactEvalProblemObjRat(objConst, objMin, x), x, true, true
+}
+
+func isContDualOptimalForBoundsRat(p *gb.CompiledProblem, lb, ub []float64, ex gb.ExactLPSolution) bool {
+	n := p.NumVars()
+	if len(ex.Primal) != n || len(ex.ReducedCostMin) != n || len(ex.DualMin) != p.NumConstraints() {
+		return false
+	}
+	for i := range p.NumConstraints() {
+		d := ex.DualMin[i]
+		if d == nil {
+			return false
+		}
+		switch p.RowSense(i) {
+		case gb.LessEqual:
+			if d.Sign() > 0 {
+				return false
+			}
+		case gb.GreaterEqual:
+			if d.Sign() < 0 {
+				return false
+			}
+		case gb.Equal:
+			// Unrestricted dual sign for equality rows.
+		default:
+			return false
+		}
+	}
+	for j := range n {
+		if p.VarCategory(j) != gb.Continuous {
+			continue
+		}
+		rc := ex.ReducedCostMin[j]
+		xj := ex.Primal[j]
+		if rc == nil || xj == nil {
+			return false
+		}
+		lbj := lb[j]
+		ubj := ub[j]
+		hasLB := !math.IsInf(lbj, -1)
+		hasUB := !math.IsInf(ubj, 1)
+		var lbRat, ubRat *big.Rat
+		if hasLB {
+			lbRat = new(big.Rat).SetFloat64(lbj)
+			if lbRat == nil {
+				return false
+			}
+		}
+		if hasUB {
+			ubRat = new(big.Rat).SetFloat64(ubj)
+			if ubRat == nil {
+				return false
+			}
+		}
+		atLB := hasLB && xj.Cmp(lbRat) == 0
+		atUB := hasUB && xj.Cmp(ubRat) == 0
+		if !atLB && !atUB && rc.Sign() != 0 {
+			return false
+		}
+		if atLB && !atUB && rc.Sign() < 0 {
+			return false
+		}
+		if atUB && !atLB && rc.Sign() > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func collectSmallMIPPointsRat(
+	ctx context.Context,
+	p *gb.CompiledProblem,
+	maxBox int,
+) (pts [][]*big.Rat, ptsFloat [][]float64, optMin *big.Rat, boxOK bool) {
+	if p == nil || maxBox <= 0 || p.NumVars() > 128 || p.NumConstraints() > 256 {
+		return nil, nil, nil, false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return nil, nil, nil, false
+	}
+	n := p.NumVars()
+	objConst, objMin, _, _, _, _, okProb := gb.ExactProblemRatsForTest(p)
+	if !okProb || len(objMin) != n {
+		return nil, nil, nil, false
+	}
+	if n == 0 {
+		feas, errZ := zeroVarProblemFeasibleRat(p)
+		if errZ != nil {
+			return nil, nil, nil, false
+		}
+		if !feas {
+			return nil, nil, nil, true
+		}
+		return [][]*big.Rat{{}}, [][]float64{{}}, new(big.Rat).Set(objConst), true
+	}
+
+	numInt := p.NumIntVars()
+	intCols := make([]int, numInt)
+	loBounds := make([]int64, numInt)
+	hiBounds := make([]int64, numInt)
+	emptyDomain := false
+	boxCount := int64(1)
+	for k := range numInt {
+		col := p.IntCol(k)
+		intCols[k] = col
+		lb, ub := p.VarBounds(col)
+		if math.IsNaN(lb) || math.IsNaN(ub) || math.IsInf(lb, 0) || math.IsInf(ub, 0) {
+			return nil, nil, nil, false
+		}
+		if math.Abs(lb) > 0x1p52 || math.Abs(ub) > 0x1p52 {
+			return nil, nil, nil, false
+		}
+		lo := int64(math.Ceil(lb))
+		hi := int64(math.Floor(ub))
+		if lo > hi {
+			emptyDomain = true
+			continue
+		}
+		span := hi - lo + 1
+		if span > int64(maxBox)/boxCount {
+			return nil, nil, nil, false
+		}
+		loBounds[k] = lo
+		hiBounds[k] = hi
+		boxCount *= span
+	}
+	for j := range n {
+		if p.VarCategory(j) == gb.Continuous {
+			lb, ub := p.VarBounds(j)
+			if math.IsNaN(lb) || math.IsNaN(ub) {
+				return nil, nil, nil, false
+			}
+			if lb > ub {
+				emptyDomain = true
+			}
+		}
+	}
+	if emptyDomain {
+		return nil, nil, nil, true
+	}
+
+	hasCont := numInt < n
+	stdScaled := isStandardScaledProblem(p)
+	lbFix := make([]float64, n)
+	ubFix := make([]float64, n)
+	for j := range n {
+		lbFix[j], ubFix[j] = p.VarBounds(j)
+	}
+	var ws *gb.Workspace
+	if hasCont && p.NumConstraints() > 0 {
+		ws = gb.AcquireWorkspace(n, p.NumConstraints())
+		defer gb.ReleaseWorkspace(ws)
+	}
+
+	zVals := make([]int64, numInt)
+	copy(zVals, loBounds)
+	zRat := make([]*big.Rat, n)
+	for j := range n {
+		zRat[j] = new(big.Rat)
+	}
+	contExactFail := false
+
+	evalCurrentPoint := func() bool {
+		if ctx != nil && ctx.Err() != nil {
+			contExactFail = true
+			return false
+		}
+		for k, col := range intCols {
+			zv := zVals[k]
+			zRat[col].SetInt64(zv)
+			fv := float64(zv)
+			lbFix[col] = fv
+			ubFix[col] = fv
+		}
+		if !hasCont {
+			if !isExactRatSliceMIPFeasible(p, zRat) {
+				return true
+			}
+			candObj := exactEvalProblemObjRat(objConst, objMin, zRat)
+			pt := make([]*big.Rat, n)
+			pf := make([]float64, n)
+			for j := range n {
+				pt[j] = new(big.Rat).Set(zRat[j])
+				pf[j], _ = zRat[j].Float64()
+			}
+			pts = append(pts, pt)
+			ptsFloat = append(ptsFloat, pf)
+			if optMin == nil || candObj.Cmp(optMin) < 0 {
+				optMin = candObj
+			}
+			return true
+		}
+		if p.NumConstraints() == 0 {
+			candObj, pt, feas, ok0 := exactEvalProblemZeroCont(p, objConst, objMin, zRat)
+			if !ok0 {
+				contExactFail = true
+				return false
+			}
+			if !feas {
+				return true
+			}
+			pf := make([]float64, n)
+			for j := range n {
+				pf[j], _ = pt[j].Float64()
+			}
+			pts = append(pts, pt)
+			ptsFloat = append(ptsFloat, pf)
+			if optMin == nil || candObj.Cmp(optMin) < 0 {
+				optMin = candObj
+			}
+			return true
+		}
+
+		lp := gb.NewLPSolver(p, ws)
+		lp.SetStructuralBounds(lbFix, ubFix)
+		lpRes := lp.Solve()
+		switch lpRes.Status {
+		case gb.StatusInfeasible:
+			if !stdScaled {
+				contExactFail = true
+				return false
+			}
+			return true
+		case gb.StatusOptimal:
+			ex, okEx := gb.ExactPolishBasisSlackFallbackForTest(ctx, lp)
+			if !okEx || len(ex.Primal) != n || ex.ObjectiveMin == nil {
+				contExactFail = true
+				return false
+			}
+			if !isExactRatSliceMIPFeasible(p, ex.Primal) {
+				contExactFail = true
+				return false
+			}
+			for _, col := range intCols {
+				if ex.Primal[col] == nil || ex.Primal[col].Cmp(zRat[col]) != 0 {
+					contExactFail = true
+					return false
+				}
+			}
+			if !isContDualOptimalForBoundsRat(p, lbFix, ubFix, ex) {
+				contExactFail = true
+				return false
+			}
+			candObj := exactEvalProblemObjRat(objConst, objMin, ex.Primal)
+			if candObj.Cmp(ex.ObjectiveMin) != 0 {
+				contExactFail = true
+				return false
+			}
+			pt := make([]*big.Rat, n)
+			pf := make([]float64, n)
+			for j := range n {
+				pt[j] = new(big.Rat).Set(ex.Primal[j])
+				pf[j], _ = ex.Primal[j].Float64()
+			}
+			pts = append(pts, pt)
+			ptsFloat = append(ptsFloat, pf)
+			if optMin == nil || candObj.Cmp(optMin) < 0 {
+				optMin = candObj
+			}
+			return true
+		default:
+			contExactFail = true
+			return false
+		}
+	}
+
+	for {
+		if !evalCurrentPoint() || contExactFail {
+			return nil, nil, nil, false
+		}
+		if numInt == 0 {
+			break
+		}
+		pos := numInt - 1
+		for pos >= 0 {
+			zVals[pos]++
+			if zVals[pos] <= hiBounds[pos] {
+				break
+			}
+			zVals[pos] = loBounds[pos]
+			pos--
+		}
+		if pos < 0 {
+			break
+		}
+	}
+	return pts, ptsFloat, optMin, true
+}
+
+// exactSmallMIPObjectiveRat enumerates integer boxes up to maxBox and solves each
+// continuous fiber via ExactPolishBasisSolutionForTest to determine the exact
+// minimum internal objective value (optMin) and feasibility in rational arithmetic.
+func exactSmallMIPObjectiveRat(
+	ctx context.Context,
+	p *gb.CompiledProblem,
+	maxBox int,
+) (optMin *big.Rat, feasible, ok bool) {
+	pts, _, minObj, boxOK := collectSmallMIPPointsRat(ctx, p, maxBox)
+	if !boxOK {
+		return nil, false, false
+	}
+	return minObj, len(pts) > 0 && minObj != nil, true
+}
+
+type cutCheckJSONPayload struct {
+	Cut      *cutPlaneJSONPayload `json:"cut"`
+	FinalCut *cutPlaneJSONPayload `json:"finalCut"`
+}
+
+type cutPlaneJSONPayload struct {
+	Terms []cutTermJSONPayload `json:"terms"`
+	RHS   fuzzRatJSON          `json:"rhs"`
+}
+
+type cutTermJSONPayload struct {
+	Col int         `json:"col"`
+	Val fuzzRatJSON `json:"val"`
+}
+
+func checkSeparatedCutItemsAgainstAllPointsRat(
+	tb testing.TB,
+	label string,
+	n int,
+	items [][]byte,
+	pts [][]*big.Rat,
+) {
+	tb.Helper()
+	var prod big.Rat
+	for idx, raw := range items {
+		var doc cutCheckJSONPayload
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			tb.Fatalf("[%s] unmarshal cut item %d failed: %v", label, idx, err)
+		}
+		plane := doc.Cut
+		if plane == nil {
+			plane = doc.FinalCut
+		}
+		if plane == nil {
+			continue
+		}
+		rhsRat, okR := parseRatPairStr(plane.RHS.Num, plane.RHS.Den)
+		if !okR {
+			tb.Fatalf("[%s] invalid cut item %d RHS %q/%q", label, idx, plane.RHS.Num, plane.RHS.Den)
+		}
+		cols := make([]int, len(plane.Terms))
+		vals := make([]*big.Rat, len(plane.Terms))
+		for k, term := range plane.Terms {
+			if term.Col < 0 || term.Col >= n {
+				tb.Fatalf("[%s] cut item %d out-of-range col %d (n=%d)", label, idx, term.Col, n)
+			}
+			vr, okV := parseRatPairStr(term.Val.Num, term.Val.Den)
+			if !okV {
+				tb.Fatalf("[%s] invalid cut item %d coeff %q/%q", label, idx, term.Val.Num, term.Val.Den)
+			}
+			cols[k] = term.Col
+			vals[k] = vr
+		}
+		for ptIdx, x := range pts {
+			lhs := new(big.Rat)
+			for k, col := range cols {
+				prod.Mul(vals[k], x[col])
+				lhs.Add(lhs, &prod)
+			}
+			if lhs.Cmp(rhsRat) > 0 {
+				tb.Fatalf("[%s] cut item %d cut off integer-feasible point #%d: lhs=%s > rhs=%s",
+					label, idx, ptIdx, lhs.RatString(), rhsRat.RatString())
+			}
+		}
+	}
+}
+
+func parseRatPairStr(nStr, dStr string) (*big.Rat, bool) {
+	var n, d big.Int
+	if _, okN := n.SetString(nStr, 10); !okN {
+		return nil, false
+	}
+	if _, okD := d.SetString(dStr, 10); !okD || d.Sign() <= 0 {
+		return nil, false
+	}
+	return new(big.Rat).SetFrac(&n, &d), true
+}
+
+func checkPointInsideCompiledBounds(
+	tb testing.TB,
+	label string,
+	prob *gb.CompiledProblem,
+	pts [][]*big.Rat,
+	allowFloatTol bool,
+) {
+	tb.Helper()
+	n := prob.NumVars()
+	for j := range n {
+		lb, ub := prob.VarBounds(j)
+		isInt := prob.VarCategory(j) != gb.Continuous
+		hasLB := !math.IsInf(lb, -1)
+		hasUB := !math.IsInf(ub, 1)
+		var lbRat, ubRat *big.Rat
+		if hasLB {
+			lbRat = new(big.Rat).SetFloat64(lb)
+			if lbRat == nil {
+				tb.Fatalf("[%s] non-finite lb %g on col %d", label, lb, j)
+			}
+			if allowFloatTol && !isInt {
+				tol := new(big.Rat).SetFloat64(1e-9 * max(1.0, math.Abs(lb)))
+				lbRat.Sub(lbRat, tol)
+			}
+		}
+		if hasUB {
+			ubRat = new(big.Rat).SetFloat64(ub)
+			if ubRat == nil {
+				tb.Fatalf("[%s] non-finite ub %g on col %d", label, ub, j)
+			}
+			if allowFloatTol && !isInt {
+				tol := new(big.Rat).SetFloat64(1e-9 * max(1.0, math.Abs(ub)))
+				ubRat.Add(ubRat, tol)
+			}
+		}
+		for ptIdx, x := range pts {
+			if hasLB && x[j].Cmp(lbRat) < 0 {
+				tb.Fatalf("[%s] presolve tightened lb[%d]=%g above feasible point #%d (%s)",
+					label, j, lb, ptIdx, x[j].RatString())
+			}
+			if hasUB && x[j].Cmp(ubRat) > 0 {
+				tb.Fatalf("[%s] presolve tightened ub[%d]=%g below feasible point #%d (%s)",
+					label, j, ub, ptIdx, x[j].RatString())
+			}
+		}
+	}
+}
+
+func sampleWitnessFloats(ptsFloat [][]float64, limit int) [][]float64 {
+	if len(ptsFloat) <= limit {
+		return ptsFloat
+	}
+	return ptsFloat[:limit]
+}
+
+// verifyCutsAndPresolveAgainstAllIntPoints validates root separated cuts and
+// presolve bound tightenings against every integer-feasible point in boxes up to maxBox.
+func verifyCutsAndPresolveAgainstAllIntPoints(
+	tb testing.TB,
+	label string,
+	p *gb.CompiledProblem,
+	maxBox int,
+) {
+	tb.Helper()
+	pts, ptsFloat, optMin, boxOK := collectSmallMIPPointsRat(tb.Context(), p, maxBox)
+	if p != nil && p.IsMIP() && boxOK {
+		solsSample := sampleWitnessFloats(ptsFloat, 32)
+		cutItems, errCuts := gb.ExportLiveSeparatedCutsItems(p, solsSample)
+		if errCuts != nil {
+			tb.Fatalf("[%s] ExportLiveSeparatedCutsItems failed: %v", label, errCuts)
+		}
+		if formalFuzzEnabled() {
+			for _, item := range cutItems {
+				mustFormalCutsCheck(tb, item)
+			}
+		}
+		if len(pts) > 0 && len(cutItems) > 0 {
+			checkSeparatedCutItemsAgainstAllPointsRat(tb, label+"/cuts", p.NumVars(), cutItems, pts)
+		}
+
+		viprPre := gb.PresolveForVIPR(p, 10)
+		if viprPre.Infeasible && len(pts) > 0 {
+			tb.Fatalf("[%s] PresolveForVIPR claimed infeasible despite %d feasible points", label, len(pts))
+		}
+		if viprPre.Envelope != nil && len(pts) > 0 {
+			seenSym := false
+			for stepIdx, st := range viprPre.Envelope.Steps {
+				if st.Op == "symBreakLe" {
+					seenSym = true
+				}
+				if !seenSym && st.NewBound != nil && st.Col >= 0 && st.Col < p.NumVars() {
+					for ptIdx, x := range pts {
+						if st.IsUpper && x[st.Col].Cmp(st.NewBound) > 0 {
+							tb.Fatalf("[%s] VIPR presolve step %d ub[%d]=%s cuts feasible point #%d (%s)",
+								label, stepIdx, st.Col, st.NewBound.RatString(), ptIdx, x[st.Col].RatString())
+						}
+						if !st.IsUpper && x[st.Col].Cmp(st.NewBound) < 0 {
+							tb.Fatalf("[%s] VIPR presolve step %d lb[%d]=%s cuts feasible point #%d (%s)",
+								label, stepIdx, st.Col, st.NewBound.RatString(), ptIdx, x[st.Col].RatString())
+						}
+					}
+				}
+			}
+		}
+		if !viprPre.Infeasible && !viprPre.TimedOut && viprPre.Reduced != nil && viprPre.SymBreakRows == 0 && len(pts) > 0 {
+			checkPointInsideCompiledBounds(tb, label+"/vipr_presolve_bounds", viprPre.Reduced, pts, false)
+		}
+		if !viprPre.Infeasible && !viprPre.TimedOut && viprPre.Reduced != nil {
+			optVIPR, feasVIPR, okVIPR := exactSmallMIPObjectiveRat(tb.Context(), viprPre.Reduced, maxBox)
+			if okVIPR {
+				wantFeas := len(pts) > 0
+				if feasVIPR != wantFeas {
+					tb.Fatalf("[%s] PresolveForVIPR changed feasibility: orig=%v reduced=%v", label, wantFeas, feasVIPR)
+				}
+				if wantFeas && optVIPR.Cmp(optMin) != 0 {
+					tb.Fatalf("[%s] PresolveForVIPR changed exact optimum: orig=%s reduced=%s", label, optMin.RatString(), optVIPR.RatString())
+				}
+			}
+		}
+
+		ruleItems, preRes := gb.ExportPresolveRulesItems(p)
+		if formalFuzzEnabled() {
+			for _, item := range ruleItems {
+				_ = mustFormalRulesCheck(tb, item)
+			}
+		}
+		hasOrbit := slices.ContainsFunc(ruleItems, func(raw []byte) bool {
+			return bytes.Contains(raw, []byte(`"op":"orbit-check"`))
+		})
+		if preRes.Infeasible && len(pts) > 0 {
+			tb.Fatalf("[%s] Presolve claimed infeasible despite %d feasible points", label, len(pts))
+		}
+		if !preRes.Infeasible && !preRes.TimedOut && preRes.Reduced != nil {
+			if !hasOrbit && len(pts) > 0 {
+				checkPointInsideCompiledBounds(tb, label+"/presolve_bounds", preRes.Reduced, pts, true)
+			}
+			optRed, feasRed, okRed := exactSmallMIPObjectiveRat(tb.Context(), preRes.Reduced, maxBox)
+			if okRed {
+				wantFeas := len(pts) > 0
+				if feasRed != wantFeas {
+					tb.Fatalf("[%s] Presolve changed feasibility: orig=%v reduced=%v", label, wantFeas, feasRed)
+				}
+				if wantFeas && optRed.Cmp(optMin) != 0 {
+					// Float64 presolve allows outward 1e-6/row-scale slack margins; reject large divergence.
+					diffF, _ := new(big.Rat).Sub(optRed, optMin).Float64()
+					optF, _ := optMin.Float64()
+					tol := 1e-4 * max(1.0, math.Abs(optF))
+					if math.Abs(diffF) > tol {
+						tb.Fatalf("[%s] Presolve changed optimum beyond float tolerance: orig=%s reduced=%s diff=%g tol=%g",
+							label, optMin.RatString(), optRed.RatString(), diffF, tol)
+					}
+				}
+			}
+		}
+	}
 }
