@@ -5591,6 +5591,57 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 		}
 	}
 
+	if enterVar == -1 && phase1 {
+		bestSubTolViol := 0.0
+		for k := range tot {
+			st := ws.status[k]
+			if st == statusBasic || st == statusFixed {
+				continue
+			}
+			dj := ws.dj[k]
+			var viol, dir float64
+			switch st {
+			case statusAtLower:
+				if !(ws.x[k] < ws.ub[k]) {
+					continue
+				}
+				viol = -dj
+				dir = 1.0
+			case statusAtUpper:
+				if !(ws.x[k] > ws.lb[k]) {
+					continue
+				}
+				viol = dj
+				dir = -1.0
+			case statusSuperBasic:
+				if dj < 0 {
+					if !(ws.x[k] < ws.ub[k]) {
+						continue
+					}
+					viol = -dj
+					dir = 1.0
+				} else {
+					if !(ws.x[k] > ws.lb[k]) {
+						continue
+					}
+					viol = dj
+					dir = -1.0
+				}
+			default:
+				continue
+			}
+			thresh := max(1e-13, 16.0*s.colDualNoiseTol(k, costSlice))
+			if viol > thresh && viol > bestSubTolViol {
+				if bland {
+					return k, dir, false
+				}
+				bestSubTolViol = viol
+				enterVar = k
+				enterDir = dir
+			}
+		}
+	}
+
 	if enterVar == -1 && !phase1 {
 		n := s.mat.numVars
 		bestGain := 10.0 * primalTol
@@ -5717,7 +5768,7 @@ func (s *LPSolver) primalSimplexStep(phase1, bland bool) (Status, float64) {
 	basicTol := ws.basicTol[:m]
 	fCol := ws.fCol[:m]
 
-	evalRow := func(i int) bool {
+	evalRow := func(i int, minPiv float64) bool {
 		bVar := basis[i]
 		val := xb[i]
 		lb, ub := basicLB[i], basicUB[i]
@@ -5729,36 +5780,42 @@ func (s *LPSolver) primalSimplexStep(phase1, bland bool) (Status, float64) {
 		if phase1 {
 			tol := basicTol[i]
 			if val < lb-tol {
-				if d < -pivotTol && !math.IsInf(ub, 1) {
-					tryLeave(i, true, (ub-val)/(-d), -d, bVar)
-				} else if d < -pivotTol {
-					tryLeave(i, false, (lb-val)/(-d), -d, bVar)
+				if d < -minPiv {
+					if !math.IsInf(ub, 1) {
+						tryLeave(i, true, (ub-val)/(-d), -d, bVar)
+					} else {
+						tryLeave(i, false, (lb-val)/(-d), -d, bVar)
+					}
+				} else if d < 0 {
+					subTolBlocking = true
 				}
 				return true
 			} else if val > ub+tol {
-				if d > pivotTol && !math.IsInf(lb, -1) {
-					tryLeave(i, false, (val-lb)/d, d, bVar)
-				} else if d > pivotTol {
-					tryLeave(i, true, (val-ub)/d, d, bVar)
+				if d > minPiv {
+					if !math.IsInf(lb, -1) {
+						tryLeave(i, false, (val-lb)/d, d, bVar)
+					} else {
+						tryLeave(i, true, (val-ub)/d, d, bVar)
+					}
+				} else if d > 0 {
+					subTolBlocking = true
 				}
 				return true
 			}
 		}
 
-		if d > pivotTol && !math.IsInf(lb, -1) {
+		if d > minPiv && !math.IsInf(lb, -1) {
 			tryLeave(i, false, max(0.0, val-lb)/d, d, bVar)
-		} else if d < -pivotTol && !math.IsInf(ub, 1) {
+		} else if d < -minPiv && !math.IsInf(ub, 1) {
 			tryLeave(i, true, max(0.0, ub-val)/(-d), -d, bVar)
-		} else if !phase1 {
-			if (d > 0 && !math.IsInf(lb, -1)) || (d < 0 && !math.IsInf(ub, 1)) {
-				subTolBlocking = true
-			}
+		} else if (d > 0 && !math.IsInf(lb, -1)) || (d < 0 && !math.IsInf(ub, 1)) {
+			subTolBlocking = true
 		}
 		return true
 	}
 
 	for _, i := range ws.fColIdx {
-		if uint(i) < uint(m) && !evalRow(i) {
+		if uint(i) < uint(m) && !evalRow(i, pivotTol) {
 			return StatusNumericalError, 0
 		}
 	}
@@ -5784,10 +5841,26 @@ func (s *LPSolver) primalSimplexStep(phase1, bland bool) (Status, float64) {
 		bestLeaveVar = tot
 		subTolBlocking = false
 		for i := range m {
-			if !evalRow(i) {
+			if !evalRow(i, pivotTol) {
 				return StatusNumericalError, 0
 			}
 		}
+	}
+
+	trySubTolPivot := func() bool {
+		// Re-scan exact FTRAN entries down to 1e-13 when exact basis factorization
+		// still finds a blocking sub-pivotTol coefficient on a badly scaled row.
+		const subPivotTol = 1e-13
+		bestTheta = maxTheta
+		bestPivot = 0.0
+		bestLeaveVar = tot
+		subTolBlocking = false
+		for i := range m {
+			if !evalRow(i, subPivotTol) {
+				return false
+			}
+		}
+		return true
 	}
 
 	if leaveRow == -1 {
@@ -5805,23 +5878,57 @@ func (s *LPSolver) primalSimplexStep(phase1, bland bool) (Status, float64) {
 						return StatusUnbounded, 0
 					}
 				}
-				// An improving phase-1 ray or a phase-2 ray with sub-tolerance blocking pivots
-				// is not a valid certificate of infeasibility or unboundedness.
-				return StatusNumericalError, 0
+				if subTolBlocking {
+					if !trySubTolPivot() {
+						return StatusNumericalError, 0
+					}
+				}
+				if leaveRow == -1 {
+					// An improving phase-1 ray or a phase-2 ray with sub-tolerance blocking pivots
+					// is not a valid certificate of infeasibility or unboundedness.
+					return StatusNumericalError, 0
+				}
+			} else {
+				if ws.lu.numUpdates == 0 && !s.verifyUnboundedRay(enterVar, enterDir, ws.fCol) {
+					return StatusNumericalError, 0
+				}
+				return StatusUnbounded, 0
 			}
-			if ws.lu.numUpdates == 0 && !s.verifyUnboundedRay(enterVar, enterDir, ws.fCol) {
-				return StatusNumericalError, 0
-			}
-			return StatusUnbounded, 0
 		}
+	}
+	if leaveRow == -1 {
 		step := enterDir * maxTheta
 		if subTolBlocking {
 			violates := false
 			for i := range m {
-				nv := xb[i] - fCol[i]*step
+				val := xb[i]
+				nv := val - fCol[i]*step
 				tol := basicTol[i]
-				if math.IsNaN(nv) || (!math.IsInf(basicLB[i], -1) && nv < basicLB[i]-tol) || (!math.IsInf(basicUB[i], 1) && nv > basicUB[i]+tol) {
+				lb, ub := basicLB[i], basicUB[i]
+				if math.IsNaN(nv) {
 					violates = true
+					break
+				}
+				if phase1 {
+					if val < lb-tol {
+						if !math.IsInf(ub, 1) {
+							violates = nv > ub+tol
+						} else {
+							violates = nv > lb+tol
+						}
+					} else if val > ub+tol {
+						if !math.IsInf(lb, -1) {
+							violates = nv < lb-tol
+						} else {
+							violates = nv < ub-tol
+						}
+					} else {
+						violates = (!math.IsInf(lb, -1) && nv < lb-tol) || (!math.IsInf(ub, 1) && nv > ub+tol)
+					}
+				} else {
+					violates = (!math.IsInf(lb, -1) && nv < lb-tol) || (!math.IsInf(ub, 1) && nv > ub+tol)
+				}
+				if violates {
 					break
 				}
 			}
@@ -5833,9 +5940,17 @@ func (s *LPSolver) primalSimplexStep(phase1, bland bool) (Status, float64) {
 					s.computePrimalValues()
 					return StatusNotSolved, 0
 				}
-				return StatusNumericalError, 0
+				if !trySubTolPivot() {
+					return StatusNumericalError, 0
+				}
+				if leaveRow == -1 {
+					return StatusNumericalError, 0
+				}
 			}
 		}
+	}
+	if leaveRow == -1 {
+		step := enterDir * maxTheta
 		if ws.fColSparse {
 			for _, i := range ws.fColIdx {
 				if uint(i) < uint(m) {
@@ -6264,8 +6379,27 @@ func (s *LPSolver) computeWorkingDualRefinement(cost []float64) (y0, dy1, dy2Abs
 			}
 		}
 	}
-	parent := ensureBuf(&ws.dualRefParent, m, false)
-	compSize := ensureBuf(&ws.dualRefComp, m, false)
+	parent, compSize, compMaxDual := s.computeBasisCompDualScale(y0, dy1)
+	for i := range m {
+		root := parent[i]
+		rowScaleFloor := float64(compSize[root]+2) * 0x1p-102
+		if ddFloor := rowScaleFloor * compMaxDual[root]; dy2Abs[i] < ddFloor {
+			dy2Abs[i] = ddFloor
+		}
+	}
+	return y0, dy1, dy2Abs, true
+}
+
+func (s *LPSolver) computeBasisCompDualScale(y0, dy1 []float64) (parent, compSize []int, compMaxDual []float64) {
+	p := s.mat
+	ws := s.ws
+	n := p.numVars
+	m := s.TotalRows()
+	basis := ws.basis[:m]
+	noExtra := len(s.extraRows) == 0
+
+	parent = ensureBuf(&ws.dualRefParent, m, false)
+	compSize = ensureBuf(&ws.dualRefComp, m, false)
 	for i := range m {
 		parent[i] = i
 		compSize[i] = 1
@@ -6312,30 +6446,162 @@ func (s *LPSolver) computeWorkingDualRefinement(cost []float64) (y0, dy1, dy2Abs
 			}
 		}
 	}
-	compMaxDual := ensureBuf(&ws.dualRefMax, m, true)
+	compMaxDual = ensureBuf(&ws.dualRefMax, m, true)
 	for i := range m {
-		ay := math.Abs(y0[i]) + math.Abs(dy1[i])
+		ay := math.Abs(y0[i])
+		if dy1 != nil {
+			ay += math.Abs(dy1[i])
+		}
 		root := i
 		for parent[root] != root {
 			parent[root] = parent[parent[root]]
 			root = parent[root]
 		}
+		parent[i] = root
 		if ay > compMaxDual[root] {
 			compMaxDual[root] = ay
 		}
 	}
-	for i := range m {
-		root := i
-		for parent[root] != root {
-			parent[root] = parent[parent[root]]
-			root = parent[root]
+	return parent, compSize, compMaxDual
+}
+
+func (s *LPSolver) basisColCompDualSc(
+	bCol int,
+	origSpace bool,
+	parent, compSize []int,
+	compMaxDual []float64,
+) (compScaleSc float64, compSz int) {
+	if bCol < 0 {
+		return 0, 0
+	}
+	m := s.TotalRows()
+	p := s.mat
+	if origSpace {
+		p = s.prob
+	}
+	n := p.numVars
+	scalePair := func(dualMax, norm float64) float64 {
+		if dualMax <= 0 || norm <= 0 {
+			return 0
 		}
-		rowScaleFloor := float64(compSize[root]+2) * 0x1p-102
-		if ddFloor := rowScaleFloor * compMaxDual[root]; dy2Abs[i] < ddFloor {
-			dy2Abs[i] = ddFloor
+		var sc float64
+		if dualMax < 1.0 && norm > 1.0 {
+			sc = (dualMax * norm) * 0x1p-32
+		} else {
+			sc = (dualMax * 0x1p-32) * norm
+		}
+		if isNonFinite(sc) {
+			return 0
+		}
+		return sc
+	}
+	if bCol >= n {
+		r := bCol - n
+		if uint(r) >= uint(m) {
+			return 0, 0
+		}
+		root := parent[r]
+		mult := 1.0
+		if origSpace && s.scaled {
+			mult = s.objScale * s.rowScaleOf(r)
+		}
+		return scalePair(compMaxDual[root], mult), compSize[root]
+	}
+	root := -1
+	scaledNorm := 0.0
+	accumRow := func(r int, raw float64) {
+		if uint(r) >= uint(m) {
+			return
+		}
+		v := math.Abs(raw)
+		if v == 0 {
+			return
+		}
+		if root == -1 {
+			root = parent[r]
+		}
+		if origSpace && s.scaled {
+			v *= s.objScale * s.rowScaleOf(r)
+		}
+		scaledNorm += v
+	}
+	st, en := p.colPtr[bCol], p.colPtr[bCol+1]
+	rSlice := p.rowIdx[st:en]
+	vSlice := p.colVal[st:en]
+	for idx, r := range rSlice {
+		accumRow(r, vSlice[idx])
+	}
+	baseM := p.numConstraints
+	for e, dr := range s.extraRows {
+		vals := dr.Val
+		if origSpace && s.scaled && dr.OrigVal != nil {
+			vals = dr.OrigVal
+		}
+		for k, c := range dr.ColIdx {
+			if c == bCol && k < len(vals) {
+				accumRow(baseM+e, vals[k])
+				break
+			}
 		}
 	}
-	return y0, dy1, dy2Abs, true
+	if root == -1 || isNonFinite(scaledNorm) {
+		return 0, 0
+	}
+	return scalePair(compMaxDual[root], scaledNorm), compSize[root]
+}
+
+// basisDualResidualRel bounds the relative dual residual for a basic variable while
+// discounting sub-roundoff noise covered by dy2Sc or the connected-component dual floor.
+func basisDualResidualRel(numSc, dy2Sc, denSc, compScaleSc float64, compSz int) float64 {
+	if numSc <= 0 {
+		return 0
+	}
+	excessSc := numSc
+	if dy2Sc > 0 {
+		if numSc <= 2.0*dy2Sc {
+			return 0
+		}
+		excessSc = numSc - dy2Sc
+	}
+	if compScaleSc > 0 {
+		compFloorSc := float64(compSz+2) * 0x1p-90 * compScaleSc
+		if excessSc <= compFloorSc {
+			if compScaleSc > denSc {
+				denSc = compScaleSc
+			}
+			return excessSc / denSc
+		}
+	}
+	if dy2Sc > denSc {
+		denSc = dy2Sc
+	}
+	if denSc <= 0 {
+		return 1.0
+	}
+	return excessSc / denSc
+}
+
+func (s *LPSolver) evalBasisDualRel(
+	bCol int,
+	origSpace bool,
+	numSc, dy2ColSc, denSc float64,
+	yWork, dy1Work []float64,
+	compBuilt *bool,
+) float64 {
+	if numSc <= 0 || (dy2ColSc > 0 && numSc <= 2.0*dy2ColSc) {
+		return 0
+	}
+	if denSc > 0 && numSc <= 1e-12*denSc {
+		return numSc / denSc
+	}
+	m := s.TotalRows()
+	if !*compBuilt {
+		s.computeBasisCompDualScale(yWork, dy1Work)
+		*compBuilt = true
+	}
+	ws := s.ws
+	compScaleSc, compSz := s.basisColCompDualSc(bCol, origSpace, ws.dualRefParent[:m], ws.dualRefComp[:m], ws.dualRefMax[:m])
+	return basisDualResidualRel(numSc, dy2ColSc, denSc, compScaleSc, compSz)
 }
 
 func (s *LPSolver) buildExtraColBuckets(orig bool) (colOff, rows []int, vals []float64) {
@@ -6437,16 +6703,15 @@ func (s *LPSolver) computeRefinedWorkingPricing(cost []float64) (djC, djE, dy2Sc
 		dy2Sc[k] = d2s
 		yDotSc[k] = yds
 	}
+	compBuilt := dy1 != nil
 	for _, bCol := range ws.basis[:m] {
 		if uint(bCol) >= uint(tot) {
 			continue
 		}
 		denSc := yDotSc[bCol] + math.Ldexp(math.Abs(cost[bCol]), -32)
-		if denSc > 0 {
-			numSc := math.Ldexp(math.Abs(djC[bCol])+djE[bCol], -32)
-			if rel := numSc / denSc; rel > maxBasisDualRel {
-				maxBasisDualRel = rel
-			}
+		numSc := math.Ldexp(math.Abs(djC[bCol])+djE[bCol], -32)
+		if rel := s.evalBasisDualRel(bCol, false, numSc, dy2Sc[bCol], denSc, y0, dy1, &compBuilt); rel > maxBasisDualRel {
+			maxBasisDualRel = rel
 		}
 	}
 	return djC, djE, dy2Sc, yDotSc, maxBasisDualRel, true
@@ -6510,20 +6775,19 @@ func (s *LPSolver) hasImprovingUnboundedColumn(cost []float64) bool {
 	}
 	exOff, exRows, exVals := s.buildExtraColBuckets(false)
 	maxBasisDualRel := 0.0
+	compBuilt := dy1 != nil
 	for _, bCol := range ws.basis[:m] {
 		if uint(bCol) >= uint(tot) {
 			continue
 		}
-		v, eb, _, yds, dotOK := s.evalRefinedCol(bCol, cost, exOff, exRows, exVals, y0, dy1, dy2Abs)
+		v, eb, d2s, yds, dotOK := s.evalRefinedCol(bCol, cost, exOff, exRows, exVals, y0, dy1, dy2Abs)
 		if !dotOK {
 			return true
 		}
 		denSc := yds + math.Ldexp(math.Abs(cost[bCol]), -32)
-		if denSc > 0 {
-			numSc := math.Ldexp(math.Abs(v)+eb, -32)
-			if rel := numSc / denSc; rel > maxBasisDualRel {
-				maxBasisDualRel = rel
-			}
+		numSc := math.Ldexp(math.Abs(v)+eb, -32)
+		if rel := s.evalBasisDualRel(bCol, false, numSc, d2s, denSc, y0, dy1, &compBuilt); rel > maxBasisDualRel {
+			maxBasisDualRel = rel
 		}
 	}
 	for k, st := range status {
@@ -7613,28 +7877,27 @@ func (s *LPSolver) dualResidualsEval(
 	}
 
 	maxBasisDualRel := 0.0
+	compBuilt := dy1Work != nil
 	for _, bCol := range ws.basis[:m] {
+		var numSc, dy2ColSc, denSc float64
 		if bCol < n {
-			denSc := yDotSc[bCol] + math.Abs(objMinVec[bCol])*0x1p-32
-			if denSc > 0 {
-				numSc := (math.Abs(djOrig[bCol]) + djErr[bCol]) * 0x1p-32
-				if rel := numSc / denSc; rel > maxBasisDualRel {
-					maxBasisDualRel = rel
-				}
-			}
+			dy2ColSc = dy2Sc[bCol]
+			numSc = (math.Abs(djOrig[bCol]) + djErr[bCol]) * 0x1p-32
+			denSc = yDotSc[bCol] + math.Abs(objMinVec[bCol])*0x1p-32
 		} else if r := bCol - n; uint(r) < uint(m) {
-			slackY, slackEB, _ := rowDualAt(r)
+			slackY, slackEB, d2Abs := rowDualAt(r)
 			d1Abs := 0.0
 			if dy1Min != nil {
 				d1Abs = math.Abs(dy1Min[r])
 			}
-			denSc := (math.Abs(yMin[r]) + d1Abs) * 0x1p-32
-			if denSc > 0 {
-				numSc := (math.Abs(slackY) + math.Abs(slackEB)) * 0x1p-32
-				if rel := numSc / denSc; rel > maxBasisDualRel {
-					maxBasisDualRel = rel
-				}
-			}
+			dy2ColSc = d2Abs * 0x1p-32
+			numSc = (math.Abs(slackY) + math.Abs(slackEB)) * 0x1p-32
+			denSc = (math.Abs(yMin[r]) + d1Abs) * 0x1p-32
+		} else {
+			continue
+		}
+		if rel := s.evalBasisDualRel(bCol, true, numSc, dy2ColSc, denSc, yWork, dy1Work, &compBuilt); rel > maxBasisDualRel {
+			maxBasisDualRel = rel
 		}
 	}
 
