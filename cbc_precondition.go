@@ -381,8 +381,106 @@ func hasCBCDroppedTiny(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) boo
 	return hasCBCTinyMatrixCoeffRisk(p, lb, ub, cuts, 1e-18, 1e-8)
 }
 
+func isCBCObjAmplifiedTinyEntry(av, objAbs, lb, ub float64) bool {
+	if av <= 0 || av > 1e-7 || objAbs == 0 {
+		return false
+	}
+	if av > 1e-18 && objAbs < 1e7 {
+		return false
+	}
+	if math.IsInf(lb, -1) || math.IsInf(ub, 1) {
+		return true
+	}
+	return objAbs*(ub-lb) > 1e-6
+}
+
 func hasCBCPivotRiskTiny(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) bool {
-	return hasCBCTinyMatrixCoeffRisk(p, lb, ub, cuts, 1e-11, 1e-7)
+	if hasCBCTinyMatrixCoeffRisk(p, lb, ub, cuts, 1e-11, 1e-7) {
+		return true
+	}
+	n := min(p.numVars, min(len(lb), len(ub)))
+	var rowTiny18 []float64
+	for j := range n {
+		if lb[j] >= ub[j] && lb[j] == 0 {
+			continue
+		}
+		free := lb[j] < ub[j]
+		objAbs := math.Abs(p.objMin[j])
+		infB := math.IsInf(lb[j], 0) || math.IsInf(ub[j], 0) || math.Abs(lb[j]) >= 1e30 || math.Abs(ub[j]) >= 1e30
+		maxB := max(1.0, max(math.Abs(lb[j]), math.Abs(ub[j])))
+		for k := p.colPtr[j]; k < p.colPtr[j+1]; k++ {
+			av := math.Abs(p.colVal[k])
+			if free && objAbs > 0 && isCBCObjAmplifiedTinyEntry(av, objAbs, lb[j], ub[j]) {
+				return true
+			}
+			if av > 0 && av <= 1e-18 {
+				r := p.rowIdx[k]
+				if r >= 0 && r < p.numConstraints {
+					if rowTiny18 == nil {
+						rowTiny18 = make([]float64, p.numConstraints)
+					}
+					if infB {
+						rowTiny18[r] = math.Inf(1)
+					} else {
+						rowTiny18[r] += av * maxB
+					}
+				}
+			}
+		}
+	}
+	if rowTiny18 != nil {
+		for j := range n {
+			if lb[j] >= ub[j] {
+				continue
+			}
+			objAbs := math.Abs(p.objMin[j])
+			if objAbs == 0 {
+				continue
+			}
+			for k := p.colPtr[j]; k < p.colPtr[j+1]; k++ {
+				r := p.rowIdx[k]
+				if r >= 0 && r < p.numConstraints && rowTiny18[r] > 0 {
+					av := math.Abs(p.colVal[k])
+					if av > 0 && (math.IsInf(rowTiny18[r], 1) || (rowTiny18[r]/av)*objAbs > 1e-6) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	for e := range cuts.colValCount() {
+		cutTiny18 := 0.0
+		for k := range min(len(cuts.cols[e]), len(cuts.vals[e])) {
+			c := cuts.cols[e][k]
+			if uint(c) >= uint(n) || (lb[c] >= ub[c] && lb[c] == 0) {
+				continue
+			}
+			av := math.Abs(cuts.vals[e][k])
+			if lb[c] < ub[c] && isCBCObjAmplifiedTinyEntry(av, math.Abs(p.objMin[c]), lb[c], ub[c]) {
+				return true
+			}
+			if av > 0 && av <= 1e-18 {
+				if math.IsInf(lb[c], 0) || math.IsInf(ub[c], 0) || math.Abs(lb[c]) >= 1e30 || math.Abs(ub[c]) >= 1e30 {
+					cutTiny18 = math.Inf(1)
+				} else {
+					cutTiny18 += av * max(1.0, max(math.Abs(lb[c]), math.Abs(ub[c])))
+				}
+			}
+		}
+		if cutTiny18 > 0 {
+			for k := range min(len(cuts.cols[e]), len(cuts.vals[e])) {
+				c := cuts.cols[e][k]
+				if uint(c) >= uint(n) || lb[c] >= ub[c] {
+					continue
+				}
+				objAbs := math.Abs(p.objMin[c])
+				if av := math.Abs(cuts.vals[e][k]); objAbs > 0 && av > 0 && (math.IsInf(cutTiny18, 1) || (cutTiny18/av)*objAbs > 1e-6) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // hasCBCTinyMatrixCoeffRisk reports whether any constraint or cut contains non-zero

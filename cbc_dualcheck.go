@@ -188,6 +188,7 @@ func verifyCBCMIPOptimality(ctx context.Context, req *cbcMIPVerifyReq) (Status, 
 	hasInfCont := false
 	hasInfInt := false
 	hasWideCont := false
+	hasExtremeIntObj := false
 	hasTinyCoeffOrObj := false
 	for j := range n {
 		if p.varLB[j] >= p.varUB[j] {
@@ -208,9 +209,14 @@ func verifyCBCMIPOptimality(ctx context.Context, req *cbcMIPVerifyReq) (Status, 
 			}
 		} else if infBnd {
 			hasInfInt = true
+		} else {
+			span := p.varUB[j] - p.varLB[j]
+			if math.Abs(p.objMin[j]) >= 1e7 && math.Abs(p.objMin[j])*span > gapTol {
+				hasExtremeIntObj = true
+			}
 		}
 	}
-	if (hasInfCont || hasInfInt) && !hasTinyCoeffOrObj {
+	if (hasInfCont || hasInfInt || hasExtremeIntObj) && !hasTinyCoeffOrObj {
 		for _, v := range p.colVal {
 			if av := math.Abs(v); av > 0 && av <= 1e-7 {
 				hasTinyCoeffOrObj = true
@@ -219,7 +225,7 @@ func verifyCBCMIPOptimality(ctx context.Context, req *cbcMIPVerifyReq) (Status, 
 		}
 	}
 	needFixedLP := contNeg || hasWideCont || (hasInfCont && hasTinyCoeffOrObj)
-	needRelaxLP := hasInfInt && (anyNeg || hasTinyCoeffOrObj)
+	needRelaxLP := (hasInfInt && (anyNeg || hasTinyCoeffOrObj)) || (hasExtremeIntObj && hasTinyCoeffOrObj)
 	if !needFixedLP && !needRelaxLP {
 		return StatusOptimal, 0
 	}
@@ -278,6 +284,73 @@ func verifyCBCMIPOptimality(ctx context.Context, req *cbcMIPVerifyReq) (Status, 
 	return StatusOptimal, extraIters
 }
 
+func cbcRowRepairMaxCoeffAtMost1(cols []int, vals, primal, effLB, effUB []float64, decrease bool) float64 {
+	dirMax := 0.0
+	domMax := 0.0
+	n := min(len(primal), min(len(effLB), len(effUB)))
+	for k := range min(len(cols), len(vals)) {
+		col := cols[k]
+		if uint(col) >= uint(n) || effLB[col] >= effUB[col] {
+			continue
+		}
+		a := vals[k]
+		if a == 0 {
+			continue
+		}
+		av := min(1.0, math.Abs(a))
+		if av > domMax {
+			domMax = av
+		}
+		var canMove bool
+		if decrease {
+			canMove = (a > 0 && (math.IsInf(effLB[col], -1) || primal[col] > effLB[col])) ||
+				(a < 0 && (math.IsInf(effUB[col], 1) || primal[col] < effUB[col]))
+		} else {
+			canMove = (a > 0 && (math.IsInf(effUB[col], 1) || primal[col] < effUB[col])) ||
+				(a < 0 && (math.IsInf(effLB[col], -1) || primal[col] > effLB[col]))
+		}
+		if canMove && av > dirMax {
+			if av >= 1.0 {
+				return 1.0
+			}
+			dirMax = av
+		}
+	}
+	if dirMax > 0 {
+		return dirMax
+	}
+	if domMax > 0 {
+		return domMax
+	}
+	return 1.0
+}
+
+func cbcRowResidualWithinTol(cols []int, vals, primal, effLB, effUB []float64, rhs, rowLB, rowUB float64) bool {
+	res, rTolRes, ok := evalSparseRowResidualAndTol(cols, vals, primal, effLB, effUB, rhs, 1e-4, 1e-6)
+	if !ok {
+		return false
+	}
+	dirLo, dirHi, ok := evalSparseRowDirTol(cols, vals, primal, effLB, effUB, 0, 1e-6)
+	if !ok {
+		return false
+	}
+	if !math.IsInf(rowLB, -1) && res < 0 {
+		scaleLo := cbcRowRepairMaxCoeffAtMost1(cols, vals, primal, effLB, effUB, false)
+		rTolLo := min(rTolRes, max(1e-4*scaleLo, dirLo))
+		if res < -rTolLo {
+			return false
+		}
+	}
+	if !math.IsInf(rowUB, 1) && res > 0 {
+		scaleHi := cbcRowRepairMaxCoeffAtMost1(cols, vals, primal, effLB, effUB, true)
+		rTolHi := min(rTolRes, max(1e-4*scaleHi, dirHi))
+		if res > rTolHi {
+			return false
+		}
+	}
+	return true
+}
+
 func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, primal []float64, checkInt bool) bool {
 	n := p.numVars
 	if len(primal) < n || len(lb) < n || len(ub) < n {
@@ -322,35 +395,12 @@ func cbcPrimalWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 	}
 	for i := range p.numConstraints {
 		st, en := p.rowPtr[i], p.rowPtr[i+1]
-		rhs := p.rowRHS[i]
-		cols, vals := p.colIdx[st:en], p.rowVal[st:en]
-		res, rTolRes, ok := evalSparseRowResidualAndTol(cols, vals, primal, effLB, effUB, rhs, 1e-4, 1e-6)
-		if !ok {
-			return false
-		}
-		dirLo, dirHi, ok := evalSparseRowDirTol(cols, vals, primal, effLB, effUB, 1e-4, 1e-6)
-		if !ok {
-			return false
-		}
-		rTolLo := min(rTolRes, dirLo)
-		rTolHi := min(rTolRes, dirHi)
-		if (!math.IsInf(p.rowLB[i], -1) && res < -rTolLo) ||
-			(!math.IsInf(p.rowUB[i], 1) && res > rTolHi) {
+		if !cbcRowResidualWithinTol(p.colIdx[st:en], p.rowVal[st:en], primal, effLB, effUB, p.rowRHS[i], p.rowLB[i], p.rowUB[i]) {
 			return false
 		}
 	}
 	for e := range cuts.count() {
-		rhs := cuts.rhs[e]
-		cols, vals := cuts.cols[e], cuts.vals[e]
-		res, rTolRes, ok := evalSparseRowResidualAndTol(cols, vals, primal, effLB, effUB, rhs, 1e-4, 1e-6)
-		if !ok {
-			return false
-		}
-		_, dirHi, ok := evalSparseRowDirTol(cols, vals, primal, effLB, effUB, 1e-4, 1e-6)
-		if !ok {
-			return false
-		}
-		if res > min(rTolRes, dirHi) {
+		if !cbcRowResidualWithinTol(cuts.cols[e], cuts.vals[e], primal, effLB, effUB, cuts.rhs[e], math.Inf(-1), cuts.rhs[e]) {
 			return false
 		}
 	}
@@ -362,13 +412,26 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 	baseM := p.numConstraints
 	numExtra := cuts.count()
 	m := baseM + numExtra
-	if len(yMin) < m || math.IsNaN(objMin) || math.IsInf(objMin, 0) {
+	if len(primal) < n || len(lb) < n || len(ub) < n || len(yMin) < m || math.IsNaN(objMin) || math.IsInf(objMin, 0) {
 		return false
 	}
 	maxDual := 1.0
+	maxFinData := 1.0
+	if !math.IsNaN(p.objConstant) && !math.IsInf(p.objConstant, 0) {
+		maxFinData = max(maxFinData, math.Abs(p.objConstant))
+	}
 	hasInfStruct := false
 	hasTinyEntry := false
 	for j := range n {
+		if math.IsNaN(primal[j]) || math.IsInf(primal[j], 0) {
+			return false
+		}
+		if !math.IsInf(lb[j], 0) {
+			maxFinData = max(maxFinData, math.Abs(lb[j]))
+		}
+		if !math.IsInf(ub[j], 0) {
+			maxFinData = max(maxFinData, math.Abs(ub[j]))
+		}
 		av := math.Abs(p.objMin[j])
 		if av > maxDual {
 			maxDual = av
@@ -380,6 +443,22 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 			if math.IsInf(lb[j], -1) || math.IsInf(ub[j], 1) {
 				hasInfStruct = true
 			}
+		}
+	}
+	for i := range baseM {
+		if !math.IsInf(p.rowRHS[i], 0) {
+			maxFinData = max(maxFinData, math.Abs(p.rowRHS[i]))
+		}
+	}
+	for e := range numExtra {
+		if !math.IsInf(cuts.rhs[e], 0) {
+			maxFinData = max(maxFinData, math.Abs(cuts.rhs[e]))
+		}
+	}
+	for j := range n {
+		if lb[j] < ub[j] && (math.IsInf(lb[j], -1) || math.IsInf(ub[j], 1)) &&
+			math.Abs(primal[j]) >= 1e18 && math.Abs(primal[j]) > 100.0*maxFinData {
+			return false
 		}
 	}
 	for i := range m {
@@ -441,7 +520,14 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 			denSc := yds + math.Ldexp(math.Abs(p.objMin[j]), -32)
 			if denSc > 0 {
 				numSc := math.Ldexp(math.Abs(v)+ebj, -32)
-				if rel := numSc / denSc; rel > maxBasisDualRel {
+				rel := numSc / denSc
+				if rel > 1e-4 {
+					if math.Abs(v) > max(1e-12*maxDual, ebj) {
+						return false
+					}
+					rel = (math.Abs(v) + ebj) / maxDual
+				}
+				if rel > maxBasisDualRel {
 					maxBasisDualRel = rel
 				}
 			}
@@ -490,27 +576,27 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 
 	rowRes := make([]float64, m)
 	rowTols := make([]float64, m)
+	rowRelTols := make([]float64, m)
 	for i := range m {
 		yi := yMin[i]
 		if yi == 0 {
 			continue
 		}
 		cols, vals, rhs, sense := rowDataAt(i)
-		res, rTol, ok := evalSparseRowResidualAndTol(cols, vals, primal, lb, ub, rhs, 1e-4, 1e-6)
+		res, relRTol, ok := evalSparseRowResidualAndTol(cols, vals, primal, lb, ub, rhs, 0, 1e-6)
 		if !ok {
 			return false
 		}
+		rTol := max(1e-4, relRTol)
 		rowRes[i] = res
 		rowTols[i] = rTol
-		switch sense {
-		case LessEqual:
-			if res < -10.0*rTol {
-				if rel := math.Abs(yi) / maxDual; rel > maxBasisDualRel {
-					maxBasisDualRel = rel
-				}
+		rowRelTols[i] = relRTol
+		slackRow := (sense == LessEqual && res < -10.0*rTol) || (sense == GreaterEqual && res > 10.0*rTol)
+		if slackRow {
+			if math.Abs(yi) > signTol {
+				return false
 			}
-		case GreaterEqual:
-			if res > 10.0*rTol {
+			if math.Abs(yi) <= slackNoise {
 				if rel := math.Abs(yi) / maxDual; rel > maxBasisDualRel {
 					maxBasisDualRel = rel
 				}
@@ -525,7 +611,7 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 		}
 		cols, vals, _, sense := rowDataAt(i)
 		res := rowRes[i]
-		rTol := rowTols[i]
+		relRTol := rowRelTols[i]
 		switch sense {
 		case LessEqual:
 			rSignTol := signTol
@@ -535,8 +621,8 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 			if yi > rSignTol {
 				return false
 			}
-			if yi < -slackNoise && res < -rTol {
-				compGap += (-yi - slackNoise) * (-res - rTol)
+			if yi < -slackNoise && res < -relRTol {
+				compGap += (-yi - slackNoise) * (-res - relRTol)
 			}
 		case GreaterEqual:
 			rSignTol := signTol
@@ -546,8 +632,8 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 			if yi < -rSignTol {
 				return false
 			}
-			if yi > slackNoise && res > rTol {
-				compGap += (yi - slackNoise) * (res - rTol)
+			if yi > slackNoise && res > relRTol {
+				compGap += (yi - slackNoise) * (res - relRTol)
 			}
 		}
 	}
@@ -569,6 +655,28 @@ func cbcLPDualWithinTol(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet, pr
 			return false
 		}
 		if math.IsInf(lb[j], -1) && dj[j] > infTol {
+			return false
+		}
+		colTol := max(1e-4, max(colNoise, combineDualNoiseTol(eb[j], 0, colL1Sc, maxBasisDualRel, 64.0)))
+		if j < len(rcMin) {
+			if math.IsNaN(rcMin[j]) || math.IsInf(rcMin[j], 0) {
+				return false
+			}
+			if math.IsInf(ub[j], 1) && rcMin[j] < -infTol {
+				return false
+			}
+			if math.IsInf(lb[j], -1) && rcMin[j] > infTol {
+				return false
+			}
+			if math.Abs(rcMin[j]-dj[j]) > colTol {
+				return false
+			}
+		}
+		bTol := max(1e-4, 1e-6*max(1.0, math.Abs(primal[j])))
+		if !math.IsInf(ub[j], 1) && dj[j] < -colTol && primal[j] < ub[j] && ub[j]-primal[j] > bTol {
+			return false
+		}
+		if !math.IsInf(lb[j], -1) && dj[j] > colTol && primal[j] > lb[j] && primal[j]-lb[j] > bTol {
 			return false
 		}
 		if !math.IsInf(ub[j], 1) && dj[j] < -colNoise && primal[j] < ub[j] {
