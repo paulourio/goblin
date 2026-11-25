@@ -4,6 +4,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"math"
+	"math/big"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -1791,5 +1792,421 @@ func TestDualCostPerturbationAndUnperturb(t *testing.T) {
 	resInf := sInf.Solve()
 	if resInf.Status != StatusInfeasible {
 		t.Fatalf("synth_dual_degen_infeas status = %v, want Infeasible", resInf.Status)
+	}
+}
+
+// TestSolveStrippedFixedSubLPFallback verifies that fixed variables with large Ruiz-anchoring
+// coefficients do not cause StatusNumericalError once downstream bounds fix them to a point.
+func TestSolveStrippedFixedSubLPFallback(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("stripped_fixed_scale", Maximize)
+	x0 := m.AddContVar("x0", 0, 1)
+	x1 := m.AddContVar("x1", 0, 5)
+	m.SetObjective(NewExpr(x0.T(3), x1.T(4)))
+	m.AddConstraint("r0", NewExpr(x0.T(2e11), x1.T(1e-6)).Le(0))
+	m.AddConstraint("r1", NewExpr(x0.T(1e-6), x1.T(1)).Ge(0))
+	p := m.Compile()
+
+	lp := NewLPSolver(p, nil)
+	defer lp.Close()
+	if root := lp.Solve(); root.Status != StatusOptimal {
+		t.Fatalf("root Solve status = %v, want Optimal", root.Status)
+	}
+
+	lp.SetStructuralBounds([]float64{0, 0}, []float64{0, 5})
+	res := lp.Solve()
+	if res.Status != StatusOptimal {
+		t.Fatalf("fixed x0=0 Solve status = %v, want Optimal", res.Status)
+	}
+	if math.Abs(res.Objective) > 1e-9 || math.Abs(res.Primal[0]) > 1e-12 || math.Abs(res.Primal[1]) > 1e-12 {
+		t.Fatalf("unexpected solution: obj=%g primal=%v", res.Objective, res.Primal)
+	}
+
+	// Verify inconsistent fixed-only row reports StatusInfeasible.
+	lp.SetStructuralBounds([]float64{1, 0}, []float64{1, 0})
+	if resInf := lp.Solve(); resInf.Status != StatusInfeasible {
+		t.Fatalf("all-fixed infeasible status = %v, want Infeasible", resInf.Status)
+	}
+}
+
+// TestExactPolishBasisSolutionDegenerateSlacks verifies exact dual simplex polishing clears
+// sub-tolerance float64 slack violations where single-basis ExactBasisSolution rejects.
+func TestExactPolishBasisSolutionDegenerateSlacks(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("exact_polish_1ulp", Minimize)
+	x0 := m.AddContVar("x0", 1, 1)
+	d := make([]Var, 4)
+	weights := []float64{181.9963, 458.0024, 308.6009, 220.2378}
+	var obj []Term
+	for i := range d {
+		d[i] = m.AddContVar(fmt.Sprintf("d%d", i), 0, 100)
+		obj = append(obj, d[i].T(1))
+	}
+	m.SetObjective(Expr{Terms: obj})
+	for i, w := range weights {
+		rhs := math.Nextafter(w, math.Inf(1))
+		m.AddConstraint(fmt.Sprintf("r%d", i), NewExpr(x0.T(w), d[i].T(1)).Ge(rhs))
+	}
+	p := m.Compile()
+
+	lp := NewLPSolver(p, nil)
+	defer lp.Close()
+	// Force all four slacks basic at tiny negative (~1-ULP) values and dual variables at 0.
+	lp.InitCrashBasis()
+	res := lp.Solve()
+	if res.Status != StatusOptimal {
+		t.Fatalf("Solve status = %v, want Optimal", res.Status)
+	}
+	if _, ok := exactPolishBasisSolutionStop(exactStopFromCtx(t.Context()), lp); !ok {
+		t.Fatal("exactPolishBasisSolutionStop returned false on 1-ULP multi-row slack LP")
+	}
+
+	// Manually perturb basis to the unpivoted dual-feasible all-slack basis and verify exact pivoting recovers.
+	lp.SetStructuralBounds([]float64{1, 0, 0, 0, 0}, []float64{1, 100, 100, 100, 100})
+	lp.InitCrashBasis()
+	if _, okDirect := ExactBasisSolution(t.Context(), lp); okDirect {
+		t.Fatal("expected unpivoted all-slack basis to fail strict ExactBasisSolution")
+	}
+	sol, okPol := exactPolishBasisSolutionStop(exactStopFromCtx(t.Context()), lp)
+	if !okPol {
+		t.Fatal("expected exactPolishBasisSolutionStop to pivot into exact feasibility")
+	}
+	if sol.ObjectiveMin.Cmp(big.NewRat(0, 1)) <= 0 {
+		t.Fatalf("expected strictly positive polished exact objective for non-zero 1-ULP deficits, got %s", sol.ObjectiveMin.RatString())
+	}
+}
+
+// TestPrimalUnboundedSubTolZeroNoise verifies that primalSimplexStep falls back to
+// verifyExactUnboundedEdge instead of returning StatusNumericalError when FTRANExact
+// introduces sub-tolerance float roundoff on a bounded basic variable row.
+func TestPrimalUnboundedSubTolZeroNoise(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("primal_unbounded_subtol_noise", Minimize)
+	x0 := m.AddContVar("x0", 0, 1)
+	x1 := m.AddContVar("x1", 0, math.Inf(1))
+	x2 := m.AddContVar("x2", 0, math.Inf(1))
+	m.SetObjective(NewExpr(x2.T(-1)))
+	m.AddConstraint("r0", Eq(NewExpr(x1.T(7), x0.T(3), x2.T(-7)), 10))
+	m.AddConstraint("r1", Eq(NewExpr(x1.T(11), x0.T(5), x2.T(-11)), 16))
+	p := m.Compile()
+
+	lp := NewLPSolver(p, nil)
+	defer lp.Close()
+	ws := lp.ws
+	ws.basis[0] = 1
+	ws.basis[1] = 0
+	ws.status[0] = statusBasic
+	ws.status[1] = statusBasic
+	ws.status[2] = statusAtLower
+	ws.status[3] = statusFixed
+	ws.status[4] = statusFixed
+	ws.basicRow[0] = 1
+	ws.basicRow[1] = 0
+	ws.basicRow[2] = -1
+	ws.basicRow[3] = -1
+	ws.basicRow[4] = -1
+	ws.x[2] = 0
+	ws.x[3] = 0
+	ws.x[4] = 0
+	if err := lp.factorizeBasis(); err != nil {
+		t.Fatalf("factorizeBasis: %v", err)
+	}
+	lp.computePrimalValues()
+	copy(ws.workCost, ws.cost)
+	lp.computeDualsAndReducedCosts(ws.workCost)
+
+	st, _ := lp.primalSimplexStep(false, false)
+	if st != StatusUnbounded {
+		t.Fatalf("primalSimplexStep status = %v, want StatusUnbounded", st)
+	}
+
+	res := lp.Solve()
+	if res.Status != StatusUnbounded {
+		t.Fatalf("LP Solve status = %v, want StatusUnbounded", res.Status)
+	}
+	mipRes, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(false))
+	if err != nil {
+		t.Fatalf("SolveCompiled: %v", err)
+	}
+	if mipRes.Status != StatusUnbounded {
+		t.Fatalf("SolveCompiled status = %v, want StatusUnbounded", mipRes.Status)
+	}
+}
+
+// TestPrimalStepBlocksSubTolFiniteFlip verifies that cross-ratio ill-conditioned 2x2 LPs
+// (where off-diagonal/diagonal ratio drops below pivotTol) solve cleanly to Optimal or
+// Infeasible with exact duals and VIPR certificates rather than StatusNumericalError.
+func TestPrimalStepBlocksSubTolFiniteFlip(t *testing.T) {
+	t.Parallel()
+
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	buildModel := func(scale, rhs0 float64) *CompiledProblem {
+		m := NewModel(fmt.Sprintf("cross_ratio_%.0e_rhs_%.0f", scale, rhs0), Maximize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddIntVar("x1", 0, 5)
+		m.SetObjective(NewExpr(x0.T(2), x1.T(4)))
+		m.AddConstraint("r0", Le(NewExpr(x0.T(1), x1.T(scale)), rhs0))
+		m.AddConstraint("r1", Ge(NewExpr(x0.T(scale), x1.T(-scale)), 0))
+		return m.Compile()
+	}
+
+	for _, scale := range []float64{1e8, 2e11, 1e12} {
+		t.Run(fmt.Sprintf("opt_%.0e", scale), func(t *testing.T) {
+			t.Parallel()
+			p := buildModel(scale, 0)
+			lp := NewLPSolver(p, nil)
+			defer lp.Close()
+			lpRes := lp.Solve()
+			if lpRes.Status != StatusOptimal {
+				t.Fatalf("LP status = %v, want StatusOptimal", lpRes.Status)
+			}
+			if lpRes.Objective != 0 || !slices.Equal(lpRes.Primal, []float64{0, 0}) {
+				t.Fatalf("LP obj=%.17g primal=%v, want obj=0 primal=[0 0]", lpRes.Objective, lpRes.Primal)
+			}
+			if !slices.Equal(lpRes.Dual, []float64{2, 0}) {
+				t.Fatalf("LP dual=%v, want [2 0]", lpRes.Dual)
+			}
+
+			tr := NewVIPRTrace()
+			mipRes, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(false), WithVIPRTrace(tr))
+			if err != nil {
+				t.Fatalf("SolveCompiled: %v", err)
+			}
+			if mipRes.Status != StatusOptimal || mipRes.Objective != 0 {
+				t.Fatalf("MILP status=%v obj=%.17g, want Optimal obj=0", mipRes.Status, mipRes.Objective)
+			}
+			if !tr.HasCertificate() || tr.Mode() != "optimal" {
+				t.Fatalf("missing optimal VIPR cert: has=%v mode=%q", tr.HasCertificate(), tr.Mode())
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("MarshalVIPRJSON: %v", err)
+			}
+			if formalOn {
+				requireVIPRBytesVerified(t, viprExe, fmt.Sprintf("cross_ratio_opt_%.0e", scale), raw)
+			}
+		})
+	}
+
+	t.Run("infeas_2e11", func(t *testing.T) {
+		t.Parallel()
+		p := buildModel(2e11, -1)
+		lp := NewLPSolver(p, nil)
+		defer lp.Close()
+		lpRes := lp.Solve()
+		if lpRes.Status != StatusInfeasible {
+			t.Fatalf("LP status = %v, want StatusInfeasible", lpRes.Status)
+		}
+
+		tr := NewVIPRTrace()
+		mipRes, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(false), WithVIPRTrace(tr))
+		if err != nil {
+			t.Fatalf("SolveCompiled: %v", err)
+		}
+		if mipRes.Status != StatusInfeasible {
+			t.Fatalf("MILP status = %v, want StatusInfeasible", mipRes.Status)
+		}
+		if !tr.HasCertificate() || tr.Mode() != "infeasible" {
+			t.Fatalf("missing infeasible VIPR cert: has=%v mode=%q", tr.HasCertificate(), tr.Mode())
+		}
+		raw, err := tr.MarshalVIPRJSON()
+		if err != nil {
+			t.Fatalf("MarshalVIPRJSON: %v", err)
+		}
+		if formalOn {
+			requireVIPRBytesVerified(t, viprExe, "cross_ratio_infeas_2e11", raw)
+		}
+	})
+}
+
+// TestDualCancellationPricingAndCertification verifies that extreme dual
+// cancellation (2e11 vs -2e11 rows) neither cycles primal pricing against
+// compensated phase-2 pricing nor falsely certifies a suboptimal basis in dual
+// residual checks.
+func TestDualCancellationPricingAndCertification(t *testing.T) {
+	t.Parallel()
+
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	m := NewModel("adv_mip_act_189_148", Maximize)
+	x0 := m.AddBinaryVar("x0")
+	x1 := m.AddIntVar("x1", 0, 5)
+	x2 := m.AddContVar("x2", 0, 1e6)
+	x3 := m.AddBinaryVar("x3")
+	m.SetObjective(NewExpr(x0.T(3), x1.T(5), x2.T(2), x3.T(3)))
+	m.AddConstraint("r0", Le(NewExpr(x0.T(2e11), x1.T(-2e11), x2.T(1e-6), x3.T(1)), 1e-12))
+	m.AddConstraint("r1", Ge(NewExpr(x0.T(2e11), x1.T(-2e11), x2.T(1e-12), x3.T(-2e11)), -1e-12))
+	p := m.Compile()
+
+	t.Run("lp", func(t *testing.T) {
+		t.Parallel()
+		lp := NewLPSolver(p, nil)
+		defer lp.Close()
+		lpRes := lp.Solve()
+		if lpRes.Status != StatusOptimal {
+			t.Fatalf("LP status = %v, want StatusOptimal", lpRes.Status)
+		}
+		if lpRes.Iterations >= 100 {
+			t.Fatalf("LP iterations = %d, want < 100", lpRes.Iterations)
+		}
+		const wantLPObj = 8.000004000004
+		if math.Abs(lpRes.Objective-wantLPObj) > 1e-9 {
+			t.Fatalf("LP objective = %.17g, want %.17g", lpRes.Objective, wantLPObj)
+		}
+	})
+
+	for _, pre := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pre_%t", pre), func(t *testing.T) {
+			t.Parallel()
+			tr := NewVIPRTrace()
+			res, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(pre), WithVIPRTrace(tr))
+			if err != nil {
+				t.Fatalf("SolveCompiled: %v", err)
+			}
+			if res.Status != StatusOptimal {
+				t.Fatalf("status = %v, want StatusOptimal (obj=%.17g bnd=%.17g)", res.Status, res.Objective, res.BestBound)
+			}
+			if res.BestBound > res.RootLPBound+1e-6 {
+				t.Fatalf("Maximize BestBound %.17g > RootLPBound %.17g", res.BestBound, res.RootLPBound)
+			}
+			if res.RootLPBound < 8.0 {
+				t.Fatalf("RootLPBound = %.17g, want >= 8.0 (collapsed to suboptimal basis)", res.RootLPBound)
+			}
+			if math.Abs(res.Objective-8.000004000004) > 1e-5 {
+				t.Fatalf("objective = %.17g, want ~8.000004000004", res.Objective)
+			}
+			if !tr.HasCertificate() || tr.Mode() != "optimal" {
+				t.Fatalf("missing optimal VIPR cert: has=%v mode=%q", tr.HasCertificate(), tr.Mode())
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("MarshalVIPRJSON: %v", err)
+			}
+			if formalOn {
+				requireVIPRBytesVerified(t, viprExe, fmt.Sprintf("dual_cancel_pre_%t", pre), raw)
+			}
+		})
+	}
+}
+
+// TestSlackDualSignViolationLargeRowSpan verifies that a wrong-sign dual on a
+// large-span inequality slack neither passes warm-start dual feasibility checks
+// nor is masked by global dual scaling noise in optimality certification.
+func TestSlackDualSignViolationLargeRowSpan(t *testing.T) {
+	t.Parallel()
+
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	t.Run("lp_warm_branch", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("adv_mip_act_9_22_lp", Maximize)
+		x0 := m.AddBinaryVar("x0")
+		x1 := m.AddBinaryVar("x1")
+		x2 := m.AddContVar("x2", 0, 5)
+		x3 := m.AddBinaryVar("x3")
+		m.SetObjective(NewExpr(x0.T(1), x1.T(5), x2.T(5), x3.T(3)))
+		m.AddConstraint("r0", Le(NewExpr(x0.T(1e6), x1.T(1e-9), x2.T(1e-10), x3.T(-1e6)), 1e-12))
+		m.AddConstraint("r1", Ge(NewExpr(x0.T(-1e12), x1.T(-1e12), x2.T(2e11), x3.T(-1)), -1e-9))
+		p := m.Compile()
+
+		lp := NewLPSolver(p, nil)
+		defer lp.Close()
+		if root := lp.Solve(); root.Status != StatusOptimal {
+			t.Fatalf("root LP status = %v, want StatusOptimal", root.Status)
+		}
+		lp.AddCut([]int{0, 1, 3}, []float64{1, 1, 1}, 1.0+1e-7*math.Sqrt(3))
+		if cutRes := lp.Solve(); cutRes.Status != StatusOptimal {
+			t.Fatalf("root+cut LP status = %v, want StatusOptimal", cutRes.Status)
+		}
+		lp.SetStructuralBounds([]float64{0, 0, 0, 0}, []float64{0, 1, 5, 0})
+		if left := lp.Solve(); left.Status != StatusOptimal {
+			t.Fatalf("x3=0,x0=0 LP status = %v, want StatusOptimal", left.Status)
+		}
+		lp.SetStructuralBounds([]float64{0, 0, 0, 1}, []float64{1, 1, 5, 1})
+		right := lp.Solve()
+		if right.Status != StatusOptimal {
+			t.Fatalf("x3=1 LP status = %v, want StatusOptimal", right.Status)
+		}
+		const wantObj = 28.000000866025403
+		if math.Abs(right.Objective-wantObj) > 1e-5 {
+			t.Fatalf("x3=1 LP objective = %.17g, want %.17g", right.Objective, wantObj)
+		}
+		if right.Dual[1] > 1e-9 {
+			t.Fatalf("x3=1 r1 dual = %.17g, want <= 1e-9", right.Dual[1])
+		}
+
+		lp.SetStructuralBounds([]float64{0, 0, 0, 0}, []float64{0, 1, 5, 0})
+		_ = lp.Solve()
+		lp.SetStructuralBounds([]float64{0, 0, 0, 1}, []float64{1, 1, 5, 1})
+		st, bnd, _ := lp.SolveBoundOnly(50)
+		if !math.IsNaN(bnd) && bnd > -28.0+1e-3 {
+			t.Fatalf("SolveBoundOnly(x3=1) status=%v bound=%.17g, want NaN or <= -27.999", st, bnd)
+		}
+	})
+
+	m := NewModel("adv_mip_act_9_22", Maximize)
+	x0 := m.AddBinaryVar("x0")
+	x1 := m.AddIntVar("x1", 0, 5)
+	x2 := m.AddContVar("x2", 0, 5)
+	x3 := m.AddBinaryVar("x3")
+	m.SetObjective(NewExpr(x0.T(1), x1.T(5), x2.T(5), x3.T(3)))
+	m.AddConstraint("r0", Le(NewExpr(x0.T(1e6), x1.T(1e-9), x2.T(1e-10), x3.T(-1e6)), 1e-12))
+	m.AddConstraint("r1", Ge(NewExpr(x0.T(-1e12), x1.T(-1e12), x2.T(2e11), x3.T(-1)), -1e-9))
+	p := m.Compile()
+
+	for _, pre := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mip_pre_%t", pre), func(t *testing.T) {
+			t.Parallel()
+			resNoVIPR, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(pre), WithWorkers(1))
+			if err != nil {
+				t.Fatalf("SolveCompiled(1w): %v", err)
+			}
+			if resNoVIPR.Status != StatusOptimal || math.Abs(resNoVIPR.Objective-28.0) > 1e-6 {
+				t.Fatalf("1w status=%v obj=%.17g, want StatusOptimal 28", resNoVIPR.Status, resNoVIPR.Objective)
+			}
+			bV, rV, iV := p.MaxViolation(resNoVIPR.Values, true)
+			if bV != 0 || rV != 0 || iV != 0 {
+				t.Fatalf("1w MaxViolation = (%.3e, %.3e, %.3e), want (0, 0, 0)", bV, rV, iV)
+			}
+
+			tr := NewVIPRTrace()
+			res, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(pre), WithVIPRTrace(tr))
+			if err != nil {
+				t.Fatalf("SolveCompiled(vipr): %v", err)
+			}
+			if res.Status != StatusOptimal || math.Abs(res.Objective-28.0) > 1e-6 {
+				t.Fatalf("vipr status=%v obj=%.17g, want StatusOptimal 28", res.Status, res.Objective)
+			}
+			bV, rV, iV = p.MaxViolation(res.Values, true)
+			if bV != 0 || rV != 0 || iV != 0 {
+				t.Fatalf("vipr MaxViolation = (%.3e, %.3e, %.3e), want (0, 0, 0)", bV, rV, iV)
+			}
+			if !tr.HasCertificate() || tr.Mode() != "optimal" {
+				t.Fatalf("missing optimal VIPR cert: has=%v mode=%q", tr.HasCertificate(), tr.Mode())
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("MarshalVIPRJSON: %v", err)
+			}
+			if formalOn {
+				requireVIPRBytesVerified(t, viprExe, fmt.Sprintf("slack_dual_sign_pre_%t", pre), raw)
+			}
+		})
 	}
 }

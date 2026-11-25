@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	defaultExactPolishMaxNucleus = 512
-	defaultExactPolishMaxBits    = 4096
+	defaultExactPolishMaxNucleus  = 512
+	defaultExactPolishMaxBits     = 4096
+	exactNumericalFallbackMaxRows = 64
+	exactNumericalFallbackMaxVars = 128
 )
 
 // ExactLPSolution holds an exact rational basic primal-dual solution over Q.
@@ -1169,6 +1171,628 @@ func (snap *exactSolverSnapshot) extractExactDuals(stop exactStop) (yMin, rcMin,
 // and verifies primal bounds, row constraints, dual signs, and zero duality gap over Q.
 func ExactBasisSolution(ctx context.Context, s *LPSolver) (ExactLPSolution, bool) {
 	return exactBasisSolutionStop(exactStopFromCtx(ctx), s)
+}
+
+func (snap *exactSolverSnapshot) alignDualNonBasicStatuses(varLB, varUB, yMin, rcMin []*big.Rat) bool {
+	dualFeas := true
+	zeroRat := new(big.Rat)
+	var rcVal big.Rat
+	tot := snap.n + snap.m
+	for v := range tot {
+		if snap.status[v] == statusBasic {
+			continue
+		}
+		lbv, ubv := varLB[v], varUB[v]
+		if lbv != nil && ubv != nil && lbv.Cmp(ubv) == 0 {
+			snap.status[v] = statusFixed
+			if v < snap.n {
+				snap.nonBasicAt[v] = exactNonBasicStructuralVal(snap.status[v], lbv, ubv)
+			}
+			continue
+		}
+		if v < snap.n {
+			rcVal.Set(rcMin[v])
+		} else {
+			rcVal.Neg(yMin[v-snap.n])
+		}
+		switch sgn := rcVal.Sign(); {
+		case sgn > 0:
+			if lbv == nil {
+				dualFeas = false
+			} else {
+				snap.status[v] = statusAtLower
+			}
+		case sgn < 0:
+			if ubv == nil {
+				dualFeas = false
+			} else {
+				snap.status[v] = statusAtUpper
+			}
+		default:
+			switch snap.status[v] {
+			case statusFixed:
+				if lbv != nil {
+					snap.status[v] = statusAtLower
+				} else if ubv != nil {
+					snap.status[v] = statusAtUpper
+				} else {
+					snap.status[v] = statusSuperBasic
+				}
+			case statusAtLower:
+				if lbv == nil {
+					if ubv != nil {
+						snap.status[v] = statusAtUpper
+					} else {
+						snap.status[v] = statusSuperBasic
+					}
+				}
+			case statusAtUpper:
+				if ubv == nil {
+					if lbv != nil {
+						snap.status[v] = statusAtLower
+					} else {
+						snap.status[v] = statusSuperBasic
+					}
+				}
+			case statusSuperBasic:
+				if !exactSatisfiesBounds(zeroRat, lbv, ubv) {
+					if lbv != nil {
+						snap.status[v] = statusAtLower
+					} else if ubv != nil {
+						snap.status[v] = statusAtUpper
+					}
+				}
+			}
+		}
+		if v < snap.n {
+			snap.nonBasicAt[v] = exactNonBasicStructuralVal(snap.status[v], lbv, ubv)
+		}
+	}
+	return dualFeas
+}
+
+func (snap *exactSolverSnapshot) solveExactDualSimplex(stop exactStop, maxPivots int) (ExactLPSolution, bool) {
+	sol, st, _, _, _, _, ok := snap.solveExactDualSimplexOutcome(stop, maxPivots)
+	return sol, ok && st == StatusOptimal
+}
+
+func (snap *exactSolverSnapshot) solveExactDualSimplexOutcome(
+	stop exactStop,
+	maxPivots int,
+) (sol ExactLPSolution, st Status, pivots int, infeasRow int, infeasDir float64, farkasY []*big.Rat, ok bool) {
+	if snap.m == 0 {
+		yMin, rcMin, dualUser, rcUser, okD := snap.extractExactDuals(stop)
+		if !okD {
+			return ExactLPSolution{}, StatusNotSolved, 0, -1, 0, nil, false
+		}
+		solOpt, okSol := snap.extractExactSolutionFromDuals(stop, yMin, rcMin, dualUser, rcUser)
+		if !okSol {
+			return ExactLPSolution{}, StatusNotSolved, 0, -1, 0, nil, false
+		}
+		return solOpt, StatusOptimal, 0, -1, 0, nil, true
+	}
+	n := snap.n
+	m := snap.m
+	tot := n + m
+	varLB := make([]*big.Rat, tot)
+	varUB := make([]*big.Rat, tot)
+	copy(varLB[:n], snap.lb)
+	copy(varUB[:n], snap.ub)
+	zeroRat := new(big.Rat)
+	for i := range m {
+		switch snap.rowSense[i] {
+		case LessEqual:
+			varLB[n+i] = zeroRat
+		case GreaterEqual:
+			varUB[n+i] = zeroRat
+		case Equal:
+			varLB[n+i] = zeroRat
+			varUB[n+i] = zeroRat
+		}
+	}
+
+	eQ := make([]*big.Rat, m)
+	for i := range m {
+		eQ[i] = new(big.Rat)
+	}
+	var prod, alphaK, rcK, candRatio, bestRatio big.Rat
+	for pivotIdx := range maxPivots {
+		if stop.canceled() {
+			return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+		}
+		yMin, okY := snap.solveBasisTranspose(stop, snap.basicObjMinRHS())
+		if !okY || len(yMin) != m {
+			return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+		}
+		rcMin := snap.computeReducedCostsMin(yMin)
+		for i := range m {
+			if !exactRatFitsBits(yMin[i]) {
+				return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+			}
+		}
+		for j := range n {
+			if !exactRatFitsBits(rcMin[j]) {
+				return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+			}
+		}
+		if !snap.alignDualNonBasicStatuses(varLB, varUB, yMin, rcMin) {
+			return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+		}
+
+		rhsAdj := cloneRatSlice(snap.rowRHS)
+		for j := range n {
+			if snap.status[j] == statusBasic {
+				continue
+			}
+			xj := snap.nonBasicAt[j]
+			if xj == nil || xj.Sign() == 0 {
+				continue
+			}
+			rows := snap.colRows[j]
+			vals := snap.colVals[j]
+			for k, ri := range rows {
+				prod.Mul(vals[k], xj)
+				rhsAdj[ri].Sub(rhsAdj[ri], &prod)
+			}
+		}
+		xB, okX := snap.solveBasisForward(stop, rhsAdj)
+		if !okX || len(xB) != m {
+			return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+		}
+		for q := range m {
+			if !exactRatFitsBits(xB[q]) {
+				return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+			}
+		}
+
+		leaveQ := -1
+		leaveVar := tot
+		leaveAtLower := false
+		for q := range m {
+			v := snap.basis[q]
+			if varLB[v] != nil && xB[q].Cmp(varLB[v]) < 0 {
+				if v < leaveVar {
+					leaveQ = q
+					leaveVar = v
+					leaveAtLower = true
+				}
+			} else if varUB[v] != nil && xB[q].Cmp(varUB[v]) > 0 {
+				if v < leaveVar {
+					leaveQ = q
+					leaveVar = v
+					leaveAtLower = false
+				}
+			}
+		}
+		if leaveQ < 0 {
+			if !snap.verifyDualConeBounds(yMin, rcMin) {
+				return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+			}
+			dualUser, rcUser := snap.userDualsAndRC(yMin, rcMin)
+			solOpt, okSol := snap.extractExactSolutionFromDuals(stop, yMin, rcMin, dualUser, rcUser)
+			if !okSol {
+				return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+			}
+			return solOpt, StatusOptimal, pivotIdx, -1, 0, nil, true
+		}
+
+		eQ[leaveQ].SetInt64(1)
+		rho, okRho := snap.solveBasisTranspose(stop, eQ)
+		eQ[leaveQ].SetInt64(0)
+		if !okRho || len(rho) != m {
+			return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+		}
+
+		enterK := -1
+		for k := range tot {
+			st := snap.status[k]
+			if st == statusBasic || st == statusFixed {
+				continue
+			}
+			if k < n {
+				alphaK.SetInt64(0)
+				rows := snap.colRows[k]
+				vals := snap.colVals[k]
+				for idx, ri := range rows {
+					if rho[ri].Sign() != 0 {
+						prod.Mul(vals[idx], rho[ri])
+						alphaK.Add(&alphaK, &prod)
+					}
+				}
+			} else {
+				alphaK.Set(rho[k-n])
+			}
+			aSgn := alphaK.Sign()
+			if aSgn == 0 {
+				continue
+			}
+			if k < n {
+				rcK.Set(rcMin[k])
+			} else {
+				rcK.Neg(yMin[k-n])
+			}
+			blocks := false
+			switch {
+			case st == statusSuperBasic:
+				blocks = true
+				candRatio.SetInt64(0)
+			case leaveAtLower && ((st == statusAtLower && aSgn < 0) || (st == statusAtUpper && aSgn > 0)):
+				blocks = true
+				candRatio.Quo(&rcK, &alphaK)
+				candRatio.Neg(&candRatio)
+			case !leaveAtLower && ((st == statusAtLower && aSgn > 0) || (st == statusAtUpper && aSgn < 0)):
+				blocks = true
+				candRatio.Quo(&rcK, &alphaK)
+			}
+			if !blocks || candRatio.Sign() < 0 {
+				continue
+			}
+			if enterK < 0 || candRatio.Cmp(&bestRatio) < 0 {
+				enterK = k
+				bestRatio.Set(&candRatio)
+			}
+		}
+		if enterK < 0 {
+			candPos := make([]*big.Rat, m)
+			candNeg := make([]*big.Rat, m)
+			for i := range m {
+				candPos[i] = new(big.Rat).Set(rho[i])
+				candNeg[i] = new(big.Rat).Neg(rho[i])
+			}
+			first, second := candPos, candNeg
+			dir := -1.0
+			if leaveAtLower {
+				first, second = candNeg, candPos
+				dir = 1.0
+			}
+			if w, okF := verifyExactSnapshotFarkas(snap, first); okF {
+				return ExactLPSolution{}, StatusInfeasible, pivotIdx, leaveQ, dir, w, true
+			}
+			if w, okF := verifyExactSnapshotFarkas(snap, second); okF {
+				return ExactLPSolution{}, StatusInfeasible, pivotIdx, leaveQ, -dir, w, true
+			}
+			return ExactLPSolution{}, StatusNotSolved, pivotIdx, -1, 0, nil, false
+		}
+
+		snap.basis[leaveQ] = enterK
+		snap.status[enterK] = statusBasic
+		if enterK < n {
+			snap.nonBasicAt[enterK] = nil
+		}
+		if varLB[leaveVar] != nil && varUB[leaveVar] != nil && varLB[leaveVar].Cmp(varUB[leaveVar]) == 0 {
+			snap.status[leaveVar] = statusFixed
+		} else if leaveAtLower {
+			snap.status[leaveVar] = statusAtLower
+		} else {
+			snap.status[leaveVar] = statusAtUpper
+		}
+		if leaveVar < n {
+			snap.nonBasicAt[leaveVar] = exactNonBasicStructuralVal(snap.status[leaveVar], varLB[leaveVar], varUB[leaveVar])
+		}
+	}
+	return ExactLPSolution{}, StatusNotSolved, maxPivots, -1, 0, nil, false
+}
+
+func verifyExactSnapshotFarkas(snap *exactSolverSnapshot, cand []*big.Rat) ([]*big.Rat, bool) {
+	if snap == nil || len(cand) < snap.m {
+		return nil, false
+	}
+	w := make([]*big.Rat, snap.m)
+	anyNonZero := false
+	wDotB := new(big.Rat)
+	var tmp big.Rat
+	for i := range snap.m {
+		wi := new(big.Rat).Set(cand[i])
+		switch snap.rowSense[i] {
+		case LessEqual:
+			if wi.Sign() > 0 {
+				wi.SetInt64(0)
+			}
+		case GreaterEqual:
+			if wi.Sign() < 0 {
+				wi.SetInt64(0)
+			}
+		}
+		w[i] = wi
+		if wi.Sign() != 0 {
+			anyNonZero = true
+			if snap.rowRHS[i] != nil && snap.rowRHS[i].Sign() != 0 {
+				tmp.Mul(wi, snap.rowRHS[i])
+				wDotB.Add(wDotB, &tmp)
+			}
+		}
+	}
+	if !anyNonZero {
+		return nil, false
+	}
+
+	maxLHS := new(big.Rat)
+	var aj, b1, b2 big.Rat
+	for j := range snap.n {
+		lbj, ubj := snap.lb[j], snap.ub[j]
+		if lbj != nil && ubj != nil && lbj.Cmp(ubj) > 0 {
+			return w, true
+		}
+		aj.SetInt64(0)
+		rows := snap.colRows[j]
+		vals := snap.colVals[j]
+		for k, ri := range rows {
+			if uint(ri) < uint(snap.m) && w[ri].Sign() != 0 {
+				tmp.Mul(vals[k], w[ri])
+				aj.Add(&aj, &tmp)
+			}
+		}
+		sgn := aj.Sign()
+		if sgn == 0 {
+			continue
+		}
+		hasL := lbj != nil
+		hasU := ubj != nil
+		if (!hasU && sgn > 0) || (!hasL && sgn < 0) {
+			return nil, false
+		}
+		switch {
+		case hasL && hasU:
+			b1.Mul(lbj, &aj)
+			b2.Mul(ubj, &aj)
+			if b2.Cmp(&b1) > 0 {
+				maxLHS.Add(maxLHS, &b2)
+			} else {
+				maxLHS.Add(maxLHS, &b1)
+			}
+		case hasL:
+			b1.Mul(lbj, &aj)
+			maxLHS.Add(maxLHS, &b1)
+		case hasU:
+			b2.Mul(ubj, &aj)
+			maxLHS.Add(maxLHS, &b2)
+		}
+	}
+	if maxLHS.Cmp(wDotB) < 0 {
+		return w, true
+	}
+	return nil, false
+}
+
+func (snap *exactSolverSnapshot) resetToAllSlackBasis() {
+	n := snap.n
+	m := snap.m
+	tot := n + m
+	if len(snap.basis) < m {
+		snap.basis = make([]int, m)
+	}
+	snap.basis = snap.basis[:m]
+	if len(snap.status) < tot {
+		snap.status = make([]varBasisStatus, tot)
+	}
+	snap.status = snap.status[:tot]
+	if len(snap.nonBasicAt) < n {
+		snap.nonBasicAt = make([]*big.Rat, n)
+	}
+	zeroRat := new(big.Rat)
+	for j := range n {
+		lb, ub := snap.lb[j], snap.ub[j]
+		c := snap.objMin[j]
+		switch {
+		case lb != nil && ub != nil && lb.Cmp(ub) == 0:
+			snap.status[j] = statusFixed
+			snap.nonBasicAt[j] = new(big.Rat).Set(lb)
+		case c != nil && c.Sign() < 0 && ub != nil:
+			snap.status[j] = statusAtUpper
+			snap.nonBasicAt[j] = new(big.Rat).Set(ub)
+		case lb != nil && (c == nil || c.Sign() >= 0 || ub == nil):
+			snap.status[j] = statusAtLower
+			snap.nonBasicAt[j] = new(big.Rat).Set(lb)
+		case ub != nil:
+			snap.status[j] = statusAtUpper
+			snap.nonBasicAt[j] = new(big.Rat).Set(ub)
+		default:
+			snap.status[j] = statusSuperBasic
+			snap.nonBasicAt[j] = new(big.Rat).Set(zeroRat)
+		}
+	}
+	for i := range m {
+		slack := n + i
+		snap.basis[i] = slack
+		snap.status[slack] = statusBasic
+	}
+}
+
+func ratSliceToFiniteFloats(src []*big.Rat, count int) ([]float64, bool) {
+	if len(src) < count {
+		return nil, false
+	}
+	out := make([]float64, count)
+	for i := range count {
+		v := exactRatToFloat(src[i])
+		if isNonFinite(v) {
+			return nil, false
+		}
+		out[i] = v
+	}
+	return out, true
+}
+
+func (s *LPSolver) syncBasisFromSnap(snap *exactSolverSnapshot, primal []float64) {
+	ws := s.ws
+	n := s.prob.numVars
+	m := s.TotalRows()
+	tot := n + m
+	copy(ws.basis[:m], snap.basis[:m])
+	copy(ws.status[:tot], snap.status[:tot])
+	for k := range tot {
+		ws.basicRow[k] = -1
+	}
+	for q, bVar := range ws.basis[:m] {
+		if uint(bVar) < uint(tot) {
+			ws.basicRow[bVar] = q
+		}
+	}
+	s.luValid = false
+	ws.lu.valid = false
+	s.dualValid = false
+	s.basicBoundsValid = false
+	s.varTolValid = false
+
+	if len(primal) < n || len(snap.rowRHS) < m {
+		return
+	}
+	primalRat := make([]*big.Rat, n)
+	for j := range n {
+		rj, okR := exactRatFromFloat(primal[j])
+		if !okR {
+			return
+		}
+		primalRat[j] = rj
+		xv := primal[j]
+		if s.scaled {
+			xv *= s.invColScale[j]
+			if isNonFinite(xv) {
+				return
+			}
+		}
+		ws.x[j] = xv
+	}
+	rowAct := make([]*big.Rat, m)
+	for i := range m {
+		rowAct[i] = new(big.Rat)
+	}
+	var prod big.Rat
+	for j := range n {
+		xj := primalRat[j]
+		if xj.Sign() == 0 {
+			continue
+		}
+		rows := snap.colRows[j]
+		vals := snap.colVals[j]
+		for idx, ri := range rows {
+			if uint(ri) < uint(m) {
+				prod.Mul(vals[idx], xj)
+				rowAct[ri].Add(rowAct[ri], &prod)
+			}
+		}
+	}
+	var slackRat big.Rat
+	for i := range m {
+		slackRat.Sub(snap.rowRHS[i], rowAct[i])
+		sv := exactRatToFloat(&slackRat)
+		if s.scaled {
+			sv *= s.rowScaleOf(i)
+		}
+		if !isNonFinite(sv) {
+			ws.x[n+i] = sv
+		}
+	}
+	for q := range m {
+		if bVar := ws.basis[q]; uint(bVar) < uint(tot) {
+			ws.xb[q] = ws.x[bVar]
+		}
+	}
+}
+
+func (s *LPSolver) tryExactNumericalFallback(totalIter *int) (LPResult, bool) {
+	if s == nil || s.prob == nil || s.ws == nil || s.fastHeuristicPrimal || s.invalidBounds || s.invalidCut || s.infeasibleCut {
+		return LPResult{}, false
+	}
+	p := s.prob
+	n := p.numVars
+	baseM := p.numConstraints
+	m := s.TotalRows()
+	if m > exactNumericalFallbackMaxRows || n > exactNumericalFallbackMaxVars {
+		return LPResult{}, false
+	}
+	rem := s.MaxIter - *totalIter
+	if rem <= 0 {
+		return LPResult{}, false
+	}
+	stop := exactStop{deadline: s.Deadline, done: s.Done}
+	if stop.canceled() {
+		return LPResult{}, false
+	}
+	snap, ok := buildExactSolverSnapshot(stop, s)
+	if !ok {
+		return LPResult{}, false
+	}
+	maxPivots := min(rem, min(128, max(32, m+16)))
+	sol, st, pivots, infeasRow, infeasDir, farkasY, ok := snap.solveExactDualSimplexOutcome(stop, maxPivots)
+	*totalIter += pivots
+	s.lastDualIters += pivots
+	if !ok {
+		rem = s.MaxIter - *totalIter
+		if rem <= 0 || stop.canceled() {
+			return LPResult{}, false
+		}
+		snap.resetToAllSlackBasis()
+		sol, st, pivots, infeasRow, infeasDir, farkasY, ok = snap.solveExactDualSimplexOutcome(stop, min(rem, min(128, max(32, m+16))))
+		*totalIter += pivots
+		s.lastDualIters += pivots
+		if !ok {
+			return LPResult{}, false
+		}
+	}
+
+	switch st {
+	case StatusOptimal:
+		primal, okP := ratSliceToFiniteFloats(sol.Primal, n)
+		duals, okD := ratSliceToFiniteFloats(sol.DualUser, baseM)
+		rc, okR := ratSliceToFiniteFloats(sol.ReducedCost, n)
+		if !okP || !okD || !okR {
+			return LPResult{}, false
+		}
+		objMin := evalLinearSum(0, p.objMin, primal, n)
+		userObj := p.EvaluateObjective(primal)
+		if isNonFinite(objMin) || isNonFinite(userObj) || !s.primalResidualsWithinTol(primal) {
+			return LPResult{}, false
+		}
+		s.syncBasisFromSnap(snap, primal)
+		return LPResult{
+			Status:       StatusOptimal,
+			ObjectiveMin: objMin,
+			Objective:    userObj,
+			Primal:       primal,
+			Dual:         duals,
+			ReducedCosts: rc,
+			Iterations:   *totalIter,
+		}, true
+
+	case StatusInfeasible:
+		s.syncBasisFromSnap(snap, nil)
+		s.lastPrimalFallback = false
+		s.lastInfeasRow = infeasRow
+		s.lastInfeasDir = infeasDir
+		var duals []float64
+		if baseM > 0 {
+			if candDuals, okF := ratSliceToFiniteFloats(farkasY, baseM); okF {
+				for _, v := range candDuals {
+					if v != 0 {
+						duals = candDuals
+						break
+					}
+				}
+			}
+		}
+		return LPResult{
+			Status:     StatusInfeasible,
+			Dual:       duals,
+			Iterations: *totalIter,
+		}, true
+	}
+	return LPResult{}, false
+}
+
+// exactPolishBasisSolutionStop tries the current basis first and then runs bounded
+// exact-rational dual simplex pivots with Bland's rule to clear sub-tolerance slack violations.
+func exactPolishBasisSolutionStop(stop exactStop, s *LPSolver) (ExactLPSolution, bool) {
+	snap, ok := buildExactSolverSnapshot(stop, s)
+	if !ok {
+		return ExactLPSolution{}, false
+	}
+	if yMin, rcMin, dualUser, rcUser, okD := snap.extractExactDuals(stop); okD {
+		if sol, okSol := snap.extractExactSolutionFromDuals(stop, yMin, rcMin, dualUser, rcUser); okSol {
+			return sol, true
+		}
+	}
+	return snap.solveExactDualSimplex(stop, min(128, max(32, snap.m+16)))
 }
 
 func (snap *exactSolverSnapshot) extractExactSolutionFromDuals(
@@ -2533,6 +3157,12 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 		return nil, false
 	}
 	xExact, ok := snap.extractExactPrimal(stop)
+	if !ok || !isRatSliceIntegralOnCols(p, xExact) || !verifyExactPrimalRat(p, xExact, true) {
+		if sol, okSol := exactPolishBasisSolutionStop(stop, lp); okSol {
+			xExact = sol.Primal
+			ok = true
+		}
+	}
 	if !ok || !isRatSliceIntegralOnCols(p, xExact) || !verifyExactPrimalRat(p, xExact, true) {
 		return nil, false
 	}

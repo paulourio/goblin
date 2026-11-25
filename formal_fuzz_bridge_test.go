@@ -1348,6 +1348,9 @@ func exactMIPIncumbentRat(ctx context.Context, p *gb.CompiledProblem, x []float6
 		return nil, false
 	}
 	sol, okSol := gb.ExactBasisSolution(ctx, lp)
+	if !okSol {
+		sol, okSol = gb.ExactPolishBasisSolutionForTest(ctx, lp)
+	}
 	if !okSol || !isExactRatSliceMIPFeasible(p, sol.Primal) {
 		return nil, false
 	}

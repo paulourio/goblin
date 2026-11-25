@@ -1550,6 +1550,11 @@ func ExactProblemRatsForTest(p *CompiledProblem) (
 	return objConst, cloneRatSlice(objVec), rowRHS, rowCols, rowVals, hasInexactOrig, true
 }
 
+// ExactPolishBasisSolutionForTest exports exactPolishBasisSolutionStop to package goblin_test.
+func ExactPolishBasisSolutionForTest(ctx context.Context, s *LPSolver) (ExactLPSolution, bool) {
+	return exactPolishBasisSolutionStop(exactStopFromCtx(ctx), s)
+}
+
 // BuildPhase1FarkasProblemForTest builds a continuous elastic Phase-I LP from p,
 // preserving raw duplicate terms and (er.rhs, er.exprConst) on inexact rows so
 // exact basis duals match p's original rational formulation.

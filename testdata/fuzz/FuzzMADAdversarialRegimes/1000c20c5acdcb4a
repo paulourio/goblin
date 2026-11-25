@@ -1,0 +1,5 @@
+go test fuzz v1
+uint64(158)
+byte('\u008b')
+uint16(27321)
+byte('\x04')
