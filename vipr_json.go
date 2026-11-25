@@ -352,17 +352,6 @@ func viprUnmarshalString(raw viprRawJSON) (string, bool) {
 	return s, true
 }
 
-func viprUnmarshalOptString(raw viprRawJSON) (string, bool) {
-	t, ok := trimVIPRJSON(raw)
-	if !ok {
-		return "", false
-	}
-	if string(t) == "null" {
-		return "", true
-	}
-	return viprUnmarshalString(t)
-}
-
 func viprUnmarshalBool(raw viprRawJSON) (bool, bool) {
 	t, ok := trimVIPRJSON(raw)
 	if !ok {
@@ -413,53 +402,44 @@ func viprUnmarshalIntPtr(raw viprRawJSON) (*int, bool) {
 	return &iv, true
 }
 
-func viprUnmarshalRawArray(raw viprRawJSON, allowNull bool) ([]viprRawJSON, bool, bool) {
+func viprUnmarshalRawArray(raw viprRawJSON) ([]viprRawJSON, bool) {
 	t, ok := trimVIPRJSON(raw)
 	if !ok {
-		return nil, false, false
+		return nil, false
 	}
-	if string(t) == "null" {
-		if allowNull {
-			return nil, true, true
-		}
-		return nil, true, false
-	}
-	if t[0] != '[' {
-		return nil, false, false
+	if len(t) == 0 || t[0] != '[' {
+		return nil, false
 	}
 	i := skipVIPRJSONWS(t, 1)
 	if i < len(t) && t[i] == ']' {
-		return []viprRawJSON{}, false, true
+		return []viprRawJSON{}, true
 	}
 	var elems []viprRawJSON
 	for {
 		st := skipVIPRJSONWS(t, i)
 		end, okV := scanVIPRJSONValue(t, st, 1)
 		if !okV {
-			return nil, false, false
+			return nil, false
 		}
 		elems = append(elems, t[st:end])
 		i = skipVIPRJSONWS(t, end)
 		if i >= len(t) {
-			return nil, false, false
+			return nil, false
 		}
 		if t[i] == ']' {
-			return elems, false, true
+			return elems, true
 		}
 		if t[i] != ',' {
-			return nil, false, false
+			return nil, false
 		}
 		i++
 	}
 }
 
 func viprUnmarshalBoolSlice(raw viprRawJSON) ([]bool, bool) {
-	elems, isNull, ok := viprUnmarshalRawArray(raw, true)
+	elems, ok := viprUnmarshalRawArray(raw)
 	if !ok {
 		return nil, false
-	}
-	if isNull {
-		return nil, true
 	}
 	out := make([]bool, len(elems))
 	for i, el := range elems {
@@ -533,34 +513,32 @@ func unmarshalCertRatObjJSON(raw viprRawJSON) (certRatObjJSON, bool) {
 
 func unmarshalCertSparseVecJSON(raw viprRawJSON) (certSparseVecJSON, bool) {
 	var out certSparseVecJSON
+	hasTerms := false
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		if key != "terms" {
 			return true
 		}
-		elems, isNull, okA := viprUnmarshalRawArray(val, true)
+		hasTerms = true
+		elems, okA := viprUnmarshalRawArray(val)
 		if !okA {
 			return false
-		}
-		if isNull {
-			out.Terms = nil
-			return true
 		}
 		terms := make([]certSparseTermJSON, len(elems))
 		for i, el := range elems {
 			var tm certSparseTermJSON
+			hasCol := false
+			hasCoeff := false
 			if !viprScanObject(el, func(tk string, tv viprRawJSON) bool {
 				switch tk {
 				case "col":
-					p, okI := viprUnmarshalIntPtr(tv)
-					if !okI {
-						return false
-					}
-					tm.Col = p
+					hasCol = true
+					return decodeVIPRStrictIntPtrField(&tm.Col, tv)
 				case "coeff":
+					hasCoeff = true
 					tm.Coeff = tv
 				}
 				return true
-			}) {
+			}) || !hasCol || !hasCoeff {
 				return false
 			}
 			terms[i] = tm
@@ -568,7 +546,7 @@ func unmarshalCertSparseVecJSON(raw viprRawJSON) (certSparseVecJSON, bool) {
 		out.Terms = terms
 		return true
 	})
-	return out, ok
+	return out, ok && hasTerms
 }
 
 func decodeVIPRIntPtrField(dst **int, val viprRawJSON) bool {
@@ -598,8 +576,8 @@ func decodeVIPRBoolPtrField(dst **bool, val viprRawJSON) bool {
 	return true
 }
 
-func decodeVIPROptStringField[S ~string](dst *S, val viprRawJSON) bool {
-	s, ok := viprUnmarshalOptString(val)
+func decodeVIPRStrictStringField[S ~string](dst *S, val viprRawJSON) bool {
+	s, ok := viprUnmarshalString(val)
 	if !ok {
 		return false
 	}
@@ -616,14 +594,12 @@ func decodeVIPRStrictStringPtrField(dst **string, val viprRawJSON) bool {
 	return true
 }
 
-func viprUnmarshalOptRawArray(dst *[]viprRawJSON, val viprRawJSON) bool {
-	elems, isNull, ok := viprUnmarshalRawArray(val, true)
+func viprUnmarshalReqRawArray(dst *[]viprRawJSON, val viprRawJSON) bool {
+	elems, ok := viprUnmarshalRawArray(val)
 	if !ok {
 		return false
 	}
-	if !isNull {
-		*dst = elems
-	}
+	*dst = elems
 	return true
 }
 
@@ -632,9 +608,10 @@ func unmarshalCertLinConJSON(raw viprRawJSON) (certLinConJSON, bool) {
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		switch key {
 		case "coeffs":
+			out.HasCoeffs = true
 			out.Coeffs = val
 		case "sense":
-			return decodeVIPROptStringField(&out.Sense, val)
+			return decodeVIPRStrictStringField(&out.Sense, val)
 		case "rhs":
 			out.RHS = val
 		}
@@ -648,7 +625,7 @@ func unmarshalCertPresolveStepDoc(raw viprRawJSON) (certPresolveStepDoc, bool) {
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		switch key {
 		case "op":
-			return decodeVIPROptStringField(&out.Op, val)
+			return decodeVIPRStrictStringField(&out.Op, val)
 		case "row":
 			out.Row = val
 		case "col":
@@ -684,7 +661,7 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
 		switch key {
 		case "rule":
-			return decodeVIPROptStringField(&st.Rule, val)
+			return decodeVIPRStrictStringField(&st.Rule, val)
 		case "row":
 			return decodeVIPRIntPtrField(&st.Row, val)
 		case "col":
@@ -696,13 +673,9 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 		case "bound":
 			st.Bound = val
 		case "refs":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
+			elems, okA := viprUnmarshalRawArray(val)
 			if !okA {
 				return false
-			}
-			if isNull {
-				st.Refs = nil
-				return true
 			}
 			refs := make([]certLinRefDoc, len(elems))
 			for i, el := range elems {
@@ -722,7 +695,7 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 			}
 			st.Refs = &refs
 		case "bounds":
-			elems, _, okA := viprUnmarshalRawArray(val, false)
+			elems, okA := viprUnmarshalRawArray(val)
 			if !okA {
 				return false
 			}
@@ -764,13 +737,9 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 		case "orbitAsms":
 			st.OrbitAsms = val
 		case "witnesses":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
+			elems, okA := viprUnmarshalRawArray(val)
 			if !okA {
 				return false
-			}
-			if isNull {
-				st.Witnesses = nil
-				return true
 			}
 			wits := make([]certOrbitWitDoc, len(elems))
 			for i, el := range elems {
@@ -809,46 +778,100 @@ func unmarshalCertStepDoc(raw viprRawJSON) (certStepDoc, bool) {
 	return st, ok
 }
 
+func checkVIPRMinimizationSenseField(key string, val viprRawJSON) bool {
+	t, ok := trimVIPRJSON(val)
+	if !ok {
+		return false
+	}
+	if string(t) == "null" {
+		return true
+	}
+	if key == "sense" {
+		s, okS := viprUnmarshalString(t)
+		if !okS {
+			return false
+		}
+		low := strings.ToLower(strings.Trim(s, " \t\n\r\v\f"))
+		return low == "min" || low == "minimize"
+	}
+	b, okB := viprUnmarshalBool(t)
+	return okB && !b
+}
+
+func scanVIPRInstanceField(doc *certVIPRDoc, key string, val viprRawJSON) (handled, ok bool) {
+	switch key {
+	case "sense", "maximize":
+		return true, checkVIPRMinimizationSenseField(key, val)
+	case "n":
+		return true, decodeVIPRStrictIntPtrField(&doc.N, val)
+	case "objConst":
+		doc.ObjConst = val
+		return true, true
+	case "obj":
+		doc.Obj = val
+		return true, true
+	case "isInt":
+		doc.HasIsInt = true
+		bs, okB := viprUnmarshalBoolSlice(val)
+		if !okB {
+			return true, false
+		}
+		doc.IsInt = bs
+		return true, true
+	case "lb":
+		doc.HasLB = true
+		return true, viprUnmarshalReqRawArray(&doc.LB, val)
+	case "ub":
+		doc.HasUB = true
+		return true, viprUnmarshalReqRawArray(&doc.UB, val)
+	case "baseRows":
+		doc.HasBaseRows = true
+		return true, viprUnmarshalReqRawArray(&doc.BaseRows, val)
+	default:
+		return false, true
+	}
+}
+
+func unmarshalCertVIPRInstanceDoc(raw viprRawJSON) (certVIPRDoc, bool) {
+	var doc certVIPRDoc
+	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
+		_, fieldOK := scanVIPRInstanceField(&doc, key, val)
+		return fieldOK
+	})
+	return doc, ok
+}
+
 func unmarshalCertVIPRDoc(raw viprRawJSON) (certVIPRDoc, bool) {
 	var doc certVIPRDoc
 	ok := viprScanObject(raw, func(key string, val viprRawJSON) bool {
+		if handled, fieldOK := scanVIPRInstanceField(&doc, key, val); handled {
+			return fieldOK
+		}
 		switch key {
 		case "orig":
 			doc.Orig = val
 		case "presolve":
 			doc.Presolve = val
-		case "n":
-			return decodeVIPRIntPtrField(&doc.N, val)
-		case "objConst":
-			doc.ObjConst = val
-		case "obj":
-			doc.Obj = val
-		case "isInt":
-			bs, okB := viprUnmarshalBoolSlice(val)
-			if !okB {
-				return false
-			}
-			doc.IsInt = bs
-		case "lb":
-			return viprUnmarshalOptRawArray(&doc.LB, val)
-		case "ub":
-			return viprUnmarshalOptRawArray(&doc.UB, val)
-		case "baseRows":
-			return viprUnmarshalOptRawArray(&doc.BaseRows, val)
 		case "mode":
-			return decodeVIPROptStringField(&doc.Mode, val)
+			return decodeVIPRStrictStringField(&doc.Mode, val)
 		case "targetLB":
 			doc.TargetLB = val
 		case "incumbent":
-			return viprUnmarshalOptRawArray(&doc.Incumbent, val)
+			doc.HasIncumbent = true
+			doc.IncumbentRaw = val
+			t, okT := trimVIPRJSON(val)
+			if okT && len(t) > 0 && t[0] == '[' {
+				elems, okA := viprUnmarshalRawArray(t)
+				if !okA {
+					return false
+				}
+				doc.Incumbent = elems
+			}
 		case "steps":
-			elems, isNull, okA := viprUnmarshalRawArray(val, true)
+			doc.HasSteps = true
+			elems, okA := viprUnmarshalRawArray(val)
 			if !okA {
 				return false
-			}
-			if isNull {
-				doc.Steps = nil
-				return true
 			}
 			steps := make([]certStepDoc, len(elems))
 			for i, el := range elems {

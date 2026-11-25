@@ -2004,6 +2004,7 @@ const (
 	maxVIPRVerifyVars = 10_000_000
 	maxVIPRRatStrLen  = 8192
 	maxVIPRRatBits    = 16384
+	maxVIPRJSONExp    = 10_000
 )
 
 type certLinRefDoc struct {
@@ -2051,20 +2052,27 @@ type certStepDoc struct {
 }
 
 type certVIPRDoc struct {
-	Orig      viprRawJSON   `json:"orig"`
-	Presolve  viprRawJSON   `json:"presolve"`
-	N         *int          `json:"n"`
-	ObjConst  viprRawJSON   `json:"objConst"`
-	Obj       viprRawJSON   `json:"obj"`
-	IsInt     []bool        `json:"isInt"`
-	LB        []viprRawJSON `json:"lb"`
-	UB        []viprRawJSON `json:"ub"`
-	BaseRows  []viprRawJSON `json:"baseRows"`
-	Mode      viprMode      `json:"mode"`
-	TargetLB  viprRawJSON   `json:"targetLB"`
-	Incumbent []viprRawJSON `json:"incumbent"`
-	Steps     []certStepDoc `json:"steps"`
-	RootStep  *int          `json:"rootStep"`
+	Orig         viprRawJSON   `json:"orig"`
+	Presolve     viprRawJSON   `json:"presolve"`
+	N            *int          `json:"n"`
+	ObjConst     viprRawJSON   `json:"objConst"`
+	Obj          viprRawJSON   `json:"obj"`
+	IsInt        []bool        `json:"isInt"`
+	LB           []viprRawJSON `json:"lb"`
+	UB           []viprRawJSON `json:"ub"`
+	BaseRows     []viprRawJSON `json:"baseRows"`
+	Mode         viprMode      `json:"mode"`
+	TargetLB     viprRawJSON   `json:"targetLB"`
+	Incumbent    []viprRawJSON `json:"incumbent"`
+	IncumbentRaw viprRawJSON   `json:"-"`
+	Steps        []certStepDoc `json:"steps"`
+	RootStep     *int          `json:"rootStep"`
+	HasIsInt     bool          `json:"-"`
+	HasLB        bool          `json:"-"`
+	HasUB        bool          `json:"-"`
+	HasBaseRows  bool          `json:"-"`
+	HasIncumbent bool          `json:"-"`
+	HasSteps     bool          `json:"-"`
 }
 
 type certRatObjJSON struct {
@@ -2082,9 +2090,10 @@ type certSparseVecJSON struct {
 }
 
 type certLinConJSON struct {
-	Coeffs viprRawJSON `json:"coeffs"`
-	Sense  string      `json:"sense"`
-	RHS    viprRawJSON `json:"rhs"`
+	Coeffs    viprRawJSON `json:"coeffs"`
+	Sense     string      `json:"sense"`
+	RHS       viprRawJSON `json:"rhs"`
+	HasCoeffs bool        `json:"-"`
 }
 
 func isStrictVIPRDecimalInt(s string, allowNeg bool) bool {
@@ -2106,7 +2115,7 @@ func isStrictVIPRDecimalInt(s string, allowNeg bool) bool {
 	return true
 }
 
-func parseVIPRBigInt(raw viprRawJSON) (*big.Int, bool) {
+func parseVIPRBigIntRaw(raw viprRawJSON, allowString bool) (*big.Int, bool) {
 	t, okT := trimVIPRJSON(raw)
 	if !okT {
 		return nil, false
@@ -2116,6 +2125,9 @@ func parseVIPRBigInt(raw viprRawJSON) (*big.Int, bool) {
 		return nil, false
 	}
 	if strings.HasPrefix(s, "\"") {
+		if !allowString {
+			return nil, false
+		}
 		unq, okU := viprUnmarshalString(t)
 		if !okU {
 			return nil, false
@@ -2130,6 +2142,60 @@ func parseVIPRBigInt(raw viprRawJSON) (*big.Int, bool) {
 		return nil, false
 	}
 	return z, true
+}
+
+func parseVIPRBigInt(raw viprRawJSON) (*big.Int, bool) {
+	return parseVIPRBigIntRaw(raw, true)
+}
+
+func parseVIPRJSONBigInt(raw viprRawJSON) (*big.Int, bool) {
+	return parseVIPRBigIntRaw(raw, false)
+}
+
+func withinVIPRJSONExpBound(s string) bool {
+	if len(s) == 0 || (s[0] != '-' && (s[0] < '0' || s[0] > '9')) {
+		return false
+	}
+	dotIdx := strings.IndexByte(s, '.')
+	expIdx := strings.IndexAny(s, "eE")
+	var fracLen int
+	if dotIdx >= 0 {
+		endFrac := len(s)
+		if expIdx >= 0 {
+			endFrac = expIdx
+		}
+		fracLen = endFrac - dotIdx - 1
+	}
+	var expVal int64
+	if expIdx >= 0 {
+		expPart := s[expIdx+1:]
+		neg := false
+		if len(expPart) > 0 && (expPart[0] == '+' || expPart[0] == '-') {
+			neg = expPart[0] == '-'
+			expPart = expPart[1:]
+		}
+		for len(expPart) > 1 && expPart[0] == '0' {
+			expPart = expPart[1:]
+		}
+		if len(expPart) == 0 || len(expPart) > 6 {
+			return false
+		}
+		var v int64
+		for i := range len(expPart) {
+			c := expPart[i]
+			if c < '0' || c > '9' {
+				return false
+			}
+			v = v*10 + int64(c-'0')
+		}
+		if neg {
+			expVal = -v
+		} else {
+			expVal = v
+		}
+	}
+	exp10 := expVal - int64(fracLen)
+	return exp10 >= -maxVIPRJSONExp && exp10 <= maxVIPRJSONExp
 }
 
 func parseVIPRRatValue(raw viprRawJSON) (*big.Rat, bool) {
@@ -2180,7 +2246,7 @@ func parseVIPRRatValue(raw viprRawJSON) (*big.Rat, bool) {
 		}
 		return nil, false
 	default:
-		if len(s) > 4096 {
+		if len(s) > 4096 || !withinVIPRJSONExpBound(s) {
 			return nil, false
 		}
 		r, ok := new(big.Rat).SetString(s)
@@ -2208,8 +2274,8 @@ func parseVIPRNatSlice(raw viprRawJSON, allowMissing bool) ([]int, bool) {
 	if !certHasNonNullJSON(raw) {
 		return nil, allowMissing
 	}
-	items, isNull, okA := viprUnmarshalRawArray(raw, false)
-	if !okA || isNull {
+	items, okA := viprUnmarshalRawArray(raw)
+	if !okA {
 		return nil, false
 	}
 	out := make([]int, len(items))
@@ -2270,8 +2336,8 @@ func decodeVIPRVec(n int, raw viprRawJSON) (dense []*big.Rat, terms []certRatTer
 		return nil, nil, false
 	}
 	if t[0] == '[' {
-		elems, isNull, okA := viprUnmarshalRawArray(t, false)
-		if !okA || isNull || len(elems) != n {
+		elems, okA := viprUnmarshalRawArray(t)
+		if !okA || len(elems) != n {
 			return nil, nil, false
 		}
 		dense = make([]*big.Rat, n)
@@ -2330,7 +2396,7 @@ func decodeVIPRLinCon(n int, raw viprRawJSON) (certLinCon, bool) {
 		return certLinCon{}, false
 	}
 	coeffsRaw := lc.Coeffs
-	if len(strings.TrimSpace(string(coeffsRaw))) == 0 {
+	if !lc.HasCoeffs {
 		coeffsRaw = raw
 	}
 	_, terms, okV := decodeVIPRVec(n, coeffsRaw)
@@ -3119,7 +3185,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		if step.Col == nil || *step.Col < 0 || *step.Col >= inst.n || !inst.isInt[*step.Col] {
 			return certDerivedEntry{}, false
 		}
-		bndInt, okB := parseVIPRBigInt(step.Bound)
+		bndInt, okB := parseVIPRJSONBigInt(step.Bound)
 		if !okB {
 			return certDerivedEntry{}, false
 		}
@@ -3174,7 +3240,7 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 		derived, ok = certEvalRoundStep(inst, entries, step.Ref, false)
 
 	case viprRuleBranch:
-		splitInt, okS := parseVIPRBigInt(step.SplitVal)
+		splitInt, okS := parseVIPRJSONBigInt(step.SplitVal)
 		if !okS {
 			return certDerivedEntry{}, false
 		}
@@ -3334,11 +3400,11 @@ func certEvalProofStep(inst *certVIPRInstance, entries []certDerivedEntry, step 
 }
 
 func decodeMiniVIPRInstanceDoc(doc certVIPRDoc) (*certVIPRInstance, bool) {
-	if doc.N == nil {
+	if doc.N == nil || !doc.HasIsInt || !doc.HasLB || !doc.HasUB || !doc.HasBaseRows {
 		return nil, false
 	}
 	n := *doc.N
-	if n < 0 || n > maxVIPRVerifyVars || len(doc.IsInt) != n || len(doc.LB) != n || len(doc.UB) != n {
+	if n < 0 || n > maxVIPRVerifyVars || len(doc.IsInt) != n || len(doc.LB) != n || len(doc.UB) != n || len(doc.BaseRows) > maxVIPRVerifyVars {
 		return nil, false
 	}
 	objConst := new(big.Rat)
@@ -3457,7 +3523,7 @@ type certPresolveState struct {
 }
 
 func parseVIPRReqNat(raw viprRawJSON) (int, bool) {
-	z, ok := parseVIPRBigInt(raw)
+	z, ok := parseVIPRJSONBigInt(raw)
 	if !ok || z.Sign() < 0 || !z.IsInt64() {
 		return 0, false
 	}
@@ -3486,7 +3552,7 @@ func decodeVIPRInstanceRaw(raw viprRawJSON) (*certVIPRInstance, bool) {
 	if !certHasNonNullJSON(raw) {
 		return nil, false
 	}
-	instDoc, okD := unmarshalCertVIPRDoc(raw)
+	instDoc, okD := unmarshalCertVIPRInstanceDoc(raw)
 	if !okD {
 		return nil, false
 	}
@@ -3521,7 +3587,7 @@ func decodeVIPRPresolveStep(raw viprRawJSON) (certPresolveStep, bool) {
 
 	case "gcdRowDiv":
 		row, okR := parseVIPRReqNat(sd.Row)
-		div, okD := parseVIPRBigInt(sd.Divisor)
+		div, okD := parseVIPRJSONBigInt(sd.Divisor)
 		if !okR || !okD {
 			return certPresolveStep{}, false
 		}
@@ -3588,8 +3654,8 @@ func decodeVIPRPresolveSteps(raw viprRawJSON) ([]certPresolveStep, bool) {
 	if !certHasNonNullJSON(raw) {
 		return nil, true
 	}
-	items, isNull, okA := viprUnmarshalRawArray(raw, false)
-	if !okA || isNull {
+	items, okA := viprUnmarshalRawArray(raw)
+	if !okA {
 		return nil, false
 	}
 	out := make([]certPresolveStep, len(items))
@@ -4141,21 +4207,6 @@ func verifyMiniVIPRBytes(raw []byte, expectedInst *certVIPRInstance) (certVIPRVe
 	return verifyMiniVIPRCore(doc, inst, nil)
 }
 
-func certParseRatSlice(raw []viprRawJSON, n int) ([]*big.Rat, bool) {
-	if len(raw) != n {
-		return nil, false
-	}
-	out := make([]*big.Rat, n)
-	for j := range n {
-		r, ok := parseVIPRRatValue(raw[j])
-		if !ok {
-			return nil, false
-		}
-		out[j] = r
-	}
-	return out, true
-}
-
 func certVerifyIncumbentAndObj(inst, origEnvInst *certVIPRInstance, incumbent []*big.Rat) (incLin, certMinObj *big.Rat, ok bool) {
 	if !certCheckIncumbentFeasible(inst, incumbent) {
 		return nil, nil, false
@@ -4175,28 +4226,34 @@ func certVerifyIncumbentAndObj(inst, origEnvInst *certVIPRInstance, incumbent []
 }
 
 func verifyMiniVIPRCore(doc certVIPRDoc, inst, origEnvInst *certVIPRInstance) (certVIPRVerified, error) {
+	if !doc.HasSteps {
+		return certVIPRVerified{}, ErrCertificationFailed
+	}
 	var incumbent []*big.Rat
 	var targetLB *big.Rat
 	switch doc.Mode {
 	case viprModeInfeasible:
 	case viprModeOptimal:
-		var okInc bool
-		incumbent, okInc = certParseRatSlice(doc.Incumbent, inst.n)
+		if !doc.HasIncumbent {
+			return certVIPRVerified{}, ErrCertificationFailed
+		}
+		incDense, _, okInc := decodeVIPRVec(inst.n, doc.IncumbentRaw)
 		if !okInc {
 			return certVIPRVerified{}, ErrCertificationFailed
 		}
+		incumbent = incDense
 	case viprModeBound:
 		rLB, okLB := parseVIPRRatValue(doc.TargetLB)
 		if !okLB {
 			return certVIPRVerified{}, ErrCertificationFailed
 		}
 		targetLB = rLB
-		if len(doc.Incumbent) > 0 {
-			var okInc bool
-			incumbent, okInc = certParseRatSlice(doc.Incumbent, inst.n)
+		if certHasNonNullJSON(doc.IncumbentRaw) {
+			incDense, _, okInc := decodeVIPRVec(inst.n, doc.IncumbentRaw)
 			if !okInc {
 				return certVIPRVerified{}, ErrCertificationFailed
 			}
+			incumbent = incDense
 		}
 	default:
 		return certVIPRVerified{}, ErrCertificationFailed
