@@ -796,9 +796,21 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 			SolveTime:  time.Since(b.startTime),
 		}
 	}
-	feasProb := p.zeroObjCopy()
+	var feasProb *CompiledProblem
+	if b.vipr != nil {
+		feasProb = p.semiBoundedFeasObjCopy()
+	} else {
+		var okFeas bool
+		feasProb, okFeas = boundedFeasAnchorProblem(p)
+		if !okFeas {
+			feasProb = p.semiBoundedFeasObjCopy()
+		}
+	}
 	feasOpts := b.opts
 	feasOpts.Workers = 1
+	feasOpts.hasCutoff = false
+	feasOpts.cutoffMin = 0
+	feasOpts.AbsGapTol = math.Inf(1)
 	var subTrace viprTraceHook
 	if b.vipr != nil {
 		subTrace = b.vipr.newDisabledOrbitSubTrace()
@@ -833,15 +845,40 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 		feasOpts.MaxNodes = remNodes
 	}
 	feasRes := solveBranchAndCutWithDone(feasProb, feasOpts, b.startTime, b.deadline, b.done)
+	if feasRes.Status == StatusNumericalError && feasProb.numVars > p.numVars && !b.timeExpired() {
+		fbOpts := feasOpts
+		canFallback := true
+		if b.opts.MaxIter > 0 {
+			fbOpts.MaxIter -= feasRes.Iterations
+			canFallback = fbOpts.MaxIter > 0
+		}
+		if canFallback && b.opts.MaxNodes > 0 {
+			fbOpts.MaxNodes -= feasRes.Nodes
+			canFallback = fbOpts.MaxNodes > 0
+		}
+		if canFallback {
+			fbRes := solveBranchAndCutWithDone(p.semiBoundedFeasObjCopy(), fbOpts, b.startTime, b.deadline, b.done)
+			fbRes.Nodes += feasRes.Nodes
+			fbRes.Iterations += feasRes.Iterations
+			fbRes.CutsAdded += feasRes.CutsAdded
+			feasRes = fbRes
+		}
+	}
 	st := feasRes.Status
 	if st == StatusOptimal {
+		feasVals := feasRes.Values
+		if len(feasVals) > p.numVars {
+			feasVals = feasVals[:p.numVars]
+		}
 		stop := exactStop{deadline: b.deadline, done: b.done}
-		if _, okCert := extractUnboundedCertificateStop(stop, p, b.lpSolver, feasRes.Values); okCert {
+		if _, okCert := extractUnboundedCertificateStop(stop, p, b.lpSolver, feasVals); okCert {
 			st = StatusUnbounded
 		} else if b.timeExpired() {
 			st = StatusTimeLimit
+		} else if b.vipr == nil && p.numConstraints <= defaultExactPolishMaxNucleus {
+			st = b.retryUnboundedExactFeasibility(stop, feasOpts, &feasRes)
 		} else {
-			_, exactPureInt := exactPrimalIfFeasible(p, feasRes.Values, true)
+			_, exactPureInt := exactPrimalIfFeasible(p, feasVals, true)
 			if p.numConstraints <= defaultExactPolishMaxNucleus || (len(p.intCols) == p.numVars && !exactPureInt) {
 				st = StatusNumericalError
 			} else {
@@ -864,6 +901,62 @@ func (b *babEngine) solveUnboundedMIPFeasibility() Result {
 		CutsAdded:  feasRes.CutsAdded,
 		SolveTime:  time.Since(b.startTime),
 	}
+}
+
+const unboundedExactRetryMaxNodes = 2000
+
+// retryUnboundedExactFeasibility resolves sub-ULP Q-infeasible anchors via exact
+// rational branch-and-bound when float B&B lacks an exact certificate.
+func (b *babEngine) retryUnboundedExactFeasibility(stop exactStop, feasOpts Options, feasRes *Result) Status {
+	maxIter := 0
+	if b.opts.MaxIter > 0 {
+		maxIter = feasOpts.MaxIter - feasRes.Iterations
+		if maxIter <= 0 {
+			return StatusIterationLimit
+		}
+	}
+	maxNodes := unboundedExactRetryMaxNodes
+	if b.opts.MaxNodes > 0 {
+		maxNodes = feasOpts.MaxNodes - feasRes.Nodes
+		if maxNodes <= 0 {
+			return StatusNodeLimit
+		}
+	}
+
+	xAnchor, st, usedNodes, usedIters := solveExactMIPFeasibilityStop(stop, b.p, maxNodes, maxIter)
+	feasRes.Nodes += usedNodes
+	feasRes.Iterations += usedIters
+
+	switch st {
+	case StatusInfeasible:
+		return StatusInfeasible
+	case StatusOptimal:
+		if _, okCert := extractUnboundedCertificateWithRatAnchorStop(stop, b.p, b.lpSolver, xAnchor); okCert {
+			return StatusUnbounded
+		}
+	case StatusTimeLimit:
+		return StatusTimeLimit
+	case StatusIterationLimit:
+		if b.timeExpired() {
+			return StatusTimeLimit
+		}
+		if b.opts.MaxIter > 0 {
+			return StatusIterationLimit
+		}
+		return StatusNumericalError
+	case StatusNodeLimit:
+		if b.timeExpired() {
+			return StatusTimeLimit
+		}
+		if b.opts.MaxNodes > 0 {
+			return StatusNodeLimit
+		}
+		return StatusNumericalError
+	}
+	if b.timeExpired() {
+		return StatusTimeLimit
+	}
+	return StatusNumericalError
 }
 
 func (b *babEngine) runFeasibilityPump(primal []float64, lbMin float64, hs *LPSolver, isContLinked []bool) {

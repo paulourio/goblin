@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -2310,12 +2311,34 @@ func ExtractUnboundedCertificate(ctx context.Context, p *CompiledProblem, s *LPS
 }
 
 func extractUnboundedCertificateStop(stop exactStop, p *CompiledProblem, s *LPSolver, hint []float64) (UnboundedCertificate, bool) {
+	return extractUnboundedCertificateCore(stop, p, s, hint, nil)
+}
+
+func extractUnboundedCertificateWithRatAnchorStop(
+	stop exactStop,
+	p *CompiledProblem,
+	s *LPSolver,
+	ratAnchor []*big.Rat,
+) (UnboundedCertificate, bool) {
+	return extractUnboundedCertificateCore(stop, p, s, nil, ratAnchor)
+}
+
+func extractUnboundedCertificateCore(
+	stop exactStop,
+	p *CompiledProblem,
+	s *LPSolver,
+	hint []float64,
+	ratAnchor []*big.Rat,
+) (UnboundedCertificate, bool) {
 	if stop.canceled() || p == nil || p.invalidErr != nil || p.numVars == 0 {
 		return UnboundedCertificate{}, false
 	}
 	isMIP := p.isMIP && len(p.intCols) > 0
 	if len(hint) != p.numVars {
 		hint = nil
+	}
+	if len(ratAnchor) != p.numVars {
+		ratAnchor = nil
 	}
 
 	if p.numConstraints == 0 {
@@ -2355,15 +2378,22 @@ func extractUnboundedCertificateStop(stop exactStop, p *CompiledProblem, s *LPSo
 	}
 
 	if !isMIP {
-		if x0LP == nil {
-			if hint != nil {
-				if xH, okH := exactPrimalIfFeasible(p, hint, false); okH {
-					x0LP = xH
-				}
+		if ratAnchor != nil && verifyExactPrimalRat(p, ratAnchor, false) {
+			x0LP = ratAnchor
+		}
+		if x0LP == nil && hint != nil {
+			if xH, okH := exactPrimalIfFeasible(p, hint, false); okH {
+				x0LP = xH
 			}
 		}
 		if x0LP == nil {
 			xFeas, okF := solveExactLPFeasibleAnchor(stop, p)
+			if !okF {
+				xFeas, okF = stepExactRayAnchor(p, hint, rayLP, false)
+				if !okF && hint != nil {
+					xFeas, okF = stepExactRayAnchor(p, nil, rayLP, false)
+				}
+			}
 			if !okF {
 				return UnboundedCertificate{}, false
 			}
@@ -2387,7 +2417,10 @@ func extractUnboundedCertificateStop(stop exactStop, p *CompiledProblem, s *LPSo
 	}
 
 	var x0MIP []*big.Rat
-	if hint != nil {
+	if ratAnchor != nil && verifyExactPrimalRat(p, ratAnchor, true) {
+		x0MIP = ratAnchor
+	}
+	if x0MIP == nil && hint != nil {
 		if xCand, okC := refineExactMIPAnchor(stop, p, hint); okC {
 			x0MIP = xCand
 		}
@@ -2396,7 +2429,7 @@ func extractUnboundedCertificateStop(stop exactStop, p *CompiledProblem, s *LPSo
 		x0MIP = x0LP
 	}
 	if x0MIP == nil {
-		xCand, okC := findExactMIPFeasibleAnchor(stop, p)
+		xCand, okC := findExactMIPFeasibleAnchorWithRay(stop, p, rayMIP)
 		if !okC {
 			return UnboundedCertificate{}, false
 		}
@@ -2441,6 +2474,7 @@ func shallowContRelaxProblem(p *CompiledProblem) *CompiledProblem {
 	cp := *p
 	cp.isMIP = false
 	cp.intCols = nil
+	cp.binaryMask = nil
 	cp.lazy = nil
 	cp.exactOrig = p.exactOrig.cloneForContRelax(false)
 	varCat := make([]VarCategory, p.numVars)
@@ -2883,6 +2917,7 @@ func solveHomogeneousRecessionRayLP(stop exactStop, p *CompiledProblem) ([]*big.
 	hp.sense = Minimize
 	hp.isMIP = false
 	hp.intCols = nil
+	hp.binaryMask = nil
 	hp.lazy = nil
 	hp.exactOrig = p.exactOrig.cloneForContRelax(p.sense == Maximize)
 	if hp.exactOrig != nil {
@@ -2897,6 +2932,16 @@ func solveHomogeneousRecessionRayLP(stop exactStop, p *CompiledProblem) ([]*big.
 	hp.objCoeffs = slices.Clone(p.objMin)
 	hp.objMin = slices.Clone(p.objMin)
 	hp.rowRHS = make([]float64, m)
+	hp.rowLB = make([]float64, m)
+	hp.rowUB = make([]float64, m)
+	for i := range m {
+		switch p.rowSense[i] {
+		case LessEqual:
+			hp.rowLB[i] = math.Inf(-1)
+		case GreaterEqual:
+			hp.rowUB[i] = math.Inf(1)
+		}
+	}
 	hp.varLB = make([]float64, n)
 	hp.varUB = make([]float64, n)
 	hp.varCat = make([]VarCategory, n)
@@ -2927,6 +2972,12 @@ func solveHomogeneousRecessionRayLP(stop exactStop, p *CompiledProblem) ([]*big.
 	}
 	d, ok := snap.extractExactPrimal(stop)
 	if !ok {
+		if sol, okSol := exactPolishBasisSolutionStop(stop, lp); okSol {
+			d = sol.Primal
+			ok = true
+		}
+	}
+	if !ok {
 		return nil, nil, false
 	}
 	slope, ok := verifyExactRecessionRayOnly(p, d)
@@ -2947,14 +2998,175 @@ func solveExactLPFeasibleAnchor(stop exactStop, p *CompiledProblem) ([]*big.Rat,
 	defer lp.Close()
 	stop.applyToLPSolver(lp)
 	res := lp.Solve()
-	if res.Status != StatusOptimal {
+
+	maxPivots := min(defaultExactPolishMaxNucleus, max(32, p.numConstraints+16))
+	if stop.maxLPIter > 0 {
+		maxPivots = min(maxPivots, stop.maxLPIter)
+	}
+	if res.Status == StatusOptimal {
+		snap, ok := buildExactSolverSnapshot(stop, lp)
+		if !ok {
+			return nil, false
+		}
+		if xExact, okP := snap.extractExactPrimal(stop); okP {
+			return xExact, true
+		}
+		if maxPivots <= 0 {
+			return nil, false
+		}
+		if sol, okSol := snap.solveExactDualSimplex(stop, maxPivots); okSol {
+			return sol.Primal, true
+		}
+		if !stop.canceled() && snap.m <= exactNumericalFallbackMaxRows && snap.n <= exactNumericalFallbackMaxVars {
+			snap.resetToAllSlackBasis()
+			if sol, okSol := snap.solveExactDualSimplex(stop, maxPivots); okSol {
+				return sol.Primal, true
+			}
+		}
+		return nil, false
+	}
+
+	if res.Status == StatusTimeLimit || res.Status == StatusIterationLimit ||
+		p.numConstraints > exactNumericalFallbackMaxRows || p.numVars > exactNumericalFallbackMaxVars || maxPivots <= 0 {
 		return nil, false
 	}
 	snap, ok := buildExactSolverSnapshot(stop, lp)
 	if !ok {
 		return nil, false
 	}
-	return snap.extractExactPrimal(stop)
+	snap.resetToAllSlackBasis()
+	if sol, okSol := snap.solveExactDualSimplex(stop, maxPivots); okSol {
+		return sol.Primal, true
+	}
+	return nil, false
+}
+
+func stepExactRayAnchor(p *CompiledProblem, cand []float64, ray []*big.Rat, requireInt bool) ([]*big.Rat, bool) {
+	if p == nil || p.invalidErr != nil || len(ray) != p.numVars {
+		return nil, false
+	}
+	n := p.numVars
+	if len(p.varLB) < n || len(p.varUB) < n || len(p.varCat) < n {
+		return nil, false
+	}
+	ray = ray[:n]
+	for _, rj := range ray {
+		if rj == nil {
+			return nil, false
+		}
+	}
+	x0 := make([]*big.Rat, n)
+	for j := range n {
+		lo, hi := p.varLB[j], p.varUB[j]
+		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+			return nil, false
+		}
+		isIntCol := requireInt && p.varCat[j] != Continuous
+		var xj *big.Rat
+		if len(cand) == n && !math.IsNaN(cand[j]) && !math.IsInf(cand[j], 0) {
+			v := min(max(cand[j], lo), hi)
+			if isIntCol {
+				v = math.Round(v)
+				if v < lo {
+					v = math.Ceil(lo)
+				}
+				if v > hi {
+					v = math.Floor(hi)
+				}
+			}
+			if r, okR := exactRatFromFloat(v); okR && (!isIntCol || r.IsInt()) && v >= lo && v <= hi {
+				xj = r
+			}
+		}
+		if xj == nil {
+			var okB bool
+			if isIntCol {
+				xj, okB = pickIntegerInBounds(lo, hi)
+			} else {
+				xj, okB = pickRationalInBounds(lo, hi)
+			}
+			if !okB {
+				return nil, false
+			}
+		}
+		x0[j] = xj
+	}
+
+	tMin := new(big.Rat)
+	var diff, negAct, need big.Rat
+	for i := range p.numConstraints {
+		rhs, okR := exactRowRHSRat(p, i)
+		actX, actD, okA := exactEvalRowDualActivityRat(p, i, x0, ray)
+		if !okR || !okA {
+			return nil, false
+		}
+		switch p.rowSense[i] {
+		case LessEqual:
+			if actX.Cmp(rhs) <= 0 {
+				continue
+			}
+			if actD.Sign() >= 0 {
+				return nil, false
+			}
+			diff.Sub(actX, rhs)
+			negAct.Neg(actD)
+			need.Quo(&diff, &negAct)
+		case GreaterEqual:
+			if actX.Cmp(rhs) >= 0 {
+				continue
+			}
+			if actD.Sign() <= 0 {
+				return nil, false
+			}
+			diff.Sub(rhs, actX)
+			need.Quo(&diff, actD)
+		case Equal:
+			if actX.Cmp(rhs) != 0 {
+				return nil, false
+			}
+			continue
+		default:
+			return nil, false
+		}
+		if need.Cmp(tMin) > 0 {
+			tMin.Set(&need)
+		}
+	}
+
+	if tMin.Sign() > 0 {
+		if requireInt {
+			needIntStep := false
+			for j, rj := range ray {
+				if p.varCat[j] != Continuous && rj.Sign() != 0 {
+					needIntStep = true
+					break
+				}
+			}
+			if needIntStep && !tMin.IsInt() {
+				var q, rem big.Int
+				q.QuoRem(tMin.Num(), tMin.Denom(), &rem)
+				if rem.Sign() > 0 {
+					q.Add(&q, big.NewInt(1))
+				}
+				tMin.SetInt(&q)
+			}
+		}
+		var step big.Rat
+		for j, rj := range ray {
+			if rj.Sign() != 0 {
+				step.Mul(tMin, rj)
+				x0[j].Add(x0[j], &step)
+				if !exactRatFitsBits(x0[j]) {
+					return nil, false
+				}
+			}
+		}
+	}
+
+	if !verifyExactPrimalRat(p, x0, requireInt) {
+		return nil, false
+	}
+	return x0, true
 }
 
 func scaleRayForIntegerCols(p *CompiledProblem, rayLP []*big.Rat, slopeLP *big.Rat) ([]*big.Rat, *big.Rat, bool) {
@@ -3169,16 +3381,156 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 	return xExact, true
 }
 
-func findExactMIPFeasibleAnchor(stop exactStop, p *CompiledProblem) ([]*big.Rat, bool) {
-	if stop.canceled() || (p.exactOrig != nil && p.exactOrig.intEqInfeas) {
+func semiBoundedFeasTermCoeff(lo, hi float64) float64 {
+	var sign, bnd float64
+	switch {
+	case !math.IsInf(lo, -1) && math.IsInf(hi, 1):
+		sign = 1.0
+		bnd = math.Abs(lo)
+	case math.IsInf(lo, -1) && !math.IsInf(hi, 1):
+		sign = -1.0
+		bnd = math.Abs(hi)
+	default:
+		return 0
+	}
+	if bnd <= 1e6 {
+		return sign
+	}
+	_, exp := math.Frexp(bnd)
+	return math.Ldexp(sign, -exp)
+}
+
+// semiBoundedFeasObjCopy clones p with a Minimize objective that penalizes
+// semi-bounded variables moving toward their infinite bound while preserving
+// row and variable dimensions for VIPR feasibility subtraces.
+func (p *CompiledProblem) semiBoundedFeasObjCopy() *CompiledProblem {
+	cp := *p
+	cp.lazy = nil
+	cp.sense = Minimize
+	cp.objCoeffs = make([]float64, p.numVars)
+	for j := range p.numVars {
+		cp.objCoeffs[j] = semiBoundedFeasTermCoeff(p.varLB[j], p.varUB[j])
+	}
+	cp.objMin = slices.Clone(cp.objCoeffs)
+	cp.objConstant = 0
+	cp.objConstMinVal = 0
+	cp.exactOrig = p.exactOrig.cloneZeroObj()
+	return &cp
+}
+
+// boundedFeasAnchorProblem constructs a bounded-below feasibility MIP over the
+// exact-tightened problem, adding L1 auxiliary bounds t_k >= |x_j| for any
+// doubly-unbounded integer variables so branch-and-bound never dives along zero-cost rays.
+func boundedFeasAnchorProblem(p *CompiledProblem) (*CompiledProblem, bool) {
+	if p == nil || p.invalidErr != nil {
 		return nil, false
 	}
-	feasProb := p.exactTightenedProblem().zeroObjCopy()
-	feasProb.sense = Minimize
+	tp := p.exactTightenedProblem()
+	n := tp.numVars
+	var freeCols []int
+	for j := range n {
+		lo, hi := tp.varLB[j], tp.varUB[j]
+		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+			return nil, false
+		}
+		if tp.varCat[j] != Continuous && math.IsInf(lo, -1) && math.IsInf(hi, 1) {
+			freeCols = append(freeCols, j)
+		}
+	}
+	cp := tp.semiBoundedFeasObjCopy()
+	if len(freeCols) == 0 {
+		return cp, true
+	}
+
+	kFree := len(freeCols)
+	newN := n + kFree
+	m := tp.numConstraints
+	newM := m + 2*kFree
+
+	cp.varNames = append(slices.Clone(tp.varNames), make([]string, kFree)...)
+	cp.varLB = append(slices.Clone(tp.varLB), make([]float64, kFree)...)
+	cp.varUB = append(slices.Clone(tp.varUB), make([]float64, kFree)...)
+	cp.varCat = append(slices.Clone(tp.varCat), make([]VarCategory, kFree)...)
+	cp.objCoeffs = append(cp.objCoeffs, make([]float64, kFree)...)
+	cp.objMin = append(cp.objMin, make([]float64, kFree)...)
+	needWords := (newN + bitsPerWord - 1) / bitsPerWord
+	mask := make([]uint64, needWords)
+	copy(mask, tp.binaryMask)
+	cp.binaryMask = mask
+
+	cp.rowNames = append(slices.Clone(tp.rowNames), make([]string, 2*kFree)...)
+	cp.rowSense = append(slices.Clone(tp.rowSense), make([]ConstraintSense, 2*kFree)...)
+	cp.rowRHS = append(slices.Clone(tp.rowRHS), make([]float64, 2*kFree)...)
+	cp.rowLB = append(slices.Clone(tp.rowLB), make([]float64, 2*kFree)...)
+	cp.rowUB = append(slices.Clone(tp.rowUB), make([]float64, 2*kFree)...)
+
+	cp.rowPtr = make([]int, newM+1)
+	copy(cp.rowPtr, tp.rowPtr[:m+1])
+	baseNNZ := len(tp.colIdx)
+	cp.colIdx = make([]int, baseNNZ, baseNNZ+4*kFree)
+	copy(cp.colIdx, tp.colIdx)
+	cp.rowVal = make([]float64, baseNNZ, baseNNZ+4*kFree)
+	copy(cp.rowVal, tp.rowVal)
+
+	for k, origCol := range freeCols {
+		auxCol := n + k
+		idxStr := strconv.Itoa(k)
+		cp.varNames[auxCol] = "_feas_abs_" + idxStr
+		cp.varLB[auxCol] = 0
+		cp.varUB[auxCol] = math.Inf(1)
+		cp.varCat[auxCol] = Continuous
+		cp.objCoeffs[auxCol] = 1.0
+		cp.objMin[auxCol] = 1.0
+
+		posRow := m + 2*k
+		cp.rowNames[posRow] = "_feas_pos_" + idxStr
+		cp.rowSense[posRow] = LessEqual
+		cp.rowLB[posRow] = math.Inf(-1)
+		cp.colIdx = append(cp.colIdx, origCol, auxCol)
+		cp.rowVal = append(cp.rowVal, 1.0, -1.0)
+		cp.rowPtr[posRow+1] = len(cp.colIdx)
+
+		negRow := posRow + 1
+		cp.rowNames[negRow] = "_feas_neg_" + idxStr
+		cp.rowSense[negRow] = LessEqual
+		cp.rowLB[negRow] = math.Inf(-1)
+		cp.colIdx = append(cp.colIdx, origCol, auxCol)
+		cp.rowVal = append(cp.rowVal, -1.0, -1.0)
+		cp.rowPtr[negRow+1] = len(cp.colIdx)
+	}
+
+	if cp.exactOrig != nil && len(cp.exactOrig.rows) > 0 {
+		cp.exactOrig.rows = append(slices.Clone(cp.exactOrig.rows), make([]exactModelRow, 2*kFree)...)
+	}
+	cp.numVars = newN
+	cp.numConstraints = newM
+	cp.denseRows = nil
+	if newN > 0 && newM > 0 {
+		cp.rowStride = sparseNoDenseStride
+	} else {
+		cp.rowStride = 0
+	}
+	buildCSCFromCSR(cp)
+	return cp, true
+}
+
+func findExactMIPFeasibleAnchor(stop exactStop, p *CompiledProblem) ([]*big.Rat, bool) {
+	return findExactMIPFeasibleAnchorWithRay(stop, p, nil)
+}
+
+func findExactMIPFeasibleAnchorWithRay(stop exactStop, p *CompiledProblem, rayMIP []*big.Rat) ([]*big.Rat, bool) {
+	if stop.canceled() || hasExactGCDInfeasibleEqRow(p) {
+		return nil, false
+	}
+	feasProb, okProb := boundedFeasAnchorProblem(p)
+	if !okProb {
+		return nil, false
+	}
 
 	opt := DefaultOptions()
 	opt.EnablePresolve = false
 	opt.Workers = 1
+	opt.AbsGapTol = math.Inf(1)
 	if stop.maxMIPNodes > 0 {
 		opt.MaxNodes = stop.maxMIPNodes
 	}
@@ -3187,10 +3539,383 @@ func findExactMIPFeasibleAnchor(stop exactStop, p *CompiledProblem) ([]*big.Rat,
 	}
 
 	feasRes := solveBranchAndCutWithDone(feasProb, opt, time.Now(), stop.deadline, stop.done)
-	if stop.canceled() || feasRes.Status != StatusOptimal || len(feasRes.Values) != p.numVars {
+	totNodes := feasRes.Nodes
+	totIters := feasRes.Iterations
+	if !stop.canceled() && feasRes.Status == StatusNumericalError && feasProb.numVars > p.numVars {
+		fbOpt := opt
+		canFallback := true
+		if stop.maxLPIter > 0 {
+			fbOpt.MaxIter -= totIters
+			canFallback = fbOpt.MaxIter > 0
+		}
+		if canFallback && stop.maxMIPNodes > 0 {
+			fbOpt.MaxNodes -= totNodes
+			canFallback = fbOpt.MaxNodes > 0
+		}
+		if canFallback {
+			feasRes = solveBranchAndCutWithDone(p.semiBoundedFeasObjCopy(), fbOpt, time.Now(), stop.deadline, stop.done)
+			totNodes += feasRes.Nodes
+			totIters += feasRes.Iterations
+		}
+	}
+	if stop.canceled() || feasRes.Status != StatusOptimal || len(feasRes.Values) < p.numVars {
 		return nil, false
 	}
-	return refineExactMIPAnchor(stop, p, feasRes.Values)
+	cand := feasRes.Values[:p.numVars]
+	if xExact, okC := refineExactMIPAnchor(stop, p, cand); okC {
+		return xExact, true
+	}
+	if len(rayMIP) == p.numVars {
+		if xRay, okR := stepExactRayAnchor(p, cand, rayMIP, true); okR {
+			return xRay, true
+		}
+	}
+	if p.numConstraints <= defaultExactPolishMaxNucleus {
+		remIter := 0
+		if stop.maxLPIter > 0 {
+			remIter = stop.maxLPIter - totIters
+			if remIter <= 0 {
+				return nil, false
+			}
+		}
+		remNodes := 256
+		if stop.maxMIPNodes > 0 {
+			remNodes = min(256, stop.maxMIPNodes-totNodes)
+			if remNodes <= 0 {
+				return nil, false
+			}
+		}
+		if xExact, stExact, _, _ := solveExactMIPFeasibilityStop(stop, p, remNodes, remIter); stExact == StatusOptimal {
+			return xExact, true
+		}
+	}
+	return nil, false
+}
+
+type exactFeasNode struct {
+	parent  *exactFeasNode
+	col     int
+	isUpper bool
+	bound   *big.Rat
+	lbObjF  float64
+	depth   int
+	fracCnt int
+	seq     int
+}
+
+func exactFeasNodeLess(a, b *exactFeasNode) bool {
+	if a.lbObjF != b.lbObjF {
+		return a.lbObjF < b.lbObjF
+	}
+	if a.fracCnt != b.fracCnt {
+		return a.fracCnt < b.fracCnt
+	}
+	if a.depth != b.depth {
+		return a.depth < b.depth
+	}
+	return a.seq < b.seq
+}
+
+func exactFeasHeapPush(h []*exactFeasNode, node *exactFeasNode) []*exactFeasNode {
+	h = append(h, node)
+	i := len(h) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if !exactFeasNodeLess(h[i], h[p]) {
+			break
+		}
+		h[i], h[p] = h[p], h[i]
+		i = p
+	}
+	return h
+}
+
+func exactFeasHeapPop(h []*exactFeasNode) (*exactFeasNode, []*exactFeasNode) {
+	top := h[0]
+	last := len(h) - 1
+	h[0] = h[last]
+	h[last] = nil
+	h = h[:last]
+	n := len(h)
+	i := 0
+	for {
+		left := 2*i + 1
+		if left >= n {
+			break
+		}
+		best := left
+		if right := left + 1; right < n && exactFeasNodeLess(h[right], h[left]) {
+			best = right
+		}
+		if !exactFeasNodeLess(h[best], h[i]) {
+			break
+		}
+		h[i], h[best] = h[best], h[i]
+		i = best
+	}
+	return top, h
+}
+
+func materializeExactFeasBounds(
+	rootLB, rootUB []*big.Rat,
+	node *exactFeasNode,
+	curLB, curUB []*big.Rat,
+	floatLB, floatUB []float64,
+) bool {
+	copy(curLB, rootLB)
+	copy(curUB, rootUB)
+	for cur := node; cur != nil && cur.col >= 0; cur = cur.parent {
+		c := cur.col
+		if cur.isUpper {
+			if curUB[c] == nil || cur.bound.Cmp(curUB[c]) < 0 {
+				curUB[c] = cur.bound
+			}
+		} else if curLB[c] == nil || cur.bound.Cmp(curLB[c]) > 0 {
+			curLB[c] = cur.bound
+		}
+		if curLB[c] != nil && curUB[c] != nil && curLB[c].Cmp(curUB[c]) > 0 {
+			return false
+		}
+	}
+	for j := range curLB {
+		if curLB[j] == nil {
+			floatLB[j] = math.Inf(-1)
+		} else {
+			floatLB[j] = exactRatToFloatFloor(curLB[j])
+		}
+		if curUB[j] == nil {
+			floatUB[j] = math.Inf(1)
+		} else {
+			floatUB[j] = exactRatToFloatCeil(curUB[j])
+		}
+	}
+	return true
+}
+
+func floorExactRat(r *big.Rat) *big.Int {
+	fl := new(big.Int)
+	rem := new(big.Int)
+	fl.QuoRem(r.Num(), r.Denom(), rem)
+	if rem.Sign() < 0 {
+		fl.Sub(fl, big.NewInt(1))
+	}
+	return fl
+}
+
+func pickExactFractionalIntCol(intCols []int, x []*big.Rat) (brCol int, flInt *big.Int, fracCnt int) {
+	brCol = -1
+	bestScore := math.Inf(1)
+	var diff big.Rat
+	for _, col := range intCols {
+		if uint(col) >= uint(len(x)) || x[col] == nil || x[col].IsInt() {
+			continue
+		}
+		fracCnt++
+		fl := floorExactRat(x[col])
+		diff.SetInt(fl)
+		diff.Sub(x[col], &diff)
+		fracF, _ := diff.Float64()
+		score := math.Abs(fracF - 0.5)
+		if brCol < 0 || score < bestScore {
+			brCol = col
+			flInt = fl
+			bestScore = score
+		}
+	}
+	return brCol, flInt, fracCnt
+}
+
+func solveExactFeasNodeLP(
+	stop exactStop,
+	lp *LPSolver,
+	workProb *CompiledProblem,
+	defaultLPIter, maxIter int,
+	usedIters *int,
+	curLB, curUB []*big.Rat,
+	floatLB, floatUB []float64,
+) (ExactLPSolution, Status) {
+	var lpRes LPResult
+	budgetHit := false
+	for attempt := range 2 {
+		if attempt == 1 {
+			lp.InitCrashBasis()
+		}
+		if maxIter > 0 {
+			rem := maxIter - *usedIters
+			if rem <= 0 {
+				return ExactLPSolution{}, StatusIterationLimit
+			}
+			lp.MaxIter = min(defaultLPIter, rem)
+		}
+		lp.SetStructuralBounds(floatLB, floatUB)
+		lpRes = lp.Solve()
+		*usedIters += lpRes.Iterations
+		if stop.canceled() || lpRes.Status == StatusTimeLimit {
+			return ExactLPSolution{}, StatusTimeLimit
+		}
+		budgetHit = maxIter > 0 && lp.MaxIter < defaultLPIter
+		if lpRes.Status == StatusOptimal || lpRes.Status == StatusInfeasible || (lpRes.Status == StatusIterationLimit && budgetHit) {
+			break
+		}
+	}
+	if lpRes.Status == StatusIterationLimit && budgetHit {
+		return ExactLPSolution{}, StatusIterationLimit
+	}
+
+	snap, okS := buildExactSolverSnapshot(stop, lp)
+	if !okS {
+		lp.InitCrashBasis()
+		lp.SetStructuralBounds(floatLB, floatUB)
+		snap, okS = buildExactSolverSnapshot(stop, lp)
+		if !okS {
+			if stop.canceled() {
+				return ExactLPSolution{}, StatusTimeLimit
+			}
+			return ExactLPSolution{}, StatusNumericalError
+		}
+	}
+	copy(snap.lb, curLB)
+	copy(snap.ub, curUB)
+
+	maxPivots := min(defaultExactPolishMaxNucleus, max(64, 4*workProb.numConstraints+16))
+	sol, stExact, _, _, _, _, okExact := snap.solveExactDualSimplexOutcome(stop, maxPivots)
+	if !okExact || (stExact != StatusOptimal && stExact != StatusInfeasible) {
+		snap.resetToAllSlackBasis()
+		sol, stExact, _, _, _, _, okExact = snap.solveExactDualSimplexOutcome(stop, maxPivots)
+	}
+	if stop.canceled() {
+		return ExactLPSolution{}, StatusTimeLimit
+	}
+	if !okExact || (stExact != StatusOptimal && stExact != StatusInfeasible) {
+		return ExactLPSolution{}, StatusNumericalError
+	}
+	return sol, stExact
+}
+
+// solveExactMIPFeasibilityStop runs bounded rational branch-and-bound over Q
+// to decide integer feasibility on small problems with sub-ULP tolerances.
+func solveExactMIPFeasibilityStop(
+	stop exactStop,
+	p *CompiledProblem,
+	maxNodes, maxIter int,
+) (anchor []*big.Rat, st Status, usedNodes, usedIters int) {
+	if stop.canceled() {
+		return nil, StatusTimeLimit, 0, 0
+	}
+	if hasExactGCDInfeasibleEqRow(p) {
+		return nil, StatusInfeasible, 0, 0
+	}
+	workProb, okProb := boundedFeasAnchorProblem(p)
+	if !okProb {
+		return nil, StatusNumericalError, 0, 0
+	}
+	wn := workProb.numVars
+	rootLB := make([]*big.Rat, wn)
+	rootUB := make([]*big.Rat, wn)
+	for j := range wn {
+		lo, hi := workProb.varLB[j], workProb.varUB[j]
+		if !math.IsInf(lo, -1) {
+			r, okR := exactRatFromFloat(lo)
+			if !okR {
+				return nil, StatusNumericalError, 0, 0
+			}
+			rootLB[j] = r
+		}
+		if !math.IsInf(hi, 1) {
+			r, okR := exactRatFromFloat(hi)
+			if !okR {
+				return nil, StatusNumericalError, 0, 0
+			}
+			rootUB[j] = r
+		}
+		if rootLB[j] != nil && rootUB[j] != nil && rootLB[j].Cmp(rootUB[j]) > 0 {
+			return nil, StatusInfeasible, 0, 0
+		}
+	}
+
+	lp := NewLPSolver(workProb, nil)
+	defer lp.Close()
+	defaultLPIter := lp.MaxIter
+	stop.applyToLPSolver(lp)
+
+	curLB := make([]*big.Rat, wn)
+	curUB := make([]*big.Rat, wn)
+	floatLB := make([]float64, wn)
+	floatUB := make([]float64, wn)
+
+	seq := 0
+	pq := []*exactFeasNode{{col: -1, seq: seq}}
+	one := big.NewInt(1)
+	for len(pq) > 0 {
+		if stop.canceled() {
+			return nil, StatusTimeLimit, usedNodes, usedIters
+		}
+		if maxNodes > 0 && usedNodes >= maxNodes {
+			return nil, StatusNodeLimit, usedNodes, usedIters
+		}
+		if maxIter > 0 && usedNodes > 0 && usedIters >= maxIter {
+			return nil, StatusIterationLimit, usedNodes, usedIters
+		}
+		var node *exactFeasNode
+		node, pq = exactFeasHeapPop(pq)
+		if !materializeExactFeasBounds(rootLB, rootUB, node, curLB, curUB, floatLB, floatUB) {
+			continue
+		}
+		usedNodes++
+		sol, nodeSt := solveExactFeasNodeLP(stop, lp, workProb, defaultLPIter, maxIter, &usedIters, curLB, curUB, floatLB, floatUB)
+		switch nodeSt {
+		case StatusInfeasible:
+			continue
+		case StatusOptimal:
+		default:
+			return nil, nodeSt, usedNodes, usedIters
+		}
+		if len(sol.Primal) < p.numVars {
+			return nil, StatusNumericalError, usedNodes, usedIters
+		}
+		brCol, flInt, fracCnt := pickExactFractionalIntCol(workProb.intCols, sol.Primal)
+		if brCol < 0 {
+			cand := sol.Primal[:p.numVars]
+			if verifyExactPrimalRat(p, cand, true) {
+				return cand, StatusOptimal, usedNodes, usedIters
+			}
+			return nil, StatusNumericalError, usedNodes, usedIters
+		}
+		objF := 0.0
+		if sol.ObjectiveMin != nil {
+			objF, _ = sol.ObjectiveMin.Float64()
+		}
+		flRat := new(big.Rat).SetInt(flInt)
+		clInt := new(big.Int).Add(flInt, one)
+		clRat := new(big.Rat).SetInt(clInt)
+		if curLB[brCol] == nil || flRat.Cmp(curLB[brCol]) >= 0 {
+			seq++
+			pq = exactFeasHeapPush(pq, &exactFeasNode{
+				parent:  node,
+				col:     brCol,
+				isUpper: true,
+				bound:   flRat,
+				lbObjF:  objF,
+				depth:   node.depth + 1,
+				fracCnt: fracCnt,
+				seq:     seq,
+			})
+		}
+		if curUB[brCol] == nil || clRat.Cmp(curUB[brCol]) <= 0 {
+			seq++
+			pq = exactFeasHeapPush(pq, &exactFeasNode{
+				parent:  node,
+				col:     brCol,
+				isUpper: false,
+				bound:   clRat,
+				lbObjF:  objF,
+				depth:   node.depth + 1,
+				fracCnt: fracCnt,
+				seq:     seq,
+			})
+		}
+	}
+	return nil, StatusInfeasible, usedNodes, usedIters
 }
 
 // exactMIPFeasibleRat reports whether x satisfies every variable bound, integrality

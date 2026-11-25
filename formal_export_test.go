@@ -610,6 +610,85 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 			coeffs:  cm,
 		}
 	}
+	isRatRowRedundant := func(r ratLPWorkRow) bool {
+		if r.sense == Equal {
+			for _, vr := range r.coeffs {
+				if vr != nil && vr.Sign() != 0 {
+					return false
+				}
+			}
+			return r.rhs.Sign() == 0
+		}
+		wantUpper := r.sense == LessEqual
+		if !wantUpper && r.sense != GreaterEqual {
+			return false
+		}
+		act := new(big.Rat)
+		var prod big.Rat
+		for col, vr := range r.coeffs {
+			if vr == nil || vr.Sign() == 0 {
+				continue
+			}
+			if uint(col) >= uint(n) {
+				return false
+			}
+			var bnd *big.Rat
+			if (vr.Sign() > 0) == wantUpper {
+				bnd = curUB[col]
+			} else {
+				bnd = curLB[col]
+			}
+			if bnd == nil {
+				return false
+			}
+			prod.Mul(vr, bnd)
+			act.Add(act, &prod)
+		}
+		if wantUpper {
+			return act.Cmp(r.rhs) <= 0
+		}
+		return r.rhs.Cmp(act) <= 0
+	}
+	canDualFixCol := func(col int, toLower bool) bool {
+		if toLower {
+			if curLB[col] == nil || (curUB[col] != nil && curLB[col].Cmp(curUB[col]) > 0) || curObj[col].Sign() < 0 {
+				return false
+			}
+		} else {
+			if curUB[col] == nil || (curLB[col] != nil && curLB[col].Cmp(curUB[col]) > 0) || curObj[col].Sign() > 0 {
+				return false
+			}
+		}
+		for _, r := range curRows {
+			a := r.coeffs[col]
+			if a == nil || a.Sign() == 0 {
+				continue
+			}
+			switch r.sense {
+			case LessEqual:
+				if (toLower && a.Sign() < 0) || (!toLower && a.Sign() > 0) {
+					return false
+				}
+			case GreaterEqual:
+				if (toLower && a.Sign() > 0) || (!toLower && a.Sign() < 0) {
+					return false
+				}
+			case Equal:
+				return false
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	isEmptyColInRows := func(col int) bool {
+		for _, r := range curRows {
+			if a := r.coeffs[col]; a != nil && a.Sign() != 0 {
+				return false
+			}
+		}
+		return true
+	}
 
 	snapshotLP := func(mode string) lpCertPayload {
 		objPay := make([]ratPayload, n)
@@ -748,7 +827,7 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 
 		case lpStepDropRedundantRow:
 			q := slices.IndexFunc(curRows, func(r ratLPWorkRow) bool { return r.origIdx == ev.row })
-			if q < 0 {
+			if q < 0 || !isRatRowRedundant(curRows[q]) {
 				return nil, false
 			}
 			rowMap := makeSkipMap(len(curRows), q)
@@ -763,18 +842,12 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 
 		case lpStepDualColFix:
 			col := ev.col
-			if uint(col) >= uint(n) {
+			if uint(col) >= uint(n) || !canDualFixCol(col, ev.toLower) {
 				return nil, false
 			}
 			if ev.toLower {
-				if curLB[col] == nil {
-					return nil, false
-				}
 				curUB[col] = new(big.Rat).Set(curLB[col])
 			} else {
-				if curUB[col] == nil {
-					return nil, false
-				}
 				curLB[col] = new(big.Rat).Set(curUB[col])
 			}
 			cIdx := col
@@ -788,7 +861,7 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 
 		case lpStepZeroObjEmptyColFix:
 			col := ev.col
-			if uint(col) >= uint(n) || curObj[col].Sign() != 0 {
+			if uint(col) >= uint(n) || curObj[col].Sign() != 0 || !isEmptyColInRows(col) {
 				return nil, false
 			}
 			valR, okV := exactRatFromFloat(ev.val)
@@ -878,6 +951,9 @@ func ExportLPPresolveCheckPayload(p *CompiledProblem) ([]byte, bool) {
 				cert.YReduced = ratSliceToPayloads(yProj)
 			}
 		}
+	}
+	if len(cert.XReduced) != red.numVars {
+		return nil, false
 	}
 
 	raw, err := json.Marshal(cert)
