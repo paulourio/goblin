@@ -130,6 +130,7 @@ private def readArgInput (arg : String) : IO (Except String String) := do
 end Apps.SimdCfgCheck
 
 open Apps.SimdCfgCheck in
+/-- CLI entry point for `simd-cfg-check`, verifying AMD64 SIMD control-flow and vector-hazard invariants. -/
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] =>

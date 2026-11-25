@@ -752,8 +752,11 @@ inductive Sense where
 
 /-- Linear constraint row over `Fin n`. -/
 structure RowSpec (n : Nat) where
+  /-- Linear coefficient for each variable column. -/
   coeffs : Fin n → Rat
+  /-- Relation sense (`≤`, `≥`, or `=`) of the constraint. -/
   sense : Sense
+  /-- Right-hand side constant of the constraint. -/
   rhs : Rat
 
 /-- Row satisfaction predicate at `x`. -/
@@ -766,10 +769,15 @@ def RowSpec.holds {n : Nat} (r : RowSpec n) (x : Fin n → Rat) : Prop :=
 
 /-- Mixed-integer linear program specification. -/
 structure MipSpec (n m : Nat) where
+  /-- Lower bound for each variable column. -/
   l : Fin n → Rat
+  /-- Upper bound for each variable column. -/
   u : Fin n → Rat
+  /-- Integrality indicator (`true` for integer variables). -/
   isInt : Fin n → Bool
+  /-- Linear objective coefficient for each variable column. -/
   obj : Fin n → Rat
+  /-- Linear constraint rows of the MIP. -/
   rows : Fin m → RowSpec n
 
 /-- Full MIP feasibility predicate. -/
@@ -784,7 +792,9 @@ def mipObj {n : Nat} (c x : Fin n → Rat) : Rat :=
 
 /-- Column automorphism preserving variable types, bounds, objective, and feasibility. -/
 structure Aut {n m : Nat} (P : MipSpec n m) where
+  /-- Forward column permutation on `Fin n`. -/
   perm : Fin n → Fin n
+  /-- Inverse column permutation on `Fin n`. -/
   inv : Fin n → Fin n
   left_inv : ∀ j : Fin n, inv (perm j) = j
   right_inv : ∀ j : Fin n, perm (inv j) = j
@@ -1021,26 +1031,41 @@ def ExtRat.isNonneg : ExtRat → Bool
 
 /-- Term descriptor for executable row activity evaluation (supporting `none` for `±∞`). -/
 structure ActivityTerm where
+  /-- Linear coefficient of the term. -/
   coeff : Rat
+  /-- Optional finite lower bound on the variable (`none` represents `-∞`). -/
   lb : Option Rat
+  /-- Optional finite upper bound on the variable (`none` represents `+∞`). -/
   ub : Option Rat
+  /-- Whether the variable is constrained to be integral. -/
   isInt : Bool
 
 /-- Per-term implied quotients and rounded bounds. -/
 structure ActivityTermOut where
+  /-- Residual quotient derived from the row upper bound and minimum other-term activity. -/
   quotUpper : Option Rat
+  /-- Residual quotient derived from the row lower bound and maximum other-term activity. -/
   quotLower : Option Rat
+  /-- Implied upper bound on the variable after integrality rounding, if finite. -/
   impliedUB : Option Rat
+  /-- Implied lower bound on the variable after integrality rounding, if finite. -/
   impliedLB : Option Rat
 
 /-- Full executable activity summary output matching `evalRowActivitySummary` + `residualQuotient`. -/
 structure ActivitySummaryOut where
+  /-- Number of terms contributing `-∞` to the minimum row activity. -/
   minInfCount : Nat
+  /-- Number of terms contributing `+∞` to the maximum row activity. -/
   maxInfCount : Nat
+  /-- Finite minimum row activity, or `none` if `minInfCount > 0`. -/
   minAct : Option Rat
+  /-- Finite maximum row activity, or `none` if `maxInfCount > 0`. -/
   maxAct : Option Rat
+  /-- Row slack `rhs - minAct`, when `minAct` is finite. -/
   slack : Option Rat
+  /-- Row deficit `rhs - maxAct`, when `maxAct` is finite. -/
   deficit : Option Rat
+  /-- Per-term residual quotients and implied bounds. -/
   terms : Array ActivityTermOut
 
 private def termMinOpt (t : ActivityTerm) : Option Rat :=
@@ -1107,10 +1132,15 @@ def evalActivitySummarySpec (rhs : Rat) (hasLo hasHi : Bool)
 
 /-- Sparse row representation for executable orbit verification. -/
 structure OrbitWorkRow where
+  /-- Whether this row is active in the working model. -/
   active : Bool
+  /-- Column indices of the sparse nonzero entries. -/
   cols : Array Nat
+  /-- Rational coefficients corresponding to `cols`. -/
   vals : Array Rat
+  /-- Constraint relation sense (`≤`, `≥`, or `=`). -/
   sense : Sense
+  /-- Right-hand side constant of the row. -/
   rhs : Rat
   deriving Repr, Inhabited
 

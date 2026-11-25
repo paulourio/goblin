@@ -42,6 +42,7 @@ RE_GNU_OBJDUMP_INSN = re.compile(r"^\s*([0-9a-f]+):\t([0-9a-f ]+?)\t")
 
 RE_LEAN_BYTE_CHUNKS = re.compile(
     r"def\s+(\w+)ByteChunks\s*:\s*List\s*\(List\s+UInt8\)\s*:=\s*\[(.*?)\]\s*\n"
+    r"(?:/--.*?-/\s*\n)?"
     r"def\s+\1Bytes",
     re.DOTALL,
 )

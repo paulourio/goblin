@@ -279,9 +279,9 @@ fi
 
 run_lake_build() {
     if command -v flock >/dev/null 2>&1; then
-        (cd formal && flock /tmp/goblin-formal-lake.lock lake build --wfail)
+        (cd formal && flock /tmp/goblin-formal-lake.lock bash -c 'lake build --wfail && lake lint')
     else
-        (cd formal && lake build --wfail)
+        (cd formal && lake build --wfail && lake lint)
     fi
 }
 

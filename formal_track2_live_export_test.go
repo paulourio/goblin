@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 )
 
 type liveRowMultPayload struct {
@@ -147,19 +148,60 @@ func rawCutPayload(cols []int, vals []float64, rhs float64) (track2BCutPayload, 
 	return track2BCutPayload{Terms: terms, RHS: rhsP}, nil
 }
 
-func feasibleSolutionsPayload(sols [][]float64) ([][]ratPayload, error) {
+func ratsToPayloads(vals []*big.Rat) []ratPayload {
+	row := make([]ratPayload, len(vals))
+	for j, r := range vals {
+		row[j] = bigRatToPayload(r)
+	}
+	return row
+}
+
+func feasibleSolutionsPayload(p *CompiledProblem, sols [][]float64) ([][]ratPayload, error) {
 	if len(sols) == 0 {
 		return nil, nil
 	}
+	var rp *viprRatProblem
+	var scratch *LPSolver
+	rpChecked := false
+	defer func() {
+		if scratch != nil {
+			scratch.Close()
+		}
+	}()
+	getScratch := func() *LPSolver {
+		if scratch == nil && p != nil {
+			scratch = NewLPSolver(p, nil)
+		}
+		return scratch
+	}
+
 	out := make([][]ratPayload, len(sols))
 	for i, s := range sols {
+		if p != nil && len(s) == p.numVars {
+			if xRat, ok := exactPrimalIfFeasible(p, s, true); ok {
+				out[i] = ratsToPayloads(xRat)
+				continue
+			}
+			if !rpChecked {
+				rpChecked = true
+				if built, okRP := buildVIPRRatProblem(p); okRP {
+					rp = built
+				}
+			}
+			if rp != nil {
+				if xRat, _, okRef := rp.refineExactIncumbent(s, getScratch); okRef && len(xRat) == p.numVars {
+					out[i] = ratsToPayloads(xRat)
+					continue
+				}
+			}
+		}
 		row := make([]ratPayload, len(s))
 		for j, v := range s {
-			p, err := float64ToPayload(v)
+			rpVal, err := float64ToPayload(v)
 			if err != nil {
 				return nil, err
 			}
-			row[j] = p
+			row[j] = rpVal
 		}
 		out[i] = row
 	}
@@ -313,13 +355,38 @@ func solveExactBasisTransposeRow(p *CompiledProblem, basis []int, rowIdx int) ([
 	return rho, true
 }
 
+// compactBaseRows returns the deduplicated subset of baseRows referenced by usedIdxs
+// in ascending index order together with a map from original row indices to compacted indices.
+func compactBaseRows(baseRows []track2BRowPayload, usedIdxs []int) ([]track2BRowPayload, map[int]int) {
+	seen := make(map[int]struct{}, len(usedIdxs))
+	sorted := make([]int, 0, len(usedIdxs))
+	for _, idx := range usedIdxs {
+		if idx < 0 || idx >= len(baseRows) {
+			continue
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		sorted = append(sorted, idx)
+	}
+	slices.Sort(sorted)
+	compact := make([]track2BRowPayload, len(sorted))
+	remap := make(map[int]int, len(sorted))
+	for newIdx, oldIdx := range sorted {
+		compact[newIdx] = baseRows[oldIdx]
+		remap[oldIdx] = newIdx
+	}
+	return compact, remap
+}
+
 // exportObserverItems converts captured production cut records into canonical cuts-check JSONL items.
 func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols [][]float64) ([][]byte, error) {
 	isInt, lb, ub, baseRows, err := problemBaseMetaPayloads(p)
 	if err != nil {
 		return nil, err
 	}
-	solsPayload, err := feasibleSolutionsPayload(feasibleSols)
+	solsPayload, err := feasibleSolutionsPayload(p, feasibleSols)
 	if err != nil {
 		return nil, err
 	}
@@ -434,13 +501,21 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 		if err != nil {
 			return nil, err
 		}
+		usedIdxs := make([]int, len(rhoEntries))
+		for idx, entry := range rhoEntries {
+			usedIdxs[idx] = entry.RowIdx
+		}
+		subRows, rowRemap := compactBaseRows(baseRows, usedIdxs)
+		for idx := range rhoEntries {
+			rhoEntries[idx].RowIdx = rowRemap[rhoEntries[idx].RowIdx]
+		}
 		obj := map[string]any{
 			"op":         "gmi-check",
 			"numVars":    n,
 			"isInt":      isInt,
 			"lb":         lb,
 			"ub":         ub,
-			"baseRows":   baseRows,
+			"baseRows":   subRows,
 			"basicCol":   rec.basicCol,
 			"rho":        rhoEntries,
 			"colAtUpper": rec.colAtUpper,
@@ -503,13 +578,23 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 		if err != nil {
 			return nil, err
 		}
+		var usedIdxs []int
+		if len(rec.aggMults) > 0 {
+			usedIdxs = make([]int, len(rec.aggMults))
+			for idx, rm := range rec.aggMults {
+				usedIdxs[idx] = rm.rowIdx
+			}
+		} else if rec.rowIdx >= 0 {
+			usedIdxs = []int{rec.rowIdx}
+		}
+		subRows, rowRemap := compactBaseRows(baseRows, usedIdxs)
 		obj := map[string]any{
 			"op":       "cover-check",
 			"numVars":  n,
 			"isInt":    isInt,
 			"lb":       lb,
 			"ub":       ub,
-			"baseRows": baseRows,
+			"baseRows": subRows,
 			"row": track2BRowPayload{
 				Terms: rowTerms,
 				Sense: senseName(rec.rowSense),
@@ -528,11 +613,11 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 				if err != nil {
 					return nil, err
 				}
-				mults[idx] = liveRowMultPayload{RowIdx: rm.rowIdx, Mu: mp}
+				mults[idx] = liveRowMultPayload{RowIdx: rowRemap[rm.rowIdx], Mu: mp}
 			}
 			obj["aggMultipliers"] = mults
 		} else if rec.rowIdx >= 0 {
-			obj["rowIdx"] = rec.rowIdx
+			obj["rowIdx"] = rowRemap[rec.rowIdx]
 		}
 		if len(solsPayload) > 0 {
 			obj["solutions"] = solsPayload
@@ -554,14 +639,15 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 		if err != nil {
 			return nil, err
 		}
+		subRows, rowRemap := compactBaseRows(baseRows, []int{rec.rowIdx})
 		obj := map[string]any{
 			"op":        "vub-check",
 			"numVars":   n,
 			"isInt":     isInt,
 			"lb":        lb,
 			"ub":        ub,
-			"baseRows":  baseRows,
-			"rowIdx":    rec.rowIdx,
+			"baseRows":  subRows,
+			"rowIdx":    rowRemap[rec.rowIdx],
 			"binCol":    rec.binCol,
 			"targetCol": rec.targetCol,
 			"effUB":     effUB,
@@ -580,6 +666,11 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 
 	// 4. Lot-sizing (l, S) certificates (universal derivation over baseRows + column distinctness).
 	for _, rec := range obs.lotSizings {
+		usedIdxs := make([]int, 0, 2*len(rec.nodes))
+		for _, nd := range rec.nodes {
+			usedIdxs = append(usedIdxs, nd.flowRowIdx, nd.vubRowIdx)
+		}
+		subRows, rowRemap := compactBaseRows(baseRows, usedIdxs)
 		nodes := make([]liveLotSizingNodePayload, len(rec.nodes))
 		for idx, nd := range rec.nodes {
 			demP, err := float64ToPayload(nd.demand)
@@ -599,7 +690,13 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 				return nil, err
 			}
 			flIdx := nd.flowRowIdx
+			if mapped, ok := rowRemap[flIdx]; ok {
+				flIdx = mapped
+			}
 			vbIdx := nd.vubRowIdx
+			if mapped, ok := rowRemap[vbIdx]; ok {
+				vbIdx = mapped
+			}
 			nodes[idx] = liveLotSizingNodePayload{
 				ProdCol:    nd.prodCol,
 				InvOutCol:  nd.invOutCol,
@@ -639,7 +736,7 @@ func exportObserverItems(p *CompiledProblem, obs *cutCertObserver, feasibleSols 
 			"isInt":    isInt,
 			"lb":       lb,
 			"ub":       ub,
-			"baseRows": baseRows,
+			"baseRows": subRows,
 			"invInCol": invIn,
 			"nodes":    nodes,
 			"cutDem":   cutDemP,

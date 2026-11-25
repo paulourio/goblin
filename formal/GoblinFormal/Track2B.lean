@@ -1020,32 +1020,45 @@ theorem cut_drop_scale_sound {n : Nat} {v kept lb ub x : Fin n → Rat}
 
 /-- Sparse linear term `(col, val)`. -/
 structure SparseTerm where
+  /-- Zero-based column index of the variable. -/
   col : Nat
+  /-- Rational coefficient multiplying `x[col]`. -/
   val : Rat
   deriving Repr, Inhabited
 
 /-- Sparse linear cut `∑ val * x[col] ≤ rhs`. -/
 structure CutSpec where
+  /-- Sparse nonzero terms on the left-hand side of the cut. -/
   terms : Array SparseTerm
+  /-- Right-hand side upper bound of the cut. -/
   rhs : Rat
   deriving Repr, Inhabited
 
 /-- Sparse linear constraint row. -/
 structure RowSpec where
+  /-- Sparse nonzero terms on the left-hand side of the row. -/
   terms : Array SparseTerm
+  /-- Constraint relation sense (`≤`, `≥`, or `=`). -/
   sense : ConstraintSense
+  /-- Right-hand side constant of the row. -/
   rhs : Rat
   deriving Repr, Inhabited
 
 /-- Mixed-integer linear program specification for structural cut checks. -/
 structure MIPSpec where
+  /-- Total number of decision variables. -/
   numVars : Nat
+  /-- Integrality flag for each variable (`true` for integer variables). -/
   isInt : Array Bool
+  /-- Optional finite lower bound for each variable (`none` means `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional finite upper bound for each variable (`none` means `+∞`). -/
   ub : Array (Option Rat)
+  /-- Linear constraint rows of the MIP. -/
   rows : Array RowSpec
   deriving Repr, Inhabited
 
+/-- Evaluates a sparse linear combination `∑ t.val * x[t.col]`, failing if any column index is out of bounds. -/
 def evalTerms (terms : Array SparseTerm) (x : Array Rat) : Except String Rat := do
   let mut acc : Rat := 0
   for t in terms do
@@ -1055,6 +1068,7 @@ def evalTerms (terms : Array SparseTerm) (x : Array Rat) : Except String Rat := 
       throw s!"column index {t.col} out of bounds (numVars={x.size})"
   pure acc
 
+/-- Evaluates the dense dot product `∑ a[i] * x[i]`, failing if the array lengths differ. -/
 def evalArrayDot (a x : Array Rat) : Except String Rat := do
   if a.size != x.size then
     throw s!"vector length mismatch: {a.size} vs {x.size}"
@@ -1064,12 +1078,14 @@ def evalArrayDot (a x : Array Rat) : Except String Rat := do
       acc := acc + a[i]! * x[i]!
   pure acc
 
+/-- Boolean test checking whether `lhs` satisfies `sense` against `rhs`. -/
 def satisfiesSenseBool (lhs : Rat) (sense : ConstraintSense) (rhs : Rat) : Bool :=
   match sense with
   | .le => decide (lhs ≤ rhs)
   | .eq => decide (lhs == rhs)
   | .ge => decide (rhs ≤ lhs)
 
+/-- Checks that `x` is a feasible solution to `mip` (dimensions, integrality, bounds, and all rows). -/
 def checkMIPFeasible (mip : MIPSpec) (x : Array Rat) : Except String Unit := do
   if x.size != mip.numVars then
     throw s!"solution length {x.size} != numVars {mip.numVars}"
@@ -1095,6 +1111,7 @@ def checkMIPFeasible (mip : MIPSpec) (x : Array Rat) : Except String Unit := do
     if !satisfiesSenseBool lhs row.sense row.rhs then
       throw s!"row {idx} violated: lhs={lhs} sense={repr row.sense} rhs={row.rhs}"
 
+/-- Evaluates whether `cut` is satisfied (`lhs ≤ cut.rhs`) at point `x`. -/
 def checkCutAtPoint (cut : CutSpec) (x : Array Rat) : Except String Bool := do
   let lhs ← evalTerms cut.terms x
   pure (decide (lhs ≤ cut.rhs))

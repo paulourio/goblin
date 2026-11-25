@@ -92,6 +92,7 @@ private def runBatch (path : String) : IO UInt32 :=
 
 end Apps.ViprCheck
 
+/-- CLI entry point for `vipr-check`, verifying VIPR branch-and-bound and presolve proof traces. -/
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] =>

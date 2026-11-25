@@ -28,7 +28,9 @@ def hasInfeasibleIntegerEqRowChunks : List (List UInt32) := [
   [0xf84107fe, 0xd65f03c0, 0xb24003e0, 0xf85f83fd, 0xf84107fe, 0xd65f03c0, 0x97fa65c6, 0x9ac50c9b, 0x9b059367, 0xaa0503e4, 0xaa0703e5, 0xb5ffff85, 0x17ffffa5, 0x97fa65bf, 0x97fa65be, 0x97fa65bd],
   [0x97fa65bc, 0x97fa65bb, 0x97fa65ba, 0x97fa65b9, 0xd503201f, 0xf90007e0, 0xaa1e03e3, 0x97fa5d7d, 0xf94007e0, 0x17ffff67]
 ]
+/-- Flattened ELF `.text` instruction words for `hasInfeasibleIntegerEqRow`. -/
 def hasInfeasibleIntegerEqRowWords : Array UInt32 := ⟨hasInfeasibleIntegerEqRowChunks.flatten⟩
+/-- External call-target map for `hasInfeasibleIntegerEqRow`. -/
 def hasInfeasibleIntegerEqRowTargets (idx : Nat) : Option String :=
   match idx with
   | 134 | 141 | 142 | 143 | 144 | 145 | 146 | 147 => some "runtime.panicBounds"
@@ -59,7 +61,9 @@ def augmentRowScalarChunks : List (List UInt32) := [
   [0xaa1603e1, 0x97faa87f, 0xaa1003e0, 0x97faa87d, 0x97faa87c, 0xaa1303e0, 0x97faa87a, 0x97faa879, 0x97faa878, 0x97faa877, 0x97faa876, 0xd503201f, 0xa90687e0, 0xa9078fe2, 0xa90897e4, 0xa9099fe6],
   [0xa90aa7e8, 0xa90bafea, 0xa90cb7ec, 0xf9006fee, 0xaa1e03e3, 0x97faa033, 0xa94687e0, 0xa9478fe2, 0xa94897e4, 0xa9499fe6, 0xa94aa7e8, 0xa94bafea, 0xa94cb7ec, 0xf9406fee, 0x17fffeb2]
 ]
+/-- Flattened ELF `.text` instruction words for `augmentRowScalar`. -/
 def augmentRowScalarWords : Array UInt32 := ⟨augmentRowScalarChunks.flatten⟩
+/-- External call-target map for `augmentRowScalar`. -/
 def augmentRowScalarTargets (idx : Nat) : Option String :=
   match idx with
   | 59 => some "internal/simd.InitReducedRow64"
@@ -80,7 +84,9 @@ def initReducedRow64Chunks : List (List UInt32) := [
   [0x9e6703e1, 0x1e604020, 0xf85f83fd, 0xf84107fe, 0xd65f03c0, 0x97fad99f, 0xd503201f, 0xa90087e0, 0xa9018fe2, 0xa90297e4, 0xa9039fe6, 0xf90027e8, 0xfd002be0, 0xaa1e03e3, 0x97fad15e, 0xa94087e0],
   [0xa9418fe2, 0xa94297e4, 0xa9439fe6, 0xf94027e8, 0xfd402be0, 0x17ffff9b]
 ]
+/-- Flattened ELF `.text` instruction words for `InitReducedRow64`. -/
 def initReducedRow64Words : Array UInt32 := ⟨initReducedRow64Chunks.flatten⟩
+/-- External call-target map for `InitReducedRow64`. -/
 def initReducedRow64Targets (idx : Nat) : Option String :=
   match idx with
   | 85 => some "runtime.panicBounds"
@@ -106,7 +112,9 @@ def refillQueueIndirectScalarChunks : List (List UInt32) := [
   [0xd65f03c0, 0x97faa9c7, 0x97faa9c6, 0x97faa9c5, 0x97faa9c4, 0x97faa9c3, 0x97faa9c2, 0x97faa9c1, 0xd503201f, 0xa90087e0, 0xa9018fe2, 0xa90297e4, 0xa9039fe6, 0xa904a7e8, 0xf9002fea, 0xaa1e03e3],
   [0x97faa180, 0xa94087e0, 0xa9418fe2, 0xa94297e4, 0xa9439fe6, 0xa944a7e8, 0xf9402fea, 0x17ffff09]
 ]
+/-- Flattened ELF `.text` instruction words for `refillQueueIndirectScalar`. -/
 def refillQueueIndirectScalarWords : Array UInt32 := ⟨refillQueueIndirectScalarChunks.flatten⟩
+/-- External call-target map for `refillQueueIndirectScalar`. -/
 def refillQueueIndirectScalarTargets (idx : Nat) : Option String :=
   match idx with
   | 179 | 180 | 181 | 182 | 225 | 226 | 227 | 228 | 229 | 230 | 231 => some "runtime.panicBounds"
@@ -123,7 +131,9 @@ def relaxRowIndirectScalarChunks : List (List UInt32) := [
   [0xf84107fe, 0xd65f03c0, 0x97faaac6, 0x97faaac5, 0x97faaac4, 0x97faaac3, 0x97faaac2, 0x97faaac1, 0x97faaac0, 0xd503201f, 0xa90307e0, 0xa9040fe2, 0xa90517e4, 0xa9061fe6, 0xa90727e8, 0xa9082fea],
   [0xa90937ec, 0xa90a3fee, 0x6d0b07e0, 0xaa1e03e3, 0x97faa27c, 0xa94307e0, 0xa9440fe2, 0xa94517e4, 0xa9461fe6, 0xa94727e8, 0xa9482fea, 0xa94937ec, 0xa94a3fee, 0x6d4b07e0, 0x17ffff92]
 ]
+/-- Flattened ELF `.text` instruction words for `relaxRowIndirectScalar`. -/
 def relaxRowIndirectScalarWords : Array UInt32 := ⟨relaxRowIndirectScalarChunks.flatten⟩
+/-- External call-target map for `relaxRowIndirectScalar`. -/
 def relaxRowIndirectScalarTargets (idx : Nat) : Option String :=
   match idx with
   | 82 | 83 | 84 | 85 | 86 | 87 | 88 => some "runtime.panicBounds"
@@ -198,6 +208,7 @@ theorem everyWithIdx_getElem?_zero {α : Type} (xs : List α) (p : Nat → α �
   intro k a hk
   simpa using everyWithIdx_getElem? 0 xs p hAll k a hk
 
+/-- Return `true` iff every non-final chunk has length 16 and the final chunk has length at most 16. -/
 def allChunksBounded16 {α : Type} : List (List α) → Bool
   | [] => true
   | [last] => last.length <= 16
@@ -231,6 +242,7 @@ theorem chunks16_len_of_all {α : Type} (chunks : List (List α))
         have hRec := ih hOk.2 i' c' hc'
         exact ⟨fun h => hRec.1 (by simp only [List.length_cons] at h ⊢; omega), hRec.2⟩
 
+/-- Compute the total number of elements across a list of chunks. -/
 def chunksSumLen {α : Type} : List (List α) → Nat
   | [] => 0
   | c :: cs => c.length + chunksSumLen cs
@@ -331,6 +343,7 @@ def stepChunked (chunks : List (List UInt32)) (cSz progLen : Nat)
     | none => { s with status := .trapIllegal }
   else { s with status := .trapIllegal }
 
+/-- Execute up to `fuel` steps of a chunked ARM64 program from state `s`. -/
 def runChunked (fuel : Nat) (chunks : List (List UInt32)) (cSz progLen : Nat)
     (ext : Nat → Option String) (s : Arm64State) : Arm64State :=
   match fuel with
@@ -574,10 +587,12 @@ def insnDecodedValid : Arm64Insn → Bool
   | .fpBinaryD op _ _ _ => isSupportedFpBinary op
   | _ => true
 
+/-- Return `true` iff the PC-relative branch target `idx + imm` falls outside `[0, progSize)`. -/
 def isOutOfBoundsRel (progSize idx : Nat) (imm : Int) : Bool :=
   let t : Int := (idx : Int) + imm
   !(0 <= t && t.toNat < progSize)
 
+/-- Check that a single decoded instruction satisfies Zero-GC safety (allowlisted calls, valid opcode, resolved external branches). -/
 def zeroGcInsnOk (progSize : Nat) (ext : Nat → Option String) (idx : Nat) (insn : Arm64Insn) : Bool :=
   let extClean :=
     match ext idx with
@@ -746,20 +761,25 @@ inductive StackPrologueKind where
   | largeFrame (subImm trapStart safeLimit : Nat)
   deriving DecidableEq, Repr
 
+/-- Instruction index of the stack-guard conditional branch (`B.ls`) in the prologue. -/
 def StackPrologueKind.guardIdx : StackPrologueKind → Nat
   | .smallFrame _ _ => 2
   | .largeFrame _ _ _ => 3
 
+/-- Stack headroom in bytes required past `g.stackguard0` to bypass `runtime.morestack`. -/
 def StackPrologueKind.headroomBytes : StackPrologueKind → Nat
   | .smallFrame _ _ => 32
   | .largeFrame subImm _ _ => subImm
 
+/-- Exclusive upper bound on instruction indices belonging to the stack-guarded function body. -/
 def StackPrologueKind.safeLimit : StackPrologueKind → Nat
   | .smallFrame _ s | .largeFrame _ _ s => s
 
+/-- Return `true` iff `sym` is a Go `runtime.morestack` entry symbol. -/
 def isMorestackSym (sym : String) : Bool :=
   sym == "runtime.morestack_noctxt.abi0" || sym == "runtime.morestack"
 
+/-- Compute the intra-procedural CFG successor instruction indices of `insn` at `idx`. -/
 def insnSuccessors (progSize : Nat) (ext : Nat → Option String) (idx : Nat) : Arm64Insn → List Nat
   | .ret _ | .unknown _ => []
   | .b imm26 =>
@@ -835,6 +855,7 @@ def isAllowedPrologueOrEpilogueSP (getInsn : Nat → Option Arm64Insn)
     getInsn (idx + 1) == some (.ret 30#5)
   | _ => false
 
+/-- Check that a body instruction stays within the stack-guarded region, respects `SP` discipline, and never invokes `morestack`. -/
 def bodyInsnStackSafe (progSize guardIdx safeLimit maxFrameBytes : Nat)
     (getInsn : Nat → Option Arm64Insn) (ext : Nat → Option String)
     (idx : Nat) (insn : Arm64Insn) : Bool :=
@@ -909,6 +930,7 @@ private def computeSafeLimit (getInsn : Nat → Option Arm64Insn) (ext : Nat →
     | _, _ => trapStart
   else trapStart
 
+/-- Verify that a decoded ARM64 routine has a valid Go stack-guard prologue and a stack-safe body using a custom instruction lookup `getInsn`. -/
 def checkStackGuardWith (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
     (insns : List Arm64Insn) (ext : Nat → Option String) : Except String StackPrologueKind :=
   if !(getInsn 0 == some (.ldrStrUImm true false 8 16 16#5 28#5)) then
@@ -959,6 +981,7 @@ def checkStackGuardWith (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
         | _ => .error "expected B.ls after CMP R16, R17 at [3]"
     | _ => .error "unrecognized ARM64 Go stack-check prologue sequence"
 
+/-- Verify that a decoded ARM64 program array has a valid Go stack-guard prologue and stack-safe body. -/
 def checkStackGuard (prog : Array Arm64Insn) (ext : Nat → Option String) :
     Except String StackPrologueKind :=
   checkStackGuardWith prog.size (fun i => prog[i]?) prog.toList ext
@@ -1427,6 +1450,7 @@ theorem checkStackGuard_sound (prog : Array Arm64Insn) (ext : Nat → Option Str
     ∀ fuel : Nat, (runArm64 fuel prog ext s).status ≠ .trapMorestack :=
   checkStackGuardWith_sound prog (fun i => prog[i]?) ext kind (fun _ => rfl) hOk s hRun hPc hG hSp hGuard
 
+/-- Return `true` iff `cond` is an unsigned bounds-check condition (`CS`, `CC`, `HI`, or `LS`). -/
 def isBoundsCond : Arm64Cond → Bool
   | .cs | .cc | .hi | .ls => true
   | _ => false
@@ -1443,10 +1467,12 @@ def isFlagCmpInsn : Arm64Insn → Bool
     rn != rm && rn != 31#5 && rm != 31#5
   | _ => false
 
+/-- Return `true` iff an optional instruction is a non-degenerate flag-setting comparison (`isFlagCmpInsn`). -/
 def isFlagCmpOpt : Option Arm64Insn → Bool
   | some insn => isFlagCmpInsn insn
   | none => false
 
+/-- Return `true` iff an optional instruction is an unconditional branch (`B`). -/
 def isUncondBOpt : Option Arm64Insn → Bool
   | some (.b _) => true
   | _ => false
@@ -1472,9 +1498,11 @@ def isVerifiedBoundsGuard (getInsn : Nat → Option Arm64Insn) (src dst : Nat) :
     brGuard || fallGuard
   | _ => false
 
+/-- Return `true` iff `sym` is the Go `runtime.panicBounds` symbol. -/
 def isPanicBoundsSym (sym : String) : Bool :=
   sym == "runtime.panicBounds"
 
+/-- Check that instruction `idx` respects the `inPb` panic-bounds cold-region certificate and guards every entry edge. -/
 def panicBoundsInsnSafe (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
     (ext : Nat → Option String) (inPb : Nat → Bool) (idx : Nat) (insn : Arm64Insn) : Bool :=
   let noUnk := insnDecodedValid insn
@@ -1511,6 +1539,7 @@ def panicBoundsInsnSafe (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
       else true
     noUnk && pbCovered && noOutPb && edgesGuarded && fallSafe
 
+/-- Verify a panic-bounds cold-region certificate `inPb` over a decoded routine using instruction lookup `getInsn`. -/
 def verifyPanicBoundsCertWith (progSize : Nat) (getInsn : Nat → Option Arm64Insn)
     (insns : List Arm64Insn) (ext : Nat → Option String) (inPb : Nat → Bool) : Except String Unit :=
   if progSize > 0 && inPb 0 then
@@ -1871,12 +1900,17 @@ private theorem memInList_of_all_lt (xs : List Nat) (hi j : Nat)
     simp only [List.contains_cons, hNe, Bool.false_or]
     exact ih hAll.2
 
+/-- Cold `runtime.panicBounds` instruction indices for `hasInfeasibleIntegerEqRow`. -/
 def hasInfeasiblePbIndices : List Nat := [134, 141, 142, 143, 144, 145, 146, 147]
+/-- Cold `runtime.panicBounds` instruction indices for `augmentRowScalar`. -/
 def augmentRowScalarPbIndices : List Nat := [
   272, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314
 ]
+/-- Cold `runtime.panicBounds` instruction indices for `InitReducedRow64`. -/
 def initReducedRow64PbIndices : List Nat := [77, 85]
+/-- Cold `runtime.panicBounds` instruction indices for `refillQueueIndirectScalar`. -/
 def refillQueuePbIndices : List Nat := [179, 180, 181, 182, 225, 226, 227, 228, 229, 230, 231]
+/-- Cold `runtime.panicBounds` instruction indices for `relaxRowIndirectScalar`. -/
 def relaxRowPbIndices : List Nat := [82, 83, 84, 85, 86, 87, 88]
 
 private theorem checkZeroGC_of_chunks (chunks : List (List UInt32)) (ext : Nat → Option String) (sz : Nat)
@@ -2208,16 +2242,19 @@ theorem augmentRowScalar_done_nil_no_selectnbrecv (s : Arm64State)
 
 /-! ### Concrete Execution Bridges (`WordOverlay` and Exact `Rat` Evaluation) -/
 
+/-- Insert or update the 64-bit word at 8-byte-aligned address `k` in a sparse word overlay list. -/
 def upsertWord (xs : List (BitVec 64 × BitVec 64)) (k v : BitVec 64) : List (BitVec 64 × BitVec 64) :=
   match xs with
   | [] => [(k, v)]
   | (k', v') :: rest => if k == k' then (k, v) :: rest else (k', v') :: upsertWord rest k v
 
+/-- Look up the 64-bit word at 8-byte-aligned address `k` in a sparse word overlay list. -/
 def lookupWord (xs : List (BitVec 64 × BitVec 64)) (k : BitVec 64) : Option (BitVec 64) :=
   match xs with
   | [] => none
   | (k', v') :: rest => if k == k' then some v' else lookupWord rest k
 
+/-- Evaluate byte memory at address `a` by consulting the little-endian 64-bit word overlay `ws` before falling back to `base`. -/
 def evalWordOverlay (base : BitVec 64 → BitVec 8) (ws : List (BitVec 64 × BitVec 64)) (a : BitVec 64) : BitVec 8 :=
   match lookupWord ws (a &&& 0xfffffffffffffff8#64) with
   | some w => (w >>> ((a &&& 7#64) * 8#64)).extractLsb' 0 8
@@ -2602,8 +2639,10 @@ private theorem f64Add_zero_left (b : BitVec 64) (q : Rat)
   simp only [hNaN, hPosInf, hNegInf, hFlags0.1, hFlags0.2.1, hFlags0.2.2, Bool.false_and, Bool.or_false,
     Bool.false_eq_true, ↓reduceIte, hZ0, hRat, hNegZ, Rat.zero_add, hBack]
 
+/-- Read register `r` from a 32-element list, defaulting to `0#64` if out of bounds. -/
 def lookup32 (rs : List (BitVec 64)) (r : BitVec 5) : BitVec 64 := rs.getD r.toNat 0#64
 
+/-- Materialize a total register function `f` as a 32-element list. -/
 def regListOf (f : BitVec 5 → BitVec 64) : List (BitVec 64) :=
   (List.range 32).map fun i => f (BitVec.ofNat 5 i)
 
@@ -2650,17 +2689,27 @@ private theorem list_set_idem {α : Type} (xs : List α) (i : Nat) (v : α) :
 
 /-- Concrete list-backed ARM64 execution state using explicit sparse word memory overlays. -/
 structure OverlayState where
+  /-- General-purpose register file (`X0`–`X31`) stored as a 32-element list. -/
   regs : List (BitVec 64)
+  /-- 64-bit floating-point register file (`D0`–`D31`) stored as a 32-element list. -/
   fpRegs : List (BitVec 64)
+  /-- Stack pointer (`SP`). -/
   sp : BitVec 64
+  /-- Processor condition flags (`NZCV`). -/
   nzcv : NZCV
+  /-- Go runtime goroutine `g.stackguard0` limit. -/
   gStackGuard0 : BitVec 64
+  /-- Sparse 8-byte-aligned 64-bit word memory overlay list. -/
   ws : List (BitVec 64 × BitVec 64)
+  /-- Current instruction index (word offset from `baseAddr`). -/
   pcIdx : Nat
+  /-- Base virtual address of the routine's `.text` segment. -/
   baseAddr : BitVec 64
+  /-- Current execution status. -/
   status : ExecStatus
   deriving DecidableEq, Repr, Inhabited
 
+/-- Lift a concrete `OverlayState` into an `Arm64State` over backing byte memory `base`. -/
 def OverlayState.toArm64 (base : BitVec 64 → BitVec 8) (c : OverlayState) : Arm64State :=
   { regs := lookup32 c.regs
   , sp := c.sp
@@ -2672,6 +2721,7 @@ def OverlayState.toArm64 (base : BitVec 64 → BitVec 8) (c : OverlayState) : Ar
   , baseAddr := c.baseAddr
   , status := c.status }
 
+/-- Project an `Arm64State` together with its explicit word overlay `ws` into an `OverlayState`. -/
 def OverlayState.ofArm64 (ws : List (BitVec 64 × BitVec 64)) (s : Arm64State) : OverlayState :=
   { regs := regListOf s.regs
   , fpRegs := regListOf s.fpRegs
@@ -2701,6 +2751,7 @@ private theorem toArm64_with_ctrl (base : BitVec 64 → BitVec 8) (c : OverlaySt
     { c.toArm64 base with pcIdx := p, baseAddr := b, status := st } =
       ({ c with pcIdx := p, baseAddr := b, status := st }).toArm64 base := rfl
 
+/-- Return `true` iff `insn` does not store to memory (leaving `mem` unchanged). -/
 def isPureNonStoreInsn : Arm64Insn → Bool
   | .ldrStrPair false .. => false
   | .ldrStrUImm false .. => false
@@ -2799,11 +2850,12 @@ private theorem execArm64Insn_pure_mem (progLen : Nat) (ext : Nat → Option Str
   case nop => rfl
   case ret _ => unfold execArm64Insn; dsimp only; split <;> rfl
   case unknown _ => rfl
-  case fpUnaryD _ _ _ => unfold execArm64Insn; dsimp only; split <;> first | rfl | simp only [advancePc_mem, writeFp_mem]
-  case fpBinaryD _ _ _ _ => unfold execArm64Insn; dsimp only; split <;> first | rfl | simp only [advancePc_mem, writeFp_mem]
+  case fpUnaryD _ _ _ => unfold execArm64Insn; dsimp only; split <;> rfl
+  case fpBinaryD _ _ _ _ => unfold execArm64Insn; dsimp only; split <;> rfl
   all_goals
     unfold execArm64Insn; dsimp only; simp only [advancePc_mem, writeGpr_mem]
 
+/-- Execute a single 8-byte-aligned store instruction directly against an `OverlayState`'s word overlay. -/
 def stepStoreOverlay (base : BitVec 64 → BitVec 8) (c : OverlayState) (insn : Arm64Insn) : Option OverlayState :=
   let s := c.toArm64 base
   match insn with
@@ -2903,6 +2955,7 @@ private theorem stepStoreOverlay_sound (progLen : Nat) (ext : Nat → Option Str
       rw [hMemEq, hW, toArm64_ofArm64]; intro a; rfl
     · contradiction
 
+/-- Execute one ARM64 instruction step on an `OverlayState` over a chunked program. -/
 def stepOverlay (chunks : List (List UInt32)) (progLen : Nat) (ext : Nat → Option String)
     (base : BitVec 64 → BitVec 8) (c : OverlayState) : Option OverlayState :=
   if c.status != .running then some c
@@ -2917,6 +2970,7 @@ def stepOverlay (chunks : List (List UInt32)) (progLen : Nat) (ext : Nat → Opt
         stepStoreOverlay base c insn
   else some { c with status := .trapIllegal }
 
+/-- Execute up to `fuel` overlay steps over a chunked ARM64 program from `c`. -/
 def runOverlay (fuel : Nat) (chunks : List (List UInt32)) (progLen : Nat) (ext : Nat → Option String)
     (base : BitVec 64 → BitVec 8) (c : OverlayState) : Option OverlayState :=
   match fuel with
@@ -3047,8 +3101,10 @@ private theorem runChunked_fpToInt64 (chunks : List (List UInt32)) (progLen : Na
   · rfl
   · rfl
 
+/-- All-zero backing byte memory for concrete overlay executions. -/
 def zeroBase : BitVec 64 → BitVec 8 := fun _ => 0#8
 
+/-- Build a 32-element register list from sparse `(index, value)` pairs, defaulting unspecified entries to `0#64`. -/
 def sparse32 (ps : List (Nat × BitVec 64)) : List (BitVec 64) :=
   (List.range 32).map fun i => match ps.find? (fun p => p.1 == i) with | some (_, v) => v | none => 0#64
 
@@ -3201,6 +3257,7 @@ private theorem f64ToInt_3 : f64ToInt64 0x4008000000000000#64 = 3#64 :=
 private theorem f64ToInt_4 : f64ToInt64 0x4010000000000000#64 = 4#64 :=
   f64ToInt64_exact _ _ 4 4 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
 
+/-- Initial sparse 64-bit word memory overlay for the concrete `augmentRowScalar` execution witness. -/
 def augPairs : List (BitVec 64 × BitVec 64) :=
   [ (0x399d98#64, 0x7ff0000000000000#64)
   , (0x21000#64, 0x3ff0000000000000#64), (0x21008#64, 0x4014000000000000#64)
@@ -3213,6 +3270,7 @@ def augPairs : List (BitVec 64 × BitVec 64) :=
   , (0x80038#64, 0x27000#64), (0x80040#64, 2#64), (0x80048#64, 2#64)
   , (0x80050#64, 0x28000#64), (0x80058#64, 2#64), (0x80060#64, 2#64) ]
 
+/-- Initial `OverlayState` for the concrete `augmentRowScalar` execution witness. -/
 def augOverlayInit : OverlayState :=
   { regs := sparse32 [(0, 0#64), (1, 2#64), (2, 0x21000#64), (3, 4#64), (4, 4#64),
       (5, 0x22000#64), (6, 2#64), (7, 2#64), (8, 0x23000#64), (9, 2#64),
@@ -3257,6 +3315,7 @@ private def augFin : OverlayState :=
     gStackGuard0 := 0x70000#64, ws := [(0x399d98#64, 0x7ff0000000000000#64), (0x21000#64, 0x3ff0000000000000#64), (0x21008#64, 0x4014000000000000#64), (0x21010#64, 0x4000000000000000#64), (0x21018#64, 0x4010000000000000#64), (0x25000#64, 0#64), (0x25008#64, 0xffffffffffffffff#64), (0x26000#64, 0#64), (0x26008#64, 0xffffffffffffffff#64), (0x27000#64, 0#64), (0x27008#64, 0xffffffffffffffff#64), (0x80008#64, 0x25000#64), (0x80010#64, 0x2#64), (0x80018#64, 0x2#64), (0x80020#64, 0x26000#64), (0x80028#64, 0x2#64), (0x80030#64, 0x2#64), (0x80038#64, 0x27000#64), (0x80040#64, 0x2#64), (0x80048#64, 0x2#64), (0x80050#64, 0x28000#64), (0x80058#64, 0x2#64), (0x80060#64, 0x2#64), (0x7ff10#64, 0xdeadbeef#64), (0x7ff08#64, 0#64), (0x80078#64, 0x21000#64), (0x80090#64, 0x22000#64), (0x800a8#64, 0x23000#64), (0x800c0#64, 0x24000#64), (0x80068#64, 0#64), (0x80070#64, 0x2#64), (0x800d8#64, 0#64), (0x80098#64, 0x2#64), (0x800d0#64, 0x2#64), (0x800b8#64, 0x2#64), (0x80088#64, 0x4#64), (0x80080#64, 0x4#64), (0x7ff00#64, 0x1f06b0#64), (0x7fef8#64, 0x7ff08#64), (0x7ff18#64, 0x24000#64), (0x7ff30#64, 0x21000#64), (0x7ff48#64, 0x23000#64), (0x24000#64, 0x3ff0000000000000#64), (0x24008#64, 0x4014000000000000#64), (0x28000#64, 0#64), (0x22000#64, 0x3ff0000000000000#64)],
     pcIdx := 120, baseAddr := 0x1f05c0#64, status := ExecStatus.returned }
 
+/-- Initial sparse 64-bit word memory overlay for the concrete `hasInfeasibleIntegerEqRow` execution witness with RHS bit pattern `rhsBits`. -/
 def hasInfPairs (rhsBits : BitVec 64) : List (BitVec 64 × BitVec 64) :=
   [ (0x3998f0#64, 0x41cdcd6500000000#64), (0x399a70#64, 0x3e7ad7f29abcaf48#64)
   , (0x399a80#64, 0x3eb0c6f7a0b5ed8d#64), (0x399d40#64, 0x43d0000000000000#64)
@@ -3268,6 +3327,7 @@ def hasInfPairs (rhsBits : BitVec 64) : List (BitVec 64 × BitVec 64) :=
   , (0x10080#64, 0x15000#64), (0x10088#64, 2#64), (0x15000#64, 0x0101#64)
   , (0x101a0#64, 0x16000#64), (0x101a8#64, 2#64), (0x16000#64, 0x4000000000000000#64), (0x16008#64, 0x4010000000000000#64) ]
 
+/-- Initial `OverlayState` for the concrete `hasInfeasibleIntegerEqRow` execution witness with RHS bit pattern `rhsBits`. -/
 def hasInfOverlayInit (rhsBits : BitVec 64) : OverlayState :=
   { regs := sparse32 [(0, 0x10000#64), (30, 0xdeadbeef#64)]
   , fpRegs := sparse32 []

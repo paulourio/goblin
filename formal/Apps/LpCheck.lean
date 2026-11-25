@@ -400,6 +400,7 @@ private def parseCliArgs : List String → CliArgs → Except String CliArgs
 end Apps.LpCheck
 
 open Apps.LpCheck in
+/-- CLI entry point for `lp-check`, verifying LP optimality, infeasibility, and unboundedness certificates. -/
 def main (args : List String) : IO UInt32 := do
   match parseCliArgs args {} with
   | .error msg =>

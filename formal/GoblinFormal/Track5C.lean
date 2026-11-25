@@ -55,16 +55,18 @@ private def matchHighSimdRegFromList : List Char → Bool
 def hasHighSimdReg (args : String) : Bool :=
   matchHighSimdRegFromList args.toLower.toList
 
+/-- Drops leading `'0'` characters from a hexadecimal digit list. -/
+private def dropLeadingHexZeros : List Char → List Char
+  | '0' :: rest => dropLeadingHexZeros rest
+  | cs => cs
+
 /-- Normalizes hexadecimal address string by trimming leading zeros and lowercasing. -/
 def normalizeHexAddr (addr : String) : String :=
   let s0 := addr.trimAscii.toString.toLower
   let s :=
     if s0.startsWith "0x" then String.ofList (s0.toList.drop 2)
     else s0
-  let rec dropZeros : List Char → List Char
-    | '0' :: rest => dropZeros rest
-    | cs => cs
-  let trimmed := String.ofList (dropZeros s.toList)
+  let trimmed := String.ofList (dropLeadingHexZeros s.toList)
   if trimmed.isEmpty then "0" else trimmed
 
 private def isHexDigit (c : Char) : Bool :=
@@ -215,20 +217,22 @@ private def isPlan9Sep (c : Char) : Bool :=
   c == ' ' || c == '\t' || c == ',' || c == '(' || c == ')' ||
   c == '[' || c == ']' || c == '{' || c == '}' || c == ':' || c == '+' || c == '-' || c == '*'
 
+/-- Splits an assembly operand string into Plan 9 / Intel token candidates using `isPlan9Sep`. -/
+private def splitPlan9Tokens (cs : List Char) (cur : List Char) (acc : List String) : List String :=
+  match cs with
+  | [] =>
+    if cur.isEmpty then acc else String.ofList cur.reverse :: acc
+  | c :: rest =>
+    if isPlan9Sep c then
+      if cur.isEmpty then splitPlan9Tokens rest [] acc
+      else splitPlan9Tokens rest [] (String.ofList cur.reverse :: acc)
+    else
+      splitPlan9Tokens rest (c :: cur) acc
+
 /-- Detects unparsed Go Plan 9 or Intel assembly syntax (bare registers or memory specifiers lacking `%`). -/
 def isPlan9Syntax (args : String) : Bool :=
   let beforeSym := ((stripTrailingComment args).splitOn "<").headD ""
-  let rec splitTokens (cs : List Char) (cur : List Char) (acc : List String) : List String :=
-    match cs with
-    | [] =>
-      if cur.isEmpty then acc else String.ofList cur.reverse :: acc
-    | c :: rest =>
-      if isPlan9Sep c then
-        if cur.isEmpty then splitTokens rest [] acc
-        else splitTokens rest [] (String.ofList cur.reverse :: acc)
-      else
-        splitTokens rest (c :: cur) acc
-  (splitTokens beforeSym.toList [] []).any isPlan9RegToken
+  (splitPlan9Tokens beforeSym.toList [] []).any isPlan9RegToken
 
 /-- Detects AVX-512 EVEX instructions from opcode and operand strings (case-insensitive). -/
 def isEVEXInsn (op args : String) : Bool :=
@@ -344,28 +348,51 @@ def isNoreturnRuntimeCall (args : String) : Bool :=
 
 /-- Classified x86-64 disassembly instruction for CFG auditing. -/
 structure Amd64Insn where
+  /-- Normalized hexadecimal instruction address. -/
   addr : String
+  /-- Lowercased opcode mnemonic after stripping x86 prefixes. -/
   op : String
+  /-- Trimmed operand string. -/
   args : String
+  /-- Raw disassembly line text. -/
   raw : String := ""
+  /-- Whether operands contain unparsed Plan 9 or Intel syntax. -/
   isPlan9 : Bool := false
+  /-- Whether the instruction uses AVX-512 EVEX encoding. -/
   isEVEX : Bool
+  /-- Whether the instruction uses 256-bit VEX-YMM encoding. -/
   isVEXYMM : Bool
+  /-- Whether the instruction is a legacy (non-VEX/EVEX) SSE instruction. -/
   isLegacySSE : Bool
+  /-- Whether the instruction dirties upper YMM/ZMM vector state. -/
   dirtiesUpper : Bool
+  /-- Whether the instruction is `vzeroupper` or `vzeroall`. -/
   isVzeroupper : Bool
+  /-- Whether the instruction is a return (`ret`/`retq`). -/
   isRet : Bool
+  /-- Whether the instruction is a trap (`ud2` or `int3`). -/
   isTrap : Bool
+  /-- Whether the instruction is a call (`call`/`callq`). -/
   isCall : Bool
+  /-- Whether the instruction calls a Go `runtime.morestack*` helper. -/
   isMorestackCall : Bool
+  /-- Whether the instruction calls a noreturn runtime panic helper. -/
   isNoreturnPanic : Bool
+  /-- Whether the instruction is an unconditional jump (`jmp`/`jmpq`). -/
   isUncondJmp : Bool
+  /-- Whether the instruction is a conditional jump (`j*` other than `jmp`/`jmpq`). -/
   isCondJmp : Bool
+  /-- Whether the instruction references a CPU feature or active-tier symbol. -/
   isCpuFeatureCheck : Bool := false
+  /-- Whether the instruction references a boolean CPU feature flag symbol. -/
   isBoolCpuFeatureCheck : Bool := false
+  /-- Whether the instruction references the active SIMD tier symbol. -/
   isActiveTierCheck : Bool := false
+  /-- Whether the instruction is a flag-setting `cmp*` or `test*` instruction. -/
   isFlagTestOrCmp : Bool := false
+  /-- Whether the jump operand parses as a hexadecimal target address. -/
   hasHexJmpTarget : Bool
+  /-- Resolved instruction index of the jump target within the function CFG, if intra-function. -/
   jmpTargetIdx : Option Nat
   deriving DecidableEq, Repr, Inhabited
 
@@ -419,7 +446,9 @@ def classifyAmd64Insn (addr op args raw : String) (jmpTargetIdx : Option Nat) : 
 
 /-- Disassembled function CFG for amd64 vector safety checking. -/
 structure Amd64FuncCFG where
+  /-- Symbol name of the disassembled function. -/
   name : String
+  /-- Ordered array of classified instructions in the function. -/
   insns : Array Amd64Insn
   deriving DecidableEq, Repr, Inhabited
 
@@ -452,9 +481,13 @@ inductive VectorHazardKind where
 
 /-- Structured hazard witness emitted by `checkVectorCFG`. -/
 structure VectorHazard where
+  /-- Name of the function in which the hazard was detected. -/
   funcName : String
+  /-- Normalized hexadecimal address of the offending instruction. -/
   addr : String
+  /-- Classification of the detected vector ISA hazard. -/
   kind : VectorHazardKind
+  /-- Formatted instruction text (`op args`) at the hazard site. -/
   insn : String
   deriving DecidableEq, Repr, Inhabited
 

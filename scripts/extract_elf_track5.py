@@ -45,6 +45,7 @@ RE_LEAN_ARRAY_WORDS = re.compile(
 )
 RE_LEAN_CHUNK_WORDS = re.compile(
     r"def\s+(\w+)Chunks\s*:\s*List\s*\(List\s+UInt32\)\s*:=\s*\[(.*?)\]\s*\n"
+    r"(?:/--.*?-/\s*\n)?"
     r"def\s+\1Words",
     re.DOTALL,
 )

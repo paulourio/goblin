@@ -1,5 +1,6 @@
 name = "GoblinFormal"
 version = "0.1.0"
+lintDriver = "batteries/runLinter"
 defaultTargets = [
   "GoblinFormal",
   "lsap-check",
@@ -10,6 +11,15 @@ defaultTargets = [
   "bin-check",
   "simd-cfg-check",
 ]
+
+[leanOptions]
+linter.extra = true
+linter.redundantVisibility = true
+
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries"
+rev = "v4.36.0"
 
 [[lean_lib]]
 name = "GoblinFormal"

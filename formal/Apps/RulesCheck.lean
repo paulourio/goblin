@@ -392,6 +392,7 @@ private def runBatchFlag (defaultSubcmd : Option String) (path : String) : IO UI
 end Apps.RulesCheck
 
 open Apps.RulesCheck in
+/-- CLI entry point for `rules-check`, verifying presolve and arithmetic rule certificates. -/
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["-h"] | ["--help"] | ["help"] =>

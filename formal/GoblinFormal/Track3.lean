@@ -17,20 +17,31 @@ inductive ConstraintSense where
 
 /-- Sparse nonzero matrix entry `(col, coeff)` in a constraint row. -/
 structure SparseTerm (n : Nat) where
+  /-- Column index of the variable in `Fin n`. -/
   col : Fin n
+  /-- Rational coefficient multiplying `x[col]`. -/
   coeff : Rat
   deriving Repr, DecidableEq, BEq
 
 /-- Linear program in minimization canonical form `min objConst + ∑ obj_j x_j`. -/
 structure LPInstance where
+  /-- Number of decision variables. -/
   numVars : Nat
+  /-- Number of linear constraint rows. -/
   numRows : Nat
+  /-- Constant offset added to the linear objective. -/
   objConst : Rat
+  /-- Linear objective coefficient for each variable. -/
   obj : Fin numVars → Rat
+  /-- Relation sense (`≤`, `≥`, or `=`) for each constraint row. -/
   sense : Fin numRows → ConstraintSense
+  /-- Sparse nonzero terms for each constraint row. -/
   rows : Fin numRows → List (SparseTerm numVars)
+  /-- Right-hand side constant for each constraint row. -/
   rhs : Fin numRows → Rat
+  /-- Optional finite lower bound for each variable (`none` means `-∞`). -/
   lb : Fin numVars → Option Rat
+  /-- Optional finite upper bound for each variable (`none` means `+∞`). -/
   ub : Fin numVars → Option Rat
 
 /-- Evaluates a sparse linear expression `∑ (coeff * x[col])`. -/

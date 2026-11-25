@@ -22,14 +22,18 @@ open GoblinFormal.Track5B
 def twoSumAssignChunks : List (List UInt32) := [
   [0x1e602822, 0x1e603843, 0x1e633844, 0x1e643804, 0x1e633823, 0x1e632881, 0x1e604040, 0xd65f03c0]
 ]
+/-- Flattened ARM64 instruction word array for `assign.twoSumAssign`. -/
 def twoSumAssignWords : Array UInt32 := ⟨twoSumAssignChunks.flatten⟩
+/-- External call relocation target table for `assign.twoSumAssign` (none; leaf function). -/
 def twoSumAssignTargets (_ : Nat) : Option String := none
 
 /-- Stock Go 1.27 `GOARCH=arm64` ELF `.text` words (13 insns) for `assign.clampFinite` in 16-word chunks. -/
 def clampFiniteChunks : List (List UInt32) := [
   [0xb00009bb, 0xfd45ef61, 0x1e602020, 0x54000104, 0xb00009bb, 0xfd45f761, 0x1e612000, 0x54000065, 0x1e604020, 0xd65f03c0, 0xd65f03c0, 0x1e604020, 0xd65f03c0]
 ]
+/-- Flattened ARM64 instruction word array for `assign.clampFinite`. -/
 def clampFiniteWords : Array UInt32 := ⟨clampFiniteChunks.flatten⟩
+/-- External call relocation target table for `assign.clampFinite` (none; leaf function). -/
 def clampFiniteTargets (_ : Nat) : Option String := none
 
 /-- Stock Go 1.27 `GOARCH=arm64` ELF `.text` words (63 insns) for `-gcflags=-l` `assign.exactReducedCost` in 16-word chunks. -/
@@ -39,7 +43,9 @@ def exactReducedCostNoinlineChunks : List (List UInt32) := [
   [0x97fbb9a4, 0x37000120, 0xfd4027e0, 0xaa1f03e0, 0x97fbb9a0, 0x370000a0, 0xfd4023e0, 0xaa1f03e0, 0x97fbb99c, 0x360000c0, 0x9e6703e0, 0xaa1f03e0, 0xf85f83fd, 0xf84607fe, 0xd65f03c0, 0xfd401fe1],
   [0xfd401be2, 0x1e622821, 0xfd4023e2, 0x1e622820, 0xb24003e0, 0xf85f83fd, 0xf84607fe, 0xd65f03c0, 0x6d0087e0, 0xfd000fe2, 0xaa1e03e3, 0x97fac749, 0x6d4087e0, 0xfd400fe2, 0x17ffffc2]
 ]
+/-- Flattened ARM64 instruction word array for `-gcflags=-l` `assign.exactReducedCost`. -/
 def exactReducedCostNoinlineWords : Array UInt32 := ⟨exactReducedCostNoinlineChunks.flatten⟩
+/-- External call relocation target table for `-gcflags=-l` `assign.exactReducedCost`. -/
 def exactReducedCostNoinlineTargets (idx : Nat) : Option String :=
   match idx with
   | 8 | 13 | 16 | 21 => some "assign.twoSumAssign"
@@ -54,7 +60,9 @@ def exactReducedCostChunks : List (List UInt32) := [
   [0xb00009bb, 0xfd45ef63, 0x1e642060, 0x54000144, 0x1e60c0c4, 0x1e642060, 0x540000e4, 0x1e60c0e4, 0x1e642060, 0x54000084, 0x1e60c104, 0x1e642060, 0x54000085, 0x9e6703e0, 0xaa1f03e0, 0xd65f03c0],
   [0x1e622821, 0x1e682820, 0xb24003e0, 0xd65f03c0]
 ]
+/-- Flattened ARM64 instruction word array for shipping optimized `assign.exactReducedCost`. -/
 def exactReducedCostWords : Array UInt32 := ⟨exactReducedCostChunks.flatten⟩
+/-- External call relocation target table for shipping optimized `assign.exactReducedCost` (none; leaf function). -/
 def exactReducedCostTargets (_ : Nat) : Option String := none
 
 /-- Stock Go 1.27 `GOARCH=arm64` ELF `.text` words (1353 insns) for `assign.hasPotentialCancellation` in 16-word chunks. -/
@@ -145,7 +153,9 @@ def hasPotentialCancellationChunks : List (List UInt32) := [
   [0xaa1103e1, 0x97face6b, 0x97face6a, 0xd503201f, 0xa90207e0, 0xa9030fe2, 0xa90417e4, 0xa9051fe6, 0xa90627e8, 0xa9072fea, 0xa90837ec, 0xf9004bee, 0x390263ef, 0xaa1e03e3, 0x97fac626, 0xa94207e0],
   [0xa9430fe2, 0xa94417e4, 0xa9451fe6, 0xa94627e8, 0xa9472fea, 0xa94837ec, 0xf9404bee, 0x394263ef, 0x17fffab8]
 ]
+/-- Flattened ARM64 instruction word array for `assign.hasPotentialCancellation`. -/
 def hasPotentialCancellationWords : Array UInt32 := ⟨hasPotentialCancellationChunks.flatten⟩
+/-- External call relocation target table for `assign.hasPotentialCancellation`. -/
 def hasPotentialCancellationTargets (idx : Nat) : Option String :=
   match idx with
   | 89 => some "runtime.memclrNoHeapPointers"
@@ -235,6 +245,7 @@ def decodeArm64WordD (word : UInt32) : Arm64InsnD :=
       .base (.unknown word)
   | insn => .base insn
 
+/-- Decodes an array of ARM64 machine words into extended `Arm64InsnD` instructions. -/
 def decodeArm64ProgD (words : Array UInt32) : Array Arm64InsnD :=
   ⟨words.toList.map decodeArm64WordD⟩
 
@@ -244,9 +255,11 @@ def toCfgProxy : Arm64InsnD → Arm64Insn
   | .fmaddD _ _ rd _ _ _ => .fpUnaryD 0 rd rd
   | .fmovImmD rd _ => .fpUnaryD 0 rd rd
 
+/-- Decodes a single ARM64 machine word into its control-flow-equivalent `Arm64Insn` proxy. -/
 def decodeArm64WordCfg (word : UInt32) : Arm64Insn :=
   toCfgProxy (decodeArm64WordD word)
 
+/-- Decodes an array of ARM64 machine words into control-flow-equivalent `Arm64Insn` proxies. -/
 def decodeArm64ProgCfg (words : Array UInt32) : Array Arm64Insn :=
   ⟨words.toList.map decodeArm64WordCfg⟩
 
@@ -261,6 +274,7 @@ def execArm64InsnD (progLen : Nat) (extTargets : Nat → Option String)
   | .fmovImmD rd immBits =>
     advancePc (writeFp s rd immBits)
 
+/-- Executes one fetch-and-step cycle of an `Arm64InsnD` program, trapping if `pcIdx` is out of bounds. -/
 def stepArm64D (prog : Array Arm64InsnD) (extTargets : Nat → Option String)
     (s : Arm64State) : Arm64State :=
   if s.status != .running then s
@@ -269,6 +283,7 @@ def stepArm64D (prog : Array Arm64InsnD) (extTargets : Nat → Option String)
   else
     { s with status := .trapIllegal }
 
+/-- Runs an `Arm64InsnD` program for up to `fuel` steps or until execution leaves `.running`. -/
 def runArm64D (fuel : Nat) (prog : Array Arm64InsnD) (extTargets : Nat → Option String)
     (s : Arm64State) : Arm64State :=
   match fuel with
@@ -512,6 +527,7 @@ theorem twoSumAssign_arm64_equiv (s : Arm64State) (a b : BitVec 64)
 
 /-! ### Frameless Leaf Safety Analyzer (`twoSumAssign`, `clampFinite`, `exactReducedCost`) -/
 
+/-- Checks that a single instruction at `idx` is valid for a frameless leaf function (no calls, no unknowns, all branches in bounds). -/
 def framelessLeafInsnOk (progSize : Nat) (idx : Nat) (insn : Arm64Insn) : Bool :=
   if !insnDecodedValid insn then false
   else
@@ -522,6 +538,7 @@ def framelessLeafInsnOk (progSize : Nat) (idx : Nat) (insn : Arm64Insn) : Bool :
     | .tbz _ _ _ imm14 => !isOutOfBoundsRel progSize idx imm14
     | _ => true
 
+/-- Verifies that every instruction in `prog` satisfies `framelessLeafInsnOk`. -/
 def checkFramelessLeaf (prog : Array Arm64Insn) : Bool :=
   everyWithIdx 0 prog.toList (framelessLeafInsnOk prog.size)
 
@@ -985,15 +1002,23 @@ theorem hasPotentialCancellation_exactD_zeroGC_and_pb (s : Arm64State)
 ### Part II: Functional IEEE-754 SIMD Lane & `Min2` Reduction Equivalence
 -/
 
-/-- Canonical IEEE-754 binary64 bit patterns (`+0.0`, `-0.0`, `+Inf`, `-Inf`, subnormals, `minPosNormal`). -/
+/-- Canonical IEEE-754 binary64 `+0.0` bit pattern (`0x0000000000000000`). -/
 def f64PosZero : BitVec 64 := 0x0000000000000000#64
+/-- Canonical IEEE-754 binary64 `-0.0` bit pattern (`0x8000000000000000`). -/
 def f64NegZero : BitVec 64 := 0x8000000000000000#64
+/-- Canonical IEEE-754 binary64 `+Inf` bit pattern (`0x7ff0000000000000`). -/
 def f64PosInf : BitVec 64 := 0x7ff0000000000000#64
+/-- Canonical IEEE-754 binary64 `-Inf` bit pattern (`0xfff0000000000000`). -/
 def f64NegInf : BitVec 64 := 0xfff0000000000000#64
+/-- Smallest positive IEEE-754 binary64 subnormal (`0x0000000000000001`). -/
 def f64MinPosSubnormal : BitVec 64 := 0x0000000000000001#64
+/-- Largest positive IEEE-754 binary64 subnormal (`0x000fffffffffffff`). -/
 def f64MaxPosSubnormal : BitVec 64 := 0x000fffffffffffff#64
+/-- Smallest-magnitude negative IEEE-754 binary64 subnormal (`0x8000000000000001`). -/
 def f64MinNegSubnormal : BitVec 64 := 0x8000000000000001#64
+/-- Largest-magnitude negative IEEE-754 binary64 subnormal (`0x800fffffffffffff`). -/
 def f64MaxNegSubnormal : BitVec 64 := 0x800fffffffffffff#64
+/-- Smallest positive IEEE-754 binary64 normal (`0x0010000000000000`). -/
 def f64MinPosNormal : BitVec 64 := 0x0010000000000000#64
 
 /-- Non-NaN predicate over `BitVec 64` (`VCMPPD_ORD_Q` lane check). -/
@@ -1275,7 +1300,7 @@ theorem not_f64Ge_eq_f64Lt (a b : BitVec 64)
     (!f64Ge a b) = f64Lt a b := by
   unfold f64Ge
   rw [f64Le_iff_ule_numKey b a hb ha, f64Lt_iff_ult_numKey a b ha hb, BitVec.ule_eq_decide, BitVec.ult_eq_decide]
-  by_cases h : (f64NumKey b).toNat ≤ (f64NumKey a).toNat <;> simp [h] <;> omega
+  by_cases h : (f64NumKey b).toNat ≤ (f64NumKey a).toNat <;> simp [h]; omega
 
 /-- `+Inf` (`0x7ff0000000000000`) is the strict top sentinel of `f64NumKey` over all non-NaN float64 lanes. -/
 theorem f64PosInf_top_of_notNaN (x : BitVec 64) (hx : f64NotNaN x = true) :
@@ -1400,7 +1425,9 @@ theorem vminpdLane_numKey_assoc_comm (a b c : BitVec 64)
 
 /-- Value-index lane pair (`idx = none` denotes `+Inf` sentinel or masked tail lane). -/
 structure LaneEntry where
+  /-- IEEE-754 binary64 bit pattern of the lane value. -/
   val : BitVec 64
+  /-- Column index of the active lane, or `none` for `+Inf` sentinels and masked tail lanes. -/
   idx : Option Nat
   deriving DecidableEq, Repr
 
@@ -1425,6 +1452,7 @@ def entryLt (a b : LaneEntry) : Bool :=
   else if a.idx != b.idx then optIdxLt a.idx b.idx
   else decide ((f64TotalKey a.val).toNat < (f64TotalKey b.val).toNat)
 
+/-- Non-strict lexicographic linear order on `LaneEntry` (`entryLt a b || a == b`). -/
 def entryLe (a b : LaneEntry) : Bool :=
   entryLt a b || a == b
 
@@ -1433,11 +1461,11 @@ private theorem optIdxLt_irrefl (x : Option Nat) : optIdxLt x x = false := by
 
 private theorem optIdxLt_trans {x y z : Option Nat}
     (h1 : optIdxLt x y = true) (h2 : optIdxLt y z = true) : optIdxLt x z = true := by
-  cases x <;> cases y <;> cases z <;> simp [optIdxLt] at h1 h2 ⊢ <;> omega
+  cases x <;> cases y <;> cases z <;> simp [optIdxLt] at h1 h2 ⊢; omega
 
 private theorem optIdxLt_trichotomy (x y : Option Nat) (hne : x ≠ y) :
     optIdxLt x y = true ∨ optIdxLt y x = true := by
-  cases x <;> cases y <;> simp [optIdxLt] at hne ⊢ <;> omega
+  cases x <;> cases y <;> simp [optIdxLt] at hne ⊢; omega
 
 private theorem f64TotalKey_toNat_inj {a b : BitVec 64}
     (h : (f64TotalKey a).toNat = (f64TotalKey b).toNat) : a = b := by
@@ -1557,13 +1585,16 @@ private theorem not_entryLt_of_le {a b : LaneEntry} (h : entryLe a b = true) :
 /-- Running `(min1, min2)` pair over `LaneEntry`. -/
 abbrev Min2Pair := LaneEntry × LaneEntry
 
+/-- Initial empty `(min1, min2)` accumulator seeded with `(infEntry, infEntry)`. -/
 def initMin2 : Min2Pair := (infEntry, infEntry)
 
+/-- Inserts a `LaneEntry` into an ordered `(min1, min2)` pair, keeping the two smallest entries. -/
 def insertEntry (e : LaneEntry) (p : Min2Pair) : Min2Pair :=
   if entryLt e p.1 then (e, p.1)
   else if entryLt e p.2 then (p.1, e)
   else p
 
+/-- Lifts a single `LaneEntry` into a `(min1, min2)` pair by inserting it into `initMin2`. -/
 def singleMin2 (e : LaneEntry) : Min2Pair :=
   insertEntry e initMin2
 
@@ -1571,6 +1602,7 @@ def singleMin2 (e : LaneEntry) : Min2Pair :=
 def mergeMin2 (p q : Min2Pair) : Min2Pair :=
   insertEntry q.2 (insertEntry q.1 p)
 
+/-- Folds a list of `LaneEntry` values into an existing `(min1, min2)` accumulator. -/
 def foldEntries (es : List LaneEntry) (st : Min2Pair) : Min2Pair :=
   es.foldl (fun acc e => insertEntry e acc) st
 
@@ -1860,6 +1892,7 @@ def simdTree4Aux : Nat → Nat → List (BitVec 64) → Min2Pair → Min2Pair
                             (paddedLane base c 2) (paddedLane base c 3)
       simdTree4Aux fuel (base + 4) (xs.drop 4) (mergeMin2 st v)
 
+/-- Reduces a list of binary64 values to their `(min1, min2)` pair using 4-lane (AVX2) chunked tree reduction. -/
 def simdTree4Reduce (xs : List (BitVec 64)) : Min2Pair :=
   simdTree4Aux xs.length 0 xs initMin2
 
@@ -1875,6 +1908,7 @@ def simdTree8Aux : Nat → Nat → List (BitVec 64) → Min2Pair → Min2Pair
                             (paddedLane base c 4) (paddedLane base c 5) (paddedLane base c 6) (paddedLane base c 7)
       simdTree8Aux fuel (base + 8) (xs.drop 8) (mergeMin2 st v)
 
+/-- Reduces a list of binary64 values to their `(min1, min2)` pair using 8-lane (AVX-512) chunked tree reduction. -/
 def simdTree8Reduce (xs : List (BitVec 64)) : Min2Pair :=
   simdTree8Aux xs.length 0 xs initMin2
 

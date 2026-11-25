@@ -34,11 +34,14 @@ def allAbsLE64AVX2ByteChunks : List (List UInt8) := [
   [0x31, 0xc0, 0x5d, 0xc3, 0xc5, 0xf8, 0x77, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x5d, 0xc3, 0xe8, 0x2d],
   [0xe5, 0xf3, 0xff, 0x90]
 ]
+/-- Flattened x86-64 machine-code byte array for `internal/simd.allAbsLE64AVX2`. -/
 def allAbsLE64AVX2Bytes : Array UInt8 := ⟨allAbsLE64AVX2ByteChunks.flatten⟩
+/-- External call relocation target table for `internal/simd.allAbsLE64AVX2`. -/
 def allAbsLE64AVX2Targets (off : Nat) : Option String :=
   match off with
   | 0xae => some "runtime.panicBounds"
   | _ => none
+/-- RIP-relative `.rodata` constant table for `internal/simd.allAbsLE64AVX2` (none). -/
 def allAbsLE64AVX2Rodata (_ : Nat) : Option (BitVec 64) := none
 
 /-- Compiled Go 1.27 `GOARCH=amd64 GOEXPERIMENT=simd` ELF `.text` bytes (220 bytes, 56 insns) for `internal/simd.allAbsLE64AVX512`. -/
@@ -58,11 +61,14 @@ def allAbsLE64AVX512ByteChunks : List (List UInt8) := [
   [0x80, 0xf9, 0xff, 0x74, 0x07, 0xc5, 0xf8, 0x77, 0x31, 0xc0, 0x5d, 0xc3, 0xc5, 0xf8, 0x77, 0xb8],
   [0x01, 0x00, 0x00, 0x00, 0x5d, 0xc3, 0xe8, 0xa5, 0xb6, 0xf3, 0xff, 0x90]
 ]
+/-- Flattened x86-64 machine-code byte array for `internal/simd.allAbsLE64AVX512`. -/
 def allAbsLE64AVX512Bytes : Array UInt8 := ⟨allAbsLE64AVX512ByteChunks.flatten⟩
+/-- External call relocation target table for `internal/simd.allAbsLE64AVX512`. -/
 def allAbsLE64AVX512Targets (off : Nat) : Option String :=
   match off with
   | 0xd6 => some "runtime.panicBounds"
   | _ => none
+/-- RIP-relative `.rodata` constant table for `internal/simd.allAbsLE64AVX512` (none). -/
 def allAbsLE64AVX512Rodata (_ : Nat) : Option (BitVec 64) := none
 
 /-- Compiled Go 1.27 `GOARCH=amd64 GOEXPERIMENT=simd` ELF `.text` bytes (284 bytes, 81 insns) for `internal/simd.minNoNaN64AVX2`. -/
@@ -86,11 +92,14 @@ def minNoNaN64AVX2ByteChunks : List (List UInt8) := [
   [0xeb, 0xe5, 0x0f, 0x57, 0xc9, 0x66, 0x0f, 0x2e, 0xc1, 0x75, 0x05, 0x7a, 0x03, 0x0f, 0x57, 0xc0],
   [0x48, 0x83, 0xc4, 0x40, 0x5d, 0xc3, 0xe8, 0xe5, 0x7d, 0xf4, 0xff, 0x90]
 ]
+/-- Flattened x86-64 machine-code byte array for `internal/simd.minNoNaN64AVX2`. -/
 def minNoNaN64AVX2Bytes : Array UInt8 := ⟨minNoNaN64AVX2ByteChunks.flatten⟩
+/-- External call relocation target table for `internal/simd.minNoNaN64AVX2`. -/
 def minNoNaN64AVX2Targets (off : Nat) : Option String :=
   match off with
   | 0x116 => some "runtime.panicBounds"
   | _ => none
+/-- RIP-relative `.rodata` constant table for `internal/simd.minNoNaN64AVX2` (`+Inf` at `0x17`, `0xbe`). -/
 def minNoNaN64AVX2Rodata (off : Nat) : Option (BitVec 64) :=
   match off with
   | 0x17 | 0xbe => some 0x7ff0000000000000#64
@@ -124,12 +133,15 @@ def minNoNaN64AVX512ByteChunks : List (List UInt8) := [
   [0x48, 0x8b, 0x44, 0x24, 0x08, 0x48, 0x8b, 0x5c, 0x24, 0x10, 0x48, 0x8b, 0x4c, 0x24, 0x18, 0x90],
   [0xe9, 0x7b, 0xfe, 0xff, 0xff]
 ]
+/-- Flattened x86-64 machine-code byte array for `internal/simd.minNoNaN64AVX512`. -/
 def minNoNaN64AVX512Bytes : Array UInt8 := ⟨minNoNaN64AVX512ByteChunks.flatten⟩
+/-- External call relocation target table for `internal/simd.minNoNaN64AVX512`. -/
 def minNoNaN64AVX512Targets (off : Nat) : Option String :=
   match off with
   | 0x156 => some "runtime.panicBounds"
   | 0x16b => some "runtime.morestack_noctxt.abi0"
   | _ => none
+/-- RIP-relative `.rodata` constant table for `internal/simd.minNoNaN64AVX512` (`+Inf` at `0x2a`, `0x100`). -/
 def minNoNaN64AVX512Rodata (off : Nat) : Option (BitVec 64) :=
   match off with
   | 0x2a | 0x100 => some 0x7ff0000000000000#64
@@ -164,11 +176,14 @@ def initReducedRow64AVX2ByteChunks : List (List UInt8) := [
   [0xf2, 0x0f, 0x5d, 0xc1, 0x66, 0x0f, 0xeb, 0xc2, 0x48, 0x83, 0xc4, 0x20, 0x5d, 0xc3, 0xe8, 0x4d],
   [0xd8, 0xf3, 0xff, 0xe8, 0x48, 0xd8, 0xf3, 0xff, 0xe8, 0x43, 0xd8, 0xf3, 0xff, 0x90]
 ]
+/-- Flattened x86-64 machine-code byte array for `internal/simd.initReducedRow64AVX2`. -/
 def initReducedRow64AVX2Bytes : Array UInt8 := ⟨initReducedRow64AVX2ByteChunks.flatten⟩
+/-- External call relocation target table for `internal/simd.initReducedRow64AVX2`. -/
 def initReducedRow64AVX2Targets (off : Nat) : Option String :=
   match off with
   | 0x18e | 0x193 | 0x198 => some "runtime.panicBounds"
   | _ => none
+/-- RIP-relative `.rodata` constant table for `internal/simd.initReducedRow64AVX2` (`+Inf` at `0x3f`). -/
 def initReducedRow64AVX2Rodata (off : Nat) : Option (BitVec 64) :=
   match off with
   | 0x3f => some 0x7ff0000000000000#64
@@ -214,11 +229,14 @@ def initReducedRow64AVX512ByteChunks : List (List UInt8) := [
   [0x10, 0xc1, 0x48, 0x83, 0xc4, 0x40, 0x5d, 0xc3, 0xe8, 0xa3, 0xae, 0xf3, 0xff, 0x0f, 0x1f, 0x00],
   [0xe8, 0x9b, 0xae, 0xf3, 0xff, 0xe8, 0x96, 0xae, 0xf3, 0xff, 0x90]
 ]
+/-- Flattened x86-64 machine-code byte array for `internal/simd.initReducedRow64AVX512`. -/
 def initReducedRow64AVX512Bytes : Array UInt8 := ⟨initReducedRow64AVX512ByteChunks.flatten⟩
+/-- External call relocation target table for `internal/simd.initReducedRow64AVX512`. -/
 def initReducedRow64AVX512Targets (off : Nat) : Option String :=
   match off with
   | 0x238 | 0x240 | 0x245 => some "runtime.panicBounds"
   | _ => none
+/-- RIP-relative `.rodata` constant table for `internal/simd.initReducedRow64AVX512` (`+Inf` at `0x3f`). -/
 def initReducedRow64AVX512Rodata (off : Nat) : Option (BitVec 64) :=
   match off with
   | 0x3f => some 0x7ff0000000000000#64
@@ -255,8 +273,11 @@ inductive RmOp where
 
 /-- EVEX masking, zeroing (`{z}`), and embedded broadcast (`{1toN}`) modifiers. -/
 structure EvexMask where
+  /-- 3-bit opmask register index (`k0..k7`; `0` means unmasked). -/
   kmask : BitVec 3 := 0#3
+  /-- Whether zero-masking (`{z}`) is enabled instead of merge-masking. -/
   zeroing : Bool := false
+  /-- Whether embedded memory broadcast (`{1toN}`) is enabled. -/
   broadcast : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
@@ -320,8 +341,11 @@ inductive Amd64VecInsn where
 
 /-- Decoded instruction paired with its byte offset and next instruction byte offset. -/
 structure DecodedAmd64Insn where
+  /-- Starting byte offset of the instruction within the function's `.text` slice. -/
   offset : Nat
+  /-- Byte offset immediately following this instruction (fall-through PC). -/
   nextOffset : Nat
+  /-- Decoded typed instruction AST. -/
   insn : Amd64VecInsn
   deriving DecidableEq, Repr, Inhabited
 
@@ -848,35 +872,49 @@ theorem decodeAmd64ProgramChunks_eq (chunks : List (List UInt8))
 
 /-- Eight 64-bit IEEE-754 lanes modeling one `ZMM0..ZMM31` vector register. -/
 structure Vec512 where
+  /-- 64-bit lane 0 (bits 0..63). -/
   l0 : BitVec 64 := 0#64
+  /-- 64-bit lane 1 (bits 64..127). -/
   l1 : BitVec 64 := 0#64
+  /-- 64-bit lane 2 (bits 128..191). -/
   l2 : BitVec 64 := 0#64
+  /-- 64-bit lane 3 (bits 192..255). -/
   l3 : BitVec 64 := 0#64
+  /-- 64-bit lane 4 (bits 256..319). -/
   l4 : BitVec 64 := 0#64
+  /-- 64-bit lane 5 (bits 320..383). -/
   l5 : BitVec 64 := 0#64
+  /-- 64-bit lane 6 (bits 384..447). -/
   l6 : BitVec 64 := 0#64
+  /-- 64-bit lane 7 (bits 448..511). -/
   l7 : BitVec 64 := 0#64
   deriving DecidableEq, Repr, Inhabited
 
+/-- Broadcasts a single 64-bit word across all eight lanes of a `Vec512`. -/
 @[inline] def Vec512.broadcast (x : BitVec 64) : Vec512 :=
   { l0 := x, l1 := x, l2 := x, l3 := x, l4 := x, l5 := x, l6 := x, l7 := x }
 
+/-- Zeros the upper 384 bits (lanes 2..7), preserving the low 128-bit XMM portion. -/
 @[inline] def Vec512.zeroHi128 (v : Vec512) : Vec512 :=
   { l0 := v.l0, l1 := v.l1, l2 := 0#64, l3 := 0#64, l4 := 0#64, l5 := 0#64, l6 := 0#64, l7 := 0#64 }
 
+/-- Zeros the upper 256 bits (lanes 4..7), preserving the low 256-bit YMM portion. -/
 @[inline] def Vec512.zeroHi256 (v : Vec512) : Vec512 :=
   { l0 := v.l0, l1 := v.l1, l2 := v.l2, l3 := v.l3, l4 := 0#64, l5 := 0#64, l6 := 0#64, l7 := 0#64 }
 
+/-- Zeros lanes above the specified `VecWidth` (`xmm128`, `ymm256`, or `zmm512`). -/
 @[inline] def Vec512.applyWidth (w : VecWidth) (v : Vec512) : Vec512 :=
   match w with
   | .xmm128 => v.zeroHi128
   | .ymm256 => v.zeroHi256
   | .zmm512 => v
 
+/-- Applies a binary 64-bit lane operation element-wise across two `Vec512` values. -/
 @[inline] def Vec512.zipWith (f : BitVec 64 → BitVec 64 → BitVec 64) (a b : Vec512) : Vec512 :=
   { l0 := f a.l0 b.l0, l1 := f a.l1 b.l1, l2 := f a.l2 b.l2, l3 := f a.l3 b.l3
     l4 := f a.l4 b.l4, l5 := f a.l5 b.l5, l6 := f a.l6 b.l6, l7 := f a.l7 b.l7 }
 
+/-- Extracts bit `i` of an 8-bit AVX-512 opmask value as a `Bool`. -/
 @[inline] def Vec512.maskBit (k : BitVec 8) (i : Nat) : Bool :=
   ((k.toNat >>> i) &&& 1) == 1
 
@@ -994,10 +1032,15 @@ def x86F64Add (a b : BitVec 64) : BitVec 64 :=
 
 /-- x86 `RFLAGS` subset exercised by Go 1.27 SIMD loops and `UCOMISD`. -/
 structure X86Flags where
+  /-- Zero flag (`ZF`). -/
   zf : Bool := false
+  /-- Carry flag (`CF`). -/
   cf : Bool := false
+  /-- Sign flag (`SF`). -/
   sf : Bool := false
+  /-- Overflow flag (`OF`). -/
   of : Bool := false
+  /-- Parity flag (`PF`). -/
   pf : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
@@ -1081,28 +1124,41 @@ inductive Amd64ExecStatus where
 
 /-- Architectural x86-64 + AVX2 + AVX-512 machine state. -/
 structure Amd64VecState where
+  /-- General-purpose 64-bit register file (`RAX..R15`). -/
   gpr : BitVec 4 → BitVec 64
+  /-- 512-bit SIMD vector register file (`ZMM0..ZMM31`). -/
   zmm : BitVec 5 → Vec512
+  /-- 8-bit AVX-512 opmask register file (`k0..k7`). -/
   kmask : BitVec 3 → BitVec 8
+  /-- Architectural `RFLAGS` condition-code subset. -/
   flags : X86Flags := {}
+  /-- Whether upper YMM/ZMM vector state is currently dirty (cleared by `VZEROUPPER`). -/
   upperDirty : Bool := false
+  /-- Latched hazard flag set if a legacy SSE instruction executes while `upperDirty` is true. -/
   sseHazard : Bool := false
+  /-- Word-addressed 64-bit memory map. -/
   mem : BitVec 64 → BitVec 64
+  /-- Current instruction byte offset within the function's `.text` slice. -/
   pc : Nat := 0
+  /-- Current execution status (running, returned, external call, or trap). -/
   status : Amd64ExecStatus := .running
 
+/-- Functional update of general-purpose register `r` to `v`. -/
 @[inline] def setGpr (gpr : BitVec 4 → BitVec 64) (r : BitVec 4) (v : BitVec 64) :
     BitVec 4 → BitVec 64 :=
   fun r' => if r' == r then v else gpr r'
 
+/-- Functional update of vector register `r` to `v`. -/
 @[inline] def setZmm (zmm : BitVec 5 → Vec512) (r : BitVec 5) (v : Vec512) :
     BitVec 5 → Vec512 :=
   fun r' => if r' == r then v else zmm r'
 
+/-- Functional update of opmask register `k` to `v`. -/
 @[inline] def setKmask (kmask : BitVec 3 → BitVec 8) (k : BitVec 3) (v : BitVec 8) :
     BitVec 3 → BitVec 8 :=
   fun k' => if k' == k then v else kmask k'
 
+/-- Functional update storing 64-bit word `v` at address `addr` in memory. -/
 @[inline] def write64 (mem : BitVec 64 → BitVec 64) (addr v : BitVec 64) :
     BitVec 64 → BitVec 64 :=
   fun a => if a == addr then v else mem a
@@ -3583,9 +3639,11 @@ private def replaceByteInChunks (chunks : List (List UInt8)) (pos : Nat) (val : 
     List (List UInt8) :=
   chunks.set (pos / 16) ((chunks.getD (pos / 16) []).set (pos % 16) val)
 
+/-- Mutated `allAbsLE64AVX2` byte chunks with `VZEROUPPER` (`0x9d..0x9f`) overwritten by three `NOP` (`0x90`) bytes. -/
 def allAbsLE64AVX2StrippedVzuChunks : List (List UInt8) :=
   replaceByteInChunks (replaceByteInChunks (replaceByteInChunks allAbsLE64AVX2ByteChunks 0x9d 0x90) 0x9e 0x90) 0x9f 0x90
 
+/-- Flattened byte array for the `VZEROUPPER`-stripped `allAbsLE64AVX2` negative-control fixture. -/
 def allAbsLE64AVX2StrippedVzuBytes : Array UInt8 :=
   ⟨allAbsLE64AVX2StrippedVzuChunks.flatten⟩
 

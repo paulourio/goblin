@@ -146,9 +146,9 @@ check_empty_batch_rejected() {
 export LEAN_NUM_THREADS="${LEAN_NUM_THREADS:-16}"
 log_step "1/5 Building Lean 4 proofs, axiom audit, and ELF byte extractors (LEAN_NUM_THREADS=${LEAN_NUM_THREADS})..."
 if command -v flock >/dev/null 2>&1; then
-    (cd formal && flock /tmp/goblin-formal-lake.lock lake build --wfail)
+    (cd formal && flock /tmp/goblin-formal-lake.lock bash -c 'lake build --wfail && lake lint')
 else
-    (cd formal && lake build --wfail)
+    (cd formal && lake build --wfail && lake lint)
 fi
 if command -v leanchecker >/dev/null 2>&1; then
     (cd formal && lake env leanchecker --fresh GoblinFormal)

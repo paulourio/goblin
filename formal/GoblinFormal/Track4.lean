@@ -21,6 +21,7 @@ inductive RowSense where
 
 /-- Fixed-length rational vector backed by a size-invariant `Array Rat`. -/
 structure RatVec (n : Nat) where
+  /-- Underlying array of `n` rational entries. -/
   data : Array Rat
   size_eq : data.size = n
   deriving Repr
@@ -84,6 +85,7 @@ theorem RatVec.get_addScaled {n : Nat} (a b : RatVec n) (m : Rat) (j : Fin n) :
 def RatVec.beq {n : Nat} (a b : RatVec n) : Bool :=
   loop 0
 where
+  /-- Tail-recursive loop comparing entries `i .. n - 1` of `a` and `b`. -/
   loop (i : Nat) : Bool :=
     if hi : i < n then
       if a.data[i]'(by rw [a.size_eq]; exact hi) ==
@@ -184,6 +186,7 @@ theorem RatVec.dot_addScaled {n : Nat} (a b : RatVec n) (m : Rat) (x : Fin n →
 def RatVec.dotVec {n : Nat} (a x : RatVec n) : Rat :=
   loop 0 0
 where
+  /-- Tail-recursive loop accumulating `a[i] * x[i]` for `i .. n - 1`. -/
   loop (i : Nat) (acc : Rat) : Rat :=
     if hi : i < n then
       let ai := a.data[i]'(by rw [a.size_eq]; exact hi)
@@ -232,8 +235,11 @@ theorem RatVec.dotVec_eq_dot {n : Nat} (a x : RatVec n) :
 
 /-- Linear constraint `coeffs · x <sense> rhs` in `ℚ^n`. -/
 structure LinCon (n : Nat) where
+  /-- Coefficient vector of the linear expression. -/
   coeffs : RatVec n
+  /-- Relational sense (`≤`, `=`, or `≥`). -/
   sense : RowSense
+  /-- Right-hand side constant. -/
   rhs : Rat
   deriving Repr
 
@@ -275,12 +281,19 @@ theorem LinCon.satBool_iff {n : Nat} (con : LinCon n) (x : RatVec n) :
 
 /-- MILP problem instance over `ℚ^n` in minimization form. -/
 structure VIPRInstance where
+  /-- Number of structural variables. -/
   n : Nat
+  /-- Constant offset added to the linear objective. -/
   objConst : Rat
+  /-- Linear objective coefficient vector. -/
   obj : Fin n → Rat
+  /-- Integrality indicator for each variable. -/
   isInt : Fin n → Bool
+  /-- Base linear constraints of the MILP instance. -/
   baseRows : Array (LinCon n)
+  /-- Optional lower bound for each variable (`none` = `-∞`). -/
   lb : Fin n → Option Rat
+  /-- Optional upper bound for each variable (`none` = `+∞`). -/
   ub : Fin n → Option Rat
 
 /-- Integrality predicate on `Rat`. -/
@@ -449,9 +462,13 @@ def tightenUBOpt (old : Option Rat) (u : Rat) : Option Rat :=
 
 /-- Search node in the abstract Branch-and-Bound tree. -/
 structure BabNode (n : Nat) where
+  /-- Node-local optional variable lower bounds (`none` = `-∞`). -/
   lb : Fin n → Option Rat
+  /-- Node-local optional variable upper bounds (`none` = `+∞`). -/
   ub : Fin n → Option Rat
+  /-- Node-local cutting-plane predicate. -/
   cuts : (Fin n → Rat) → Prop := fun _ => True
+  /-- Valid dual lower bound on the node's subproblem. -/
   lowerBound : Rat
 
 /-- Feasible domain of a `BabNode`. -/
@@ -524,12 +541,19 @@ theorem BabNode.domain_tightenLB {n : Nat} (nd : BabNode n) (col : Fin n) (l : R
 and `parCoordinator` (`bab.go:2138`, `currentGlobalBoundLocked` at `bab.go:2173`), including
 in-flight parallel worker bounds `activeBounds`. -/
 structure BabState (n : Nat) where
+  /-- Queue of open unprocessed Branch-and-Bound nodes. -/
   openQueue : List (BabNode n)
+  /-- Optional node currently held for diving/plunging. -/
   plungeNode : Option (BabNode n)
+  /-- Best incumbent objective value found so far (`none` if no incumbent). -/
   bestObjMin : Option Rat
+  /-- Minimum dual bound among nodes pruned by bound. -/
   prunedMinBound : Option Rat
+  /-- Minimum dual bound among unsolved/aborted nodes. -/
   unsolvedMinBound : Option Rat
+  /-- Lower bounds of nodes currently in flight on parallel workers. -/
   activeBounds : List Rat := []
+  /-- Best feasible primal solution found so far. -/
   bestPrimal : Option (Fin n → Rat) := none
 
 /-- Minimum lower bound across a list of open nodes. -/
@@ -1711,18 +1735,24 @@ inductive CertMode (n : Nat) where
   | bound (targetLB : Rat)
   deriving Repr
 
+/-- Legacy alias for `CertMode`. -/
 abbrev VIPRMode := CertMode
 
 /-- Weighted reference to a constraint in the derivation table. -/
 structure LinRef where
+  /-- Index of the referenced constraint in the derivation table. -/
   id : Nat
+  /-- Rational multiplier applied to the referenced constraint. -/
   mult : Rat
   deriving Repr, DecidableEq
 
 /-- Weighted reference to an initial variable bound (`P.lb` or `P.ub`). -/
 structure VarBoundRef where
+  /-- Column index of the bounded variable. -/
   col : Nat
+  /-- Bound side (`true` = upper bound `P.ub`, `false` = lower bound `P.lb`). -/
   isUpper : Bool
+  /-- Rational multiplier applied to the variable bound. -/
   mult : Rat
   deriving Repr, DecidableEq
 
@@ -1733,9 +1763,13 @@ structure VarBoundRef where
 - `companion` only needs `P.isInt companion = true` (soundness uses `x_c ≤ 0 ∨ x_c ≥ 1`
   from integrality, without requiring `[0, 1]` binary bounds). -/
 structure OrbitWitness where
+  /-- Column index of the symmetric integer companion variable `c ≠ br`. -/
   companion : Nat
+  /-- Column permutation `σ` on `Fin n` mapping `br ↦ companion`. -/
   colPerm : Array Nat
+  /-- Row-implication witness map of length `baseRows.size`. -/
   rowPerm : Array Nat
+  /-- Optional derived entry IDs supporting assumption preservation under `σ`. -/
   supportEntries : Array Nat := #[]
   deriving Repr
 
@@ -1758,24 +1792,35 @@ inductive StepRule (n : Nat) where
 
 /-- Single proof step with optional claimed constraint and assumption check. -/
 structure ProofStep (n : Nat) where
+  /-- Derivation rule applied at this step. -/
   rule : StepRule n
+  /-- Optional expected derived linear constraint for cross-checking. -/
   claimedCon : Option (LinCon n) := none
+  /-- Optional expected active assumption IDs for cross-checking. -/
   claimedAssumptions : Option (Array Nat) := none
   deriving Repr
 
 /-- Complete Mini-VIPR rational MILP certificate. -/
 structure MiniVIPRCert where
+  /-- Underlying MILP problem instance. -/
   inst : VIPRInstance
+  /-- Certification mode (infeasibility, optimality, or lower bound). -/
   mode : CertMode inst.n
+  /-- Sequence of derivation proof steps. -/
   steps : Array (ProofStep inst.n)
+  /-- Index of the root concluding step in the derivation table. -/
   rootStep : Nat
+  /-- Optional primal incumbent vector. -/
   incumbent? : Option (RatVec inst.n) := none
 
+/-- Alias returning the MILP instance of a `MiniVIPRCert`. -/
 abbrev MiniVIPRCert.prob (cert : MiniVIPRCert) : VIPRInstance := cert.inst
 
 /-- Verified derived entry with its active assumption ID set. -/
 structure DerivedEntry (n : Nat) where
+  /-- Derived linear constraint. -/
   con : LinCon n
+  /-- List of active assumption entry IDs on which `con` depends. -/
   assumptions : List Nat
   deriving Repr
 
@@ -1783,6 +1828,7 @@ structure DerivedEntry (n : Nat) where
 def checkIncumbentFeasible (P : VIPRInstance) (x : RatVec P.n) : Bool :=
   checkBounds 0 && checkRows 0
 where
+  /-- Tail-recursive loop verifying variable bounds and integrality for columns `i .. P.n - 1`. -/
   checkBounds (i : Nat) : Bool :=
     if hi : i < P.n then
       let j : Fin P.n := ⟨i, hi⟩
@@ -1793,6 +1839,7 @@ where
       if okL && okU && okI then checkBounds (i + 1) else false
     else true
   termination_by P.n - i
+  /-- Tail-recursive loop verifying base linear constraints `i .. P.baseRows.size - 1`. -/
   checkRows (i : Nat) : Bool :=
     if hi : i < P.baseRows.size then
       if P.baseRows[i].satBool x then checkRows (i + 1) else false
@@ -2046,6 +2093,7 @@ def entryValid (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
   (∀ a ∈ e.assumptions, a < entries.size) ∧
   (∀ x : Fin P.n → Rat, MILPFeasible P x → asmsSat entries e.assumptions x → e.con.sat x)
 
+/-- Invariant stating that every entry in the derivation table `entries` is valid for `P`. -/
 def ValidTable (P : VIPRInstance) (entries : Array (DerivedEntry P.n)) : Prop :=
   ∀ i (hi : i < entries.size), entryValid P entries entries[i]
 
@@ -2118,6 +2166,7 @@ def evalLinComb (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
     | some (v2, r2) =>
       some { con := { coeffs := v2, sense := sense, rhs := r2 }, assumptions := asms1 }
 where
+  /-- Tail-recursive loop accumulating weighted constraint references `refs[i ..]`. -/
   goRefs (i : Nat) (v : RatVec P.n) (rhs : Rat) (asms : List Nat) :
       Option (RatVec P.n × Rat × List Nat) :=
     if hi : i < refs.size then
@@ -2133,6 +2182,7 @@ where
       else none
     else some (v, rhs, asms)
   termination_by refs.size - i
+  /-- Tail-recursive loop accumulating weighted variable bound references `bounds[i ..]`. -/
   goBounds (i : Nat) (v : RatVec P.n) (rhs : Rat) : Option (RatVec P.n × Rat) :=
     if hi : i < bounds.size then
       match stepLinBound P sense v rhs bounds[i] with
@@ -2338,6 +2388,7 @@ private theorem evalLinComb_sense {P : VIPRInstance} {entries : Array (DerivedEn
 def isIntegralLinVec (P : VIPRInstance) (v : RatVec P.n) : Bool :=
   loop 0
 where
+  /-- Tail-recursive loop checking integrality of coordinates `i .. P.n - 1`. -/
   loop (i : Nat) : Bool :=
     if hi : i < P.n then
       let j : Fin P.n := ⟨i, hi⟩
@@ -2691,6 +2742,7 @@ def evalSafeDual (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
       some { con := { coeffs := RatVec.ofFn P.obj, sense := .ge, rhs := totalRhs },
              assumptions := finalAsms }
 where
+  /-- Tail-recursive loop folding reduced-cost variable bound contributions for columns `i .. P.n - 1`. -/
   goCols (i : Nat) (rowCoeffs : RatVec P.n) (accRhs : Rat) (accAsms : List Nat) :
       Option (Rat × List Nat) :=
     if hi : i < P.n then
@@ -2856,6 +2908,7 @@ private def getBoundUB (P : VIPRInstance) (entries : Array (DerivedEntry P.n))
 def buildPermInv (n : Nat) (perm : Array Nat) : Array Nat :=
   go 0 (Array.replicate n n)
 where
+  /-- Tail-recursive loop scattering `inv[perm[i]] := i` for `i .. perm.size - 1`. -/
   go (i : Nat) (inv : Array Nat) : Array Nat :=
     if hi : i < perm.size then
       let p := perm[i]
@@ -2903,6 +2956,7 @@ def checkPermBijection (n : Nat) (perm : Array Nat) : Bool :=
     loop inv 0
   else false
 where
+  /-- Tail-recursive loop verifying `inv[perm[i]] = i` for `i .. n - 1`. -/
   loop (inv : Array Nat) (i : Nat) : Bool :=
     if hi : i < n then
       if hp : i < perm.size then
@@ -2987,6 +3041,7 @@ def checkPermInvolution (n : Nat) (perm : Array Nat) : Bool :=
     loop 0
   else false
 where
+  /-- Tail-recursive loop verifying `perm[perm[i]] = i` for `i .. n - 1`. -/
   loop (i : Nat) : Bool :=
     if hi : i < n then
       if hp : i < perm.size then
@@ -3066,6 +3121,7 @@ theorem checkPermInvolution_spec {n : Nat} {perm : Array Nat}
 def checkCoeffsPermMatch {n : Nat} (dst src : RatVec n) (perm : Array Nat) (negate : Bool) : Bool :=
   loop 0
 where
+  /-- Tail-recursive loop checking `dst[i] = (±) src[perm[i]]` for `i .. n - 1`. -/
   loop (i : Nat) : Bool :=
     if hi : i < n then
       if hp : i < perm.size then
@@ -3235,6 +3291,7 @@ theorem checkConPermImplies_sound {n : Nat} {src dst : LinCon n} {perm : Array N
 def checkBaseBoundImpliesPerm (P : VIPRInstance) (dst : LinCon P.n) (perm : Array Nat) : Bool :=
   loop 0
 where
+  /-- Tail-recursive loop scanning unit-vector coordinates `k .. P.n - 1` for a base-bound implication. -/
   loop (k : Nat) : Bool :=
     if hk : k < P.n then
       if hp : k < perm.size then
@@ -3341,6 +3398,7 @@ def checkOrbitAutomorphism (P : VIPRInstance) (entries : Array (DerivedEntry P.n
   checkSupports 0 &&
   checkRightRem rightRem
 where
+  /-- Tail-recursive loop checking integrality, objective, and bound preservation for columns `i .. P.n - 1`. -/
   checkCols (i : Nat) : Bool :=
     if hi : i < P.n then
       if hp : i < w.colPerm.size then
@@ -3357,6 +3415,7 @@ where
       else false
     else true
   termination_by P.n - i
+  /-- Tail-recursive loop checking base-row implications `baseRows[rowPerm[i]] ⇒ σ(baseRows[i])`. -/
   checkRows (i : Nat) : Bool :=
     if hi : i < P.baseRows.size then
       if hrp : i < w.rowPerm.size then
@@ -3369,6 +3428,7 @@ where
       else false
     else true
   termination_by P.baseRows.size - i
+  /-- Tail-recursive loop checking that every support entry depends only on `outAsms`. -/
   checkSupports (i : Nat) : Bool :=
     if hi : i < w.supportEntries.size then
       let b := w.supportEntries[i]
@@ -3379,11 +3439,13 @@ where
       else false
     else true
   termination_by w.supportEntries.size - i
+  /-- Checks whether any entry in `outAsms` implies `σ(conA)`. -/
   anyOutMatch (conA : LinCon P.n) : List Nat → Bool
     | [] => false
     | b :: bs =>
       let ok := if hb : b < entries.size then checkConPermImplies entries[b].con conA w.colPerm else false
       ok || anyOutMatch conA bs
+  /-- Checks whether any entry in `w.supportEntries[i ..]` implies `σ(conA)`. -/
   anySupportMatch (conA : LinCon P.n) (i : Nat) : Bool :=
     if hi : i < w.supportEntries.size then
       let b := w.supportEntries[i]
@@ -3391,6 +3453,7 @@ where
       ok || anySupportMatch conA (i + 1)
     else false
   termination_by w.supportEntries.size - i
+  /-- Checks that every remaining assumption in `rightRem` is preserved under `w.colPerm`. -/
   checkRightRem : List Nat → Bool
     | [] => true
     | a :: rest =>
@@ -4759,24 +4822,33 @@ private theorem rat_binary_zero_or_one {v : Rat} (h0 : 0 ≤ v) (h1 : v ≤ 1) (
 
 /-- Intermediate MILP state during exact rational presolve over `n` variables. -/
 structure PresolveState (n : Nat) where
+  /-- Current constant offset of the objective function. -/
   objConst : Rat
+  /-- Current linear objective coefficient vector. -/
   obj : RatVec n
+  /-- Integrality flags for each variable. -/
   isInt : Array Bool
   isInt_size : isInt.size = n
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
   lb_size : lb.size = n
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
   ub_size : ub.size = n
+  /-- Active constraints (`none` indicates a deleted/redundant row). -/
   rows : Array (Option (LinCon n))
 
+/-- Returns the integrality flag for variable `j`. -/
 @[inline]
 def PresolveState.isIntAt {n : Nat} (st : PresolveState n) (j : Fin n) : Bool :=
   st.isInt[j.1]'(by rw [st.isInt_size]; exact j.2)
 
+/-- Returns the optional lower bound for variable `j`. -/
 @[inline]
 def PresolveState.lbAt {n : Nat} (st : PresolveState n) (j : Fin n) : Option Rat :=
   st.lb[j.1]'(by rw [st.lb_size]; exact j.2)
 
+/-- Returns the optional upper bound for variable `j`. -/
 @[inline]
 def PresolveState.ubAt {n : Nat} (st : PresolveState n) (j : Fin n) : Option Rat :=
   st.ub[j.1]'(by rw [st.ub_size]; exact j.2)
@@ -4785,6 +4857,7 @@ def PresolveState.ubAt {n : Nat} (st : PresolveState n) (j : Fin n) : Option Rat
 def compactOptRows {n : Nat} (rows : Array (Option (LinCon n))) : Array (LinCon n) :=
   go 0 #[]
 where
+  /-- Tail-recursive loop collecting `some` entries from `rows[i ..]` into `acc`. -/
   go (i : Nat) (acc : Array (LinCon n)) : Array (LinCon n) :=
     if hi : i < rows.size then
       match rows[i] with
@@ -4995,6 +5068,7 @@ def sumMinAct {n : Nat} (st : PresolveState n) (coeffs : RatVec n) (skip : Optio
     Option Rat :=
   go 0 0
 where
+  /-- Tail-recursive loop accumulating minimum term activities for columns `i .. n - 1`. -/
   go (i : Nat) (acc : Rat) : Option Rat :=
     if hi : i < n then
       let j : Fin n := ⟨i, hi⟩
@@ -5012,6 +5086,7 @@ def sumMaxAct {n : Nat} (st : PresolveState n) (coeffs : RatVec n) (skip : Optio
     Option Rat :=
   go 0 0
 where
+  /-- Tail-recursive loop accumulating maximum term activities for columns `i .. n - 1`. -/
   go (i : Nat) (acc : Rat) : Option Rat :=
     if hi : i < n then
       let j : Fin n := ⟨i, hi⟩
@@ -7579,6 +7654,7 @@ def checkVIPRInstanceEqSame {n : Nat} (objConst1 objConst2 : Rat)
   (rows1.size == rows2.size) &&
   checkRows 0
 where
+  /-- Tail-recursive loop comparing objective, integrality, and bounds for columns `k .. n - 1`. -/
   checkCols (k : Nat) : Bool :=
     if hk : k < n then
       let j : Fin n := ⟨k, hk⟩
@@ -7587,6 +7663,7 @@ where
       else false
     else true
   termination_by n - k
+  /-- Tail-recursive loop comparing base rows `i .. rows1.size - 1` for structural equality. -/
   checkRows (i : Nat) : Bool :=
     if hi : i < rows1.size then
       if hi2 : i < rows2.size then
@@ -7701,8 +7778,11 @@ theorem checkVIPRInstanceEq_sound {P Q : VIPRInstance}
 /-- Combined presolve + Mini-VIPR certificate relating an original MILP `orig`
 through a verified presolve reduction sequence to a verified `reduced` Mini-VIPR proof. -/
 structure VIPRWithPresolveCert where
+  /-- Original unpresolved MILP instance. -/
   orig : VIPRInstance
+  /-- Sequence of exact rational presolve reduction steps. -/
   presolve : Array PresolveStep
+  /-- Mini-VIPR certificate for the resulting reduced MILP instance. -/
   reduced : MiniVIPRCert
 
 /-- Executable verifier for a presolve-enveloped Mini-VIPR certificate. -/

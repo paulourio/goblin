@@ -57,6 +57,13 @@ theorem allFin_eq_true_iff {n : Nat} {p : Fin n → Bool} :
     · intro hall
       exact ⟨fun i => hall i.castSucc, hall (Fin.last n)⟩
 
+private theorem allFin_congr {n : Nat} {p q : Fin n → Bool} (h : ∀ i, p i = q i) :
+    allFin n p = allFin n q := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [allFin, ih (fun i => h i.castSucc), h (Fin.last n)]
+
 /-- Satisfaction of optional variable bounds `lb[j] ≤ x[j] ≤ ub[j]`. -/
 def boundsSat {n : Nat} (lb ub : Fin n → Option Rat) (x : Fin n → Rat) : Prop :=
   ∀ j : Fin n, (∀ l, lb j = some l → l ≤ x j) ∧ (∀ u, ub j = some u → x j ≤ u)
@@ -125,6 +132,12 @@ private theorem guardExc_ok {c : Bool} {msg : String} {k : Except String Unit}
   cases c
   · simp at h
   · exact ⟨rfl, h⟩
+
+private theorem guardExc_congr {c₁ c₂ : Bool} {m₁ m₂ : String} {k₁ k₂ : Except String Unit}
+    (hc : c₁ = c₂) (hm : m₁ = m₂) (hk : k₁ = k₂) :
+    guardExc c₁ m₁ k₁ = guardExc c₂ m₂ k₂ := by
+  subst hc hm hk
+  rfl
 
 theorem allTermsInBounds_iff {n : Nat} {terms : Array SparseTerm} :
     allTermsInBounds n terms = true ↔ ∀ t ∈ terms.toList, t.col < n := by
@@ -226,6 +239,122 @@ theorem accumTerms_getElem {n : Nat} (terms : Array SparseTerm) (j : Fin n) :
       termsCoeff terms.toList j.val := by
   unfold accumTerms
   rw [accumTermsAux_getElem]
+  simp [Rat.zero_add]
+
+private def accumScaledTermsAux (n : Nat) (scale : Rat) (acc : Array Rat) (hsz : acc.size = n) :
+    List SparseTerm → { a : Array Rat // a.size = n }
+  | [] => ⟨acc, hsz⟩
+  | t :: ts =>
+    if h : t.col < n then
+      let acc' := acc.set t.col (acc[t.col]'(by omega) + scale * t.val) (by omega)
+      accumScaledTermsAux n scale acc' (by simp [acc', hsz]) ts
+    else
+      accumScaledTermsAux n scale acc hsz ts
+
+private theorem accumScaledTermsAux_getElem {n : Nat} (scale : Rat) (acc : Array Rat)
+    (hsz : acc.size = n) (terms : List SparseTerm) (j : Fin n) :
+    (accumScaledTermsAux n scale acc hsz terms).1[j.val]'(by
+      rw [(accumScaledTermsAux n scale acc hsz terms).2]; exact j.isLt) =
+      acc[j.val]'(by rw [hsz]; exact j.isLt) + scale * termsCoeff terms j.val := by
+  induction terms generalizing acc hsz with
+  | nil =>
+    simp [accumScaledTermsAux, termsCoeff, Rat.mul_zero, Rat.add_zero]
+  | cons t ts ih =>
+    dsimp only [accumScaledTermsAux]
+    split
+    · next h =>
+      let acc' := acc.set t.col (acc[t.col]'(by omega) + scale * t.val) (by omega)
+      have hsz' : acc'.size = n := by simp [acc', hsz]
+      rw [ih acc' hsz']
+      simp only [termsCoeff]
+      by_cases hjeq : t.col = j.val
+      · have hbeq : (t.col == j.val) = true := beq_iff_eq.mpr hjeq
+        simp only [hbeq, ↓reduceIte]
+        have hget : acc'[j.val]'(by rw [hsz']; exact j.isLt) =
+            acc[j.val]'(by rw [hsz]; exact j.isLt) + scale * t.val := by
+          simp [acc', hjeq]
+        rw [hget, Rat.mul_add, Rat.add_assoc]
+      · have hbeq : (t.col == j.val) = false := beq_false_of_ne hjeq
+        simp only [hbeq, Bool.false_eq_true, ↓reduceIte, Rat.zero_add]
+        have hget : acc'[j.val]'(by rw [hsz']; exact j.isLt) =
+            acc[j.val]'(by rw [hsz]; exact j.isLt) := by
+          simp [acc', Array.getElem_set, hjeq]
+        rw [hget]
+    · next h =>
+      have hne : t.col ≠ j.val := by omega
+      have hbeq : (t.col == j.val) = false := beq_false_of_ne hne
+      rw [ih acc hsz]
+      simp [termsCoeff, hbeq, Rat.zero_add]
+
+private def accumWeightedRowsAux (n : Nat) (baseRows : Array RowSpec) (pairs : Array (Nat × Rat)) :
+    (k : Nat) → k ≤ pairs.size → (acc : Array Rat) → acc.size = n →
+      { a : Array Rat // a.size = n }
+  | 0, _, acc, hsz => ⟨acc, hsz⟩
+  | k + 1, hk, acc, hsz =>
+    let p := pairs[k]'(by omega)
+    let res1 :=
+      if h : p.1 < baseRows.size then
+        if p.2 == 0 then ⟨acc, hsz⟩
+        else accumScaledTermsAux n p.2 acc hsz baseRows[p.1].terms.toList
+      else ⟨acc, hsz⟩
+    accumWeightedRowsAux n baseRows pairs k (by omega) res1.1 res1.2
+
+private theorem accumWeightedRowsAux_getElem {n : Nat} (baseRows : Array RowSpec)
+    (pairs : Array (Nat × Rat)) (k : Nat) (hk : k ≤ pairs.size)
+    (acc : Array Rat) (hsz : acc.size = n) (j : Fin n) :
+    (accumWeightedRowsAux n baseRows pairs k hk acc hsz).1[j.val]'(by
+      rw [(accumWeightedRowsAux n baseRows pairs k hk acc hsz).2]; exact j.isLt) =
+      acc[j.val]'(by rw [hsz]; exact j.isLt) + finSum k (fun i =>
+        let p := pairs[i.val]'(by omega)
+        if h : p.1 < baseRows.size then p.2 * termsCoeff baseRows[p.1].terms.toList j.val else 0) := by
+  induction k generalizing acc hsz with
+  | zero =>
+    simp [accumWeightedRowsAux, finSum_zero_n, Rat.add_zero]
+  | succ k ih =>
+    dsimp only [accumWeightedRowsAux]
+    let p := pairs[k]'(by omega)
+    let res1 :=
+      if h : p.1 < baseRows.size then
+        if p.2 == 0 then ⟨acc, hsz⟩
+        else accumScaledTermsAux n p.2 acc hsz baseRows[p.1].terms.toList
+      else ⟨acc, hsz⟩
+    have hstep :
+        res1.1[j.val]'(by rw [res1.2]; exact j.isLt) =
+          acc[j.val]'(by rw [hsz]; exact j.isLt) +
+            (if h : p.1 < baseRows.size then p.2 * termsCoeff baseRows[p.1].terms.toList j.val else 0) := by
+      dsimp only [res1]
+      by_cases hlt : p.1 < baseRows.size
+      · simp only [hlt, ↓reduceDIte]
+        by_cases hw0 : p.2 = 0
+        · simp [hw0, Rat.zero_mul, Rat.add_zero]
+        · have hbeq : (p.2 == 0) = false := beq_false_of_ne hw0
+          simp only [hbeq, Bool.false_eq_true, ↓reduceIte]
+          exact accumScaledTermsAux_getElem p.2 acc hsz baseRows[p.1].terms.toList j
+      · simp [hlt, Rat.add_zero]
+    have hmain := ih (by omega) res1.1 res1.2
+    have hwrap :
+        (accumWeightedRowsAux n baseRows pairs (k + 1) hk acc hsz).1[j.val]'(by
+          rw [(accumWeightedRowsAux n baseRows pairs (k + 1) hk acc hsz).2]; exact j.isLt) =
+          (accumWeightedRowsAux n baseRows pairs k (by omega) res1.1 res1.2).1[j.val]'(by
+            rw [(accumWeightedRowsAux n baseRows pairs k (by omega) res1.1 res1.2).2]; exact j.isLt) := rfl
+    exact hwrap.trans (hmain.trans (by
+      rw [hstep, finSum_succ, Rat.add_assoc]
+      congr 1
+      exact Rat.add_comm _ _))
+
+private def accumWeightedRowsN (n m : Nat) (baseRows : Array RowSpec) (pairs : Array (Nat × Rat))
+    (hsz : pairs.size = m) : { a : Array Rat // a.size = n } :=
+  accumWeightedRowsAux n baseRows pairs m (by omega) (Array.replicate n 0) (by simp)
+
+private theorem accumWeightedRowsN_getElem {n m : Nat} (baseRows : Array RowSpec)
+    (pairs : Array (Nat × Rat)) (hsz : pairs.size = m) (j : Fin n) :
+    (accumWeightedRowsN n m baseRows pairs hsz).1[j.val]'(by
+      rw [(accumWeightedRowsN n m baseRows pairs hsz).2]; exact j.isLt) =
+      finSum m (fun i =>
+        let p := pairs[i.val]'(by omega)
+        if h : p.1 < baseRows.size then p.2 * termsCoeff baseRows[p.1].terms.toList j.val else 0) := by
+  unfold accumWeightedRowsN
+  rw [accumWeightedRowsAux_getElem]
   simp [Rat.zero_add]
 
 theorem evalCutOnFin_eq_finSum_accum {n : Nat} (cut : CutSpec) (x : Fin n → Rat)
@@ -1046,28 +1175,46 @@ theorem lifted_knapsack_cover_sound {n m : Nat}
 
 /-- Item entry in an executable knapsack cover lifting certificate. -/
 structure CoverItemCert where
+  /-- Column index of the binary variable in the knapsack row. -/
   col : Nat
+  /-- Non-negative knapsack weight of the item. -/
   weight : Rat
+  /-- Whether the binary variable is complemented (`1 - x[col]`) in the knapsack form. -/
   comp : Bool
+  /-- Whether the item belongs to the initial minimal cover. -/
   inCover : Bool
+  /-- Lifted integer cut coefficient `α` for this item. -/
   alpha : Nat
   deriving Repr, Inhabited
 
 /-- Complete certificate for a minimal/lifted binary knapsack cover cut (with optional positive scaling),
 verified end-to-end against variable integrality/bounds and `baseRows`. -/
 structure KnapsackCoverCert where
+  /-- Number of structural variables in the problem. -/
   numVars : Nat
+  /-- Integrality flags for each variable. -/
   isInt : Array Bool
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
+  /-- Base linear constraints of the MILP instance. -/
   baseRows : Array RowSpec
+  /-- Optional index into `baseRows` when the knapsack row comes from a single base row. -/
   rowIdx : Option Nat := none
+  /-- Optional `(rowIndex, multiplier)` pairs when the knapsack row is aggregated from `baseRows`. -/
   aggMultipliers : Option (Array (Nat × Rat)) := none
+  /-- Source linear row used to derive the binary knapsack inequality. -/
   row : RowSpec
+  /-- Orientation multiplier (`1` or `-1`) converting `row` into `≤` form. -/
   sign : Rat
+  /-- Binary knapsack items with their weights, complement flags, cover membership, and lifted coefficients. -/
   items : Array CoverItemCert
+  /-- Right-hand side of the derived binary knapsack inequality. -/
   knapRHS : Rat
+  /-- Positive scaling factor applied to the cut. -/
   scale : Rat := 1
+  /-- Final emitted knapsack cover cut. -/
   cut : CutSpec
   deriving Repr, Inhabited
 
@@ -1699,30 +1846,50 @@ theorem lot_sizing_lS_sound {L : Nat}
 
 /-- Single period node in a Barany-Van Roy-Wolsey `(l, S)` lot-sizing chain certificate. -/
 structure LotSizingNodeCert where
+  /-- Production variable column index for this period. -/
   prodCol : Nat
+  /-- Outgoing inventory variable column index for this period. -/
   invOutCol : Nat
+  /-- Binary setup variable column index for this period. -/
   binCol : Nat
+  /-- Demand for this period. -/
   demand : Rat
+  /-- Variable upper bound capacity coefficient linking production to the binary setup variable. -/
   vubCap : Rat
+  /-- Right-hand side of the variable upper bound constraint. -/
   vubRHS : Rat := 0
+  /-- Whether this period is included in the cut subset `S`. -/
   inS : Bool
+  /-- Coefficient on the binary setup variable `y` in the `(l, S)` cut. -/
   coeffY : Rat
+  /-- Optional index in `baseRows` of the flow-conservation row for this period. -/
   flowRowIdx : Option Nat := none
+  /-- Optional index in `baseRows` of the VUB row for this period. -/
   vubRowIdx : Option Nat := none
   deriving Repr, Inhabited
 
 /-- Complete certificate for an `(l, S)` lot-sizing flow-conservation cut (with optional positive scaling),
 verified end-to-end against variable domains, column distinctness, and `baseRows`. -/
 structure LotSizingCutCert where
+  /-- Number of structural variables in the problem. -/
   numVars : Nat
+  /-- Integrality flags for each variable. -/
   isInt : Array Bool
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
+  /-- Base linear constraints of the MILP instance. -/
   baseRows : Array RowSpec
+  /-- Optional incoming inventory variable column index at the start of the chain. -/
   invInCol : Option Nat
+  /-- Ordered sequence of lot-sizing period nodes forming the `(l, S)` chain. -/
   nodes : Array LotSizingNodeCert
+  /-- Cumulative demand right-hand side for the `(l, S)` cut. -/
   cutDem : Rat
+  /-- Positive scaling factor applied to the cut. -/
   scale : Rat := 1
+  /-- Final emitted `(l, S)` lot-sizing cut. -/
   cut : CutSpec
   deriving Repr, Inhabited
 
@@ -2614,20 +2781,35 @@ theorem agg_row_cmir_sound {m n : Nat}
 /-- Complete certificate for a multi-row aggregated (or pairwise surrogate) cMIR cut
 over arbitrary optional bounds, with optional positive final cut scaling. -/
 structure AggCMIRCert where
+  /-- Number of structural variables in the problem. -/
   numVars : Nat
+  /-- Integrality flags for each variable. -/
   isInt : Array Bool
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
+  /-- Base rows paired with their aggregation multipliers. -/
   rows : Array (RowSpec × Rat)
+  /-- Sparse terms of the materialized aggregated inequality. -/
   aggTerms : Array SparseTerm
+  /-- Right-hand side of the materialized aggregated inequality. -/
   aggRHS : Rat
+  /-- Positive cMIR divisor `δ`. -/
   delta : Rat
+  /-- Per-variable bound-substitution side (`true` = lower bound, `false` = upper bound). -/
   useLower : Array Bool
+  /-- Optional upward-weakened scaled right-hand side `β̂`. -/
   betaHat : Option Rat := none
+  /-- Optional upward-weakened scaled integer coefficients `α̂`. -/
   alphaHat : Option (Array Rat) := none
+  /-- Optional upward-weakened integer cut coefficients. -/
   cInt : Option (Array Rat) := none
+  /-- Optional upward-weakened continuous cut coefficients. -/
   cCont : Option (Array Rat) := none
+  /-- Positive scaling factor applied to the final cut. -/
   scale : Rat := 1
+  /-- Final emitted cMIR cut. -/
   cut : CutSpec
   deriving Repr, Inhabited
 
@@ -3066,11 +3248,17 @@ theorem finalize_cut_drop_universal_sound {n : Nat}
 
 /-- Complete certificate for a `finalizeSparseCut` / `finalizeCut` transformation. -/
 structure FinalizedCutCert where
+  /-- Number of structural variables in the problem. -/
   numVars : Nat
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
+  /-- Unfinalized input cut before coefficient dropping and scaling. -/
   rawCut : CutSpec
+  /-- Positive scaling factor applied during finalization. -/
   scale : Rat := 1
+  /-- Resulting finalized cut after coefficient dropping and scaling. -/
   finalCut : CutSpec
   deriving Repr, Inhabited
 
@@ -3169,17 +3357,29 @@ tableau row multipliers `rho : Array (Nat × Rat)`, non-basic bound side `colAtU
 optional upward-weakened GMI coefficients (`cStruct`, `cSlack`), and `finalizeSparseCut`
 coefficient dropping & scaling. -/
 structure StructuralGMICert where
+  /-- Number of structural variables in the problem. -/
   numVars : Nat
+  /-- Integrality flags for each variable. -/
   isInt : Array Bool
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
+  /-- Base linear constraints of the MILP instance. -/
   baseRows : Array RowSpec
+  /-- Column index of the fractional basic integer variable generating the GMI cut. -/
   basicCol : Nat
+  /-- Sparse tableau row multipliers `(rowIndex, multiplier)` combining `baseRows`. -/
   rho : Array (Nat × Rat)
+  /-- Per-variable non-basic bound side (`true` = at upper bound, `false` = at lower bound). -/
   colAtUpper : Array Bool
+  /-- Optional upward-weakened GMI coefficients for structural variables. -/
   cStruct : Option (Array Rat) := none
+  /-- Optional upward-weakened GMI coefficients for slack variables. -/
   cSlack : Option (Array Rat) := none
+  /-- Positive scaling factor applied during cut finalization. -/
   scale : Rat := 1
+  /-- Final emitted structural GMI cut. -/
   cut : CutSpec
   deriving Repr, Inhabited
 
@@ -3757,21 +3957,519 @@ theorem checkStructuralGMICert_sound (cert : StructuralGMICert)
   rw [evalCutOnFin_eq_finSum_accum cert.cut x hcutColsT]
   exact finalize_cut_drop_universal_sound hscalePos hrawCut hfeas.1 hlo hrhsLe
 
+private def sgmiBuildActiveArr (cert : StructuralGMICert)
+    (alphaDense : { a : Array Rat // a.size = cert.numVars }) :
+    { a : Array Bool // a.size = cert.numVars } :=
+  ⟨Array.ofFn (fun (j : Fin cert.numVars) =>
+    (j.val != cert.basicCol) &&
+      decide (alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt) ≠ 0)),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildActiveArr_getElem (cert : StructuralGMICert)
+    (alphaDense : { a : Array Rat // a.size = cert.numVars })
+    (halpha : ∀ j : Fin cert.numVars,
+      alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt) = sgmiAlpha cert j)
+    (j : Fin cert.numVars) :
+    (sgmiBuildActiveArr cert alphaDense).1[j.val]'(by
+      rw [(sgmiBuildActiveArr cert alphaDense).2]; exact j.isLt) = sgmiActiveCol cert j := by
+  unfold sgmiBuildActiveArr sgmiActiveCol
+  simp only [Array.getElem_ofFn, halpha j]
+
+private def sgmiBuildColBndArr (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars }) :
+    { a : Array (Option Rat) // a.size = cert.numVars } :=
+  ⟨Array.ofFn (fun (j : Fin cert.numVars) =>
+    if !(activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt)) then some 0
+    else if cert.colAtUpper[j.val]! then cert.ub[j.val]! else cert.lb[j.val]!),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildColBndArr_getElem (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (hactive : ∀ j : Fin cert.numVars,
+      activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j)
+    (j : Fin cert.numVars) :
+    (sgmiBuildColBndArr cert activeArr).1[j.val]'(by
+      rw [(sgmiBuildColBndArr cert activeArr).2]; exact j.isLt) = sgmiColBnd cert j := by
+  unfold sgmiBuildColBndArr sgmiColBnd
+  simp only [Array.getElem_ofFn, hactive j]
+
+private def sgmiFastBeta (cert : StructuralGMICert)
+    (alphaDense : { a : Array Rat // a.size = cert.numVars })
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (colBndArr : { a : Array (Option Rat) // a.size = cert.numVars }) : Rat :=
+  sgmiBeta0 cert - finSum cert.numVars (fun j =>
+    if activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) then
+      alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt) *
+        (colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt)).getD 0
+    else 0)
+
+private theorem sgmiFastBeta_eq (cert : StructuralGMICert)
+    (alphaDense : { a : Array Rat // a.size = cert.numVars })
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (colBndArr : { a : Array (Option Rat) // a.size = cert.numVars })
+    (halpha : ∀ j : Fin cert.numVars,
+      alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt) = sgmiAlpha cert j)
+    (hactive : ∀ j : Fin cert.numVars,
+      activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j)
+    (hcolBnd : ∀ j : Fin cert.numVars,
+      colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt) = sgmiColBnd cert j) :
+    sgmiFastBeta cert alphaDense activeArr colBndArr = sgmiBeta cert := by
+  unfold sgmiFastBeta sgmiBeta
+  congr 1
+  exact finSum_congr fun j => by rw [hactive j, halpha j, hcolBnd j]
+
+private def sgmiBuildExactStructArr (cert : StructuralGMICert)
+    (alphaDense : { a : Array Rat // a.size = cert.numVars })
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (colBndArr : { a : Array (Option Rat) // a.size = cert.numVars })
+    (f0 : Rat) : { a : Array Rat // a.size = cert.numVars } :=
+  ⟨Array.ofFn (fun (j : Fin cert.numVars) =>
+    if !(activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt)) then 0
+    else
+      let a := alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt)
+      let aTilde := if cert.colAtUpper[j.val]! then -a else a
+      let useInt := cert.isInt[j.val]! &&
+        ((colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt)).getD 0).den == 1
+      if useInt then gmiIntCoeff aTilde f0 else gmiContCoeff aTilde f0),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildExactStructArr_getElem (cert : StructuralGMICert)
+    (alphaDense : { a : Array Rat // a.size = cert.numVars })
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (colBndArr : { a : Array (Option Rat) // a.size = cert.numVars })
+    (f0 : Rat)
+    (halpha : ∀ j : Fin cert.numVars,
+      alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt) = sgmiAlpha cert j)
+    (hactive : ∀ j : Fin cert.numVars,
+      activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j)
+    (hcolBnd : ∀ j : Fin cert.numVars,
+      colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt) = sgmiColBnd cert j)
+    (hf0 : f0 = fracPart (sgmiBeta cert))
+    (j : Fin cert.numVars) :
+    (sgmiBuildExactStructArr cert alphaDense activeArr colBndArr f0).1[j.val]'(by
+      rw [(sgmiBuildExactStructArr cert alphaDense activeArr colBndArr f0).2]; exact j.isLt) =
+      sgmiExactStruct cert j := by
+  unfold sgmiBuildExactStructArr sgmiExactStruct sgmiAlphaTilde sgmiUseInt
+  simp only [Array.getElem_ofFn, hactive j, halpha j, hcolBnd j, hf0]
+  cases sgmiActiveCol cert j <;> simp
+
+private def sgmiBuildCStructArr (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (exactStructArr : { a : Array Rat // a.size = cert.numVars }) :
+    { a : Array Rat // a.size = cert.numVars } :=
+  ⟨Array.ofFn (fun (j : Fin cert.numVars) =>
+    if !(activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt)) then 0
+    else optCoeffAt cert.cStruct
+      (exactStructArr.1[j.val]'(by rw [exactStructArr.2]; exact j.isLt)) j.val),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildCStructArr_getElem (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (exactStructArr : { a : Array Rat // a.size = cert.numVars })
+    (hactive : ∀ j : Fin cert.numVars,
+      activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j)
+    (hexact : ∀ j : Fin cert.numVars,
+      exactStructArr.1[j.val]'(by rw [exactStructArr.2]; exact j.isLt) = sgmiExactStruct cert j)
+    (j : Fin cert.numVars) :
+    (sgmiBuildCStructArr cert activeArr exactStructArr).1[j.val]'(by
+      rw [(sgmiBuildCStructArr cert activeArr exactStructArr).2]; exact j.isLt) =
+      sgmiCStruct cert j := by
+  unfold sgmiBuildCStructArr sgmiCStruct
+  simp only [Array.getElem_ofFn, hactive j, hexact j]
+
+private def sgmiBuildExactSlackArr (cert : StructuralGMICert) (f0 : Rat) :
+    { a : Array Rat // a.size = cert.rho.size } :=
+  ⟨Array.ofFn (fun (i : Fin cert.rho.size) =>
+    let rVal := cert.rho[i.val].2
+    match sgmiRowSense cert i with
+    | .le => gmiContCoeff rVal f0
+    | .ge => gmiContCoeff (-rVal) f0
+    | .eq => 0),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildExactSlackArr_getElem (cert : StructuralGMICert) (f0 : Rat)
+    (hf0 : f0 = fracPart (sgmiBeta cert)) (i : Fin cert.rho.size) :
+    (sgmiBuildExactSlackArr cert f0).1[i.val]'(by
+      rw [(sgmiBuildExactSlackArr cert f0).2]; exact i.isLt) = sgmiExactSlack cert i := by
+  unfold sgmiBuildExactSlackArr sgmiExactSlack
+  simp only [Array.getElem_ofFn, hf0]
+
+private def sgmiBuildCSlackArr (cert : StructuralGMICert)
+    (exactSlackArr : { a : Array Rat // a.size = cert.rho.size }) :
+    { a : Array Rat // a.size = cert.rho.size } :=
+  ⟨Array.ofFn (fun (i : Fin cert.rho.size) =>
+    match sgmiRowSense cert i with
+    | .eq => 0
+    | _ => optCoeffAt cert.cSlack
+      (exactSlackArr.1[i.val]'(by rw [exactSlackArr.2]; exact i.isLt)) i.val),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildCSlackArr_getElem (cert : StructuralGMICert)
+    (exactSlackArr : { a : Array Rat // a.size = cert.rho.size })
+    (hexact : ∀ i : Fin cert.rho.size,
+      exactSlackArr.1[i.val]'(by rw [exactSlackArr.2]; exact i.isLt) = sgmiExactSlack cert i)
+    (i : Fin cert.rho.size) :
+    (sgmiBuildCSlackArr cert exactSlackArr).1[i.val]'(by
+      rw [(sgmiBuildCSlackArr cert exactSlackArr).2]; exact i.isLt) = sgmiCSlack cert i := by
+  unfold sgmiBuildCSlackArr sgmiCSlack
+  simp only [Array.getElem_ofFn, hexact i]
+
+private def sgmiBuildSlackPairs (cert : StructuralGMICert)
+    (cSlackArr : { a : Array Rat // a.size = cert.rho.size }) :
+    { a : Array (Nat × Rat) // a.size = cert.rho.size } :=
+  ⟨Array.ofFn (fun (i : Fin cert.rho.size) =>
+    let rIdx := cert.rho[i.val].1
+    let c := cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt)
+    let w :=
+      if h : rIdx < cert.baseRows.size then slackSignVal cert.baseRows[rIdx].sense * c else 0
+    (rIdx, w)),
+   Array.size_ofFn⟩
+
+private def sgmiBuildVArr (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (cStructArr : { a : Array Rat // a.size = cert.numVars })
+    (vRowsDense : { a : Array Rat // a.size = cert.numVars }) :
+    { a : Array Rat // a.size = cert.numVars } :=
+  ⟨Array.ofFn (fun (j : Fin cert.numVars) =>
+    (if !(activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt)) then 0
+     else
+       let c := cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt)
+       if cert.colAtUpper[j.val]! then c else -c) +
+    vRowsDense.1[j.val]'(by rw [vRowsDense.2]; exact j.isLt)),
+   Array.size_ofFn⟩
+
+private theorem sgmiBuildVArr_getElem (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (cStructArr : { a : Array Rat // a.size = cert.numVars })
+    (cSlackArr : { a : Array Rat // a.size = cert.rho.size })
+    (hactive : ∀ j : Fin cert.numVars,
+      activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j)
+    (hcStruct : ∀ j : Fin cert.numVars,
+      cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt) = sgmiCStruct cert j)
+    (hcSlack : ∀ i : Fin cert.rho.size,
+      cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt) = sgmiCSlack cert i)
+    (j : Fin cert.numVars) :
+    let sp := sgmiBuildSlackPairs cert cSlackArr
+    let vRows := accumWeightedRowsN cert.numVars cert.rho.size cert.baseRows sp.1 sp.2
+    (sgmiBuildVArr cert activeArr cStructArr vRows).1[j.val]'(by
+      rw [(sgmiBuildVArr cert activeArr cStructArr vRows).2]; exact j.isLt) =
+      sgmiV cert j := by
+  dsimp only
+  unfold sgmiBuildVArr sgmiV
+  simp only [Array.getElem_ofFn, hactive j, hcStruct j]
+  congr 1
+  rw [accumWeightedRowsN_getElem]
+  apply finSum_congr
+  intro i
+  unfold sgmiBuildSlackPairs
+  simp only [Array.getElem_ofFn, hcSlack i]
+  split <;> rfl
+
+private def sgmiFastRawRHS (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (cStructArr : { a : Array Rat // a.size = cert.numVars })
+    (colBndArr : { a : Array (Option Rat) // a.size = cert.numVars })
+    (cSlackArr : { a : Array Rat // a.size = cert.rho.size }) : Rat :=
+  -1 +
+  finSum cert.numVars (fun j =>
+    if !(activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt)) then 0
+    else
+      let c := cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt)
+      (if cert.colAtUpper[j.val]! then c else -c) *
+        (colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt)).getD 0) +
+  finSum cert.rho.size fun i =>
+    let rIdx := cert.rho[i.val].1
+    if h : rIdx < cert.baseRows.size then
+      (slackSignVal cert.baseRows[rIdx].sense *
+        (cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt))) * cert.baseRows[rIdx].rhs
+    else 0
+
+private theorem sgmiFastRawRHS_eq (cert : StructuralGMICert)
+    (activeArr : { a : Array Bool // a.size = cert.numVars })
+    (cStructArr : { a : Array Rat // a.size = cert.numVars })
+    (colBndArr : { a : Array (Option Rat) // a.size = cert.numVars })
+    (cSlackArr : { a : Array Rat // a.size = cert.rho.size })
+    (hactive : ∀ j : Fin cert.numVars,
+      activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j)
+    (hcStruct : ∀ j : Fin cert.numVars,
+      cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt) = sgmiCStruct cert j)
+    (hcolBnd : ∀ j : Fin cert.numVars,
+      colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt) = sgmiColBnd cert j)
+    (hcSlack : ∀ i : Fin cert.rho.size,
+      cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt) = sgmiCSlack cert i) :
+    sgmiFastRawRHS cert activeArr cStructArr colBndArr cSlackArr = sgmiRawRHS cert := by
+  unfold sgmiFastRawRHS sgmiRawRHS
+  have h1 :
+      finSum cert.numVars (fun j =>
+        if !(activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt)) then 0
+        else
+          let c := cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt)
+          (if cert.colAtUpper[j.val]! then c else -c) *
+            (colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt)).getD 0) =
+      finSum cert.numVars (fun j =>
+        if !sgmiActiveCol cert j then 0
+        else (if cert.colAtUpper[j.val]! then sgmiCStruct cert j else -sgmiCStruct cert j) *
+          (sgmiColBnd cert j).getD 0) :=
+    finSum_congr fun j => by simp only [hactive j, hcStruct j, hcolBnd j]
+  have h2 :
+      finSum cert.rho.size (fun i =>
+        let rIdx := cert.rho[i.val].1
+        if h : rIdx < cert.baseRows.size then
+          (slackSignVal cert.baseRows[rIdx].sense *
+            (cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt))) * cert.baseRows[rIdx].rhs
+        else 0) =
+      finSum cert.rho.size (fun i =>
+        let rIdx := cert.rho[i.val].1
+        if h : rIdx < cert.baseRows.size then
+          (slackSignVal cert.baseRows[rIdx].sense * sgmiCSlack cert i) * cert.baseRows[rIdx].rhs
+        else 0) :=
+    finSum_congr fun i => by simp only [hcSlack i]
+  rw [h1, h2]
+
+/-- Linear-time `O(n + |rho| * avgRowNnz)` fast verifier equivalent to `checkStructuralGMICert`. -/
+def checkStructuralGMICertFast (cert : StructuralGMICert) : Except String Unit :=
+  let n := cert.numVars
+  let m := cert.rho.size
+  if !(cert.isInt.size == n && cert.lb.size == n && cert.ub.size == n && cert.colAtUpper.size == n) then
+    .error s!"structural GMI cert metadata arrays must have length {n}"
+  else
+  let rhoOk := allFin m fun i =>
+    let (rIdx, _) := cert.rho[i.val]
+    if h : rIdx < cert.baseRows.size then allTermsInBounds n cert.baseRows[rIdx].terms else false
+  let alphaDense := accumWeightedRowsN n m cert.baseRows cert.rho rfl
+  let basicOk : Bool :=
+    if hB : cert.basicCol < n then
+      cert.isInt[cert.basicCol]! &&
+        decide (alphaDense.1[cert.basicCol]'(by rw [alphaDense.2]; exact hB) = 1)
+    else false
+  let activeArr := sgmiBuildActiveArr cert alphaDense
+  let colBndArr := sgmiBuildColBndArr cert activeArr
+  let colBndOk := allFin n fun j =>
+    (colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt)).isSome
+  let betaVal := sgmiFastBeta cert alphaDense activeArr colBndArr
+  let f0 := fracPart betaVal
+  let cStructLenOk : Bool := match cert.cStruct with | none => true | some arr => arr.size == n
+  let exactStructArr := sgmiBuildExactStructArr cert alphaDense activeArr colBndArr f0
+  let cStructArr := sgmiBuildCStructArr cert activeArr exactStructArr
+  let cStructOk := allFin n fun j =>
+    if activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) then
+      decide (exactStructArr.1[j.val]'(by rw [exactStructArr.2]; exact j.isLt) ≤
+        cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt))
+    else true
+  let cSlackLenOk : Bool := match cert.cSlack with | none => true | some arr => arr.size == m
+  let exactSlackArr := sgmiBuildExactSlackArr cert f0
+  let cSlackArr := sgmiBuildCSlackArr cert exactSlackArr
+  let cSlackOk := allFin m fun i =>
+    match sgmiRowSense cert i with
+    | .eq => true
+    | _ => decide (exactSlackArr.1[i.val]'(by rw [exactSlackArr.2]; exact i.isLt) ≤
+      cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt))
+  let slackPairs := sgmiBuildSlackPairs cert cSlackArr
+  let vRowsDense := accumWeightedRowsN n m cert.baseRows slackPairs.1 slackPairs.2
+  let vArr := sgmiBuildVArr cert activeArr cStructArr vRowsDense
+  let rawRHS := sgmiFastRawRHS cert activeArr cStructArr colBndArr cSlackArr
+  let cutDense := accumTerms n cert.cut.terms
+  let dropTerms : Fin n → Option Rat := fun j =>
+    dropMinTerm
+      (cert.scale * (vArr.1[j.val]'(by rw [vArr.2]; exact j.isLt)) -
+        cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+      cert.lb[j.val]! cert.ub[j.val]!
+  let dropOk := allFin n fun j => (dropTerms j).isSome
+  let reqRHS := cert.scale * rawRHS - finSum n (fun j => (dropTerms j).getD 0)
+  guardExc (decide (0 < cert.scale)) s!"structural GMI cert scale={cert.scale} must be > 0" <|
+  guardExc (allTermsInBounds n cert.cut.terms) "structural GMI cert cut has out-of-bounds column" <|
+  guardExc rhoOk "structural GMI cert rho references out-of-bounds row or column" <|
+  guardExc basicOk "structural GMI cert basicCol must be an integer variable with tableau coeff 1" <|
+  guardExc colBndOk "structural GMI cert active non-basic column missing active bound" <|
+  guardExc (decide (0 < f0) && decide (f0 < 1)) s!"structural GMI cert beta={betaVal} has non-fractional f0={f0}" <|
+  guardExc (cStructLenOk && cSlackLenOk) "structural GMI cert optional coeff array length mismatch" <|
+  guardExc cStructOk "structural GMI cert cStruct coefficient below exact GMI coefficient" <|
+  guardExc cSlackOk "structural GMI cert cSlack coefficient below exact GMI coefficient" <|
+  guardExc dropOk "structural GMI cert finalize/drop perturbed coefficient on unbounded variable side" <|
+  guardExc (decide (reqRHS ≤ cert.cut.rhs))
+    s!"structural GMI cert cut.rhs={cert.cut.rhs} < required outward RHS {reqRHS}" <|
+  .ok ()
+
+theorem checkStructuralGMICertFast_eq (cert : StructuralGMICert) :
+    checkStructuralGMICertFast cert = checkStructuralGMICert cert := by
+  unfold checkStructuralGMICertFast checkStructuralGMICert
+  dsimp only
+  split
+  · rfl
+  · next _hmeta =>
+    let alphaDense := accumWeightedRowsN cert.numVars cert.rho.size cert.baseRows cert.rho rfl
+    have halpha : ∀ j : Fin cert.numVars,
+        alphaDense.1[j.val]'(by rw [alphaDense.2]; exact j.isLt) = sgmiAlpha cert j := fun j =>
+      accumWeightedRowsN_getElem cert.baseRows cert.rho rfl j
+    let activeArr := sgmiBuildActiveArr cert alphaDense
+    have hactive : ∀ j : Fin cert.numVars,
+        activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) = sgmiActiveCol cert j := fun j =>
+      sgmiBuildActiveArr_getElem cert alphaDense halpha j
+    let colBndArr := sgmiBuildColBndArr cert activeArr
+    have hcolBnd : ∀ j : Fin cert.numVars,
+        colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt) = sgmiColBnd cert j := fun j =>
+      sgmiBuildColBndArr_getElem cert activeArr hactive j
+    have hbasic :
+        (if hB : cert.basicCol < cert.numVars then
+          cert.isInt[cert.basicCol]! &&
+            decide (alphaDense.1[cert.basicCol]'(by rw [alphaDense.2]; exact hB) = 1)
+         else false) =
+        (if hB : cert.basicCol < cert.numVars then
+          cert.isInt[cert.basicCol]! && decide (sgmiAlpha cert ⟨cert.basicCol, hB⟩ = 1)
+         else false) := by
+      split
+      · next hB => rw [halpha ⟨cert.basicCol, hB⟩]
+      · rfl
+    have hcolBndOk :
+        allFin cert.numVars (fun j =>
+          (colBndArr.1[j.val]'(by rw [colBndArr.2]; exact j.isLt)).isSome) =
+          allFin cert.numVars (fun j => (sgmiColBnd cert j).isSome) :=
+      allFin_congr fun j => by rw [hcolBnd j]
+    have hbeta : sgmiFastBeta cert alphaDense activeArr colBndArr = sgmiBeta cert :=
+      sgmiFastBeta_eq cert alphaDense activeArr colBndArr halpha hactive hcolBnd
+    have hf0 : fracPart (sgmiFastBeta cert alphaDense activeArr colBndArr) = fracPart (sgmiBeta cert) :=
+      congrArg fracPart hbeta
+    let exactStructArr := sgmiBuildExactStructArr cert alphaDense activeArr colBndArr
+      (fracPart (sgmiFastBeta cert alphaDense activeArr colBndArr))
+    have hexactStruct : ∀ j : Fin cert.numVars,
+        exactStructArr.1[j.val]'(by rw [exactStructArr.2]; exact j.isLt) =
+          sgmiExactStruct cert j := fun j =>
+      sgmiBuildExactStructArr_getElem cert alphaDense activeArr colBndArr
+        (fracPart (sgmiFastBeta cert alphaDense activeArr colBndArr)) halpha hactive hcolBnd hf0 j
+    let cStructArr := sgmiBuildCStructArr cert activeArr exactStructArr
+    have hcStruct : ∀ j : Fin cert.numVars,
+        cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt) = sgmiCStruct cert j := fun j =>
+      sgmiBuildCStructArr_getElem cert activeArr exactStructArr hactive hexactStruct j
+    have hcStructOk :
+        allFin cert.numVars (fun j =>
+          if activeArr.1[j.val]'(by rw [activeArr.2]; exact j.isLt) then
+            decide (exactStructArr.1[j.val]'(by rw [exactStructArr.2]; exact j.isLt) ≤
+              cStructArr.1[j.val]'(by rw [cStructArr.2]; exact j.isLt))
+          else true) =
+          allFin cert.numVars (fun j =>
+            if sgmiActiveCol cert j then decide (sgmiExactStruct cert j ≤ sgmiCStruct cert j) else true) :=
+      allFin_congr fun j => by rw [hactive j, hexactStruct j, hcStruct j]
+    let exactSlackArr := sgmiBuildExactSlackArr cert
+      (fracPart (sgmiFastBeta cert alphaDense activeArr colBndArr))
+    have hexactSlack : ∀ i : Fin cert.rho.size,
+        exactSlackArr.1[i.val]'(by rw [exactSlackArr.2]; exact i.isLt) = sgmiExactSlack cert i :=
+      fun i => sgmiBuildExactSlackArr_getElem cert
+        (fracPart (sgmiFastBeta cert alphaDense activeArr colBndArr)) hf0 i
+    let cSlackArr := sgmiBuildCSlackArr cert exactSlackArr
+    have hcSlack : ∀ i : Fin cert.rho.size,
+        cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt) = sgmiCSlack cert i := fun i =>
+      sgmiBuildCSlackArr_getElem cert exactSlackArr hexactSlack i
+    have hcSlackOk :
+        allFin cert.rho.size (fun i =>
+          match sgmiRowSense cert i with
+          | .eq => true
+          | _ => decide (exactSlackArr.1[i.val]'(by rw [exactSlackArr.2]; exact i.isLt) ≤
+            cSlackArr.1[i.val]'(by rw [cSlackArr.2]; exact i.isLt))) =
+          allFin cert.rho.size (fun i =>
+            match sgmiRowSense cert i with
+            | .eq => true
+            | _ => decide (sgmiExactSlack cert i ≤ sgmiCSlack cert i)) :=
+      allFin_congr fun i => by cases sgmiRowSense cert i <;> simp [hexactSlack i, hcSlack i]
+    let slackPairs := sgmiBuildSlackPairs cert cSlackArr
+    let vRowsDense := accumWeightedRowsN cert.numVars cert.rho.size cert.baseRows slackPairs.1 slackPairs.2
+    let vArr := sgmiBuildVArr cert activeArr cStructArr vRowsDense
+    have hv : ∀ j : Fin cert.numVars,
+        vArr.1[j.val]'(by rw [vArr.2]; exact j.isLt) = sgmiV cert j := fun j =>
+      sgmiBuildVArr_getElem cert activeArr cStructArr cSlackArr hactive hcStruct hcSlack j
+    have hrawRHS :
+        sgmiFastRawRHS cert activeArr cStructArr colBndArr cSlackArr = sgmiRawRHS cert :=
+      sgmiFastRawRHS_eq cert activeArr cStructArr colBndArr cSlackArr hactive hcStruct hcolBnd hcSlack
+    let cutDense := accumTerms cert.numVars cert.cut.terms
+    have hdrop : ∀ j : Fin cert.numVars,
+        dropMinTerm
+          (cert.scale * (vArr.1[j.val]'(by rw [vArr.2]; exact j.isLt)) -
+            cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+          cert.lb[j.val]! cert.ub[j.val]! =
+        dropMinTerm
+          (cert.scale * sgmiV cert j -
+            cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+          cert.lb[j.val]! cert.ub[j.val]! := fun j => by
+      rw [hv j]
+    have hdropOk :
+        allFin cert.numVars (fun j =>
+          (dropMinTerm
+            (cert.scale * (vArr.1[j.val]'(by rw [vArr.2]; exact j.isLt)) -
+              cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+            cert.lb[j.val]! cert.ub[j.val]!).isSome) =
+          allFin cert.numVars (fun j =>
+            (dropMinTerm
+              (cert.scale * sgmiV cert j -
+                cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+              cert.lb[j.val]! cert.ub[j.val]!).isSome) :=
+      allFin_congr fun j => by rw [hdrop j]
+    have hreqRHS :
+        cert.scale * sgmiFastRawRHS cert activeArr cStructArr colBndArr cSlackArr -
+          finSum cert.numVars (fun j =>
+            (dropMinTerm
+              (cert.scale * (vArr.1[j.val]'(by rw [vArr.2]; exact j.isLt)) -
+                cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+              cert.lb[j.val]! cert.ub[j.val]!).getD 0) =
+        cert.scale * sgmiRawRHS cert -
+          finSum cert.numVars (fun j =>
+            (dropMinTerm
+              (cert.scale * sgmiV cert j -
+                cutDense.1[j.val]'(by rw [cutDense.2]; exact j.isLt))
+              cert.lb[j.val]! cert.ub[j.val]!).getD 0) := by
+      rw [hrawRHS, finSum_congr fun j => by rw [hdrop j]]
+    refine guardExc_congr rfl rfl ?_
+    refine guardExc_congr rfl rfl ?_
+    refine guardExc_congr rfl rfl ?_
+    refine guardExc_congr hbasic rfl ?_
+    refine guardExc_congr hcolBndOk rfl ?_
+    refine guardExc_congr (by rw [hbeta]) (by rw [hbeta]) ?_
+    refine guardExc_congr rfl rfl ?_
+    refine guardExc_congr hcStructOk rfl ?_
+    refine guardExc_congr hcSlackOk rfl ?_
+    refine guardExc_congr hdropOk rfl ?_
+    refine guardExc_congr (by rw [hreqRHS]) (by rw [hreqRHS]) rfl
+
+theorem checkStructuralGMICertFast_sound (cert : StructuralGMICert)
+    (hok : checkStructuralGMICertFast cert = .ok ())
+    (hIntLen : cert.isInt.size = cert.numVars)
+    (hlbLen : cert.lb.size = cert.numVars)
+    (hubLen : cert.ub.size = cert.numVars)
+    (hAtULen : cert.colAtUpper.size = cert.numVars)
+    (x : Fin cert.numVars → Rat)
+    (hfeas : MIPFeasible cert.numVars
+      (fun j => cert.isInt[j.val]'(by omega))
+      (fun j => cert.lb[j.val]'(by omega))
+      (fun j => cert.ub[j.val]'(by omega))
+      cert.baseRows x) :
+    evalCutOnFin cert.numVars cert.cut x ≤ cert.cut.rhs := by
+  rw [checkStructuralGMICertFast_eq] at hok
+  exact checkStructuralGMICert_sound cert hok hIntLen hlbLen hubLen hAtULen x hfeas
+
 /-! ### 4c. Universal Structural VUB Disaggregation Certificate Over `baseRows` -/
 
 /-- Complete structural VUB disaggregation certificate deriving `x[targetCol] - effUB * x[binCol] ≤ 0`
 directly from a base row in `baseRows`, followed by `finalizeSparseCut` drop & scaling. -/
 structure StructuralVUBCert where
+  /-- Number of structural variables in the problem. -/
   numVars : Nat
+  /-- Integrality flags for each variable. -/
   isInt : Array Bool
+  /-- Optional lower bounds for each variable (`none` = `-∞`). -/
   lb : Array (Option Rat)
+  /-- Optional upper bounds for each variable (`none` = `+∞`). -/
   ub : Array (Option Rat)
+  /-- Base linear constraints of the MILP instance. -/
   baseRows : Array RowSpec
+  /-- Index in `baseRows` of the row certifying the variable upper bound. -/
   rowIdx : Nat
+  /-- Column index of the binary indicator variable. -/
   binCol : Nat
+  /-- Column index of the target variable bounded by `effUB * x[binCol]`. -/
   targetCol : Nat
+  /-- Effective upper-bound coefficient multiplying the binary variable. -/
   effUB : Rat
+  /-- Positive scaling factor applied during cut finalization. -/
   scale : Rat := 1
+  /-- Final emitted VUB disaggregation cut. -/
   cut : CutSpec
   deriving Repr, Inhabited
 
@@ -4162,7 +4860,7 @@ def checkStructuralGMIJson (v : JsonVal) : Except String String := do
   let cut ← v.getField "cut" >>= parseCutSpecJson
   let cert : StructuralGMICert :=
     { numVars, isInt, lb, ub, baseRows, basicCol, rho, colAtUpper, cStruct, cSlack, scale, cut }
-  checkStructuralGMICert cert
+  checkStructuralGMICertFast cert
   let wits ← checkOptionalWitnesses v cut
   pure s!"VERIFIED (gmi-check-structural, {rho.size} rows, {wits} witnesses)"
 

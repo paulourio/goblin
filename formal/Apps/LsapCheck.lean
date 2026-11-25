@@ -585,6 +585,7 @@ private def runBatch (path : String) (args : ParsedArgs) : IO UInt32 :=
 end Apps.LsapCheck
 
 open Apps.LsapCheck in
+/-- CLI entry point for `lsap-check`, verifying linear sum assignment certificates. -/
 def main (args : List String) : IO UInt32 := do
   match parseArgs args {} with
   | .error msg =>

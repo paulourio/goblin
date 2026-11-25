@@ -875,6 +875,7 @@ inductive LPPresolveStep where
 def findReducedRow? (mRed : Nat) (origRowIdx : Array Nat) (origRow : Nat) : Option (Fin mRed) :=
   loop 0
 where
+  /-- Linearly scans `origRowIdx` from index `q` up to `mRed - 1` for `origRow`. -/
   loop (q : Nat) : Option (Fin mRed) :=
     if hq : q < mRed then
       if hsz : q < origRowIdx.size then

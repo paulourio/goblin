@@ -748,6 +748,7 @@ decreasing_by
   · left; omega
   · left; omega
 where
+  /-- Recursively scans JSON array elements starting at index `i` for duplicate object keys. -/
   findInArr (xs : Array JsonVal) (i : Nat) : Option String :=
     if h : i < xs.size then
       match findDuplicateKey? xs[i] with
@@ -760,6 +761,7 @@ where
     all_goals simp_wf
     · left; have := Array.sizeOf_getElem xs i h; omega
     · right; omega
+  /-- Recursively scans JSON object field values starting at index `i` for duplicate keys. -/
   findInObj (xs : Array (String × JsonVal)) (i : Nat) : Option String :=
     if h : i < xs.size then
       match findDuplicateKey? xs[i].2 with

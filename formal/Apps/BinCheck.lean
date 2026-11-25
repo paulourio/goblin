@@ -184,6 +184,7 @@ private def usageText : String :=
 end GoblinFormal.Apps.BinCheck
 
 open GoblinFormal.Apps.BinCheck in
+/-- CLI entry point for `bin-check`, verifying compiled ARM64/AMD64 ELF binary encodings against Track 5 proofs. -/
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] =>

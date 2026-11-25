@@ -310,6 +310,7 @@ private def runSingleFile (path : String) (handler : JsonVal → Except String S
 end Apps.CutsCheck
 
 open Apps.CutsCheck in
+/-- CLI entry point for `cuts-check`, verifying cutting-plane validity certificates. -/
 def main (args : List String) : IO UInt32 := do
   match args with
   | [] | ["--help"] | ["-h"] | ["help"] =>

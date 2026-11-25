@@ -54,9 +54,13 @@ inductive Arm64Cond where
 
 /-- Processor condition flags (N, Z, C, V). -/
 structure NZCV where
+  /-- Negative condition flag. -/
   n : Bool := false
+  /-- Zero condition flag. -/
   z : Bool := false
+  /-- Carry condition flag. -/
   c : Bool := false
+  /-- Overflow condition flag. -/
   v : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
@@ -348,14 +352,23 @@ def decodeArm64Prog (words : Array UInt32) : Array Arm64Insn :=
 
 /-- AArch64 machine state for executing decoded ELF routines. -/
 structure Arm64State where
+  /-- General-purpose register file (`X0`–`X30`; `X31` is read as `0` or `SP`). -/
   regs : BitVec 5 → BitVec 64
+  /-- Stack pointer (`SP`). -/
   sp : BitVec 64
+  /-- Processor condition flags (`NZCV`). -/
   nzcv : NZCV
+  /-- 64-bit floating-point / SIMD scalar register file (`D0`–`D31`). -/
   fpRegs : BitVec 5 → BitVec 64
+  /-- Go runtime goroutine `g.stackguard0` limit. -/
   gStackGuard0 : BitVec 64
+  /-- Byte-addressed flat memory map. -/
   mem : BitVec 64 → BitVec 8
+  /-- Current instruction index (word offset from `baseAddr`). -/
   pcIdx : Nat
+  /-- Base virtual address of the routine's `.text` segment. -/
   baseAddr : BitVec 64
+  /-- Current execution status (running, returned, external call, or trapped). -/
   status : ExecStatus
 
 /-- Read a 64-bit GPR (`X31` reads `0`). -/
@@ -490,6 +503,7 @@ def logicFlags32 (res : BitVec 64) : NZCV :=
 @[inline] def logicFlags (is64 : Bool) (res : BitVec 64) : NZCV :=
   if is64 then logicFlags64 res else logicFlags32 res
 
+/-- Apply an AArch64 shift (`LSL`, `LSR`, `ASR`, `ROR`) to `v` at 32-bit or 64-bit width. -/
 def shiftVal (is64 : Bool) (sk : ShiftKind) (v : BitVec 64) (amt : Nat) : BitVec 64 :=
   if is64 then
     let sh := amt % 64
@@ -509,6 +523,7 @@ def shiftVal (is64 : Bool) (sk : ShiftKind) (v : BitVec 64) (amt : Nat) : BitVec
       | .ror => BitVec.rotateRight v32 sh
     r32.zeroExtend 64
 
+/-- Zero- or sign-extend `v` according to `ext` and left-shift by `imm3 % 5`. -/
 def extVal (ext : ExtKind) (v : BitVec 64) (imm3 : Nat) : BitVec 64 :=
   let base : BitVec 64 :=
     match ext with
@@ -522,9 +537,11 @@ def extVal (ext : ExtKind) (v : BitVec 64) (imm3 : Nat) : BitVec 64 :=
     | .sxtx => v
   base <<< (imm3 % 5)
 
+/-- Zero-extend the low 32 bits of `v` when `is64` is `false`. -/
 @[inline] def mask32IfNeeded (is64 : Bool) (v : BitVec 64) : BitVec 64 :=
   if is64 then v else (v.extractLsb' 0 32).zeroExtend 64
 
+/-- Execute an AArch64 bitfield instruction (`SBFM`, `BFM`, `UBFM`) on `dstOld` and `src`. -/
 def execBitfield (is64 isSigned isInsert : Bool) (dstOld src : BitVec 64)
     (immr imms : Nat) : BitVec 64 :=
   let datasize := if is64 then 64 else 32
@@ -567,14 +584,21 @@ def execBitfield (is64 isSigned isInsert : Bool) (dstOld src : BitVec 64)
 
 /-! ### Exact IEEE-754 Binary64 Helpers for AArch64 FP Instructions -/
 
+/-- Extract the sign bit of an IEEE-754 binary64 value. -/
 def f64Sign (b : BitVec 64) : Bool := b.msb
+/-- Extract the 11-bit biased exponent of an IEEE-754 binary64 value. -/
 def f64Exp (b : BitVec 64) : Nat := ((b.toNat >>> 52) &&& 0x7ff)
+/-- Extract the 52-bit significand (mantissa) of an IEEE-754 binary64 value. -/
 def f64Mant (b : BitVec 64) : Nat := (b.toNat &&& 0x000fffffffffffff)
+/-- Return `true` iff `b` encodes an IEEE-754 binary64 NaN. -/
 def f64IsNaN (b : BitVec 64) : Bool :=
   (b &&& 0x7ff0000000000000#64) == 0x7ff0000000000000#64 &&
   (b &&& 0x000fffffffffffff#64) != 0#64
+/-- Return `true` iff `b` encodes IEEE-754 binary64 `+0.0` or `-0.0`. -/
 def f64IsZero (b : BitVec 64) : Bool := (b &&& 0x7fffffffffffffff#64) == 0#64
+/-- Return `true` iff `b` encodes IEEE-754 binary64 `+∞`. -/
 def f64IsPosInf (b : BitVec 64) : Bool := b == 0x7ff0000000000000#64
+/-- Return `true` iff `b` encodes IEEE-754 binary64 `-∞`. -/
 def f64IsNegInf (b : BitVec 64) : Bool := b == 0xfff0000000000000#64
 
 /-- IEEE-754 binary64 absolute value (`FABSD`). -/
@@ -841,6 +865,7 @@ def isSupportedFpBinary (op : Nat) : Bool :=
   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => true
   | _ => false
 
+/-- Rounding modes for AArch64 `FRINT*D` floating-point-to-integer instructions. -/
 inductive RoundMode where
   | nearestEven
   | nearestAway
@@ -848,6 +873,7 @@ inductive RoundMode where
   | floor
   | trunc
 
+/-- Round an IEEE-754 binary64 value to an integral binary64 value under `mode`. -/
 def f64RoundToInt (mode : RoundMode) (b : BitVec 64) : BitVec 64 :=
   if f64IsNaN b then f64QuietNaN b
   else if f64Exp b == 0x7ff || f64IsZero b then b
@@ -889,14 +915,17 @@ def f64ToInt64 (b : BitVec 64) : BitVec 64 :=
       else if z < -((1 <<< 63 : Nat) : Int) then 0x8000000000000000#64
       else BitVec.ofInt 64 z
 
+/-- Compute a register-offset load/store address from `base`, extended `idx`, and optional 8-byte scaling. -/
 def calcRegOffsetAddr (base : BitVec 64) (idx : BitVec 64)
     (ext : ExtKind) (scale : Bool) (sizeBytes : Nat) : BitVec 64 :=
   let shift := if scale && sizeBytes == 8 then 3 else 0
   base + extVal ext idx shift
 
+/-- Advance the program counter index by one 32-bit instruction word. -/
 @[inline] def advancePc (s : Arm64State) : Arm64State :=
   { s with pcIdx := s.pcIdx + 1 }
 
+/-- Execute a PC-relative branch or call (`B`/`BL`), setting `X30` on calls and resolving external targets. -/
 def jumpRel (progLen : Nat) (extTargets : Nat → Option String) (isCall : Bool)
     (s : Arm64State) (imm : Int) : Arm64State :=
   let tgtInt : Int := (s.pcIdx : Int) + imm
@@ -1952,6 +1981,7 @@ def splitmix64Words : Array UInt32 := #[
   0x9b017c41, 0xca417c20, 0xd65f03c0
 ]
 
+/-- External call-target map for `presolveSplitmix64` (leaf routine with no external calls). -/
 def splitmix64Targets (_ : Nat) : Option String := none
 
 /-- Tier 5A theorem: decoded Go 1.27 ARM64 `presolveSplitmix64` matches `splitmix64Spec` on all 2^64 inputs. -/
@@ -2259,6 +2289,7 @@ def canonicalFloatBitsInlinedWords : Array UInt32 := #[
   0x1e602008, 0x54000061, 0xaa1f03e0, 0xd65f03c0, 0x9e660000, 0xd65f03c0
 ]
 
+/-- External call-target map for the inlined `canonicalFloatBits` routine (no external calls). -/
 def canonicalFloatBitsInlinedTargets (_ : Nat) : Option String := none
 
 private def canonicalFloatBitsInlinedDecoded : Array Arm64Insn := #[
@@ -2365,6 +2396,7 @@ def canonicalFloatBitsWords : Array UInt32 := #[
   0x17ffffec
 ]
 
+/-- External call-target map for `canonicalFloatBits` (`math.Float64bits` and `runtime.morestack_noctxt.abi0`). -/
 def canonicalFloatBitsTargets (idx : Nat) : Option String :=
   if idx == 12 then some "math.Float64bits"
   else if idx == 18 then some "runtime.morestack_noctxt.abi0"
@@ -2675,6 +2707,7 @@ def divCeilInt64Words : Array UInt32 := #[
   0xa94087e0, 0x17ffffeb
 ]
 
+/-- External call-target map for `divCeilInt64` (`runtime.panicdivide` and `runtime.morestack_noctxt.abi0`). -/
 def divCeilInt64Targets (idx : Nat) : Option String :=
   if idx == 15 then some "runtime.panicdivide"
   else if idx == 19 then some "runtime.morestack_noctxt.abi0"
@@ -2952,6 +2985,7 @@ def gcdInt64Words : Array UInt32 := #[
   0x14000005, 0x9ac10c1b, 0x9b018362, 0xaa0103e0, 0xaa0203e1, 0xb5ffff81, 0xd65f03c0
 ]
 
+/-- External call-target map for `gcdInt64` (leaf routine with no external calls). -/
 def gcdInt64Targets (_ : Nat) : Option String := none
 
 private def gcdInt64Decoded : Array Arm64Insn := #[
