@@ -978,7 +978,7 @@ func certifyAssignCore(ctx context.Context, req certAssignReq) (float64, error) 
 			uNorm, vNorm = vRaw, uRaw
 		}
 		if maxAbsFinite <= hugeCostThreshold {
-			if !approxDualsConsistent(m, n, normEntry, col4row, row4col, uNorm, vNorm) {
+			if !approxDualsConsistent(m, n, normEntry, col4row, row4col, uNorm, vNorm, maxAbsFinite) {
 				return 0, ErrCertificationFailed
 			}
 		} else if !hugeDualsConsistent(m, n, normEntry, row4col, uNorm, vNorm) {
@@ -1070,10 +1070,28 @@ func approxDualsConsistent(
 	normEntry func(int, int) (float64, bool),
 	col4row, row4col []int,
 	uNorm, vNorm []float64,
+	maxAbsFinite float64,
 ) bool {
 	if len(uNorm) != m || len(vNorm) != n {
 		return false
 	}
+	maxDualAbs := 0.0
+	for _, ui := range uNorm {
+		if av := math.Abs(ui); av > maxDualAbs {
+			maxDualAbs = av
+		}
+	}
+	for _, vj := range vNorm {
+		if av := math.Abs(vj); av > maxDualAbs {
+			maxDualAbs = av
+		}
+	}
+	// Cap the global ULP allowance by O(n) * maxAbsFinite so inflated duals cannot
+	// bypass consistency while permitting multi-scale downward ULP projections.
+	dualCap := float64(2*n) * maxAbsFinite
+	globalScale := max(maxAbsFinite, min(maxDualAbs, dualCap))
+	globalULPTol := float64(n) * 64.0 * floatULP(globalScale)
+
 	if m < n {
 		for j := range n {
 			vj := vNorm[j]
@@ -1095,7 +1113,12 @@ func approxDualsConsistent(
 		ui := uNorm[i]
 		vm := vNorm[mj]
 		scale := max(1.0, math.Abs(cm)+math.Abs(ui)+math.Abs(vm))
-		if math.Abs((ui+vm)-cm) > 1e-7*scale {
+		diff := (ui + vm) - cm
+		csTol := 1e-7 * scale
+		if diff < 0 && globalULPTol > csTol {
+			csTol = globalULPTol
+		}
+		if math.Abs(diff) > csTol {
 			return false
 		}
 		for j := range n {

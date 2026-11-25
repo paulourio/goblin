@@ -521,9 +521,12 @@ func TestAssignCertifiedNegativeControlsFailClosed(t *testing.T) {
 		res.Objective = math.Nextafter(res.Objective, math.Inf(1))
 	})
 
-	// 7. Tampered dual potential U.
+	// 7. Tampered dual potential U (upward and downward).
 	assertAllEntrypointsFailClosed(t, "tampered_dual_u", base3, Maximize, func(_, _ int, _ Sense, res *Result, _ *error) {
 		res.U[0] += 0.5
+	})
+	assertAllEntrypointsFailClosed(t, "tampered_dual_u_downward", base3, Maximize, func(_, _ int, _ Sense, res *Result, _ *error) {
+		res.U[0] -= 0.5
 	})
 
 	// 8. Tampered rectangular unmatched V != 0.

@@ -2467,7 +2467,9 @@ func FuzzCertifiedAssign(f *testing.F) {
 		}
 
 		if formalAssignOracleEnabled() {
-			verifyFormalAssignResult(t, label+"/formal", rows, cols, cost, sense, res, true)
+			// Regimes 0-1 fit in 53-bit float64; multi-scale regime 2 and 2^1021..MaxFloat64
+			// regime 3 can floor projected float64 duals while proving exact dyadic optimality.
+			verifyFormalAssignResult(t, label+"/formal", rows, cols, cost, sense, res, regimeByte%4 < 2)
 		}
 	})
 }
