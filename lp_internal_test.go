@@ -2210,3 +2210,181 @@ func TestSlackDualSignViolationLargeRowSpan(t *testing.T) {
 		})
 	}
 }
+
+// TestPolishIncumbentTightSkipTol ensures continuous variables are re-optimized when a
+// base-row residual sits between polishSkipTol (1e-11) and primalTol (1e-7).
+func TestPolishIncumbentTightSkipTol(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("tight_polish_skip", Minimize)
+	x0 := m.AddIntVar("x0", 0, 5)
+	c0 := m.AddContVar("c0", 0, 100)
+	m.SetObjective(NewExpr(x0.T(1), c0.T(1)))
+	m.AddConstraint("r0", NewExpr(x0.T(1), c0.T(2)).Ge(10))
+	p := m.Compile()
+
+	hs := NewLPSolver(p, nil)
+	defer hs.Close()
+
+	var fixLB, fixUB []float64
+	// Perturb c0 below its feasible bound so r0 is violated by 8e-8 (< primalTol, > polishSkipTol).
+	cand, ok := polishIncumbentWith(&polishIncumbentReq{
+		p:            p,
+		x:            []float64{2, 4.0 - 4e-8},
+		fixScratchLB: &fixLB,
+		fixScratchUB: &fixUB,
+		ensureHeur:   func() *LPSolver { return hs },
+	})
+	if !ok {
+		t.Fatal("polishIncumbentWith failed")
+	}
+	if cand[1] < 4.0-1e-12 {
+		t.Fatalf("expected continuous variable c0 to polish up to >= 4.0, got %.17g", cand[1])
+	}
+}
+
+// TestVIPRNodeFarkasAfterStrippedFixedSubLP verifies that an infeasible fixed-variable B&B node
+// resolved via solveStrippedFixedSubLP still yields a complete VIPR Farkas certificate.
+func TestVIPRNodeFarkasAfterStrippedFixedSubLP(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("vipr_stripped_farkas", Minimize)
+	x0 := m.AddContVar("x0", 1, 1)
+	x1 := m.AddIntVar("x1", 0, 1)
+	x2 := m.AddContVar("x2", 0, 5)
+	m.SetObjective(NewExpr(x1.T(1), x2.T(1e12)))
+	m.AddConstraint("r0", Le(NewExpr(x2.T(1e-12), x0.T(2e11)), 2e11))
+	m.AddConstraint("r1", Ge(NewExpr(x2.T(2e11), x1.T(2)), 1))
+	p := m.Compile()
+
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	for _, presolve := range []bool{false, true} {
+		t.Run(fmt.Sprintf("presolve_%t", presolve), func(t *testing.T) {
+			t.Parallel()
+			tr := NewVIPRTrace()
+			res, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(presolve), WithVIPRTrace(tr))
+			if err != nil {
+				t.Fatalf("SolveCompiled: %v", err)
+			}
+			if res.Status != StatusOptimal {
+				t.Fatalf("status = %v, want StatusOptimal", res.Status)
+			}
+			if !tr.HasCertificate() || tr.Mode() != "optimal" {
+				t.Fatalf("missing optimal VIPR certificate: hasCert=%v mode=%q", tr.HasCertificate(), tr.Mode())
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("MarshalVIPRJSON: %v", err)
+			}
+			if formalOn {
+				requireVIPRBytesVerified(t, viprExe, fmt.Sprintf("vipr_stripped_farkas_pre_%t", presolve), raw)
+			}
+		})
+	}
+}
+
+// TestRootPruneMatchesIsGapClosedBoundary verifies that IEEE-754 non-equivalence between
+// bound >= bestObjMin - absGapTol and isGapClosed never prunes a root node into StatusUndefined.
+func TestRootPruneMatchesIsGapClosedBoundary(t *testing.T) {
+	t.Parallel()
+
+	m := NewModel("mip_small_k0_121", Maximize)
+	x0 := m.AddBinaryVar("x0")
+	x1 := m.AddIntVar("x1", 0, 5)
+	x2 := m.AddContVar("x2", 0, math.Inf(1))
+	x3 := m.AddBinaryVar("x3")
+	x4 := m.AddIntVar("x4", 0, 9)
+	m.SetObjective(NewExpr(x0.T(-2), x1.T(-5), x2.T(4), x3.T(5), x4.T(-1)))
+	m.AddConstraint("r0", Le(NewExpr(x0.T(2), x2.T(4), x4.T(3)), 4))
+	m.AddConstraint("r1", Le(NewExpr(x0.T(3), x1.T(-2), x3.T(3), x4.T(3)), -1))
+	p := m.Compile()
+
+	for _, heur := range []bool{false, true} {
+		t.Run(fmt.Sprintf("heur_%t", heur), func(t *testing.T) {
+			t.Parallel()
+			res, err := SolveCompiled(
+				t.Context(), p,
+				WithPureGo(),
+				WithPresolve(true),
+				WithCuts(true),
+				WithHeuristics(heur),
+				WithWorkers(1),
+				WithMaxNodes(400),
+				WithRelGapTol(1e-6),
+				WithAbsGapTol(1e-6),
+			)
+			if err != nil {
+				t.Fatalf("SolveCompiled: %v", err)
+			}
+			if res.Status != StatusOptimal {
+				t.Fatalf("status = %v, want StatusOptimal (obj=%.17g bnd=%.17g nodes=%d)",
+					res.Status, res.Objective, res.BestBound, res.Nodes)
+			}
+			if math.Abs(res.Objective-(-1)) > 1e-6 {
+				t.Fatalf("objective = %.17g, want -1", res.Objective)
+			}
+			if !isGapClosed(-res.BestBound, -res.Objective, 0, 1e-6, 1e-6) {
+				t.Fatalf("expected closed gap for obj=%.17g bnd=%.17g", res.Objective, res.BestBound)
+			}
+		})
+	}
+}
+
+// TestPolishIncumbentRepairsContinuousULPOvershoot verifies that nearest-float64 LP
+// rounding on a large-coefficient inequality constraint is nudged by ULP repair into
+// an exact-feasible incumbent rather than triggering leaf StatusNumericalError.
+func TestPolishIncumbentRepairsContinuousULPOvershoot(t *testing.T) {
+	t.Parallel()
+
+	formalOn := os.Getenv("GOBLIN_FORMAL") == "1"
+	var viprExe string
+	if formalOn {
+		viprExe = formalExe(t, "vipr-check")
+	}
+
+	m := NewModel("adv_mip_act_38_6", Maximize)
+	x0 := m.AddBinaryVar("x0")
+	x1 := m.AddIntVar("x1", 0, 5)
+	x2 := m.AddContVar("x2", 0, 1e9)
+	x3 := m.AddBinaryVar("x3")
+	m.SetObjective(NewExpr(x0.T(5), x1.T(5), x2.T(2), x3.T(3)))
+	m.AddConstraint("r0", Le(NewExpr(x0.T(-1e12), x1.T(2e11), x2.T(1e6), x3.T(1)), 0))
+	m.AddConstraint("r1", Ge(NewExpr(x0.T(-1e6), x1.T(2e11), x2.T(-2e11), x3.T(-1)), 0))
+	p := m.Compile()
+
+	for _, pre := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pre_%t", pre), func(t *testing.T) {
+			t.Parallel()
+			tr := NewVIPRTrace()
+			res, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(pre), WithVIPRTrace(tr))
+			if err != nil {
+				t.Fatalf("SolveCompiled: %v", err)
+			}
+			if res.Status != StatusOptimal {
+				t.Fatalf("status = %v, want StatusOptimal (obj=%.17g bnd=%.17g)", res.Status, res.Objective, res.BestBound)
+			}
+			if math.Abs(res.Objective-35.999989999989999) > 1e-6 {
+				t.Fatalf("objective = %.17g, want 35.999989999989999", res.Objective)
+			}
+			bV, rV, iV := p.MaxViolation(res.Values, true)
+			if bV != 0 || rV != 0 || iV != 0 {
+				t.Fatalf("MaxViolation = (%.3e, %.3e, %.3e), want (0, 0, 0)", bV, rV, iV)
+			}
+			if !tr.HasCertificate() || tr.Mode() != "optimal" {
+				t.Fatalf("missing optimal VIPR cert: has=%v mode=%q", tr.HasCertificate(), tr.Mode())
+			}
+			raw, err := tr.MarshalVIPRJSON()
+			if err != nil {
+				t.Fatalf("MarshalVIPRJSON: %v", err)
+			}
+			if formalOn {
+				requireVIPRBytesVerified(t, viprExe, fmt.Sprintf("ulp_overshoot_pre_%t", pre), raw)
+			}
+		})
+	}
+}

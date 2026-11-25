@@ -1596,6 +1596,8 @@ func (rp *viprRatProblem) refineExactIncumbent(approx []float64, scratchLP func(
 	if !rp.checkExactFeasible(xRat) {
 		if repaired, okRep := rp.repairContinuousExactIncumbent(xRat, basicContCols, isBasicStruct, activeRows); okRep {
 			xRat = repaired
+		} else if sol, okSol := exactPolishBasisSolutionStop(exactStop{deadline: s.Deadline, done: s.Done}, s); okSol && rp.checkExactFeasible(sol.Primal) {
+			xRat = sol.Primal
 		} else {
 			return returnFallback()
 		}
@@ -2534,6 +2536,16 @@ func (r *babVIPRRecorder) polishNodeDualExactSimplex(vn *viprTreeNode, targetObj
 		if !okY || len(y) != m {
 			break
 		}
+		yOK := true
+		for i := range m {
+			if !exactRatFitsBits(y[i]) {
+				yOK = false
+				break
+			}
+		}
+		if !yOK {
+			break
+		}
 
 		for j := range n {
 			dot := new(big.Rat)
@@ -2640,6 +2652,16 @@ func (r *babVIPRRecorder) polishNodeDualExactSimplex(vn *viprTreeNode, targetObj
 		if !okX || len(xB) != m {
 			break
 		}
+		xOK := true
+		for q := range m {
+			if !exactRatFitsBits(xB[q]) {
+				xOK = false
+				break
+			}
+		}
+		if !xOK {
+			break
+		}
 
 		leaveQ := -1
 		leaveVar := tot
@@ -2692,6 +2714,16 @@ func (r *babVIPRRecorder) polishNodeDualExactSimplex(vn *viprTreeNode, targetObj
 		rho, okRho := r.solveBasisTransposeActive(basis, eQ)
 		eQ[leaveQ].SetInt64(0)
 		if !okRho || len(rho) != m {
+			break
+		}
+		rhoOK := true
+		for i := range m {
+			if !exactRatFitsBits(rho[i]) {
+				rhoOK = false
+				break
+			}
+		}
+		if !rhoOK {
 			break
 		}
 
@@ -3174,10 +3206,10 @@ func (r *babVIPRRecorder) extractNodeFarkasActive(s *LPSolver, lpDuals []float64
 		return w, true
 	}
 
-	if len(lpDuals) == m {
+	if len(lpDuals) == m || len(lpDuals) == rp.m {
 		wFloat := make([]*big.Rat, m)
 		allOK := true
-		for i := range m {
+		for i := range lpDuals {
 			rv, ok := exactRatFromFloat(lpDuals[i])
 			if !ok {
 				allOK = false
@@ -3187,6 +3219,9 @@ func (r *babVIPRRecorder) extractNodeFarkasActive(s *LPSolver, lpDuals []float64
 				rv.Mul(rv, r.activeRowLPScale(i))
 			}
 			wFloat[i] = rv
+		}
+		for i := len(lpDuals); i < m; i++ {
+			wFloat[i] = new(big.Rat)
 		}
 		if allOK {
 			if w, ok := tryDualSigns(wFloat); ok {
@@ -3372,6 +3407,10 @@ func (r *babVIPRRecorder) solveCutScratchNode(lbR, ubR []*big.Rat, strictDual bo
 	}
 	res := sc.Solve()
 	sc.effDualTol = origDualTol
+	if res.Status != StatusOptimal && res.Status != StatusInfeasible && !stopRequested(r.deadline, r.done) {
+		sc.reinitCrashKeepingBounds()
+		res = sc.Solve()
+	}
 	return sc, res, true
 }
 
@@ -3384,6 +3423,119 @@ func (r *babVIPRRecorder) tryTightenNodeDualForPrune(vn *viprTreeNode, bestPrima
 	}
 	closed, infeas, _ = r.polishNodeDualExactSimplex(vn, r.cachedIncObj)
 	return closed, infeas
+}
+
+func (r *babVIPRRecorder) extractNodeElasticPhase1Farkas(lbR, ubR []*big.Rat) ([]viprRowMult, bool) {
+	stop := exactStop{deadline: r.deadline, done: r.done}
+	if r == nil || r.rp == nil || stop.canceled() {
+		return nil, false
+	}
+	rp := r.rp
+	mActive := rp.m + len(r.activeCutIDs)
+	if mActive == 0 {
+		return nil, false
+	}
+
+	em := NewModel("__node_phase1__", Minimize)
+	vars := make([]Var, rp.n)
+	for j := range rp.n {
+		vars[j] = em.AddContVar("", viprRatToOutwardFloat(lbR[j], false), viprRatToOutwardFloat(ubR[j], true))
+	}
+	var objTerms []Term
+	for i := range mActive {
+		sense, rhsR, cols, vals := r.rowData(r.activeRowID(i))
+		rhsVal := exactRatToFloat(rhsR)
+		if isNonFinite(rhsVal) {
+			return nil, false
+		}
+		terms := make([]Term, 0, len(cols)+2)
+		for k, col := range cols {
+			coeff := exactRatToFloat(vals[k])
+			if isNonFinite(coeff) {
+				return nil, false
+			}
+			if coeff != 0 {
+				terms = append(terms, Term{Var: vars[col], Coeff: coeff})
+			}
+		}
+		switch sense {
+		case LessEqual:
+			sp := em.AddContVar("", 0, math.Inf(1))
+			terms = append(terms, Term{Var: sp, Coeff: -1})
+			objTerms = append(objTerms, Term{Var: sp, Coeff: 1})
+			em.AddConstraint("", Le(NewExpr(terms...), rhsVal))
+		case GreaterEqual:
+			sn := em.AddContVar("", 0, math.Inf(1))
+			terms = append(terms, Term{Var: sn, Coeff: 1})
+			objTerms = append(objTerms, Term{Var: sn, Coeff: 1})
+			em.AddConstraint("", Ge(NewExpr(terms...), rhsVal))
+		case Equal:
+			sp := em.AddContVar("", 0, math.Inf(1))
+			sn := em.AddContVar("", 0, math.Inf(1))
+			terms = append(terms, Term{Var: sp, Coeff: -1}, Term{Var: sn, Coeff: 1})
+			objTerms = append(objTerms, Term{Var: sp, Coeff: 1}, Term{Var: sn, Coeff: 1})
+			em.AddConstraint("", Eq(NewExpr(terms...), rhsVal))
+		}
+	}
+	em.SetObjective(NewExpr(objTerms...))
+	ep := em.Compile()
+	if ep == nil || ep.invalidErr != nil || ep.numConstraints != mActive {
+		return nil, false
+	}
+
+	lp := NewLPSolver(ep, nil)
+	defer lp.Close()
+	stop.applyToLPSolver(lp)
+	lpRes := lp.Solve()
+	if lpRes.Status != StatusOptimal {
+		return nil, false
+	}
+
+	tryRawDuals := func(raw []*big.Rat) ([]viprRowMult, bool) {
+		pos := make([]viprRowMult, 0, mActive)
+		neg := make([]viprRowMult, 0, mActive)
+		for i := range mActive {
+			if raw[i] == nil || raw[i].Sign() == 0 {
+				continue
+			}
+			gID := r.activeRowID(i)
+			pos = append(pos, viprRowMult{rowID: gID, mult: raw[i]})
+			neg = append(neg, viprRowMult{rowID: gID, mult: new(big.Rat).Neg(raw[i])})
+		}
+		if w, _, ok := r.projectFarkasMults(pos, lbR, ubR); ok {
+			return w, true
+		}
+		if w, _, ok := r.projectFarkasMults(neg, lbR, ubR); ok {
+			return w, true
+		}
+		return nil, false
+	}
+
+	if snap, okSnap := buildExactSolverSnapshot(stop, lp); okSnap {
+		if yMin, _, _, _, okD := snap.extractExactDuals(stop); okD && len(yMin) >= mActive {
+			if w, okW := tryRawDuals(yMin[:mActive]); okW {
+				return w, true
+			}
+		}
+	}
+	if len(lpRes.Dual) >= mActive {
+		cand := make([]*big.Rat, mActive)
+		allOK := true
+		for i := range mActive {
+			rv, okR := exactRatFromFloat(lpRes.Dual[i])
+			if !okR {
+				allOK = false
+				break
+			}
+			cand[i] = rv
+		}
+		if allOK {
+			if w, okW := tryRawDuals(cand); okW {
+				return w, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes LPResult) {
@@ -3416,6 +3568,11 @@ func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes
 			r.recordNodeDual(vn, sc, res)
 			return
 		}
+	}
+	if w, ok := r.extractNodeElasticPhase1Farkas(lbR, ubR); ok {
+		vn.kind = viprNodeLeafFarkas
+		vn.farkas = w
+		return
 	}
 	r.invalid = true
 }

@@ -691,7 +691,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	if opts.hasCutoff {
 		b.bestObjMin = opts.cutoffMin + b.searchShift
 	}
-	if opts.isSubMIP && b.bestObjMin <= b.rootLPMin+opts.AbsGapTol {
+	if opts.isSubMIP && b.gapClosed(b.rootLPMin, b.bestObjMin, 0) {
 		return Result{
 			modelID:      p.modelID,
 			Status:       StatusOptimal,
@@ -1042,7 +1042,7 @@ func (b *babEngine) rootGapClosed(rootVN *viprTreeNode, boundMin *float64) bool 
 }
 
 func (b *babEngine) shouldPruneNode(vn *viprTreeNode, nodeMin *float64, pruneRelTol float64) (prune, infeas bool) {
-	floatPrune := *nodeMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol)
+	floatPrune := b.gapClosed(*nodeMin, b.bestObjMin, pruneRelTol)
 	if b.strictExactVIPRGap() {
 		if b.bestPrimal == nil {
 			return false, false
@@ -1098,7 +1098,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			break
 		}
 		curMin := b.lpSearchMin(curLPRes)
-		if curMin >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(curMin, b.bestObjMin, b.opts.RelGapTol) {
+		if b.gapClosed(curMin, b.bestObjMin, b.opts.RelGapTol) {
 			break
 		}
 		var newCuts []cutPlane
@@ -1565,7 +1565,7 @@ func (b *babEngine) resolveRootLP(
 	if b.rootGapClosed(rootVN, rootNodeMin) {
 		return b.optimalRootResult(min(b.bestObjMin, *rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true, true
 	}
-	if !b.strictExactVIPRGap() && *rootNodeMin >= b.bestObjMin-b.opts.AbsGapTol {
+	if b.bestPrimal == nil && !b.strictExactVIPRGap() && b.gapClosed(*rootNodeMin, b.bestObjMin, b.opts.RelGapTol) {
 		b.prunedMinBound = min(b.prunedMinBound, *rootNodeMin)
 		return Result{}, false, true
 	}
@@ -2029,7 +2029,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			node = b.pq.pop()
 		}
 
-		if (node.lowerBound >= b.bestObjMin-b.opts.AbsGapTol || b.gapClosed(node.lowerBound, b.bestObjMin, pruneRelTol)) &&
+		if b.gapClosed(node.lowerBound, b.bestObjMin, pruneRelTol) &&
 			(b.vipr == nil || (!b.strictExactVIPRGap() && b.bestPrimal != nil) || b.vipr.exactSubtreeGapClosed(node.viprNode, b.bestPrimal)) {
 			b.prunedMinBound = min(b.prunedMinBound, node.lowerBound)
 			continue
@@ -2605,7 +2605,7 @@ func (c *parCoordinator) nextNode(
 			fromPlunge = false
 		}
 
-		if node.lowerBound >= c.bestObjMin-c.b.opts.AbsGapTol || c.b.gapClosed(node.lowerBound, c.bestObjMin, c.pruneRelTol) {
+		if c.b.gapClosed(node.lowerBound, c.bestObjMin, c.pruneRelTol) {
 			if node.lowerBound < c.prunedMinBound {
 				c.prunedMinBound = node.lowerBound
 			}
@@ -2696,7 +2696,7 @@ func (w *parWorker) isPruned(bound float64) bool {
 	if !hasInc {
 		return false
 	}
-	return bound >= bestObjMin-w.coord.b.opts.AbsGapTol || w.coord.b.gapClosed(bound, bestObjMin, w.coord.pruneRelTol)
+	return w.coord.b.gapClosed(bound, bestObjMin, w.coord.pruneRelTol)
 }
 
 func (w *parWorker) tryInTreeCuts(node *searchNode, nodeRes *LPResult, nodeMin *float64) (pruned bool, stopStatus Status) {
@@ -3864,7 +3864,7 @@ func selectBranchVar(req *branchSelectReq) sbOutcome {
 			margin := max(1e-6, 1e-7*max(1.0, math.Abs(req.bestObjMin)))
 			return boundMin > req.bestObjMin+margin, boundMin
 		}
-		cut = boundMin >= req.bestObjMin-req.absGapTol || isGapClosed(boundMin, req.bestObjMin, req.objConstMin, req.pruneRelTol, req.absGapTol)
+		cut = isGapClosed(boundMin, req.bestObjMin, req.objConstMin, req.pruneRelTol, req.absGapTol)
 		return cut, boundMin
 	}
 
@@ -4115,8 +4115,10 @@ func polishIncumbentWith(req *polishIncumbentReq) ([]float64, bool) {
 	if violatesExactIntRows(p, req.exactIntRows, cand) {
 		return nil, false
 	}
+	const polishSkipTol = 1e-11
 	if len(p.intCols) < p.numVars && !stopRequested(req.deadline, req.done) {
-		if incumbentFeasibleWithDual(p, cand, req.dualAmp, primalTol) {
+		// Re-solve continuous variables whenever cut perturbations leave a base-row residual above polishSkipTol.
+		if incumbentFeasibleWithDual(p, cand, req.dualAmp, polishSkipTol) {
 			return cand, true
 		}
 		n := p.numVars
@@ -4169,10 +4171,156 @@ func polishIncumbentWith(req *polishIncumbentReq) ([]float64, bool) {
 				if violatesExactIntRows(p, req.exactIntRows, cand) {
 					return nil, false
 				}
+				if !incumbentFeasibleWithDual(p, cand, req.dualAmp, incumbentTol) {
+					repairContinuousInequalityViolations(p, cand, fixLB, fixUB)
+				}
 			}
 		}
 	}
 	return cand, incumbentFeasibleWithDual(p, cand, req.dualAmp, incumbentTol)
+}
+
+func rowInequalityExcess(p *CompiledProblem, row int, x []float64) (signedExcess, viol float64, ok bool) {
+	hasLB := !math.IsInf(p.rowLB[row], -1)
+	hasUB := !math.IsInf(p.rowUB[row], 1)
+	if !hasLB && !hasUB {
+		return 0, 0, true
+	}
+	if hasLB && hasUB && p.rowLB[row] == p.rowUB[row] {
+		return 0, 0, true
+	}
+	s, e := p.rowPtr[row], p.rowPtr[row+1]
+	cols := p.colIdx[s:e]
+	vals := p.rowVal[s:e]
+	if hasUB {
+		res := evalSparseRowResidual(cols, vals, x, p.rowUB[row])
+		if isNonFinite(res) {
+			return 0, 0, false
+		}
+		if res > 0 {
+			return res, res, true
+		}
+	}
+	if hasLB {
+		res := evalSparseRowResidual(cols, vals, x, p.rowLB[row])
+		if isNonFinite(res) {
+			return 0, 0, false
+		}
+		if res < 0 {
+			return res, -res, true
+		}
+	}
+	return 0, 0, true
+}
+
+// repairContinuousInequalityViolations adjusts single continuous coordinates by up to a few ULPs
+// (toward feasible bounds) when nearest-float64 LP rounding overshoots a large-coefficient inequality.
+func repairContinuousInequalityViolations(p *CompiledProblem, x, lb, ub []float64) {
+	const maxRepairPasses = 4
+	if p == nil || len(x) < p.numVars || len(lb) < p.numVars || len(ub) < p.numVars {
+		return
+	}
+	var oldViols []float64
+	for range maxRepairPasses {
+		improved := false
+		for i := range p.numConstraints {
+			signedExcess, oldViolI, okRow := rowInequalityExcess(p, i, x)
+			if !okRow || signedExcess == 0 {
+				continue
+			}
+			s, e := p.rowPtr[i], p.rowPtr[i+1]
+			cols := p.colIdx[s:e]
+			vals := p.rowVal[s:e]
+			bestCol := -1
+			bestVal := 0.0
+			bestAbsA := 0.0
+			for k, col := range cols {
+				if p.varCat[col] != Continuous || isNonFinite(x[col]) {
+					continue
+				}
+				a := vals[k]
+				if a == 0 {
+					continue
+				}
+				absA := math.Abs(a)
+				if absA <= bestAbsA {
+					continue
+				}
+				delta := -signedExcess / a
+				if delta == 0 || isNonFinite(delta) {
+					continue
+				}
+				origX := x[col]
+				if (delta < 0 && origX <= lb[col]) || (delta > 0 && origX >= ub[col]) {
+					continue
+				}
+				target := ub[col]
+				if delta < 0 {
+					target = lb[col]
+				}
+				incRows := p.rowIdx[p.colPtr[col]:p.colPtr[col+1]]
+				oldViols = oldViols[:0]
+				incValid := true
+				for _, r := range incRows {
+					vr, okR := evalRowViolation(p, r, x)
+					if !okR {
+						incValid = false
+						break
+					}
+					oldViols = append(oldViols, vr)
+				}
+				if !incValid {
+					continue
+				}
+				tryCand := func(candV float64) (float64, bool) {
+					x[col] = candV
+					defer func() { x[col] = origX }()
+					_, newViolI, okI := rowInequalityExcess(p, i, x)
+					if !okI || newViolI >= oldViolI {
+						return 0, false
+					}
+					for idx, r := range incRows {
+						nv, okR := evalRowViolation(p, r, x)
+						if !okR || nv > oldViols[idx] {
+							return 0, false
+						}
+					}
+					return newViolI, true
+				}
+
+				raw := min(max(origX+delta, lb[col]), ub[col])
+				nudged := min(max(math.Nextafter(raw, target), lb[col]), ub[col])
+				candVal := 0.0
+				candViol := oldViolI
+				accepted := false
+				if raw != origX {
+					if vRaw, okRaw := tryCand(raw); okRaw {
+						candVal = raw
+						candViol = vRaw
+						accepted = true
+					}
+				}
+				if (!accepted || candViol > 0) && nudged != raw && nudged != origX {
+					if vNudge, okNudge := tryCand(nudged); okNudge && (!accepted || vNudge < candViol) {
+						candVal = nudged
+						accepted = true
+					}
+				}
+				if accepted {
+					bestCol = col
+					bestVal = candVal
+					bestAbsA = absA
+				}
+			}
+			if bestCol != -1 {
+				x[bestCol] = bestVal
+				improved = true
+			}
+		}
+		if !improved {
+			break
+		}
+	}
 }
 
 // resolveFixedIntLeaf re-solves a node whose integer variables are all fixed to singletons
