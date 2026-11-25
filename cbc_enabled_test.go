@@ -10,6 +10,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1656,4 +1660,163 @@ func TestAdversarialPeerReviewCBCRegressions(t *testing.T) {
 			checkOpt(t, "m1/"+v.name, pm1, res, -2.0)
 		}
 	})
+}
+
+func readLinuxStatmRSSBytes(t *testing.T) int64 {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		t.Fatalf("read /proc/self/statm: %v", err)
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) < 2 {
+		t.Fatalf("unexpected /proc/self/statm output %q", string(raw))
+	}
+	pages, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parse /proc/self/statm RSS pages %q: %v", fields[1], err)
+	}
+	return pages * int64(os.Getpagesize())
+}
+
+// TestCBCCGoBoundedRSSGrowth verifies that repeated CBC/CLP solves, incremental
+// LP lifecycle mutations, and rapid context cancellations bound steady-state RSS growth.
+func TestCBCCGoBoundedRSSGrowth(t *testing.T) {
+	ctx := t.Context()
+
+	// 1. Continuous LP model for solveCBC LP calls.
+	const lpVars = 24
+	mLP := gb.NewModel("cbc_rss_lp", gb.Minimize)
+	xLP := make([]gb.Var, lpVars)
+	objLP := make([]gb.Term, lpVars)
+	for j := range lpVars {
+		xLP[j] = mLP.AddContVar(fmt.Sprintf("x_%d", j), 0, 20)
+		objLP[j] = xLP[j].T(float64(j + 1))
+	}
+	mLP.SetObjective(gb.NewExpr(objLP...))
+	for i := range 12 {
+		cTerms := []gb.Term{
+			xLP[i].T(1),
+			xLP[(i+1)%lpVars].T(2),
+			xLP[(i+7)%lpVars].T(1),
+		}
+		mLP.AddConstraint(fmt.Sprintf("r_%d", i), gb.NewExpr(cTerms...).Ge(6.0+float64(i%3)))
+	}
+	pLP := mLP.Compile()
+
+	// 2. Knapsack-covering MILP model for solveCBC MILP calls.
+	const mipVars = 12
+	mMIP := gb.NewModel("cbc_rss_mip", gb.Minimize)
+	xMIP := make([]gb.Var, mipVars)
+	objMIP := make([]gb.Term, mipVars)
+	for j := range mipVars {
+		xMIP[j] = mMIP.AddBinaryVar(fmt.Sprintf("b_%d", j))
+		objMIP[j] = xMIP[j].T(float64(3 + (j*5)%11))
+	}
+	mMIP.SetObjective(gb.NewExpr(objMIP...))
+	for i := range 6 {
+		cTerms := []gb.Term{
+			xMIP[i].T(2),
+			xMIP[(i+3)%mipVars].T(3),
+			xMIP[(i+6)%mipVars].T(2),
+			xMIP[(i+9)%mipVars].T(1),
+		}
+		mMIP.AddConstraint(fmt.Sprintf("k_%d", i), gb.NewExpr(cTerms...).Ge(4))
+	}
+	pMIP := mMIP.Compile()
+
+	// 3. Incremental LP model for NewCBCLPSolver + SetStructuralBounds + AddCut + Solve + Close.
+	const incVars = 16
+	mInc := gb.NewModel("cbc_rss_inc_lp", gb.Minimize)
+	xInc := make([]gb.Var, incVars)
+	objInc := make([]gb.Term, incVars)
+	sumInc := make([]gb.Term, incVars)
+	for j := range incVars {
+		xInc[j] = mInc.AddContVar(fmt.Sprintf("v_%d", j), 0, 10)
+		objInc[j] = xInc[j].T(float64(j + 1))
+		sumInc[j] = xInc[j].T(1)
+	}
+	mInc.SetObjective(gb.NewExpr(objInc...))
+	mInc.AddConstraint("total", gb.NewExpr(sumInc...).Ge(20))
+	for i := range 8 {
+		mInc.AddConstraint(fmt.Sprintf("pair_%d", i), gb.NewExpr(xInc[i].T(1), xInc[(i+1)%incVars].T(1)).Ge(3))
+	}
+	pInc := mInc.Compile()
+	incLB := make([]float64, incVars)
+	incUB := make([]float64, incVars)
+
+	// 4. Unpresolved Diophantine MIP (2*x + 2*y = 1) that branches until context cancellation.
+	mCancel := gb.NewModel("cbc_rss_cancel", gb.Minimize)
+	cx := mCancel.AddIntVar("x", math.Inf(-1), math.Inf(1))
+	cy := mCancel.AddIntVar("y", math.Inf(-1), math.Inf(1))
+	mCancel.AddConstraint("lo", gb.NewExpr(cx.T(2), cy.T(2)).Ge(1))
+	mCancel.AddConstraint("hi", gb.NewExpr(cx.T(2), cy.T(2)).Le(1))
+	pCancel := mCancel.Compile()
+
+	var rssAt100, rssAt400 int64
+	for iter := 1; iter <= 400; iter++ {
+		switch iter % 4 {
+		case 0:
+			res, err := gb.SolveCompiled(ctx, pLP, gb.WithCBC())
+			if err != nil || res.Status != gb.StatusOptimal {
+				t.Fatalf("iter %d CBC LP: status=%v err=%v, want StatusOptimal", iter, res.Status, err)
+			}
+		case 1:
+			res, err := gb.SolveCompiled(ctx, pMIP, gb.WithCBC())
+			if err != nil || res.Status != gb.StatusOptimal {
+				t.Fatalf("iter %d CBC MILP: status=%v err=%v, want StatusOptimal", iter, res.Status, err)
+			}
+		case 2:
+			lp := gb.NewCBCLPSolver(pInc)
+			if r0 := lp.Solve(); r0.Status != gb.StatusOptimal {
+				lp.Close()
+				t.Fatalf("iter %d CBCLPSolver initial solve: status=%v, want StatusOptimal", iter, r0.Status)
+			}
+			shift := 0.001 * float64(iter%10)
+			for j := range incVars {
+				incLB[j] = 0.5 + shift
+				incUB[j] = 10.0
+			}
+			lp.SetStructuralBounds(incLB, incUB)
+			lp.AddCut([]int{0, 1}, []float64{1, 1}, 15.0-shift)
+			if r1 := lp.Solve(); r1.Status != gb.StatusOptimal {
+				lp.Close()
+				t.Fatalf("iter %d CBCLPSolver resolve: status=%v, want StatusOptimal", iter, r1.Status)
+			}
+			lp.Close()
+		case 3:
+			cCtx, cancel := context.WithCancel(ctx)
+			timer := time.AfterFunc(500*time.Microsecond, cancel)
+			_, err := gb.SolveCompiled(cCtx, pCancel, gb.WithCBC(), gb.WithPresolve(false), gb.WithCuts(false))
+			timer.Stop()
+			cancel()
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("iter %d CBC cancel solve: err=%v, want context.Canceled", iter, err)
+			}
+		}
+
+		if iter == 100 || iter == 400 {
+			runtime.GC()
+			debug.FreeOSMemory()
+			if runtime.GOOS == "linux" {
+				rss := readLinuxStatmRSSBytes(t)
+				if iter == 100 {
+					rssAt100 = rss
+				} else {
+					rssAt400 = rss
+				}
+			}
+		}
+	}
+
+	if runtime.GOOS == "linux" {
+		const maxRSSDeltaBytes = 64 << 20
+		delta := rssAt400 - rssAt100
+		t.Logf("CBC CGo RSS: iter100=%.2f MiB, iter400=%.2f MiB, delta=%.2f MiB",
+			float64(rssAt100)/(1<<20), float64(rssAt400)/(1<<20), float64(delta)/(1<<20))
+		if delta > maxRSSDeltaBytes {
+			t.Fatalf("CBC CGo steady-state RSS delta %.2f MiB exceeds 64 MiB limit (iter100=%d B, iter400=%d B)",
+				float64(delta)/(1<<20), rssAt100, rssAt400)
+		}
+	}
 }

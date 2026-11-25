@@ -117,8 +117,25 @@ if [[ -z "${CRASHES}" ]]; then
 else
     echo "${CRASHES}"
     if [[ -n "${DOWNLOAD_CRASHES_DIR}" ]]; then
-        mkdir -p "${DOWNLOAD_CRASHES_DIR}"
-        gcloud storage cp -r "gs://${BUCKET}/runs/${RUN_ID}/*/crashes" "${DOWNLOAD_CRASHES_DIR}/" --project="${PROJECT}" --quiet
+        crash_prefix="gs://${BUCKET}/runs/${RUN_ID}/"
+        while IFS= read -r target_dir; do
+            [[ -n "${target_dir}" ]] || continue
+            mkdir -p "${DOWNLOAD_CRASHES_DIR}/${target_dir}"
+            gcloud storage cp -r "${crash_prefix}${target_dir}/crashes/" "${DOWNLOAD_CRASHES_DIR}/${target_dir}/" --project="${PROJECT}" --quiet
+        done < <(
+            printf '%s\n' "${CRASHES}" | awk -v pfx="${crash_prefix}" '
+                index($0, pfx) == 1 {
+                    rest = substr($0, length(pfx) + 1)
+                    slash = index(rest, "/crashes")
+                    if (slash > 1) {
+                        td = substr(rest, 1, slash - 1)
+                        if (index(td, "/") == 0 && !seen[td]++) {
+                            print td
+                        }
+                    }
+                }
+            '
+        )
         echo "Downloaded crashes into ${DOWNLOAD_CRASHES_DIR}"
     fi
 fi
