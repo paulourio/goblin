@@ -3517,6 +3517,17 @@ func (r *babVIPRRecorder) extractNodeElasticPhase1Farkas(lbR, ubR []*big.Rat) ([
 				return w, true
 			}
 		}
+		if sol, okSol := exactPolishBasisSolutionStop(stop, lp); okSol && len(sol.DualMin) >= mActive {
+			if w, okW := tryRawDuals(sol.DualMin[:mActive]); okW {
+				return w, true
+			}
+		}
+		snap.resetToAllSlackBasis()
+		if sol, okSol := snap.solveExactDualSimplex(stop, min(128, max(32, snap.m+16))); okSol && len(sol.DualMin) >= mActive {
+			if w, okW := tryRawDuals(sol.DualMin[:mActive]); okW {
+				return w, true
+			}
+		}
 	}
 	if len(lpRes.Dual) >= mActive {
 		cand := make([]*big.Rat, mActive)
@@ -3550,23 +3561,25 @@ func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes
 			return
 		}
 	}
-	if w, ok := r.extractNodeFarkasActive(s, lpRes.Dual, lbR, ubR); ok {
-		vn.kind = viprNodeLeafFarkas
-		vn.farkas = w
-		return
-	}
-	// Retry once on a cut-synced scratch LP solver when warm-start state cannot yield an exact ray.
-	if sc, res, ok := r.solveCutScratchNode(lbR, ubR, false); ok {
-		switch res.Status {
-		case StatusInfeasible:
-			if w, ok := r.extractNodeFarkasActive(sc, res.Dual, lbR, ubR); ok {
-				vn.kind = viprNodeLeafFarkas
-				vn.farkas = w
+	if lpRes.Status == StatusInfeasible {
+		if w, ok := r.extractNodeFarkasActive(s, lpRes.Dual, lbR, ubR); ok {
+			vn.kind = viprNodeLeafFarkas
+			vn.farkas = w
+			return
+		}
+		// Retry once on a cut-synced scratch LP solver when warm-start state cannot yield an exact ray.
+		if sc, res, ok := r.solveCutScratchNode(lbR, ubR, false); ok {
+			switch res.Status {
+			case StatusInfeasible:
+				if w, ok := r.extractNodeFarkasActive(sc, res.Dual, lbR, ubR); ok {
+					vn.kind = viprNodeLeafFarkas
+					vn.farkas = w
+					return
+				}
+			case StatusOptimal:
+				r.recordNodeDual(vn, sc, res)
 				return
 			}
-		case StatusOptimal:
-			r.recordNodeDual(vn, sc, res)
-			return
 		}
 	}
 	if w, ok := r.extractNodeElasticPhase1Farkas(lbR, ubR); ok {
@@ -3575,6 +3588,102 @@ func (r *babVIPRRecorder) certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes
 		return
 	}
 	r.invalid = true
+}
+
+func finalizeFixedLeafObjMin(
+	p *CompiledProblem,
+	res *LPResult,
+	searchShift, floorMin float64,
+	hasFloor bool,
+) (float64, bool) {
+	var objMin float64
+	objMinValid := false
+	if res != nil && res.Status == StatusOptimal && len(res.Primal) == p.numVars {
+		objMin = lpMinWithShift(p, *res, searchShift)
+		objMinValid = !isNonFinite(objMin)
+	}
+	if hasFloor && (!objMinValid || floorMin > objMin) {
+		objMin = floorMin
+		objMinValid = !isNonFinite(objMin)
+	}
+	if !objMinValid {
+		return 0, false
+	}
+	return objMin, true
+}
+
+func markFixedLeafInfeasible(lpRes *LPResult) {
+	if lpRes != nil {
+		*lpRes = LPResult{Status: StatusInfeasible, Iterations: lpRes.Iterations}
+	}
+}
+
+func (r *babVIPRRecorder) certifyOrPolishFixedLeaf(
+	vn *viprTreeNode,
+	s *LPSolver,
+	lpRes *LPResult,
+	searchShift float64,
+) (objMin float64, infeas, ok bool) {
+	if r == nil || r.invalid || vn == nil || r.rp == nil || stopRequested(r.deadline, r.done) {
+		return 0, false, false
+	}
+	var targetObj *big.Rat
+	if r.cachedIncOK {
+		targetObj = r.cachedIncObj
+	}
+	closed, inf, xExact := r.polishNodeDualExactSimplex(vn, targetObj)
+	if inf || vn.kind == viprNodeLeafFarkas || vn.kind == viprNodeLeafBoundConflict {
+		markFixedLeafInfeasible(lpRes)
+		return 0, true, true
+	}
+	floorMin, hasFloor := r.exactDualSearchMinFloor(vn, searchShift)
+	if hasFloor && isNonFinite(floorMin) {
+		floorMin, hasFloor = 0, false
+	}
+	if closed {
+		objMin, okObj := finalizeFixedLeafObjMin(r.rp.p, lpRes, searchShift, floorMin, hasFloor)
+		return objMin, false, okObj
+	}
+	if len(xExact) == r.rp.n && r.rp.checkExactFeasible(xExact) {
+		if lpRes != nil {
+			if primalF, okP := ratSliceToFiniteFloats(xExact, r.rp.n); okP {
+				objNoConst := r.rp.evalObjNoConst(xExact)
+				objMinF := exactRatToFloat(objNoConst)
+				if isNonFinite(objMinF) {
+					objMinF = evalLinearSum(0, r.rp.p.objMin, primalF, r.rp.n)
+				}
+				objWithConst := new(big.Rat).Add(r.rp.objConst, objNoConst)
+				if r.rp.p.sense == Maximize {
+					objWithConst.Neg(objWithConst)
+				}
+				userObjF := exactRatToFloat(objWithConst)
+				if isNonFinite(userObjF) {
+					userObjF = r.rp.p.EvaluateObjective(primalF)
+				}
+				if !isNonFinite(objMinF) && !isNonFinite(userObjF) {
+					lpRes.Status = StatusOptimal
+					lpRes.Primal = primalF
+					lpRes.ObjectiveMin = objMinF
+					lpRes.Objective = userObjF
+					objMin, okObj := finalizeFixedLeafObjMin(r.rp.p, lpRes, searchShift, floorMin, hasFloor)
+					return objMin, false, okObj
+				}
+			}
+		}
+		return 0, false, false
+	}
+	prevInvalid := r.invalid
+	var resVal LPResult
+	if lpRes != nil {
+		resVal = *lpRes
+	}
+	r.certifyNodeFarkas(vn, s, resVal)
+	if vn.kind == viprNodeLeafFarkas || vn.kind == viprNodeLeafBoundConflict {
+		markFixedLeafInfeasible(lpRes)
+		return 0, true, true
+	}
+	r.invalid = prevInvalid
+	return 0, false, false
 }
 
 func (r *babVIPRRecorder) certifyRowActivityFarkas(vn *viprTreeNode, row int) bool {

@@ -362,6 +362,7 @@ type babVIPRHook interface {
 	tryTightenNodeDualForPrune(vn *viprTreeNode, bestPrimal []float64) (closed, infeas bool)
 	certifyNodeFarkas(vn *viprTreeNode, s *LPSolver, lpRes LPResult)
 	certifyRowActivityFarkas(vn *viprTreeNode, row int) bool
+	certifyOrPolishFixedLeaf(vn *viprTreeNode, s *LPSolver, lpRes *LPResult, searchShift float64) (objMin float64, infeas, ok bool)
 	canCertifyIncumbent(cand []float64, candMin float64) bool
 	stageCertifiedCutRound(s *LPSolver, lpPrimal []float64, maxCuts int, minEff float64, ws *cutGenWorkspace) bool
 	commitStagedCutPlanes(lpSolver *LPSolver, isRoot bool) int
@@ -2082,7 +2083,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			b.hitIterLimit = true
 			break
 		}
-		if b.opts.Workers > 1 && !b.opts.isSubMIP {
+		if b.opts.Workers > 1 && !b.opts.isSubMIP && b.vipr == nil {
 			openCount := len(b.pq)
 			if b.plungeNode != nil {
 				openCount++
@@ -4191,6 +4192,9 @@ func (b *babEngine) polishIncumbent(x []float64) ([]float64, bool) {
 
 func polishIncumbentWith(req *polishIncumbentReq) ([]float64, bool) {
 	p := req.p
+	if p == nil || len(req.x) < p.numVars {
+		return nil, false
+	}
 	cand := slices.Clone(req.x)
 	for _, col := range p.intCols {
 		v := cand[col]
@@ -4437,6 +4441,11 @@ func resolveFixedIntLeaf(
 	for _, col := range p.intCols {
 		lb, ub := curLB[col], curUB[col]
 		if isNonFinite(lb) || isNonFinite(ub) || lb != ub || math.Floor(lb) != lb {
+			if vipr != nil && vn != nil && maxIterCap > 0 {
+				if vMin, vInfeas, vOK := vipr.certifyOrPolishFixedLeaf(vn, nil, &res, searchShift); vOK {
+					return res, vMin, vInfeas, true
+				}
+			}
 			return LPResult{}, 0, false, false
 		}
 	}
@@ -4467,6 +4476,11 @@ func resolveFixedIntLeaf(
 		return res, 0, true, true
 	}
 	if res.Status != StatusOptimal || len(res.Primal) != p.numVars {
+		if vipr != nil && vn != nil && res.Status != StatusTimeLimit && res.Status != StatusIterationLimit && !stopRequested(deadline, done) {
+			if vMin, vInfeas, vOK := vipr.certifyOrPolishFixedLeaf(vn, hs, &res, searchShift); vOK {
+				return res, vMin, vInfeas, true
+			}
+		}
 		return res, 0, false, false
 	}
 	if vipr != nil && vn != nil && !exactMIPFeasibleRat(p, res.Primal) {
@@ -4474,6 +4488,9 @@ func resolveFixedIntLeaf(
 			if vipr.certifyRowActivityFarkas(vn, row) {
 				return LPResult{Status: StatusInfeasible, Iterations: res.Iterations}, 0, true, true
 			}
+		}
+		if vMin, vInfeas, vOK := vipr.certifyOrPolishFixedLeaf(vn, hs, &res, searchShift); vOK {
+			return res, vMin, vInfeas, true
 		}
 	}
 	objMin = lpMinWithShift(p, res, searchShift)
