@@ -453,12 +453,160 @@ func solveCBC(ctx context.Context, p *CompiledProblem, opt Options, start, deadl
 	return solveCBCMIP(ctx, p, cbc, opt, start, deadline, done)
 }
 
+// hasCBCUnboundedIntProbingRisk reports whether any non-fixed integer column has
+// bounds exceeding COIN-OR CglProbing/CglPreProcess limits (+/-1e12), where
+// upstream bound clamping (+/-1.23456789e10) can corrupt tightened rows and cuts.
+func hasCBCUnboundedIntProbingRisk(p *CompiledProblem) bool {
+	for _, col := range p.intCols {
+		if col < 0 || col >= len(p.varLB) || col >= len(p.varUB) {
+			continue
+		}
+		lb, ub := p.varLB[col], p.varUB[col]
+		if lb < ub && (lb < -1e12 || ub > 1e12) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCBCRowObjAmplifiedTiny reports whether any tiny matrix or cut entry
+// (|a_ij| <= 1e-11) on an active column can alter the objective by > 1e-6 via
+// either that column's objective or a coupled companion column in the row.
+func hasCBCRowObjAmplifiedTiny(cols []int, vals []float64, objMin, lb, ub []float64, n int) bool {
+	var (
+		best1, best2 float64
+		col1         = -1
+		hasTiny      bool
+	)
+	m := min(len(cols), len(vals))
+	for idx := range m {
+		c := cols[idx]
+		if uint(c) >= uint(n) || (lb[c] >= ub[c] && lb[c] == 0) {
+			continue
+		}
+		av := math.Abs(vals[idx])
+		if av <= 0 {
+			continue
+		}
+		if av <= 1e-11 {
+			hasTiny = true
+		}
+		objAbs := math.Abs(objMin[c])
+		if objAbs <= 0 {
+			continue
+		}
+		ratio := objAbs / av
+		if math.IsNaN(ratio) || ratio > best1 {
+			best2 = best1
+			best1 = ratio
+			col1 = c
+		} else if ratio > best2 {
+			best2 = ratio
+		}
+	}
+	if !hasTiny {
+		return false
+	}
+	for idx := range m {
+		c := cols[idx]
+		if uint(c) >= uint(n) || (lb[c] >= ub[c] && lb[c] == 0) {
+			continue
+		}
+		av := math.Abs(vals[idx])
+		if av <= 0 || av > 1e-11 {
+			continue
+		}
+		objAbs := math.Abs(objMin[c])
+		infB := math.IsInf(lb[c], 0) || math.IsInf(ub[c], 0) ||
+			math.Abs(lb[c]) >= 1e30 || math.Abs(ub[c]) >= 1e30 || math.IsInf(ub[c]-lb[c], 0)
+		if objAbs > 0 {
+			width := max(0.0, ub[c]-lb[c])
+			diff := objAbs * width
+			if infB || math.IsNaN(diff) || math.IsInf(diff, 0) || diff > 1e-6 {
+				return true
+			}
+		}
+		otherRatio := best1
+		if c == col1 {
+			otherRatio = best2
+		}
+		if otherRatio > 0 {
+			if infB {
+				return true
+			}
+			shift := av * max(math.Abs(lb[c]), math.Abs(ub[c]))
+			prod := shift * otherRatio
+			if math.IsNaN(prod) || math.IsInf(prod, 0) || prod > 1e-6 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasCBCObjAmplifiedTinyMatrixEntry reports whether any structural constraint
+// or cut carries a sub-1e-11 coefficient whose objective coupling exceeds 1e-6.
+func hasCBCObjAmplifiedTinyMatrixEntry(p *CompiledProblem, lb, ub []float64, cuts cbcCutSet) bool {
+	n := min(p.numVars, min(len(lb), len(ub)))
+	for r := range p.numConstraints {
+		if r+1 >= len(p.rowPtr) {
+			break
+		}
+		lo, hi := p.rowPtr[r], p.rowPtr[r+1]
+		if lo < 0 || hi > len(p.colIdx) || hi > len(p.rowVal) || lo >= hi {
+			continue
+		}
+		if hasCBCRowObjAmplifiedTiny(p.colIdx[lo:hi], p.rowVal[lo:hi], p.objMin, lb, ub, n) {
+			return true
+		}
+	}
+	for e := range cuts.colValCount() {
+		if hasCBCRowObjAmplifiedTiny(cuts.cols[e], cuts.vals[e], p.objMin, lb, ub, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCBCDirectLPFallback(refRes LPResult) (LPResult, bool) {
+	if refRes.Status == StatusOptimal && !math.IsNaN(refRes.Objective) && !math.IsInf(refRes.Objective, 0) {
+		return refRes, true
+	}
+	if refRes.Status == StatusInfeasible || refRes.Status == StatusUnbounded || isLimitStatus(refRes.Status) {
+		return LPResult{Status: refRes.Status, Iterations: refRes.Iterations}, true
+	}
+	return LPResult{Status: StatusNumericalError, Iterations: refRes.Iterations}, false
+}
+
+func cbcLPResultToResult(p *CompiledProblem, start time.Time, lpRes LPResult, fellBack bool) Result {
+	res := cbcStatusResult(p, lpRes.Status, start, 0, lpRes.Iterations, 0)
+	res.FellBackToGo = fellBack
+	if lpRes.Status == StatusOptimal {
+		res.Objective = lpRes.Objective
+		res.BestBound = lpRes.Objective
+		res.RootLPBound = lpRes.Objective
+		res.RootCutBound = lpRes.Objective
+		res.Values = lpRes.Primal
+		res.Duals = lpRes.Dual
+		res.ReducedCosts = lpRes.ReducedCosts
+	}
+	return res
+}
+
 func solveCBCLP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
 	n := p.numVars
 	m := p.numConstraints
 	noCuts := cbcCutSet{}
 	rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, noCuts)
 	droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, noCuts)
+	if !droppedTiny && (hasCBCPivotRiskTiny(p, p.varLB, p.varUB, noCuts) || hasCBCObjAmplifiedTinyMatrixEntry(p, p.varLB, p.varUB, noCuts)) {
+		refRes, isCanceled := runBudgetedGoLPProbe(ctx, p, opt, 0, nil, nil, deadline, done)
+		if isCanceled {
+			return Result{}
+		}
+		normRes, fellBack := normalizeCBCDirectLPFallback(refRes)
+		return cbcLPResultToResult(p, start, normRes, fellBack)
+	}
 	var pc cbcPrecond
 	if (rowCancel || objCancel) && !droppedTiny {
 		pc = preconditionCBC(p, p.varLB, p.varUB, noCuts, false, deadline, done)
@@ -572,18 +720,7 @@ func solveCBCLP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt
 	if canceled {
 		return Result{}
 	}
-	res := cbcStatusResult(p, lpRes.Status, start, 0, lpRes.Iterations, 0)
-	res.FellBackToGo = fellBack
-	if lpRes.Status == StatusOptimal {
-		res.Objective = lpRes.Objective
-		res.BestBound = lpRes.Objective
-		res.RootLPBound = lpRes.Objective
-		res.RootCutBound = lpRes.Objective
-		res.Values = lpRes.Primal
-		res.Duals = lpRes.Dual
-		res.ReducedCosts = lpRes.ReducedCosts
-	}
-	return res
+	return cbcLPResultToResult(p, start, lpRes, fellBack)
 }
 
 func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, opt Options, start, deadline time.Time, done <-chan struct{}) Result {
@@ -591,7 +728,8 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 	m := p.numConstraints
 	noCuts := cbcCutSet{}
 	droppedTiny := hasCBCDroppedTiny(p, p.varLB, p.varUB, noCuts)
-	if !droppedTiny && !hasUnscalableCBCMIPObjective(p.objMin) && hasCBCPivotRiskTiny(p, p.varLB, p.varUB, noCuts) {
+	if !droppedTiny && !hasUnscalableCBCMIPObjective(p.objMin) &&
+		(hasCBCPivotRiskTiny(p, p.varLB, p.varUB, noCuts) || hasCBCObjAmplifiedTinyMatrixEntry(p, p.varLB, p.varUB, noCuts)) {
 		return fallbackCBCMIPToGo(ctx, p, opt, start, deadline, done, 0, 0, 0)
 	}
 	rowCancel, objCancel := hasCBCCancellationRisk(p, p.varLB, p.varUB, noCuts)
@@ -645,6 +783,17 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 		maxNodes = -1
 	}
 
+	// Disable CBC presolve and CglProbing cut passes when any non-fixed integer
+	// column exceeds Cgl finite limits (+/-1e12). Upstream CglPreProcess and
+	// CglProbing clamp those bounds to +/-1.23456789e10, causing cancellation in
+	// bound tightening and unsound strengthened cuts under negative or infinite bounds.
+	enablePresolve := opt.EnablePresolve
+	enableCuts := opt.EnableCuts
+	if hasCBCUnboundedIntProbingRisk(p) {
+		enablePresolve = false
+		enableCuts = false
+	}
+
 	timedOutBeforeCall := func() bool {
 		defer release()
 		return withCBCCancel(ctx, deadline, done, func(timeLimitSec float64, cancelPtr *C.int) {
@@ -661,8 +810,8 @@ func solveCBCMIP(ctx context.Context, p *CompiledProblem, cbc *cbcMatrixData, op
 				cFloat64Ptr(mat.rowUBClp),
 				C.int(len(cbc.intCols32)),
 				cInt32Ptr(cbc.intCols32),
-				boolToCInt(opt.EnablePresolve),
-				boolToCInt(opt.EnableCuts),
+				boolToCInt(enablePresolve),
+				boolToCInt(enableCuts),
 				boolToCInt(opt.EnableHeuristics),
 				clampCInt(maxNodes),
 				clampCInt(cutPasses),
@@ -1234,6 +1383,16 @@ func (s *CBCLPSolver) AddCut(colIdx []int, val []float64, rhs float64) {
 	s.numCut++
 }
 
+func (s *CBCLPSolver) solveWithGoLP() LPResult {
+	lpRef := NewLPSolver(s.prob, nil)
+	defer lpRef.Close()
+	lpRef.SetStructuralBounds(s.curLB, s.curUB)
+	for e := range s.cuts.count() {
+		lpRef.AddCut(s.cuts.cols[e], s.cuts.vals[e], s.cuts.rhs[e])
+	}
+	return lpRef.Solve()
+}
+
 // Solve solves or warm-start resolves the current LP relaxation via COIN-OR CLP.
 func (s *CBCLPSolver) Solve() LPResult {
 	if s == nil || s.invalidBounds {
@@ -1294,6 +1453,10 @@ func (s *CBCLPSolver) Solve() LPResult {
 
 	rowCancel, objCancel := hasCBCCancellationRisk(p, s.curLB, s.curUB, s.cuts)
 	droppedTiny := hasCBCDroppedTiny(p, s.curLB, s.curUB, s.cuts)
+	if !droppedTiny && (hasCBCPivotRiskTiny(p, s.curLB, s.curUB, s.cuts) || hasCBCObjAmplifiedTinyMatrixEntry(p, s.curLB, s.curUB, s.cuts)) {
+		normRes, _ := normalizeCBCDirectLPFallback(s.solveWithGoLP())
+		return normRes
+	}
 	var pc cbcPrecond
 	if (rowCancel || objCancel) && !droppedTiny {
 		pc = preconditionCBC(p, s.curLB, s.curUB, s.cuts, false, time.Time{}, nil)
@@ -1402,13 +1565,7 @@ func (s *CBCLPSolver) Solve() LPResult {
 		status: Status(cRes.status), primal: primal, duals: duals, rc: rc,
 		totalIters: totalIters, droppedTiny: droppedTiny, unresolvedCancel: unresolvedCancel,
 		fallback: func(acceptInfeasible bool) (LPResult, bool, bool) {
-			lpRef := NewLPSolver(p, nil)
-			defer lpRef.Close()
-			lpRef.SetStructuralBounds(s.curLB, s.curUB)
-			for e := range s.cuts.count() {
-				lpRef.AddCut(s.cuts.cols[e], s.cuts.vals[e], s.cuts.rhs[e])
-			}
-			refRes := lpRef.Solve()
+			refRes := s.solveWithGoLP()
 			totalIters += refRes.Iterations
 			if refRes.Status == StatusOptimal && !math.IsNaN(refRes.Objective) && !math.IsInf(refRes.Objective, 0) {
 				refRes.Iterations = totalIters
