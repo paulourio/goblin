@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -696,6 +698,678 @@ func FuzzMADLimitsCBC(f *testing.F) {
 			assertDecomposedMADSoundness(t, tag, "cbc-ctx", p, rCtx, plantedObj)
 		} else if !errors.Is(ctxErr, context.DeadlineExceeded) {
 			t.Fatalf("[%s] unexpected CBC context error: %v", tag, ctxErr)
+		}
+	})
+}
+
+func buildGeneralCBCDiffModel(cur *statefulByteCursor) (mdl *gb.Model, tag string, customLimit gb.Option) {
+	regime := cur.u8() % 5
+	sense := gb.Minimize
+	if cur.u8()%2 == 1 {
+		sense = gb.Maximize
+	}
+	senseStr := "min"
+	if sense == gb.Maximize {
+		senseStr = "max"
+	}
+	tag = fmt.Sprintf("gen_cbc_r%d_%s", regime, senseStr)
+	mdl = gb.NewModel(tag, sense)
+
+	varSenses := []gb.VarCategory{gb.Continuous, gb.Integer, gb.Binary}
+	rowSenses := []gb.ConstraintSense{gb.LessEqual, gb.GreaterEqual, gb.Equal}
+
+	addTypedVar := func(name string, vt gb.VarCategory, bKind uint8) gb.Var {
+		if vt == gb.Binary {
+			return mdl.AddBinaryVar(name)
+		}
+		lo := cur.scaledFloat(6.0)
+		hi := lo + 1.0 + math.Abs(cur.scaledFloat(6.0))
+		switch bKind % 6 {
+		case 0:
+			lo, hi = 0, 1.0+math.Abs(cur.scaledFloat(6.0))
+		case 1:
+			lo = math.Inf(-1)
+		case 2:
+			hi = math.Inf(1)
+		case 3:
+			lo, hi = math.Inf(-1), math.Inf(1)
+		case 4:
+			hi = lo
+		}
+		if vt == gb.Integer {
+			if !math.IsInf(lo, -1) {
+				lo = math.Floor(lo)
+			}
+			if !math.IsInf(hi, 1) {
+				hi = math.Ceil(hi)
+			}
+			return mdl.AddIntVar(name, lo, hi)
+		}
+		return mdl.AddContVar(name, lo, hi)
+	}
+
+	addMixedConstraint := func(name string, cs gb.ConstraintSense, xs []gb.Var, coeffScale float64) {
+		ex := gb.NewExpr()
+		nnz := 1 + int(cur.u8())%min(len(xs), 5)
+		for range nnz {
+			c := int(cur.u8()) % len(xs)
+			val := cur.scaledFloat(coeffScale)
+			if val == 0 {
+				val = 1.0
+			}
+			ex = ex.AddTerm(xs[c], val)
+		}
+		rhs := cur.scaledFloat(8.0)
+		switch cs {
+		case gb.LessEqual:
+			mdl.AddConstraint(name, gb.Le(ex, rhs))
+		case gb.GreaterEqual:
+			mdl.AddConstraint(name, gb.Ge(ex, rhs))
+		default:
+			mdl.AddConstraint(name, gb.Eq(ex, rhs))
+		}
+	}
+
+	switch regime {
+	case 0: // Non-MAD continuous LP (Minimize/Maximize, LessEqual/GreaterEqual/Equal, infinite bounds)
+		nVars := 1 + int(cur.u8()%7)
+		xs := make([]gb.Var, nVars)
+		obj := gb.NewExpr().AddConstant(cur.scaledFloat(5.0))
+		for j := range nVars {
+			xs[j] = addTypedVar("x"+strconv.Itoa(j), gb.Continuous, cur.u8())
+			if cur.u8()%4 != 0 {
+				obj = obj.AddTerm(xs[j], cur.scaledFloat(4.0))
+			}
+		}
+		mdl.SetObjective(obj)
+		nRows := 1 + int(cur.u8()%8)
+		for i := range nRows {
+			addMixedConstraint("c"+strconv.Itoa(i), rowSenses[int(cur.u8())%3], xs, 4.0)
+		}
+
+	case 1: // Non-MAD MILP with Continuous/Integer/Binary mixes and occasional short resource limits
+		nVars := 2 + int(cur.u8()%6)
+		xs := make([]gb.Var, nVars)
+		obj := gb.NewExpr().AddConstant(cur.scaledFloat(4.0))
+		for j := range nVars {
+			vt := varSenses[int(cur.u8())%len(varSenses)]
+			xs[j] = addTypedVar("m"+strconv.Itoa(j), vt, cur.u8())
+			if cur.u8()%5 != 0 {
+				obj = obj.AddTerm(xs[j], cur.scaledFloat(4.0))
+			}
+		}
+		mdl.SetObjective(obj)
+		nRows := 1 + int(cur.u8()%8)
+		for i := range nRows {
+			addMixedConstraint("mc"+strconv.Itoa(i), rowSenses[int(cur.u8())%3], xs, 4.0)
+		}
+		if cur.u8()%4 == 0 {
+			switch cur.u8() % 3 {
+			case 0:
+				customLimit = gb.WithMaxNodes(int(cur.u8() % 3))
+			case 1:
+				customLimit = gb.WithMaxIter(5 + int(cur.u8()%60))
+			default:
+				customLimit = gb.WithTimeLimit(time.Duration(2+int(cur.u8()%15)) * time.Millisecond)
+			}
+		}
+
+	case 2: // Equality chains triggering buildCBCEqRREFBasis and cancellation risk
+		nVars := 3 + int(cur.u8()%5)
+		xs := make([]gb.Var, nVars)
+		obj := gb.NewExpr().AddConstant(1.5)
+		isMILP := cur.u8()%2 == 0
+		for j := range nVars {
+			vt := gb.Continuous
+			if isMILP && j%2 == 0 {
+				vt = varSenses[1+int(cur.u8()%2)]
+			}
+			xs[j] = addTypedVar("e"+strconv.Itoa(j), vt, cur.u8()%5)
+			obj = obj.AddTerm(xs[j], cur.scaledFloat(5.0))
+		}
+		mdl.SetObjective(obj)
+		nEq := 2 + int(cur.u8())%min(nVars, 5)
+		cancelModes := []float64{1.0, 1e4, 1e8, 1e10}
+		bigW := cancelModes[int(cur.u8())%len(cancelModes)]
+		for i := range nEq {
+			j0 := i % nVars
+			j1 := (i + 1) % nVars
+			c0 := cur.scaledFloat(3.0)
+			if c0 == 0 {
+				c0 = 1.5
+			}
+			c1 := cur.scaledFloat(3.0)
+			if c1 == 0 {
+				c1 = -2.0
+			}
+			ex := gb.NewExpr(xs[j0].T(c0), xs[j1].T(c1))
+			if nVars >= 3 {
+				jShared := (nVars - 1)
+				if jShared != j0 && jShared != j1 {
+					ex = ex.AddTerm(xs[jShared], bigW)
+				}
+			}
+			rhs := cur.scaledFloat(6.0) + bigW*0.5
+			mdl.AddConstraint("eq"+strconv.Itoa(i), gb.Eq(ex, rhs))
+		}
+		nExtra := 1 + int(cur.u8()%3)
+		for i := range nExtra {
+			addMixedConstraint("ineq"+strconv.Itoa(i), rowSenses[int(cur.u8())%2], xs, 3.0)
+		}
+
+	case 3: // Extreme objective scaling (cbcMIPObjectiveScaleExp) and tiny matrix coeffs (hasCBCTinyMatrixCoeffRisk)
+		nVars := 2 + int(cur.u8()%5)
+		xs := make([]gb.Var, nVars)
+		subMode := cur.u8() % 3
+		obj := gb.NewExpr()
+		isMILP := subMode != 1 || cur.u8()%2 == 0
+		for j := range nVars {
+			vt := gb.Continuous
+			if isMILP && cur.u8()%2 == 0 {
+				vt = gb.Integer
+			}
+			lo, hi := 0.0, 10.0
+			switch cur.u8() % 4 {
+			case 1:
+				lo, hi = -1e9, 1e9
+			case 2:
+				hi = math.Inf(1)
+			case 3:
+				lo, hi = math.Inf(-1), 5.0
+			}
+			if vt == gb.Integer {
+				xs[j] = mdl.AddIntVar("s"+strconv.Itoa(j), lo, hi)
+			} else {
+				xs[j] = mdl.AddContVar("s"+strconv.Itoa(j), lo, hi)
+			}
+			if subMode == 0 || subMode == 2 {
+				extScales := []float64{1e35, -1e38, 1e44, -1e48, 1.5, -1e-5}
+				obj = obj.AddTerm(xs[j], extScales[int(cur.u8())%len(extScales)])
+			} else {
+				obj = obj.AddTerm(xs[j], cur.scaledFloat(3.0))
+			}
+		}
+		mdl.SetObjective(obj)
+		tinyVals := []float64{1e-20, -1e-18, 1e-13, -1e-11, 1e-8}
+		nRows := 1 + int(cur.u8()%5)
+		for i := range nRows {
+			ex := gb.NewExpr(xs[i%nVars].T(tinyVals[int(cur.u8())%len(tinyVals)]))
+			if nVars > 1 {
+				cNext := cur.scaledFloat(3.0)
+				if cNext == 0 {
+					cNext = 1.0
+				}
+				ex = ex.AddTerm(xs[(i+1)%nVars], cNext)
+			}
+			rhs := cur.scaledFloat(5.0)
+			switch rowSenses[int(cur.u8())%3] {
+			case gb.LessEqual:
+				mdl.AddConstraint("ts"+strconv.Itoa(i), gb.Le(ex, rhs))
+			case gb.GreaterEqual:
+				mdl.AddConstraint("ts"+strconv.Itoa(i), gb.Ge(ex, rhs))
+			default:
+				mdl.AddConstraint("ts"+strconv.Itoa(i), gb.Eq(ex, rhs))
+			}
+		}
+
+	default: // Deliberate infeasible and unbounded edge cases across Minimize and Maximize
+		if cur.u8()%2 == 0 {
+			x := mdl.AddContVar("x", 0, 10)
+			y := mdl.AddIntVar("y", 0, 10)
+			mdl.SetObjective(gb.NewExpr(x.T(1), y.T(-2)))
+			switch cur.u8() % 3 {
+			case 0:
+				mdl.AddConstraint("le", gb.Le(gb.NewExpr(x.T(1), y.T(1)), 2))
+				mdl.AddConstraint("ge", gb.Ge(gb.NewExpr(x.T(1), y.T(1)), 7))
+			case 1:
+				mdl.AddConstraint("eq1", gb.Eq(gb.NewExpr(x.T(1), y.T(1)), 3))
+				mdl.AddConstraint("eq2", gb.Eq(gb.NewExpr(x.T(1), y.T(1)), 4))
+			default:
+				// Integer parity trap when continuous relaxation has solution x=0, y=1.5.
+				mdl.AddConstraint("fix_x", gb.Eq(gb.NewExpr(x.T(1)), 0))
+				mdl.AddConstraint("parity", gb.Eq(gb.NewExpr(y.T(2)), 3))
+			}
+		} else {
+			// Unbounded LP/MILP with one-sided semi-infinite or free recession ray.
+			x := mdl.AddContVar("x", math.Inf(-1), 1)
+			y := mdl.AddContVar("y", 0, 5)
+			z := mdl.AddContVar("z", 0, math.Inf(1))
+			if sense == gb.Maximize {
+				mdl.SetObjective(gb.NewExpr(x.T(-0.5), y.T(2), z.T(1.5)))
+			} else {
+				mdl.SetObjective(gb.NewExpr(x.T(0.5), y.T(-2), z.T(-1.5)))
+			}
+			mdl.AddConstraint("r0", gb.Ge(gb.NewExpr(y.T(-2), x.T(-2)), -3))
+			mdl.AddConstraint("r1", gb.Le(gb.NewExpr(y.T(1), z.T(-0.5)), 4))
+		}
+	}
+	return mdl, tag, customLimit
+}
+
+func assertGeneralSenseBoundCompatible(
+	t *testing.T,
+	tag string,
+	sense gb.Sense,
+	optName string,
+	optObj float64,
+	limName string,
+	limRes gb.Result,
+	limHasInc bool,
+) {
+	t.Helper()
+	tol := 1e-5 * max(1.0, math.Abs(optObj))
+	if hasFiniteBound(limRes.BestBound) {
+		if sense == gb.Minimize && limRes.BestBound > optObj+tol {
+			t.Fatalf("[%s] %s BestBound %.10g (status=%v) exceeds %s Minimize optimal %.10g",
+				tag, limName, limRes.BestBound, limRes.Status, optName, optObj)
+		}
+		if sense == gb.Maximize && limRes.BestBound < optObj-tol {
+			t.Fatalf("[%s] %s BestBound %.10g (status=%v) falls below %s Maximize optimal %.10g",
+				tag, limName, limRes.BestBound, limRes.Status, optName, optObj)
+		}
+	}
+	if limHasInc {
+		if sense == gb.Minimize && limRes.Objective < optObj-tol {
+			t.Fatalf("[%s] %s feasible incumbent %.10g beats %s Minimize optimal %.10g",
+				tag, limName, limRes.Objective, optName, optObj)
+		}
+		if sense == gb.Maximize && limRes.Objective > optObj+tol {
+			t.Fatalf("[%s] %s feasible incumbent %.10g beats %s Maximize optimal %.10g",
+				tag, limName, limRes.Objective, optName, optObj)
+		}
+	}
+}
+
+func assertGeneralCBCDiffEquivalence(t *testing.T, tag string, p *gb.CompiledProblem, resGo, resCBC gb.Result) {
+	t.Helper()
+	if resGo.Backend != gb.BackendGo {
+		t.Fatalf("[%s] expected Go backend, got %v", tag, resGo.Backend)
+	}
+	if resCBC.Backend != gb.BackendCBC {
+		t.Fatalf("[%s] expected CBC backend, got %v", tag, resCBC.Backend)
+	}
+
+	stdScaled := isStandardScaledProblem(p)
+	if resGo.Status == gb.StatusUndefined || (stdScaled && resGo.Status == gb.StatusNumericalError) {
+		t.Fatalf("[%s] unexpected pure-Go failure status %v (stdScaled=%v)", tag, resGo.Status, stdScaled)
+	}
+	verifyMILPInvariants(t, tag+"/go", p, resGo)
+	goHasInc := verifyOptionalIncumbent(t, tag+"/go", p, resGo)
+
+	cbcOK, cbcHasInc := cbcOracleReliable(p, resCBC)
+	if cbcOK {
+		if resGo.Status == gb.StatusOptimal && resCBC.Status == gb.StatusOptimal {
+			tol := 1e-5 * max(1.0, max(math.Abs(resGo.Objective), math.Abs(resCBC.Objective)))
+			if math.Abs(resGo.Objective-resCBC.Objective) > tol {
+				t.Fatalf("[%s] optimal objective mismatch: go=%.10g vs cbc=%.10g (tol=%.2e)",
+					tag, resGo.Objective, resCBC.Objective, tol)
+			}
+			return
+		}
+		if resCBC.Status == gb.StatusOptimal {
+			switch resGo.Status {
+			case gb.StatusInfeasible:
+				exactOK := !p.IsMIP() && stdScaled
+				if p.IsMIP() {
+					exactOK = isExactRatMIPFeasible(p, resCBC.Values)
+				}
+				if exactOK {
+					t.Fatalf("[%s] go claimed Infeasible while CBC reported Optimal (obj=%.10g)", tag, resCBC.Objective)
+				}
+				return
+			case gb.StatusUnbounded:
+				if stdScaled {
+					t.Fatalf("[%s] status mismatch: go=Unbounded while CBC reported reliable Optimal (obj=%.10g)", tag, resCBC.Objective)
+				}
+				return
+			case gb.StatusNumericalError:
+				return
+			default:
+				assertGeneralSenseBoundCompatible(t, tag, p.Sense(), "cbc", resCBC.Objective, "go", resGo, goHasInc)
+				return
+			}
+		}
+		if resGo.Status == gb.StatusOptimal {
+			assertGeneralSenseBoundCompatible(t, tag, p.Sense(), "go", resGo.Objective, "cbc", resCBC, cbcHasInc)
+			return
+		}
+		// Both solvers hit resource limits: neither BestBound may cross the other's incumbent.
+		if goHasInc && hasFiniteBound(resCBC.BestBound) {
+			assertGeneralSenseBoundCompatible(t, tag, p.Sense(), "go-inc", resGo.Objective, "cbc", resCBC, cbcHasInc)
+		}
+		if cbcHasInc && hasFiniteBound(resGo.BestBound) {
+			assertGeneralSenseBoundCompatible(t, tag, p.Sense(), "cbc-inc", resCBC.Objective, "go", resGo, goHasInc)
+		}
+		return
+	}
+
+	// Standard-scaled models where CBC ran natively (FellBackToGo=false) must agree on terminal status.
+	if stdScaled && !resCBC.FellBackToGo &&
+		resGo.Status != gb.StatusNumericalError &&
+		resCBC.Status != gb.StatusNumericalError &&
+		!isResourceLimitStatus(resGo.Status) &&
+		!isResourceLimitStatus(resCBC.Status) {
+		if resGo.Status != resCBC.Status {
+			if p.IsMIP() && resGo.Status == gb.StatusOptimal && !isExactRatMIPFeasible(p, resGo.Values) {
+				return
+			}
+			t.Fatalf("[%s] standard-scaled CBC parity status mismatch: go=%v (obj=%.10g) vs cbc=%v (obj=%.10g)",
+				tag, resGo.Status, resGo.Objective, resCBC.Status, resCBC.Objective)
+		}
+	}
+}
+
+// FuzzGeneralLPAndMILPCBC differential-fuzzes general (non-MAD) Minimize/Maximize
+// LPs and MILPs between pure-Go goblin and C++ COIN-OR CBC, exercising equality-chain
+// RREF basis building, extreme objective exponent scaling, tiny matrix coefficients,
+// and infeasible/unbounded edge cases.
+func FuzzGeneralLPAndMILPCBC(f *testing.F) {
+	// Seeds covering LP, MILP, equality chains, extreme obj scaling, tiny coeffs, and Maximize unbounded.
+	f.Add([]byte{0, 0, 3, 2, 0x40, 0x01, 0, 0x80, 0x01, 1, 2, 0, 1, 0x40, 0x01, 2, 0x80, 0x02})
+	f.Add([]byte{1, 1, 4, 3, 1, 0, 0x80, 0x02, 2, 1, 0x40, 0x01, 0, 2, 3, 4, 1, 2})
+	f.Add([]byte{2, 1, 4, 3, 0, 0x40, 0x01, 1, 0x80, 0x01, 2, 2, 3, 0x80, 0x03, 1, 2})
+	f.Add([]byte{3, 0, 3, 0, 1, 0x40, 0x01, 2, 0x80, 0x02, 0, 1, 2, 3, 4, 5, 6})
+	f.Add([]byte{4, 1, 1, 0, 0, 0, 0, 0, 0})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		cur := statefulByteCursor{data: data}
+		mdl, tag, customLimit := buildGeneralCBCDiffModel(&cur)
+		p, err := mdl.CompileChecked()
+		if err != nil {
+			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+		}
+
+		goOpts := []gb.Option{gb.WithPureGo(), gb.WithTimeLimit(400 * time.Millisecond), gb.WithMaxNodes(4000)}
+		cbcOpts := []gb.Option{gb.WithCBC(), gb.WithTimeLimit(400 * time.Millisecond), gb.WithMaxNodes(4000)}
+		if customLimit != nil {
+			goOpts = append(goOpts, customLimit)
+			cbcOpts = append(cbcOpts, customLimit)
+		}
+
+		resCBC := mustSolveCompiled(t, p, cbcOpts...)
+		resGo := mustSolveCompiled(t, p, goOpts...)
+		assertGeneralCBCDiffEquivalence(t, tag, p, resGo, resCBC)
+
+		if !p.IsMIP() && customLimit == nil {
+			lpGo := gb.NewLPSolver(p, nil)
+			resLP := lpGo.Solve()
+			verifyFormalLPResult(t, tag+"/lpgo", p, lpGo, cloneLPResult(resLP))
+			lpGo.Close()
+			if isStandardScaledProblem(p) && resLP.Status != gb.StatusNumericalError && resGo.Status != gb.StatusNumericalError {
+				if !isResourceLimitStatus(resGo.Status) && resLP.Status != resGo.Status {
+					t.Fatalf("[%s] direct LPSolver status=%v != SolveCompiled Go status=%v", tag, resLP.Status, resGo.Status)
+				}
+				if resLP.Status == gb.StatusOptimal && resGo.Status == gb.StatusOptimal {
+					tol := 1e-5 * max(1.0, max(math.Abs(resLP.Objective), math.Abs(resGo.Objective)))
+					if math.Abs(resLP.Objective-resGo.Objective) > tol {
+						t.Fatalf("[%s] direct LPSolver obj=%.10g != SolveCompiled obj=%.10g", tag, resLP.Objective, resGo.Objective)
+					}
+				}
+			}
+		}
+	})
+}
+
+// FuzzCBCLPSolverIncremental mirrors the stateful LP command stream against
+// *gb.CBCLPSolver (SetStructuralBounds, AddCut, Solve, Close) and verifies parity
+// against pure-Go *gb.LPSolver plus formal Lean certificates when GOBLIN_FORMAL=1.
+func FuzzCBCLPSolverIncremental(f *testing.F) {
+	f.Add([]byte{0x00, 3, 3, 0, 6, 0x80, 0x01, 0, 1, 0, 2, 0x40, 0x01, 1, 0, 4, 2, 0, 1, 0, 2, 0, 1, 1, 2, 0})
+	f.Add([]byte{0x0d, 4, 4, 0x40, 0x01, 1, 0x80, 0xff, 2, 1, 2, 0, 1, 0, 2, 1, 3, 2, 0, 1, 2, 0, 3, 0})
+	f.Add([]byte{0x74, 2, 5, 0x80, 0x01, 0, 0x80, 0xff, 1, 0x40, 0x01, 2, 10, 0, 1, 2, 0, 2, 3, 1, 0, 2, 0})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		cur := statefulByteCursor{data: data}
+		sp := decodeStatefulLPSpec(&cur)
+		curLB := slices.Clone(sp.lb)
+		curUB := slices.Clone(sp.ub)
+		var activeCuts []lpCutSpec
+
+		pBase := sp.buildProblem(curLB, curUB, nil)
+		baseM := pBase.NumConstraints()
+
+		wsGo := gb.AcquireWorkspace(sp.nVars, baseM)
+		lpGo := gb.NewLPSolver(pBase, wsGo)
+		lpCBC := gb.NewCBCLPSolver(pBase)
+		defer func() {
+			if lpCBC != nil {
+				lpCBC.Close()
+			}
+			if lpGo != nil {
+				lpGo.Close()
+			}
+			if wsGo != nil {
+				gb.ReleaseWorkspace(wsGo)
+			}
+		}()
+
+		nOps := 5 + int(cur.u8()%17)
+		var lastGoRes gb.LPResult
+		hasLastSolved := false
+
+		for step := range nOps {
+			op := cur.u8() % 4
+			stepTag := fmt.Sprintf("cbc_step%d_op%d", step, op)
+
+			switch op {
+			case 0: // Solve() parity + formal check
+				resCBC := lpCBC.Solve()
+				resGo := lpGo.Solve()
+
+				pStep := sp.buildProblem(curLB, curUB, activeCuts)
+				lpFresh := gb.NewLPSolver(pStep, nil)
+				resFresh := lpFresh.Solve()
+				verifyFormalLPResult(t, stepTag+"/fresh", pStep, lpFresh, cloneLPResult(resFresh))
+				if len(activeCuts) == 0 {
+					verifyFormalLPResult(t, stepTag+"/go", pStep, lpGo, cloneLPResult(resGo))
+				}
+				lpFresh.Close()
+
+				if lpCBC.NumVars() != sp.nVars || lpCBC.NumCuts() != len(activeCuts) || lpCBC.TotalRows() != baseM+len(activeCuts) {
+					t.Fatalf("[%s] CBCLPSolver dims mismatch: (%d,%d,%d) want (%d,%d,%d)",
+						stepTag, lpCBC.NumVars(), lpCBC.NumCuts(), lpCBC.TotalRows(),
+						sp.nVars, len(activeCuts), baseM+len(activeCuts))
+				}
+				if resGo.Status == gb.StatusUndefined || resCBC.Status == gb.StatusUndefined {
+					t.Fatalf("[%s] unexpected StatusUndefined: go=%v cbc=%v", stepTag, resGo.Status, resCBC.Status)
+				}
+
+				stdScaled := isStandardScaledProblem(pStep)
+				if stdScaled && resGo.Status == gb.StatusNumericalError {
+					t.Fatalf("[%s] pure-Go incremental LP returned StatusNumericalError on standard-scaled step", stepTag)
+				}
+				if resCBC.Status == gb.StatusOptimal {
+					bV, rV, _ := pStep.MaxViolation(resCBC.Primal, false)
+					if bV > 1e-5 || rV > 1e-5 {
+						t.Fatalf("[%s] CBCLPSolver Optimal primal violation: bound=%.2e row=%.2e", stepTag, bV, rV)
+					}
+					evalCBC := pStep.EvaluateObjective(resCBC.Primal)
+					if math.Abs(evalCBC-resCBC.Objective) > 1e-5*max(1.0, math.Abs(resCBC.Objective)) {
+						t.Fatalf("[%s] CBCLPSolver EvaluateObjective=%.10g != Objective=%.10g", stepTag, evalCBC, resCBC.Objective)
+					}
+					if len(resCBC.Dual) != baseM {
+						t.Fatalf("[%s] CBCLPSolver Dual len=%d, want baseM=%d", stepTag, len(resCBC.Dual), baseM)
+					}
+					if resGo.Status == gb.StatusOptimal {
+						tol := 1e-5 * max(1.0, max(math.Abs(resGo.Objective), math.Abs(resCBC.Objective)))
+						if math.Abs(resGo.Objective-resCBC.Objective) > tol {
+							t.Fatalf("[%s] optimal objective mismatch: go=%.10g vs cbc=%.10g (tol=%.2e)",
+								stepTag, resGo.Objective, resCBC.Objective, tol)
+						}
+					} else if stdScaled && resGo.Status != gb.StatusNumericalError {
+						t.Fatalf("[%s] standard-scaled status mismatch: cbc=Optimal (%.10g) vs go=%v",
+							stepTag, resCBC.Objective, resGo.Status)
+					}
+				} else if stdScaled && resCBC.Status != gb.StatusNumericalError && resGo.Status != gb.StatusNumericalError {
+					if resCBC.Status != resGo.Status {
+						t.Fatalf("[%s] standard-scaled status mismatch: cbc=%v vs go=%v",
+							stepTag, resCBC.Status, resGo.Status)
+					}
+				}
+				lastGoRes = resGo
+				hasLastSolved = true
+
+			case 1: // SetStructuralBounds(curLB, curUB)
+				nUpdates := 1 + int(cur.u8())%min(3, sp.nVars)
+				for range nUpdates {
+					col := int(cur.u8()) % sp.nVars
+					bMode := cur.u8() % 6
+					lo, hi := curLB[col], curUB[col]
+					switch bMode {
+					case 0: // Tighten
+						if math.IsInf(lo, -1) && math.IsInf(hi, 1) {
+							lo, hi = -2.0, 2.0
+						} else if math.IsInf(lo, -1) {
+							lo = hi - 4.0
+						} else if math.IsInf(hi, 1) {
+							hi = lo + 4.0
+						} else if lo < hi {
+							span := hi - lo
+							lo += 0.25 * span
+							hi -= 0.25 * span
+						}
+					case 1: // Loosen (including infinite bounds)
+						switch cur.u8() % 3 {
+						case 0:
+							lo, hi = math.Inf(-1), math.Inf(1)
+						case 1:
+							if math.IsInf(lo, -1) {
+								lo = -10.0
+							} else {
+								lo -= 5.0
+							}
+						default:
+							if math.IsInf(hi, 1) {
+								hi = 10.0
+							} else {
+								hi += 5.0
+							}
+						}
+					case 2: // Fix to midpoint or finite bound
+						if !math.IsInf(lo, -1) && !math.IsInf(hi, 1) && lo <= hi {
+							mid := 0.5 * (lo + hi)
+							lo, hi = mid, mid
+						} else if !math.IsInf(lo, -1) {
+							hi = lo
+						} else if !math.IsInf(hi, 1) {
+							lo = hi
+						} else {
+							lo, hi = 0, 0
+						}
+					case 3: // Unfix
+						base := 0.0
+						if !math.IsInf(lo, -1) {
+							base = lo
+						} else if !math.IsInf(hi, 1) {
+							base = hi
+						}
+						lo, hi = base-3.0, base+3.0
+					case 4: // Invert lo > hi (reversible on next SetStructuralBounds)
+						base := 2.0
+						if !math.IsInf(lo, -1) {
+							base = lo
+						}
+						lo, hi = base+3.0, base+1.0
+					default: // Scale shift
+						shifts := []float64{1e-5, 1e-2, 1e3, 1e7, 1e10}
+						sc := shifts[int(cur.u8())%len(shifts)]
+						lo, hi = -sc, sc
+					}
+					curLB[col], curUB[col] = lo, hi
+				}
+				lpCBC.SetStructuralBounds(curLB, curUB)
+				lpGo.SetStructuralBounds(curLB, curUB)
+				hasLastSolved = false
+
+			case 2: // AddCut(colIdx, val, rhs)
+				if len(activeCuts) >= 16 {
+					continue
+				}
+				kTerms := 1 + int(cur.u8()%4)
+				rawCols := make([]int, 0, kTerms+2)
+				rawVals := make([]float64, 0, kTerms+2)
+				for range kTerms {
+					c := int(cur.u8()) % sp.nVars
+					v := cur.scaledFloat(2.5)
+					if v == 0 {
+						v = 1.0
+					}
+					rawCols = append(rawCols, c)
+					rawVals = append(rawVals, v)
+				}
+				cutStyle := cur.u8() % 5
+				switch cutStyle {
+				case 0:
+					c0 := rawCols[0]
+					rawCols = append(rawCols, c0, c0)
+					rawVals = append(rawVals, 1.5, -1.5)
+				case 1:
+					rawCols = append(rawCols, -1, sp.nVars+2)
+					rawVals = append(rawVals, 99.0, -42.0)
+				}
+				rhs := cur.scaledFloat(6.0)
+				if hasLastSolved && lastGoRes.Status == gb.StatusOptimal && len(lastGoRes.Primal) == sp.nVars {
+					act := 0.0
+					for k, c := range rawCols {
+						if c >= 0 && c < sp.nVars {
+							act += rawVals[k] * lastGoRes.Primal[c]
+						}
+					}
+					switch cutStyle {
+					case 2:
+						rhs = act - 0.5
+					case 3:
+						rhs = act + 5.0
+					}
+				}
+				if cutStyle == 4 {
+					// Check -Inf RHS infeasibility on throwaway solver, and verify +Inf RHS is skipped live.
+					throwCBC := gb.NewCBCLPSolver(pBase)
+					throwCBC.AddCut(rawCols, rawVals, math.Inf(-1))
+					if stInf := throwCBC.Solve().Status; stInf != gb.StatusInfeasible {
+						throwCBC.Close()
+						t.Fatalf("[%s] CBCLPSolver AddCut(-Inf) returned %v, want Infeasible", stepTag, stInf)
+					}
+					throwCBC.Close()
+					rhs = math.Inf(1)
+				}
+
+				beforeCBC := lpCBC.NumCuts()
+				lpCBC.AddCut(rawCols, rawVals, rhs)
+				lpGo.AddCut(rawCols, rawVals, rhs)
+				if math.IsInf(rhs, 1) {
+					if lpCBC.NumCuts() != beforeCBC || lpGo.NumCuts() != beforeCBC {
+						t.Fatalf("[%s] AddCut(+Inf) incremented cut counts (%d,%d), want %d",
+							stepTag, lpCBC.NumCuts(), lpGo.NumCuts(), beforeCBC)
+					}
+					continue
+				}
+				normCut, okCut := normalizeCutForShadow(sp.nVars, rawCols, rawVals, rhs)
+				if !okCut {
+					t.Fatalf("[%s] generated invalid cut", stepTag)
+				}
+				activeCuts = append(activeCuts, normCut)
+				hasLastSolved = false
+
+			default: // Lifecycle Close() + idempotent Close() + rebuild from current state
+				lpCBC.Close()
+				lpCBC.Close() // must be safe idempotent no-op
+				lpCBC = gb.NewCBCLPSolver(pBase)
+				lpCBC.SetStructuralBounds(curLB, curUB)
+				for _, ct := range activeCuts {
+					lpCBC.AddCut(ct.cols, ct.vals, ct.rhs)
+				}
+				// Verify malformed mismatched cut lengths are rejected safely on a throwaway instance.
+				if len(sp.lb) > 0 {
+					badCBC := gb.NewCBCLPSolver(pBase)
+					badCBC.AddCut([]int{0}, []float64{}, 1.0)
+					if stBad := badCBC.Solve().Status; stBad != gb.StatusNumericalError {
+						badCBC.Close()
+						t.Fatalf("[%s] mismatched AddCut len returned %v, want StatusNumericalError", stepTag, stBad)
+					}
+					badCBC.Close()
+				}
+			}
 		}
 	})
 }

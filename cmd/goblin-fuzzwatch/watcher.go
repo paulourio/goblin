@@ -32,6 +32,8 @@ const (
 	ClassFast = "fast"
 	// ClassHeavy marks MILP, B&C, CBC, and Lean-oracle targets where single iterations take milliseconds to seconds.
 	ClassHeavy = "heavy"
+	// ClassRace marks targets compiled with the Go race detector (-race) at roughly 10x lower execution throughput than ClassHeavy.
+	ClassRace = "race"
 
 	// StopReasonRunning marks an active slice.
 	StopReasonRunning = "running"
@@ -116,6 +118,17 @@ var presetDefaults = map[presetKey]Config{
 		WindowExecs:  75_000,
 		WindowMinNew: defaultWindowMinNew,
 	},
+	{PresetLocal, ClassRace}: {
+		Preset:       PresetLocal,
+		Class:        ClassRace,
+		MinTime:      5 * time.Minute,
+		MinExecs:     1_000,
+		StallTime:    10 * time.Minute,
+		StallExecs:   5_000,
+		WindowTime:   15 * time.Minute,
+		WindowExecs:  10_000,
+		WindowMinNew: defaultWindowMinNew,
+	},
 	{PresetSoak, ClassParser}: {
 		Preset:       PresetSoak,
 		Class:        ClassParser,
@@ -147,6 +160,17 @@ var presetDefaults = map[presetKey]Config{
 		StallExecs:   150_000,
 		WindowTime:   45 * time.Minute,
 		WindowExecs:  250_000,
+		WindowMinNew: defaultWindowMinNew,
+	},
+	{PresetSoak, ClassRace}: {
+		Preset:       PresetSoak,
+		Class:        ClassRace,
+		MinTime:      15 * time.Minute,
+		MinExecs:     2_500,
+		StallTime:    30 * time.Minute,
+		StallExecs:   15_000,
+		WindowTime:   45 * time.Minute,
+		WindowExecs:  25_000,
 		WindowMinNew: defaultWindowMinNew,
 	},
 	{PresetDeep, ClassParser}: {
@@ -182,16 +206,27 @@ var presetDefaults = map[presetKey]Config{
 		WindowExecs:  500_000,
 		WindowMinNew: defaultWindowMinNew,
 	},
+	{PresetDeep, ClassRace}: {
+		Preset:       PresetDeep,
+		Class:        ClassRace,
+		MinTime:      25 * time.Minute,
+		MinExecs:     5_000,
+		StallTime:    50 * time.Minute,
+		StallExecs:   30_000,
+		WindowTime:   75 * time.Minute,
+		WindowExecs:  50_000,
+		WindowMinNew: defaultWindowMinNew,
+	},
 }
 
 func isValidClass(class string) bool {
-	return class == ClassParser || class == ClassFast || class == ClassHeavy
+	return class == ClassParser || class == ClassFast || class == ClassHeavy || class == ClassRace
 }
 
 // ResolveConfig builds a validated Config from preset, class, and CLI overrides.
 func ResolveConfig(preset, class string, ov ConfigOverrides) (Config, error) {
 	if !isValidClass(class) {
-		return Config{}, fmt.Errorf("unknown target class %q (expected parser, fast, or heavy)", class)
+		return Config{}, fmt.Errorf("unknown target class %q (expected parser, fast, heavy, or race)", class)
 	}
 	if preset == PresetOff {
 		return Config{Preset: PresetOff, Class: class}, nil

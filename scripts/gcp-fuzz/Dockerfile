@@ -29,9 +29,25 @@ RUN rm -rf /src/third_party/Cbc/dist && ln -s /opt/cbc-dist /src/third_party/Cbc
 # Compile standalone coverage-instrumented fuzz binaries and the saturation watcher.
 RUN mkdir -p /out && \
     GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -o /out/assign.test ./assign && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -o /out/simd.test ./internal/simd && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -o /out/format.test ./format && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -tags=cbc -o /out/format_cbc.test ./format && \
     GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -o /out/goblin.test . && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -tags=goblin_assert -o /out/goblin_assert.test . && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -race -o /out/goblin_race.test . && \
     GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -tags=cbc -o /out/goblin_cbc.test . && \
     CGO_ENABLED=0 go build -trimpath -o /out/goblin-fuzzwatch ./cmd/goblin-fuzzwatch
+
+# Stage prebuilt Lean 4 Prove Lane checker ELFs when present in the build context.
+RUN mkdir -p /out-formal/.lake/build/bin && \
+    if [ -f /src/formal/lakefile.toml ]; then \
+        cp /src/formal/lakefile.toml /out-formal/lakefile.toml; \
+    fi && \
+    for elf in lp-check vipr-check cuts-check rules-check lsap-check; do \
+        if [ -x "/src/formal/.lake/build/bin/${elf}" ]; then \
+            cp "/src/formal/.lake/build/bin/${elf}" "/out-formal/.lake/build/bin/${elf}"; \
+        fi; \
+    done
 
 FROM debian:bookworm-slim AS runtime
 
@@ -49,16 +65,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /out/assign.test /app/bin/assign.test
+COPY --from=builder /out/simd.test /app/bin/simd.test
+COPY --from=builder /out/format.test /app/bin/format.test
+COPY --from=builder /out/format_cbc.test /app/bin/format_cbc.test
 COPY --from=builder /out/goblin.test /app/bin/goblin.test
+COPY --from=builder /out/goblin_assert.test /app/bin/goblin_assert.test
+COPY --from=builder /out/goblin_race.test /app/bin/goblin_race.test
 COPY --from=builder /out/goblin_cbc.test /app/bin/goblin_cbc.test
 COPY --from=builder /out/goblin-fuzzwatch /app/bin/goblin-fuzzwatch
 COPY --from=builder /opt/cbc-dist/lib/*.so* /app/lib/
+COPY --from=builder /out-formal /app/formal
 COPY --from=builder /src/testdata /app/work/testdata
 COPY --from=builder /src/assign/testdata /app/work/assign/testdata
 COPY scripts/gcp-fuzz/targets.tsv /app/targets.tsv
 COPY scripts/gcp-fuzz/fuzz_worker.sh /app/fuzz_worker.sh
 
-RUN chmod +x /app/fuzz_worker.sh /app/bin/* && \
+RUN mkdir -p /app/work/format /app/work/internal/simd && \
+    chmod +x /app/fuzz_worker.sh /app/bin/* && \
+    if [ -n "$(ls -A /app/formal/.lake/build/bin 2>/dev/null || true)" ]; then \
+        chmod +x /app/formal/.lake/build/bin/*; \
+    fi && \
     echo "/app/lib" > /etc/ld.so.conf.d/goblin-cbc.conf && \
     ldconfig
 

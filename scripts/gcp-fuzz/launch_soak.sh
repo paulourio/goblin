@@ -165,6 +165,8 @@ REGION_A_COUNT=""
 DURATION=""
 SLICES="${SLICES:-4}"
 SLICE_DURATION="${SLICE_DURATION:-15m}"
+SLICE_DURATION_SET=0
+SLICES_SET=0
 MAX_RUN_DURATION="${MAX_RUN_DURATION:-}"
 MAX_RETRY_COUNT="${MAX_RETRY_COUNT:-}"
 RUN_ID="${RUN_ID:-soak-$(date -u +%Y%m%d-%H%M%S)}"
@@ -176,6 +178,8 @@ TWO_REGIONS=0
 ALLOW_OVER_4H=0
 DRY_RUN=0
 SKIP_BUILD=0
+FORMAL="${GOBLIN_FORMAL:-0}"
+SIMD_MAX_TIER="${GOBLIN_SIMD_MAX_TIER:-}"
 
 EARLY_STOP_PRESET="${EARLY_STOP_PRESET:-soak}"
 MIN_TIME="${MIN_TIME:-}"
@@ -189,13 +193,14 @@ WINDOW_MIN_NEW="${WINDOW_MIN_NEW:-}"
 usage() {
     cat >&2 <<'EOF'
 usage: launch_soak.sh [flags]
-  --dry-run --skip-build --continue-on-crash --two-regions --exclude-cbc --allow-over-4h
+  --dry-run --skip-build --continue-on-crash --two-regions --exclude-cbc --allow-over-4h --formal
+  --simd-max-tier=auto|scalar|avx2|avx512
   --project=P --region=R --region2=R2 --zones=Z1,Z2 --zones2=Z1,Z2
   --machine-type=TYPE --machine-type2=TYPE
   --cpu-milli=N --memory-mib=N --cpu-milli2=N --memory-mib2=N
   --parallelism=N --parallelism2=N --region-a-count=N
   --only=T1,T2 --run-id=ID --image-tag=TAG
-  --duration=4h --slices=N --slice-duration=15m
+  --duration=4h --total-duration=4h --slices=N --slice-duration=15m
   --max-run-duration=21960s --max-retry-count=N
   --early-stop=soak|local|deep|off
   --min-time=D --min-execs=N --stall-time=D --stall-execs=N
@@ -211,6 +216,9 @@ for arg in "$@"; do
         --two-regions) TWO_REGIONS=1 ;;
         --exclude-cbc) EXCLUDE_CBC=1 ;;
         --allow-over-4h) ALLOW_OVER_4H=1 ;;
+        --formal|--formal=1|--formal=true) FORMAL="1" ;;
+        --formal=0|--formal=false) FORMAL="0" ;;
+        --simd-max-tier=*) SIMD_MAX_TIER="${arg#*=}" ;;
         --project=*) PROJECT="${arg#*=}" ;;
         --region=*) REGION="${arg#*=}" ;;
         --region2=*) REGION2="${arg#*=}"; TWO_REGIONS=1 ;;
@@ -228,9 +236,9 @@ for arg in "$@"; do
         --parallelism=*) PARALLELISM="${arg#*=}"; PARALLELISM_SET=1 ;;
         --parallelism2=*) PARALLELISM2="${arg#*=}" ;;
         --region-a-count=*) REGION_A_COUNT="${arg#*=}" ;;
-        --duration=*) DURATION="${arg#*=}" ;;
-        --slices=*) SLICES="${arg#*=}" ;;
-        --slice-duration=*) SLICE_DURATION="${arg#*=}" ;;
+        --duration=*|--total-duration=*) DURATION="${arg#*=}" ;;
+        --slices=*) SLICES="${arg#*=}"; SLICES_SET=1 ;;
+        --slice-duration=*) SLICE_DURATION="${arg#*=}"; SLICE_DURATION_SET=1 ;;
         --max-run-duration=*) MAX_RUN_DURATION="${arg#*=}" ;;
         --max-retry-count=*) MAX_RETRY_COUNT="${arg#*=}" ;;
         --early-stop=*) EARLY_STOP_PRESET="${arg#*=}" ;;
@@ -247,6 +255,16 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [[ -n "${SIMD_MAX_TIER}" ]]; then
+    case "${SIMD_MAX_TIER}" in
+        auto|scalar|avx2|avx512) ;;
+        *)
+            echo "error: invalid --simd-max-tier=${SIMD_MAX_TIER} (expected auto, scalar, avx2, or avx512)." >&2
+            exit 2
+            ;;
+    esac
+fi
 
 if [[ -z "${PROJECT}" ]]; then
     echo "error: GCP project is unset; pass --project=<id>, set GCP_PROJECT, or run 'gcloud config set project <id>'." >&2
@@ -287,6 +305,10 @@ if [[ -n "${DURATION}" ]]; then
         echo "error: --duration must be positive." >&2
         exit 2
     fi
+    if [[ "${SLICE_DURATION_SET}" -eq 0 && "${SLICES_SET}" -eq 0 && "${TOTAL_REQ_SEC}" -ge 10800 ]]; then
+        SLICE_DURATION="30m"
+        SLICE_SEC="$(parse_duration_sec "${SLICE_DURATION}")"
+    fi
     SLICES="$(((TOTAL_REQ_SEC + SLICE_SEC - 1) / SLICE_SEC))"
 fi
 
@@ -315,7 +337,7 @@ if [[ -z "${MAX_RETRY_COUNT}" ]]; then
 fi
 
 if [[ -z "${TARGET_LIST}" && "${EXCLUDE_CBC}" -eq 1 ]]; then
-    TARGET_LIST="$(awk -F'\t' 'NR > 1 && $0 !~ /^#/ && NF > 0 && $2 !~ /goblin_cbc\.test$/ { out = (out == "" ? $4 : out "," $4) } END { print out }' "${SCRIPT_DIR}/targets.tsv")"
+    TARGET_LIST="$(awk -F'\t' 'NR > 1 && $0 !~ /^#/ && NF > 0 && $2 !~ /_cbc\.test$/ { out = (out == "" ? $4 : out "," $4) } END { print out }' "${SCRIPT_DIR}/targets.tsv")"
 fi
 
 if [[ -n "${TARGET_LIST}" ]]; then
@@ -394,6 +416,7 @@ echo "  Image:          ${IMAGE_URI}"
 echo "  Job:            ${JOB_NAME}"
 echo "  Targets:        ${TASK_COUNT} (exclude_cbc=${EXCLUDE_CBC})"
 echo "  Budget/task:    ${SLICES} x ${SLICE_DURATION} ($((TOTAL_BUDGET_SEC / 60))m total, maxRunDuration=${MAX_RUN_DURATION}, maxRetryCount=${MAX_RETRY_COUNT})"
+echo "  Formal/SIMD:    GOBLIN_FORMAL=${FORMAL} GOBLIN_SIMD_MAX_TIER=${SIMD_MAX_TIER:-auto}"
 echo "  Early stop:     preset=${EARLY_STOP_PRESET} min_time=${MIN_TIME:-default} min_execs=${MIN_EXECS:-default} stall_time=${STALL_TIME:-default} stall_execs=${STALL_EXECS:-default}"
 if [[ "${TWO_REGIONS}" -eq 1 ]]; then
     echo "  Group A:        ${REGION} | ${MACHINE_TYPE} (cpuMilli=${CPU_MILLI_A}, memoryMib=${MEM_MIB_A}) | tasks=0..$((GROUP_A_COUNT - 1)) (${GROUP_A_COUNT}, par=${PAR_A})"
@@ -552,6 +575,8 @@ submit_batch_group() {
             "GCS_MOUNT": "/mnt/disks/fuzz-gcs",
             "SLICES": "${SLICES}",
             "SLICE_DURATION": "${SLICE_DURATION}",
+            "GOBLIN_FORMAL": "${FORMAL}",
+            "GOBLIN_SIMD_MAX_TIER": "${SIMD_MAX_TIER}",
             "EARLY_STOP_PRESET": "${EARLY_STOP_PRESET}",
             "MIN_TIME": "${MIN_TIME}",
             "MIN_EXECS": "${MIN_EXECS}",

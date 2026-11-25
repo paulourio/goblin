@@ -161,6 +161,107 @@ func TestResolveConfigAndOverrides(t *testing.T) {
 	}
 }
 
+func TestResolveConfigClassRace(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		preset     string
+		minTime    time.Duration
+		minExecs   int64
+		stallTime  time.Duration
+		stallExecs int64
+		winTime    time.Duration
+		winExecs   int64
+	}{
+		{
+			preset:     PresetLocal,
+			minTime:    5 * time.Minute,
+			minExecs:   1_000,
+			stallTime:  10 * time.Minute,
+			stallExecs: 5_000,
+			winTime:    15 * time.Minute,
+			winExecs:   10_000,
+		},
+		{
+			preset:     PresetSoak,
+			minTime:    15 * time.Minute,
+			minExecs:   2_500,
+			stallTime:  30 * time.Minute,
+			stallExecs: 15_000,
+			winTime:    45 * time.Minute,
+			winExecs:   25_000,
+		},
+		{
+			preset:     PresetDeep,
+			minTime:    25 * time.Minute,
+			minExecs:   5_000,
+			stallTime:  50 * time.Minute,
+			stallExecs: 30_000,
+			winTime:    75 * time.Minute,
+			winExecs:   50_000,
+		},
+	}
+
+	for _, tc := range cases {
+		cfg, err := ResolveConfig(tc.preset, ClassRace, ConfigOverrides{})
+		if err != nil {
+			t.Fatalf("ResolveConfig(%s, race): %v", tc.preset, err)
+		}
+		if cfg.Class != ClassRace ||
+			cfg.MinTime != tc.minTime || cfg.MinExecs != tc.minExecs ||
+			cfg.StallTime != tc.stallTime || cfg.StallExecs != tc.stallExecs ||
+			cfg.WindowTime != tc.winTime || cfg.WindowExecs != tc.winExecs ||
+			cfg.WindowMinNew != defaultWindowMinNew {
+			t.Fatalf("unexpected (%s, race) config: %+v", tc.preset, cfg)
+		}
+	}
+
+	offCfg, err := ResolveConfig(PresetOff, ClassRace, ConfigOverrides{})
+	if err != nil {
+		t.Fatalf("ResolveConfig(off, race): %v", err)
+	}
+	if offCfg.Class != ClassRace || offCfg.Preset != PresetOff || offCfg.StallTime != 0 {
+		t.Fatalf("unexpected (off, race) config: %+v", offCfg)
+	}
+}
+
+func TestWatcherRaceClassPlateauAndTrickle(t *testing.T) {
+	t.Parallel()
+
+	cfg := mustResolve(t, PresetLocal, ClassRace, ConfigOverrides{})
+	w := NewWatcher(cfg, "FuzzParallelBABRace", nil)
+	w.ObserveLine("fuzz: elapsed: 5s, gathering baseline coverage: 20/20 completed, now fuzzing with 4 workers")
+
+	// Hold below plateau.
+	if w.ObserveLine("fuzz: elapsed: 11m5s, execs: 4500 (7/sec), new interesting: 0 (total: 20)") {
+		t.Fatal("race class triggered plateau before StallExecs=5000")
+	}
+	// Trigger plateau now.
+	if !w.ObserveLine("fuzz: elapsed: 12m5s, execs: 5200 (7/sec), new interesting: 0 (total: 20)") {
+		t.Fatal("expected race class plateau once both 10m and 5000 execs reached")
+	}
+	ok, reason, _ := w.Triggered()
+	if !ok || reason != StopReasonSaturatedPlateau {
+		t.Fatalf("Triggered()=(%v, %q), want (true, %q)", ok, reason, StopReasonSaturatedPlateau)
+	}
+
+	// Verify trickle gate.
+	wTrickle := NewWatcher(cfg, "FuzzParallelBABRace", nil)
+	wTrickle.ObserveLine("fuzz: elapsed: 0s, gathering baseline coverage: 20/20 completed, now fuzzing with 4 workers")
+	wTrickle.ObserveLine("fuzz: elapsed: 1m, execs: 800 (13/sec), new interesting: 3 (total: 23)")
+	wTrickle.ObserveLine("fuzz: elapsed: 8m, execs: 5000 (10/sec), new interesting: 4 (total: 24)")
+	if wTrickle.ObserveLine("fuzz: elapsed: 15m, execs: 9500 (10/sec), new interesting: 4 (total: 24)") {
+		t.Fatal("race class triggered trickle before WindowTime=15m and WindowExecs=10000")
+	}
+	if !wTrickle.ObserveLine("fuzz: elapsed: 16m30s, execs: 11000 (11/sec), new interesting: 4 (total: 24)") {
+		t.Fatal("expected race class trickle once WindowTime=15m and WindowExecs=10000 met")
+	}
+	okTrickle, reasonTrickle, _ := wTrickle.Triggered()
+	if !okTrickle || reasonTrickle != StopReasonSaturatedTrickle {
+		t.Fatalf("Triggered()=(%v, %q), want (true, %q)", okTrickle, reasonTrickle, StopReasonSaturatedTrickle)
+	}
+}
+
 func mustResolve(tb testing.TB, preset, class string, ov ConfigOverrides) Config {
 	tb.Helper()
 	cfg, err := ResolveConfig(preset, class, ov)

@@ -10,11 +10,16 @@ GOBLIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PHASE="assign"
 FORMAL="${GOBLIN_FORMAL:-0}"
+SIMD_MAX_TIER="${GOBLIN_SIMD_MAX_TIER:-}"
 CONCURRENCY="${CONCURRENCY:-5}"
 WORKERS_PER_TARGET="${WORKERS_PER_TARGET:-6}"
 ASSIGN_TIME="${ASSIGN_TIME:-5m}"
 SPARSE_TIME="${SPARSE_TIME:-10m}"
+SIMD_TIME="${SIMD_TIME:-5m}"
+FORMAT_TIME="${FORMAT_TIME:-10m}"
 MAD_TIME="${MAD_TIME:-20m}"
+ASSERT_TIME="${ASSERT_TIME:-20m}"
+RACE_TIME="${RACE_TIME:-10m}"
 CBC_TIME="${CBC_TIME:-20m}"
 EARLY_STOP_PRESET="${EARLY_STOP_PRESET:-local}"
 MIN_TIME="${MIN_TIME:-}"
@@ -29,8 +34,11 @@ VERIFY_LOG_ONLY=""
 
 usage() {
     cat >&2 <<'EOF'
-usage: local_fuzz_soak.sh [--formal] [--phase=assign|mad|cbc|all|all-cbc]
-  [--concurrency=5] [--workers=6] [--assign-time=5m] [--sparse-time=10m] [--mad-time=20m] [--cbc-time=20m]
+usage: local_fuzz_soak.sh [--formal] [--simd-max-tier=auto|scalar|avx2|avx512]
+  [--phase=assign|simd|format|mad|assert|race|cbc|all|all-cbc]
+  [--concurrency=5] [--workers=6]
+  [--assign-time=5m] [--sparse-time=10m] [--simd-time=5m] [--format-time=10m]
+  [--mad-time=20m] [--assert-time=20m] [--race-time=10m] [--cbc-time=20m]
   [--early-stop=local|soak|deep|off] [--min-time=D] [--min-execs=N]
   [--stall-time=D] [--stall-execs=N] [--window-time=D] [--window-execs=N] [--window-min-new=N]
   [--verify-log=PATH]
@@ -42,12 +50,17 @@ for arg in "$@"; do
         --formal) FORMAL="1" ;;
         --formal=1|--formal=true) FORMAL="1" ;;
         --formal=0|--formal=false) FORMAL="0" ;;
+        --simd-max-tier=*) SIMD_MAX_TIER="${arg#*=}" ;;
         --phase=*) PHASE="${arg#*=}" ;;
         --concurrency=*) CONCURRENCY="${arg#*=}" ;;
         --workers=*) WORKERS_PER_TARGET="${arg#*=}" ;;
         --assign-time=*) ASSIGN_TIME="${arg#*=}" ;;
         --sparse-time=*) SPARSE_TIME="${arg#*=}" ;;
+        --simd-time=*) SIMD_TIME="${arg#*=}" ;;
+        --format-time=*) FORMAT_TIME="${arg#*=}" ;;
         --mad-time=*) MAD_TIME="${arg#*=}" ;;
+        --assert-time=*) ASSERT_TIME="${arg#*=}" ;;
+        --race-time=*) RACE_TIME="${arg#*=}" ;;
         --cbc-time=*) CBC_TIME="${arg#*=}" ;;
         --early-stop=*) EARLY_STOP_PRESET="${arg#*=}" ;;
         --min-time=*) MIN_TIME="${arg#*=}" ;;
@@ -108,6 +121,16 @@ case "${EARLY_STOP_PRESET}" in
         ;;
 esac
 
+if [[ -n "${SIMD_MAX_TIER}" ]]; then
+    case "${SIMD_MAX_TIER}" in
+        auto|scalar|avx2|avx512) export GOBLIN_SIMD_MAX_TIER="${SIMD_MAX_TIER}" ;;
+        *)
+            echo "ERROR: unknown --simd-max-tier=${SIMD_MAX_TIER} (expected auto, scalar, avx2, or avx512)" >&2
+            exit 2
+            ;;
+    esac
+fi
+
 if [[ "${FORMAL}" == "1" ]]; then
     export GOBLIN_FORMAL=1
     if ! command -v lake >/dev/null 2>&1 && [[ -n "${HOME:-}" && -x "${HOME}/.elan/bin/lake" ]]; then
@@ -134,7 +157,12 @@ fi
 
 declare -a JOBS=()
 NEED_ASSIGN_BIN=0
+NEED_SIMD_BIN=0
+NEED_FORMAT_BIN=0
+NEED_FORMAT_CBC_BIN=0
 NEED_GOBLIN_BIN=0
+NEED_ASSERT_BIN=0
+NEED_RACE_BIN=0
 NEED_CBC_BIN=0
 
 add_assign_jobs() {
@@ -148,7 +176,21 @@ add_assign_jobs() {
         "./assign|FuzzAssignMetamorphicAndDirtyWorkspace|fast|${ASSIGN_TIME}"
         "./assign|FuzzLinearSum|fast|${ASSIGN_TIME}"
         "./assign|FuzzCertifiedAssign|fast|${ASSIGN_TIME}"
+        "./assign|FuzzAssignDyadic2304|fast|${ASSIGN_TIME}"
         "./assign|FuzzAssignSparseCoreTraps|fast|${SPARSE_TIME}"
+    )
+}
+add_simd_jobs() {
+    NEED_SIMD_BIN=1
+    JOBS+=(
+        "./internal/simd|FuzzSIMDKernelTierParity|fast|${SIMD_TIME}"
+    )
+}
+add_format_jobs() {
+    NEED_FORMAT_BIN=1
+    JOBS+=(
+        "./format|FuzzPuLPJSONFastVsStd|parser|${FORMAT_TIME}"
+        "./format|FuzzWriteMPSRoundTrip|parser|${FORMAT_TIME}"
     )
 }
 add_mad_jobs() {
@@ -166,32 +208,62 @@ add_mad_jobs() {
         ".|FuzzMILPSolver|heavy|${MAD_TIME}"
         ".|FuzzLPSolver|fast|${MAD_TIME}"
         ".|FuzzPuLPJSON|parser|${MAD_TIME}"
+        ".|FuzzLUForrestTomlinVsExact|fast|${MAD_TIME}"
+        ".|FuzzVerifyVIPRTraceVsLean|heavy|${MAD_TIME}"
+        ".|FuzzCertifiedAdversarialAndWitness|heavy|${MAD_TIME}"
+        ".|FuzzParallelBABStateMachine|heavy|${MAD_TIME}"
+        ".|FuzzOptionMatrixAndExactReference|heavy|${MAD_TIME}"
+        ".|FuzzSparseLPStress|heavy|${MAD_TIME}"
+        ".|FuzzAdversarialMediumMILP|heavy|${MAD_TIME}"
+    )
+}
+add_assert_jobs() {
+    NEED_ASSERT_BIN=1
+    JOBS+=(
+        ".-assert|FuzzStructLPAndMILP|heavy|${ASSERT_TIME}"
+        ".-assert|FuzzMutatePublicBenchmarks|heavy|${ASSERT_TIME}"
+        ".-assert|FuzzGeneralMetamorphicAndPresolveParity|heavy|${ASSERT_TIME}"
+        ".-assert|FuzzLPSolverIncrementalStateMachine|fast|${ASSERT_TIME}"
+    )
+}
+add_race_jobs() {
+    NEED_RACE_BIN=1
+    JOBS+=(
+        ".-race|FuzzParallelBABRace|race|${RACE_TIME}"
     )
 }
 add_cbc_jobs() {
     NEED_CBC_BIN=1
+    NEED_FORMAT_CBC_BIN=1
     JOBS+=(
+        "./format-cbc|FuzzWriteMPSCBCParity|heavy|${CBC_TIME}"
         ".-cbc|FuzzMADDifferentialCBC|heavy|${CBC_TIME}"
         ".-cbc|FuzzMADMediumDecomposedCBC|heavy|${CBC_TIME}"
         ".-cbc|FuzzMADExactOptimumCBC|heavy|${CBC_TIME}"
         ".-cbc|FuzzMADAdversarialCBC|heavy|${CBC_TIME}"
         ".-cbc|FuzzMADLimitsCBC|heavy|${CBC_TIME}"
+        ".-cbc|FuzzGeneralLPAndMILPCBC|heavy|${CBC_TIME}"
+        ".-cbc|FuzzCBCLPSolverIncremental|heavy|${CBC_TIME}"
     )
 }
 
 case "${PHASE}" in
     assign) add_assign_jobs ;;
+    simd) add_simd_jobs ;;
+    format) add_format_jobs ;;
     mad) add_mad_jobs ;;
+    assert) add_assert_jobs ;;
+    race) add_race_jobs ;;
     cbc) add_cbc_jobs ;;
-    all) add_assign_jobs; add_mad_jobs ;;
-    all-cbc) add_assign_jobs; add_mad_jobs; add_cbc_jobs ;;
+    all) add_assign_jobs; add_simd_jobs; add_format_jobs; add_mad_jobs; add_assert_jobs; add_race_jobs ;;
+    all-cbc) add_assign_jobs; add_simd_jobs; add_format_jobs; add_mad_jobs; add_assert_jobs; add_race_jobs; add_cbc_jobs ;;
     *)
-        echo "ERROR: unknown --phase=${PHASE} (expected assign, mad, cbc, all, or all-cbc)" >&2
+        echo "ERROR: unknown --phase=${PHASE} (expected assign, simd, format, mad, assert, race, cbc, all, or all-cbc)" >&2
         exit 2
         ;;
 esac
 
-if [[ "${NEED_CBC_BIN}" -eq 1 && ! -d "${GOBLIN_ROOT}/third_party/Cbc/dist/lib" ]]; then
+if [[ ( "${NEED_CBC_BIN}" -eq 1 || "${NEED_FORMAT_CBC_BIN}" -eq 1 ) && ! -d "${GOBLIN_ROOT}/third_party/Cbc/dist/lib" ]]; then
     echo "ERROR: Cbc artifacts not found in ${GOBLIN_ROOT}/third_party/Cbc/dist/lib; run scripts/build_cbc.sh first." >&2
     exit 2
 fi
@@ -223,7 +295,7 @@ trap cleanup_exit EXIT
 
 echo "=== Local Parallel Fuzz Soak (${RUN_ID}) ==="
 echo "  Phase:       ${PHASE} (${#JOBS[@]} targets)"
-echo "  Formal:      GOBLIN_FORMAL=${FORMAL}"
+echo "  Formal/SIMD: GOBLIN_FORMAL=${FORMAL} GOBLIN_SIMD_MAX_TIER=${SIMD_MAX_TIER:-auto}"
 echo "  Early stop:  preset=${EARLY_STOP_PRESET}"
 echo "  Parallelism: ${CONCURRENCY} targets x ${WORKERS_PER_TARGET} workers = $((CONCURRENCY * WORKERS_PER_TARGET)) threads"
 echo "  Logs:        ${LOG_DIR}"
@@ -234,8 +306,23 @@ CGO_ENABLED=0 go build -o "${BIN_DIR}/goblin-fuzzwatch" ./cmd/goblin-fuzzwatch
 if [[ "${NEED_ASSIGN_BIN}" -eq 1 ]]; then
     GOEXPERIMENT=simd go test -c -fuzz=. -o "${BIN_DIR}/assign.test" ./assign
 fi
+if [[ "${NEED_SIMD_BIN}" -eq 1 ]]; then
+    GOEXPERIMENT=simd go test -c -fuzz=. -o "${BIN_DIR}/simd.test" ./internal/simd
+fi
+if [[ "${NEED_FORMAT_BIN}" -eq 1 ]]; then
+    GOEXPERIMENT=simd go test -c -fuzz=. -o "${BIN_DIR}/format.test" ./format
+fi
+if [[ "${NEED_FORMAT_CBC_BIN}" -eq 1 ]]; then
+    GOEXPERIMENT=simd go test -c -fuzz=. -tags=cbc -o "${BIN_DIR}/format_cbc.test" ./format
+fi
 if [[ "${NEED_GOBLIN_BIN}" -eq 1 ]]; then
     GOEXPERIMENT=simd go test -c -fuzz=. -o "${BIN_DIR}/goblin.test" .
+fi
+if [[ "${NEED_ASSERT_BIN}" -eq 1 ]]; then
+    GOEXPERIMENT=simd go test -c -fuzz=. -tags=goblin_assert -o "${BIN_DIR}/goblin_assert.test" .
+fi
+if [[ "${NEED_RACE_BIN}" -eq 1 ]]; then
+    GOEXPERIMENT=simd go test -c -fuzz=. -race -o "${BIN_DIR}/goblin_race.test" .
 fi
 if [[ "${NEED_CBC_BIN}" -eq 1 ]]; then
     GOEXPERIMENT=simd go test -c -fuzz=. -tags=cbc -o "${BIN_DIR}/goblin_cbc.test" .
@@ -303,16 +390,45 @@ for spec in "${JOBS[@]}"; do
         wait_one
     done
     IFS='|' read -r pkg target class dur <<< "${spec}"
+    local_par="${WORKERS_PER_TARGET}"
     case "${pkg}" in
         ./assign)
             test_bin="${BIN_DIR}/assign.test"
             workdir="${GOBLIN_ROOT}/assign"
             pkg_import="github.com/paulourio/goblin/assign"
             ;;
+        ./internal/simd)
+            test_bin="${BIN_DIR}/simd.test"
+            workdir="${GOBLIN_ROOT}/internal/simd"
+            pkg_import="github.com/paulourio/goblin/internal/simd"
+            ;;
+        ./format)
+            test_bin="${BIN_DIR}/format.test"
+            workdir="${GOBLIN_ROOT}/format"
+            pkg_import="github.com/paulourio/goblin/format"
+            ;;
+        ./format-cbc)
+            test_bin="${BIN_DIR}/format_cbc.test"
+            workdir="${GOBLIN_ROOT}/format"
+            pkg_import="github.com/paulourio/goblin/format"
+            ;;
         .)
             test_bin="${BIN_DIR}/goblin.test"
             workdir="${GOBLIN_ROOT}"
             pkg_import="github.com/paulourio/goblin"
+            ;;
+        .-assert)
+            test_bin="${BIN_DIR}/goblin_assert.test"
+            workdir="${GOBLIN_ROOT}"
+            pkg_import="github.com/paulourio/goblin"
+            ;;
+        .-race)
+            test_bin="${BIN_DIR}/goblin_race.test"
+            workdir="${GOBLIN_ROOT}"
+            pkg_import="github.com/paulourio/goblin"
+            if [[ "${local_par}" -gt 4 ]]; then
+                local_par=4
+            fi
             ;;
         .-cbc)
             test_bin="${BIN_DIR}/goblin_cbc.test"
@@ -326,7 +442,7 @@ for spec in "${JOBS[@]}"; do
     esac
     cache_dir="${GOCACHE_DIR}/fuzz/${pkg_import}"
     mkdir -p "${cache_dir}"
-    echo "  [START] ${target} (${pkg}, class=${class}, -fuzztime=${dur}, -parallel=${WORKERS_PER_TARGET})"
+    echo "  [START] ${target} (${pkg}, class=${class}, -fuzztime=${dur}, -parallel=${local_par})"
     (
         cd "${workdir}"
         exec "${BIN_DIR}/goblin-fuzzwatch" \
@@ -340,7 +456,7 @@ for spec in "${JOBS[@]}"; do
             -test.run='^$' \
             -test.fuzz="^${target}$" \
             -test.fuzztime="${dur}" \
-            -test.parallel="${WORKERS_PER_TARGET}" \
+            -test.parallel="${local_par}" \
             -test.fuzzcachedir="${cache_dir}"
     ) > "${LOG_DIR}/${target}.watch.log" 2>&1 &
     PID_TO_TARGET[$!]="${target}"

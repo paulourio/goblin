@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Preemption-resilient Cloud Batch fuzz worker for goblin.
-# Maps BATCH_TASK_INDEX (0..25) via /app/targets.tsv, runs fuzzing in
+# Maps BATCH_TASK_INDEX (0..44) via /app/targets.tsv, runs fuzzing in
 # checkpointed slices on RAM disk (/dev/shm) under goblin-fuzzwatch,
 # and syncs corpus, crashes, logs, and saturation state to GCS.
 
@@ -15,6 +15,33 @@ SLICES="${SLICES:-4}"
 SLICE_DURATION="${SLICE_DURATION:-15m}"
 SYNC_INTERVAL_SEC="${SYNC_INTERVAL_SEC:-300}"
 EARLY_STOP_PRESET="${EARLY_STOP_PRESET:-soak}"
+FORMAL="${GOBLIN_FORMAL:-0}"
+SIMD_MAX_TIER="${GOBLIN_SIMD_MAX_TIER:-}"
+
+for arg in "$@"; do
+    case "${arg}" in
+        --formal|--formal=1|--formal=true) FORMAL="1" ;;
+        --formal=0|--formal=false) FORMAL="0" ;;
+        --simd-max-tier=*) SIMD_MAX_TIER="${arg#*=}" ;;
+        *)
+            echo "ERROR: unknown argument ${arg}" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ -n "${SIMD_MAX_TIER}" ]]; then
+    case "${SIMD_MAX_TIER}" in
+        auto|scalar|avx2|avx512) export GOBLIN_SIMD_MAX_TIER="${SIMD_MAX_TIER}" ;;
+        *)
+            echo "ERROR: invalid --simd-max-tier=${SIMD_MAX_TIER} (expected auto, scalar, avx2, or avx512)" >&2
+            exit 2
+            ;;
+    esac
+fi
+if [[ "${FORMAL}" == "1" ]]; then
+    export GOBLIN_FORMAL=1
+fi
 
 # Constrain native BLAS/OpenMP libraries to 1 thread per fuzz process.
 export OPENBLAS_NUM_THREADS=1
@@ -39,7 +66,7 @@ IFS=$'\t' read -r _ BIN SRC_WORKDIR TARGET TARGET_CLASS MAX_PARALLEL <<< "${ROW}
 
 # Read real host core count without allowing OMP_NUM_THREADS=1 to clamp nproc.
 HOST_CPUS="$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)"
-if [[ "${BIN}" == *goblin_cbc.test ]] && [[ "${HOST_CPUS}" -ge 10 ]]; then
+if [[ "${BIN}" == *_cbc.test ]] && [[ "${HOST_CPUS}" -ge 10 ]]; then
     RESERVE=4
 elif [[ "${HOST_CPUS}" -ge 6 ]]; then
     RESERVE=2
@@ -82,7 +109,7 @@ CONTAINER_MEM_MIB="$(detect_container_mem_mib)"
 if [[ -z "${PARALLEL_OVERRIDE:-}" && "${CONTAINER_MEM_MIB}" -gt 0 ]]; then
     if [[ "${TARGET}" == "FuzzMADMediumDecomposedCBC" ]]; then
         PER_WORKER_MIB=4608
-    elif [[ "${BIN}" == *goblin_cbc.test ]]; then
+    elif [[ "${BIN}" == *_cbc.test || "${BIN}" == *goblin_race.test ]]; then
         PER_WORKER_MIB=2560
     else
         PER_WORKER_MIB=768
@@ -103,7 +130,7 @@ PARALLEL="${PARALLEL_OVERRIDE:-${AUTO_PAR}}"
 
 configure_go_mem_env() {
     local go_mem_pct=80
-    if [[ "${BIN}" == *goblin_cbc.test ]]; then
+    if [[ "${BIN}" == *_cbc.test ]]; then
         export GOGC="${GOGC:-50}"
         go_mem_pct=50
     fi
@@ -143,7 +170,7 @@ fi
 CPU_MODEL="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo || true)"
 HAS_AVX2="$(grep -o 'avx2' /proc/cpuinfo | head -n1 || echo none)"
 HAS_AVX512="$(grep -o 'avx512f' /proc/cpuinfo | head -n1 || echo none)"
-echo "[worker ${TASK_INDEX}] target=${TARGET} class=${TARGET_CLASS} bin=${BIN} parallel=${PARALLEL}/${MAX_PARALLEL} slices=${SLICES}x${SLICE_DURATION} early_stop=${EARLY_STOP_PRESET}"
+echo "[worker ${TASK_INDEX}] target=${TARGET} class=${TARGET_CLASS} bin=${BIN} parallel=${PARALLEL}/${MAX_PARALLEL} slices=${SLICES}x${SLICE_DURATION} early_stop=${EARLY_STOP_PRESET} formal=${FORMAL} simd_max_tier=${SIMD_MAX_TIER:-auto}"
 echo "[worker ${TASK_INDEX}] host=$(hostname) nproc=${HOST_CPUS} mem_mib=${CONTAINER_MEM_MIB} gomemlimit=${GOMEMLIMIT} gogc=${GOGC:-default} avx2=${HAS_AVX2} avx512=${HAS_AVX512} cpu=${CPU_MODEL:-unknown}"
 
 # Set up fast RAM-disk workspace and fuzz cache.
@@ -156,6 +183,14 @@ rm -rf "${LOCAL_BASE}"
 mkdir -p "${LOCAL_WORK}" "${LOCAL_CACHE}"
 if [[ -d "${SRC_WORKDIR}/testdata" ]]; then
     cp -a "${SRC_WORKDIR}/testdata" "${LOCAL_WORK}/testdata"
+fi
+if [[ "${FORMAL}" == "1" ]]; then
+    if [[ -f /app/formal/lakefile.toml && -d /app/formal/.lake/build/bin ]] && \
+        find /app/formal/.lake/build/bin -maxdepth 1 -type f -executable | grep -q .; then
+        ln -sfn /app/formal "${LOCAL_WORK}/formal"
+    else
+        echo "[worker ${TASK_INDEX}] WARNING: GOBLIN_FORMAL=1 enabled, but Lean ELFs are absent under /app/formal/.lake/build/bin" >&2
+    fi
 fi
 
 # Restore previously checkpointed corpus and saturation state from GCS.
@@ -188,6 +223,24 @@ read_json_field() {
             exit
         }
     ' "${file}"
+}
+
+write_crash_signature() {
+    local sig_file="$1"
+    local repro_log="$2"
+    local target="$3"
+    local slice_num="$4"
+    local rc="$5"
+    local seeds_csv="$6"
+    {
+        printf 'target=%s\n' "${target}"
+        printf 'slice=%s\n' "${slice_num}"
+        printf 'rc=%s\n' "${rc}"
+        printf 'seeds=%s\n' "${seeds_csv}"
+        if [[ -s "${repro_log}" ]]; then
+            grep -Em 8 '^(panic:|fatal error:|WARNING: DATA RACE|[[:space:]]*--- FAIL:|FAIL\b)|_test\.go:[0-9]+:|github\.com/paulourio/goblin' "${repro_log}" || true
+        fi
+    } > "${sig_file}"
 }
 
 sync_to_gcs() {
@@ -316,9 +369,23 @@ for ((s = SLICES_DONE + 1; s <= SLICES; s++)); do
         mkdir -p "${CRASH_SUB}"
         if [[ -n "${NEW_CRASH_FILES}" ]]; then
             mkdir -p "${CRASH_SUB}/testdata_fuzz_${TARGET}"
-            while IFS= read -r newf; do
-                [[ -n "${newf}" ]] && cp -a "${LOCAL_WORK}/testdata/fuzz/${TARGET}/${newf}" "${CRASH_SUB}/testdata_fuzz_${TARGET}/" || true
+            REPRO_LOG="${CRASH_SUB}/crash_repro.log"
+            : > "${REPRO_LOG}"
+            SEEDS_CSV=""
+            while IFS= read -r seed_name; do
+                [[ -z "${seed_name}" ]] && continue
+                cp -a "${LOCAL_WORK}/testdata/fuzz/${TARGET}/${seed_name}" "${CRASH_SUB}/testdata_fuzz_${TARGET}/" || true
+                SEEDS_CSV="${SEEDS_CSV:+${SEEDS_CSV},}${seed_name}"
+                printf '=== Repro %s/%s ===\n' "${TARGET}" "${seed_name}" >> "${REPRO_LOG}"
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 120s "${BIN}" -test.run="^${TARGET}/${seed_name}$" -test.v >> "${REPRO_LOG}" 2>&1
+                else
+                    "${BIN}" -test.run="^${TARGET}/${seed_name}$" -test.v >> "${REPRO_LOG}" 2>&1
+                fi
+                set -e
             done <<< "${NEW_CRASH_FILES}"
+            write_crash_signature "${CRASH_SUB}/signature.txt" "${REPRO_LOG}" "${TARGET}" "${s}" "${RC}" "${SEEDS_CSV}"
         fi
         cp -f "${LOCAL_LOG}" "${CRASH_SUB}/crash.log" || true
         sync_to_gcs
