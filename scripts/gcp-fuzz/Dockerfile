@@ -26,11 +26,12 @@ RUN rm -rf /src/third_party/Cbc/dist && \
 COPY . /src
 RUN rm -rf /src/third_party/Cbc/dist && ln -s /opt/cbc-dist /src/third_party/Cbc/dist
 
-# Compile standalone coverage-instrumented fuzz test binaries with SIMD enabled.
+# Compile standalone coverage-instrumented fuzz binaries and the saturation watcher.
 RUN mkdir -p /out && \
-    GOEXPERIMENT=simd go test -c -fuzz=. -o /out/assign.test ./assign && \
-    GOEXPERIMENT=simd go test -c -fuzz=. -o /out/goblin.test . && \
-    GOEXPERIMENT=simd go test -c -fuzz=. -tags=cbc -o /out/goblin_cbc.test .
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -o /out/assign.test ./assign && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -o /out/goblin.test . && \
+    GOEXPERIMENT=simd GOAMD64=v1 go test -c -fuzz=. -tags=cbc -o /out/goblin_cbc.test . && \
+    CGO_ENABLED=0 go build -trimpath -o /out/goblin-fuzzwatch ./cmd/goblin-fuzzwatch
 
 FROM debian:bookworm-slim AS runtime
 
@@ -50,16 +51,22 @@ WORKDIR /app
 COPY --from=builder /out/assign.test /app/bin/assign.test
 COPY --from=builder /out/goblin.test /app/bin/goblin.test
 COPY --from=builder /out/goblin_cbc.test /app/bin/goblin_cbc.test
+COPY --from=builder /out/goblin-fuzzwatch /app/bin/goblin-fuzzwatch
 COPY --from=builder /opt/cbc-dist/lib/*.so* /app/lib/
 COPY --from=builder /src/testdata /app/work/testdata
 COPY --from=builder /src/assign/testdata /app/work/assign/testdata
 COPY scripts/gcp-fuzz/targets.tsv /app/targets.tsv
 COPY scripts/gcp-fuzz/fuzz_worker.sh /app/fuzz_worker.sh
 
-RUN chmod +x /app/fuzz_worker.sh /app/bin/*.test && \
+RUN chmod +x /app/fuzz_worker.sh /app/bin/* && \
     echo "/app/lib" > /etc/ld.so.conf.d/goblin-cbc.conf && \
     ldconfig
 
-ENV LD_LIBRARY_PATH=/app/lib
+ENV LD_LIBRARY_PATH=/app/lib \
+    OPENBLAS_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1
 
 ENTRYPOINT ["/app/fuzz_worker.sh"]

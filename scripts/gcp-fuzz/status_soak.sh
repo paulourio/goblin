@@ -3,8 +3,6 @@ set -euo pipefail
 
 # Inspect a running or completed goblin Cloud Batch fuzz soak and fetch any crashes.
 
-RUN_ID="${1:?usage: $0 <run-id> [--download-crashes <dir>]}"
-
 gcloud_cfg() {
     local val
     val="$(gcloud config get-value "$1" 2>/dev/null || true)"
@@ -17,13 +15,50 @@ gcloud_cfg() {
 PROJECT="${GCP_PROJECT:-$(gcloud_cfg project)}"
 REGION="${GCP_REGION:-$(gcloud_cfg compute/region)}"
 REGION2="${GCP_REGION2:-}"
+RUN_ID=""
+DOWNLOAD_CRASHES_DIR=""
 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --project=*) PROJECT="${1#*=}"; shift ;;
+        --region=*) REGION="${1#*=}"; shift ;;
+        --region2=*) REGION2="${1#*=}"; shift ;;
+        --download-crashes=*) DOWNLOAD_CRASHES_DIR="${1#*=}"; shift ;;
+        --download-crashes)
+            shift
+            DOWNLOAD_CRASHES_DIR="${1:?--download-crashes requires a directory argument}"
+            shift
+            ;;
+        -h|--help)
+            echo "usage: $0 <run-id> [--project=P] [--region=R] [--region2=R2] [--download-crashes <dir>]" >&2
+            exit 0
+            ;;
+        -*)
+            echo "error: unknown flag $1" >&2
+            exit 2
+            ;;
+        *)
+            if [[ -z "${RUN_ID}" ]]; then
+                RUN_ID="$1"
+            else
+                echo "error: unexpected argument $1" >&2
+                exit 2
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "${RUN_ID}" ]]; then
+    echo "usage: $0 <run-id> [--project=P] [--region=R] [--region2=R2] [--download-crashes <dir>]" >&2
+    exit 2
+fi
 if [[ -z "${PROJECT}" ]]; then
-    echo "error: GCP project is unset; set GCP_PROJECT or run 'gcloud config set project <id>'." >&2
+    echo "error: GCP project is unset; pass --project=<id>, set GCP_PROJECT, or run 'gcloud config set project <id>'." >&2
     exit 2
 fi
 if [[ -z "${REGION}" ]]; then
-    echo "error: GCP region is unset; set GCP_REGION or run 'gcloud config set compute/region <region>'." >&2
+    echo "error: GCP region is unset; pass --region=<region>, set GCP_REGION, or run 'gcloud config set compute/region <region>'." >&2
     exit 2
 fi
 
@@ -42,12 +77,36 @@ else
     fi
 fi
 
+parse_state_summary() {
+    awk '
+        /"cum_fuzz_sec":/ { sub(/^.*:[[:space:]]*/, ""); sub(/,[[:space:]]*$/, ""); sec=$0 }
+        /"cum_execs":/ { sub(/^.*:[[:space:]]*/, ""); sub(/,[[:space:]]*$/, ""); ex=$0 }
+        /"cum_new_interesting":/ { sub(/^.*:[[:space:]]*/, ""); sub(/,[[:space:]]*$/, ""); nw=$0 }
+        /"stop_reason":/ { sub(/^.*:[[:space:]]*"/, ""); sub(/",[[:space:]]*$/, ""); sub(/"[[:space:]]*$/, ""); rsn=$0 }
+        END {
+            if (ex != "" || sec != "") {
+                printf "fuzz=%ss execs=%s new=%s reason=%s", sec, ex, nw, rsn
+            }
+        }
+    '
+}
+
 echo ""
 echo "=== Per-Target Status (gs://${BUCKET}/runs/${RUN_ID}) ==="
 for f in $(gcloud storage ls "gs://${BUCKET}/runs/${RUN_ID}/*/status.txt" --project="${PROJECT}" --quiet 2>/dev/null || true); do
-    target="$(basename "$(dirname "${f}")")"
+    tdir="$(dirname "${f}")"
+    target="$(basename "${tdir}")"
     st="$(gcloud storage cat "${f}" --project="${PROJECT}" --quiet 2>/dev/null | tr -d '[:space:]')"
-    printf "  %-42s %s\n" "${target}" "${st}"
+    state_json="$(gcloud storage cat "${tdir}/fuzzwatch_state.json" --project="${PROJECT}" --quiet 2>/dev/null || true)"
+    summary=""
+    if [[ -n "${state_json}" ]]; then
+        summary="$(printf '%s\n' "${state_json}" | parse_state_summary)"
+    fi
+    if [[ -n "${summary}" ]]; then
+        printf "  %-42s %-20s %s\n" "${target}" "${st}" "${summary}"
+    else
+        printf "  %-42s %s\n" "${target}" "${st}"
+    fi
 done
 
 echo ""
@@ -57,9 +116,9 @@ if [[ -z "${CRASHES}" ]]; then
     echo "  (none)"
 else
     echo "${CRASHES}"
-    if [[ "${2:-}" == "--download-crashes" && -n "${3:-}" ]]; then
-        mkdir -p "${3}"
-        gcloud storage cp -r "gs://${BUCKET}/runs/${RUN_ID}/*/crashes" "${3}/" --project="${PROJECT}" --quiet
-        echo "Downloaded crashes into ${3}"
+    if [[ -n "${DOWNLOAD_CRASHES_DIR}" ]]; then
+        mkdir -p "${DOWNLOAD_CRASHES_DIR}"
+        gcloud storage cp -r "gs://${BUCKET}/runs/${RUN_ID}/*/crashes" "${DOWNLOAD_CRASHES_DIR}/" --project="${PROJECT}" --quiet
+        echo "Downloaded crashes into ${DOWNLOAD_CRASHES_DIR}"
     fi
 fi
