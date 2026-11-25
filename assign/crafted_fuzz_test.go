@@ -2301,12 +2301,135 @@ func verifyExactCertifiedAssignResult(
 	}
 }
 
+func buildLargeStage2SparseCoreCost(
+	rng *rand.Rand,
+	rows, cols int,
+	sense assign.Sense,
+	ulpByte, flagByte uint8,
+) []float64 {
+	forbid := math.Inf(1)
+	signMul := 1.0
+	if sense == assign.Maximize {
+		forbid = math.Inf(-1)
+		signMul = -1.0
+	}
+	cost := make([]float64, rows*cols)
+	for i := range cost {
+		cost[i] = forbid
+	}
+
+	kMatch := min(rows, cols)
+	matchRows := rng.Perm(rows)[:kMatch]
+	matchCols := rng.Perm(cols)[:kMatch]
+	matchedColOfRow := make([]int, rows)
+	for r := range matchedColOfRow {
+		matchedColOfRow[r] = -1
+	}
+	for k := range kMatch {
+		matchedColOfRow[matchRows[k]] = matchCols[k]
+	}
+
+	uStar := make([]float64, rows)
+	vStar := make([]float64, cols)
+
+	// Stage-2 cancellation bias: large opposing row/column potentials (2^34)
+	// canceling down to small fractional slacks keep 0.25 perturbations exact in float64.
+	const cancelBase = 0x1p34
+	for r := range rows {
+		shift := float64(rng.IntN(65)-32) * 0.25
+		if r%2 == 0 {
+			uStar[r] = cancelBase + shift
+		} else {
+			uStar[r] = -cancelBase + shift
+		}
+	}
+	for c := range cols {
+		vStar[c] = float64(rng.IntN(41)-20) * 0.25
+	}
+	for k := range kMatch {
+		mr, mc := matchRows[k], matchCols[k]
+		target := float64(rng.IntN(33)-16) * 0.25
+		vStar[mc] = target - uStar[mr]
+	}
+
+	// Plant trap/shadow/decoy columns on square matrices in the same +/-cancelBase gauge
+	// so shadow rows drag trap column duals and leave >= 48 free rows post-ARR.
+	var isTrapOrShadow []bool
+	if rows == cols && rows >= 64 {
+		numTrap := min(64, rows/5)
+		permRows := rng.Perm(rows)
+		trapRows := permRows[:numTrap]
+		shadowRows := permRows[numTrap : 2*numTrap]
+		isTrapOrShadow = make([]bool, rows)
+		for _, r := range trapRows {
+			isTrapOrShadow[r] = true
+		}
+		for _, r := range shadowRows {
+			isTrapOrShadow[r] = true
+		}
+		decoyRow := permRows[2*numTrap]
+		decoyCol := matchedColOfRow[decoyRow]
+		uStar[decoyRow] = cancelBase
+		vStar[decoyCol] = -cancelBase
+		for idx, tr := range trapRows {
+			sr := shadowRows[idx]
+			tc := matchedColOfRow[tr]
+			sc := matchedColOfRow[sr]
+			uStar[tr] = cancelBase
+			vStar[tc] = -cancelBase + 500.0
+			uStar[sr] = cancelBase - 500.0
+			vStar[sc] = -cancelBase
+			cost[sr*cols+tc] = signMul * 1.0
+			cost[tr*cols+decoyCol] = signMul * (float64(2+(idx&3)) + uStar[tr] + vStar[decoyCol])
+		}
+	}
+
+	deg := 8
+	if rows >= 512 {
+		deg = 6
+	}
+	for r := range rows {
+		mc := matchedColOfRow[r]
+		if mc >= 0 {
+			cost[r*cols+mc] = signMul * (uStar[r] + vStar[mc])
+		} else {
+			// Ensure every unmatched tall row has at least one finite edge.
+			fallbackCol := r % cols
+			cost[r*cols+fallbackCol] = signMul * (uStar[r] + vStar[fallbackCol] + 10.0)
+		}
+		minSlack := 1
+		if isTrapOrShadow != nil && isTrapOrShadow[r] {
+			minSlack = 150
+		}
+		for k := range deg {
+			c := rng.IntN(cols)
+			if c == mc {
+				continue
+			}
+			slack := float64(minSlack+rng.IntN(200)) + float64((k+int(ulpByte))&3)*0.25
+			if (flagByte>>3)&1 == 1 && k == 0 && minSlack == 1 {
+				slack = 0.25
+			}
+			val := uStar[r] + vStar[c] + slack
+			if !math.IsInf(val, 0) && !math.IsNaN(val) {
+				cost[r*cols+c] = signMul * val
+			}
+		}
+	}
+	return cost
+}
+
 func FuzzCertifiedAssign(f *testing.F) {
-	for reg := range uint8(4) {
+	for reg := range uint8(5) {
 		for s := range uint64(3) {
 			f.Add(s+uint64(reg)*11, reg, uint8(s*2+1), uint8(0), reg^uint8(s))
 		}
 	}
+	// Deterministic seeds for AVX-512 (n>=64), Min2 (n>=256), and Sparse Core (n in {1000, 1200}).
+	f.Add(uint64(101), uint8(4), uint8(2), uint8(0), uint8(0))  // AVX-512 n=65 Minimize SIMD
+	f.Add(uint64(102), uint8(4), uint8(5), uint8(1), uint8(1))  // Min2 n=257 Maximize SIMD
+	f.Add(uint64(103), uint8(4), uint8(0), uint8(0), uint8(4))  // Sparse Core n=1000 Minimize Scalar
+	f.Add(uint64(104), uint8(4), uint8(1), uint8(8), uint8(13)) // Sparse Core n=1200 Maximize Scalar
 
 	f.Fuzz(func(t *testing.T, seed uint64, regimeByte, dimByte, ulpByte, flagByte uint8) {
 		rng := rand.New(rand.NewPCG(seed^0x7f4a7c159e3779b9, uint64(regimeByte)*41+uint64(dimByte)*13+uint64(flagByte)))
@@ -2324,7 +2447,7 @@ func FuzzCertifiedAssign(f *testing.F) {
 		allowCertFail := false
 		expectHallInfeas := false
 
-		switch regimeByte % 4 {
+		switch regimeByte % 5 {
 		case 0:
 			// Dense finite square and near-square rational and integer costs.
 			rows = 2 + int(dimByte%10)
@@ -2381,7 +2504,7 @@ func FuzzCertifiedAssign(f *testing.F) {
 				cost[i] = float64(rng.IntN(65)-32) * sc
 			}
 
-		default:
+		case 3:
 			// Upper-triangular staircase in 2^1021..math.MaxFloat64 probing dual-repair overflow and ULP rounding.
 			n := 4 + int(dimByte%4)
 			rows, cols = n, n
@@ -2413,9 +2536,34 @@ func FuzzCertifiedAssign(f *testing.F) {
 					cost[r*n+c] = signMul * hi
 				}
 			}
+
+		default:
+			// Large sparse graphs reaching AVX-512 (n>=64), Min2 (n>=256), and Sparse Core (n in {1000,1200})
+			// with planted Stage-2 potential cancellation and forbidden edges.
+			avx512Sizes := []int{64, 65, 67, 71, 96, 127, 131}
+			min2Sizes := []int{256, 257, 259, 263, 275}
+			switch dimByte % 8 {
+			case 0:
+				rows, cols = 1000, 1000
+			case 1:
+				rows, cols = 1200, 1200
+			case 2, 3, 4:
+				n := avx512Sizes[int(dimByte>>3)%len(avx512Sizes)]
+				rows, cols = n, n
+				if ulpByte&1 == 1 {
+					cols += 3
+				}
+			default:
+				n := min2Sizes[int(dimByte>>3)%len(min2Sizes)]
+				rows, cols = n, n
+				if ulpByte&1 == 1 {
+					rows += 5
+				}
+			}
+			cost = buildLargeStage2SparseCoreCost(rng, rows, cols, sense, ulpByte, flagByte)
 		}
 
-		label := fmt.Sprintf("fuzz_cert_assign_r%d_s%d_%dx%d", regimeByte%4, seed, rows, cols)
+		label := fmt.Sprintf("fuzz_cert_assign_r%d_s%d_%dx%d", regimeByte%5, seed, rows, cols)
 		disableSIMD := (flagByte>>2)&1 == 1
 		opts := []assign.Option{
 			assign.WithCertified(true),
@@ -2467,9 +2615,10 @@ func FuzzCertifiedAssign(f *testing.F) {
 		}
 
 		if formalAssignOracleEnabled() {
-			// Regimes 0-1 fit in 53-bit float64; multi-scale regime 2 and 2^1021..MaxFloat64
-			// regime 3 can floor projected float64 duals while proving exact dyadic optimality.
-			verifyFormalAssignResult(t, label+"/formal", rows, cols, cost, sense, res, regimeByte%4 < 2)
+			// Regimes 0-1 fit in 53-bit float64; multi-scale regime 2, 2^1021..MaxFloat64
+			// regime 3, and Stage-2 cancellation regime 4 can floor projected float64 duals
+			// while proving exact dyadic optimality.
+			verifyFormalAssignResult(t, label+"/formal", rows, cols, cost, sense, res, regimeByte%5 < 2)
 		}
 	})
 }

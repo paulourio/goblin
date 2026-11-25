@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"os"
 	"simd/archsimd"
 	"sync/atomic"
 	"unsafe"
@@ -46,6 +47,9 @@ func detectHWTier() uint32 {
 func init() {
 	maxTierCap.Store(tierAVX512)
 	refreshActiveTier()
+	if envTier := os.Getenv("GOBLIN_SIMD_MAX_TIER"); envTier != "" {
+		_ = SetMaxTier(envTier)
+	}
 }
 
 func refreshActiveTier() {

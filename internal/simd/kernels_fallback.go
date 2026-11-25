@@ -5,10 +5,14 @@ package simd
 import (
 	"fmt"
 	"math"
+	"os"
 )
 
 func init() {
 	maxTierCap.Store(tierAVX512)
+	if envTier := os.Getenv("GOBLIN_SIMD_MAX_TIER"); envTier != "" {
+		_ = SetMaxTier(envTier)
+	}
 }
 
 // HardwareSIMDAvailable reports false on scalar fallback builds.
