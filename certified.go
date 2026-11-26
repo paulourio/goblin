@@ -653,16 +653,19 @@ func exactUserReducedCosts(p *CompiledProblem, yMin []*big.Rat) ([]*big.Rat, boo
 		if yi.Sign() == 0 {
 			continue
 		}
-		if eo := p.exactOrig; eo != nil && i < len(eo.rows) && eo.rows[i].hasDupLoss {
+		if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasDupLoss || eo.rows[i].hasRatTerms) {
 			er := eo.rows[i]
 			for _, t := range eo.rowTerms[er.termStart:er.termEnd] {
-				if t.coeff == 0 {
+				if t.coeffRat == nil && t.coeff == 0 {
+					continue
+				}
+				if t.coeffRat != nil && t.coeffRat.Sign() == 0 {
 					continue
 				}
 				if t.col < 0 || t.col >= len(dots) {
 					return nil, false
 				}
-				av, okA := exactRatFromFloat(t.coeff)
+				av, okA := exactModelTermRat(t)
 				if !okA {
 					return nil, false
 				}
@@ -691,7 +694,7 @@ func exactUserReducedCosts(p *CompiledProblem, yMin []*big.Rat) ([]*big.Rat, boo
 	rcUser := make([]*big.Rat, n)
 	neg := p.sense == Maximize
 	var objMinVec []*big.Rat
-	if p.exactOrig != nil && p.exactOrig.objHasLoss {
+	if p.exactOrig != nil && (p.exactOrig.objHasLoss || p.exactOrig.objHasRat) {
 		var okVec bool
 		objMinVec, okVec = exactMinObjVecRat(p)
 		if !okVec {
@@ -732,13 +735,13 @@ func evalExactMinAndLinObjRat(p *CompiledProblem, x []*big.Rat) (objMin, linAbs 
 	if p == nil || len(x) != p.numVars {
 		return nil, nil, false
 	}
-	cMin, okC := exactRatFromFloat(p.objConstMin())
+	cMin, okC := exactObjConstMinRat(p)
 	if !okC {
 		return nil, nil, false
 	}
 	lin := new(big.Rat)
 	var prod big.Rat
-	if eo := p.exactOrig; eo != nil && eo.objHasLoss {
+	if eo := p.exactOrig; eo != nil && (eo.objHasLoss || eo.objHasRat) {
 		for j := range p.numVars {
 			if x[j] == nil {
 				return nil, nil, false
@@ -748,10 +751,16 @@ func evalExactMinAndLinObjRat(p *CompiledProblem, x []*big.Rat) (objMin, linAbs 
 			if t.col < 0 || t.col >= p.numVars {
 				return nil, nil, false
 			}
-			if t.coeff == 0 || x[t.col].Sign() == 0 {
+			if x[t.col].Sign() == 0 {
 				continue
 			}
-			cj, okJ := exactRatFromFloat(t.coeff)
+			if t.coeffRat == nil && t.coeff == 0 {
+				continue
+			}
+			if t.coeffRat != nil && t.coeffRat.Sign() == 0 {
+				continue
+			}
+			cj, okJ := exactModelTermRat(t)
 			if !okJ {
 				return nil, nil, false
 			}
@@ -1070,12 +1079,10 @@ func verifyDirectInfeas(p *CompiledProblem) bool {
 		if math.IsInf(lo, 1) || math.IsInf(hi, -1) {
 			return true
 		}
-		if !math.IsInf(lo, -1) && !math.IsInf(hi, 1) {
-			lr, okL := exactRatFromFloat(lo)
-			ur, okU := exactRatFromFloat(hi)
-			if okL && okU && lr.Cmp(ur) > 0 {
-				return true
-			}
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if hasLB && hasUB && okL && okU && lr.Cmp(ur) > 0 {
+			return true
 		}
 	}
 	for i := range p.numConstraints {
@@ -1142,12 +1149,49 @@ func extractElasticPhase1Farkas(stop exactStop, p *CompiledProblem, rp *viprRatP
 	}
 	m := NewModel("cert_phase1", Minimize)
 	vars := make([]Var, p.numVars)
-	for j := range p.numVars {
-		vars[j] = m.AddContVar("", p.varLB[j], p.varUB[j])
+	if p.exactOrig != nil && len(rp.lb) == p.numVars && len(rp.ub) == p.numVars {
+		for j := range p.numVars {
+			vars[j] = m.AddContVarRat("", rp.lb[j], rp.ub[j])
+		}
+	} else {
+		for j := range p.numVars {
+			vars[j] = m.AddContVar("", p.varLB[j], p.varUB[j])
+		}
 	}
 	var objTerms []Term
 	for i := range p.numConstraints {
 		var terms []Term
+		if p.exactOrig != nil && i < rp.m && rp.rowRHS[i] != nil {
+			cols, vals, okC := exactCanonicalRowTermsRat(p, i)
+			if !okC {
+				return nil, false
+			}
+			terms = make([]Term, 0, len(cols)+2)
+			for k, col := range cols {
+				if vals[k] != nil && vals[k].Sign() != 0 {
+					terms = append(terms, TRat(vars[col], vals[k]))
+				}
+			}
+			switch p.rowSense[i] {
+			case LessEqual:
+				sp := m.AddContVar("", 0, math.Inf(1))
+				terms = append(terms, Term{Var: sp, Coeff: -1})
+				objTerms = append(objTerms, Term{Var: sp, Coeff: 1})
+				m.AddConstraint("", LeRat(NewExpr(terms...), rp.rowRHS[i]))
+			case GreaterEqual:
+				sn := m.AddContVar("", 0, math.Inf(1))
+				terms = append(terms, Term{Var: sn, Coeff: 1})
+				objTerms = append(objTerms, Term{Var: sn, Coeff: 1})
+				m.AddConstraint("", GeRat(NewExpr(terms...), rp.rowRHS[i]))
+			case Equal:
+				sp := m.AddContVar("", 0, math.Inf(1))
+				sn := m.AddContVar("", 0, math.Inf(1))
+				terms = append(terms, Term{Var: sp, Coeff: -1}, Term{Var: sn, Coeff: 1})
+				objTerms = append(objTerms, Term{Var: sp, Coeff: 1}, Term{Var: sn, Coeff: 1})
+				m.AddConstraint("", EqRat(NewExpr(terms...), rp.rowRHS[i]))
+			}
+			continue
+		}
 		rhsVal := p.rowRHS[i]
 		var exprConst float64
 		if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasDupLoss || (eo.rows[i].rhsInexact && !eo.rows[i].intTightened)) {
@@ -2412,7 +2456,7 @@ func buildCertVIPRInstance(p *CompiledProblem) (*certVIPRInstance, bool) {
 	}
 	n := p.numVars
 	m := p.numConstraints
-	objConst, okC := exactRatFromFloat(p.objConstMin())
+	objConst, okC := exactObjConstMinRat(p)
 	if !okC {
 		return nil, false
 	}
@@ -2436,18 +2480,18 @@ func buildCertVIPRInstance(p *CompiledProblem) (*certVIPRInstance, bool) {
 			inst.objTerms = append(inst.objTerms, certRatTerm{col: j, val: new(big.Rat).Set(cj)})
 		}
 		inst.isInt[j] = p.varCat[j] != Continuous
-		if !math.IsInf(p.varLB[j], -1) {
-			lr, okL := exactRatFromFloat(p.varLB[j])
-			if !okL {
-				return nil, false
-			}
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		if !okL {
+			return nil, false
+		}
+		if hasLB {
 			inst.lb[j] = lr
 		}
-		if !math.IsInf(p.varUB[j], 1) {
-			ur, okU := exactRatFromFloat(p.varUB[j])
-			if !okU {
-				return nil, false
-			}
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if !okU {
+			return nil, false
+		}
+		if hasUB {
 			inst.ub[j] = ur
 		}
 	}

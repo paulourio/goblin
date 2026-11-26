@@ -60,7 +60,7 @@ func exportCompiledProblemToLPPayload(p *CompiledProblem, mode string) (lpCertPa
 	}
 	n := p.numVars
 	m := p.numConstraints
-	objConstRat, okC := exactRatFromFloat(p.objConstMin())
+	objConstRat, okC := exactObjConstMinRat(p)
 	if !okC {
 		return lpCertPayload{}, false
 	}
@@ -74,16 +74,22 @@ func exportCompiledProblemToLPPayload(p *CompiledProblem, mode string) (lpCertPa
 	ub := make([]*ratPayload, n)
 	for j := range n {
 		obj[j] = bigRatToPayload(objMinVec[j])
-		loPtr, okL := exportOptRatPayload(p.varLB[j], -1)
+		hasLB, lr, okL := exactVarLBRat(p, j)
 		if !okL {
 			return lpCertPayload{}, false
 		}
-		hiPtr, okU := exportOptRatPayload(p.varUB[j], 1)
+		if hasLB {
+			lp := bigRatToPayload(lr)
+			lb[j] = &lp
+		}
+		hasUB, ur, okU := exactVarUBRat(p, j)
 		if !okU {
 			return lpCertPayload{}, false
 		}
-		lb[j] = loPtr
-		ub[j] = hiPtr
+		if hasUB {
+			up := bigRatToPayload(ur)
+			ub[j] = &up
+		}
 	}
 	rows := make([]lpRowPayload, m)
 	for i := range m {
@@ -200,21 +206,24 @@ func isExactLPOptimalRat(p *CompiledProblem, xRat, yProj []*big.Rat) bool {
 	}
 	n := p.numVars
 	m := p.numConstraints
-	bndRat := new(big.Rat)
 	for j := range n {
 		xj := xRat[j]
 		if xj == nil {
 			return false
 		}
-		if !math.IsInf(p.varLB[j], -1) {
-			if bndRat.SetFloat64(p.varLB[j]) == nil || xj.Cmp(bndRat) < 0 {
-				return false
-			}
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
+			return false
 		}
-		if !math.IsInf(p.varUB[j], 1) {
-			if bndRat.SetFloat64(p.varUB[j]) == nil || xj.Cmp(bndRat) > 0 {
-				return false
-			}
+		if hasLB && hasUB && lr.Cmp(ur) > 0 {
+			return false
+		}
+		if hasLB && xj.Cmp(lr) < 0 {
+			return false
+		}
+		if hasUB && xj.Cmp(ur) > 0 {
+			return false
 		}
 	}
 	for i := range m {
@@ -249,7 +258,7 @@ func isExactLPOptimalRat(p *CompiledProblem, xRat, yProj []*big.Rat) bool {
 	if !okSafe {
 		return false
 	}
-	objMin, okC := exactRatFromFloat(p.objConstMin())
+	objMin, okC := exactObjConstMinRat(p)
 	if !okC {
 		return false
 	}
@@ -1598,7 +1607,7 @@ func ExactProblemRatsForTest(p *CompiledProblem) (
 		return nil, nil, nil, nil, nil, false, false
 	}
 	hasInexactOrig = p.exactOrig != nil
-	objConst, okC := exactRatFromFloat(p.objConstMin())
+	objConst, okC := exactObjConstMinRat(p)
 	if !okC {
 		return nil, nil, nil, nil, nil, false, false
 	}
@@ -1641,10 +1650,61 @@ func BuildPhase1FarkasProblemForTest(p *CompiledProblem) (*CompiledProblem, bool
 	m := NewModel("phase1_farkas", Minimize)
 	vars := make([]Var, p.numVars)
 	for j := range p.numVars {
-		vars[j] = m.AddContVar("x"+strconv.Itoa(j), p.varLB[j], p.varUB[j])
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
+			return nil, false
+		}
+		if eo := p.exactOrig; eo != nil && (j < len(eo.varLBRat) || j < len(eo.varUBRat)) {
+			var lbArg, ubArg *big.Rat
+			if hasLB {
+				lbArg = lr
+			}
+			if hasUB {
+				ubArg = ur
+			}
+			vars[j] = m.AddContVarRat("x"+strconv.Itoa(j), lbArg, ubArg)
+		} else {
+			vars[j] = m.AddContVar("x"+strconv.Itoa(j), p.varLB[j], p.varUB[j])
+		}
 	}
 	var objTerms []Term
 	for i := range p.numConstraints {
+		rName := "r" + strconv.Itoa(i)
+		if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasRatTerms || eo.rows[i].rhsRat != nil || eo.rows[i].exprConstRat != nil) {
+			cols, vals, okC := exactCanonicalRowTermsRat(p, i)
+			rhsR, okR := exactRowRHSRat(p, i)
+			if !okC || !okR {
+				return nil, false
+			}
+			terms := make([]Term, 0, len(cols)+2)
+			for k, col := range cols {
+				if vals[k] != nil && vals[k].Sign() != 0 {
+					terms = append(terms, TRat(vars[col], vals[k]))
+				}
+			}
+			switch p.rowSense[i] {
+			case LessEqual:
+				sp := m.AddContVar("sp"+strconv.Itoa(i), 0, math.Inf(1))
+				terms = append(terms, Term{Var: sp, Coeff: -1})
+				objTerms = append(objTerms, Term{Var: sp, Coeff: 1})
+				m.AddConstraint(rName, LeRat(NewExpr(terms...), rhsR))
+			case GreaterEqual:
+				sn := m.AddContVar("sm"+strconv.Itoa(i), 0, math.Inf(1))
+				terms = append(terms, Term{Var: sn, Coeff: 1})
+				objTerms = append(objTerms, Term{Var: sn, Coeff: 1})
+				m.AddConstraint(rName, GeRat(NewExpr(terms...), rhsR))
+			case Equal:
+				sp := m.AddContVar("sp"+strconv.Itoa(i), 0, math.Inf(1))
+				sn := m.AddContVar("sm"+strconv.Itoa(i), 0, math.Inf(1))
+				terms = append(terms, Term{Var: sp, Coeff: -1}, Term{Var: sn, Coeff: 1})
+				objTerms = append(objTerms, Term{Var: sp, Coeff: 1}, Term{Var: sn, Coeff: 1})
+				m.AddConstraint(rName, EqRat(NewExpr(terms...), rhsR))
+			default:
+				return nil, false
+			}
+			continue
+		}
 		var terms []Term
 		rhsVal := p.rowRHS[i]
 		var exprConst float64
@@ -1682,7 +1742,6 @@ func BuildPhase1FarkasProblemForTest(p *CompiledProblem) (*CompiledProblem, bool
 				}
 			}
 		}
-		rName := "r" + strconv.Itoa(i)
 		switch p.rowSense[i] {
 		case LessEqual:
 			sp := m.AddContVar("sp"+strconv.Itoa(i), 0, math.Inf(1))
@@ -2032,29 +2091,24 @@ func verifyJSONProblemMatchesCompiled(
 			return fmt.Errorf("serialized obj[%d]=%s != CompiledProblem minObj=%s",
 				j, gotObj[j].RatString(), wantObj[j].RatString())
 		}
-		lo, hi := p.varLB[j], p.varUB[j]
-		if math.IsNaN(lo) || math.IsNaN(hi) || math.IsInf(lo, 1) || math.IsInf(hi, -1) {
-			return fmt.Errorf("invalid CompiledProblem bounds [%v,%v] at col %d", lo, hi, j)
+		hasLB, wantLB, okL := exactVarLBRat(p, j)
+		hasUB, wantUB, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
+			return fmt.Errorf("invalid CompiledProblem bounds [%v,%v] at col %d", p.varLB[j], p.varUB[j], j)
 		}
-		if math.IsInf(lo, -1) {
+		if !hasLB {
 			if gotLB[j] != nil {
 				return fmt.Errorf("serialized lb[%d]=%s != -Inf", j, gotLB[j].RatString())
 			}
-		} else {
-			wantLB := new(big.Rat).SetFloat64(lo)
-			if wantLB == nil || gotLB[j] == nil || gotLB[j].Cmp(wantLB) != 0 {
-				return fmt.Errorf("serialized lb[%d] mismatch (want %v)", j, lo)
-			}
+		} else if gotLB[j] == nil || gotLB[j].Cmp(wantLB) != 0 {
+			return fmt.Errorf("serialized lb[%d] mismatch (want %s)", j, wantLB.RatString())
 		}
-		if math.IsInf(hi, 1) {
+		if !hasUB {
 			if gotUB[j] != nil {
 				return fmt.Errorf("serialized ub[%d]=%s != +Inf", j, gotUB[j].RatString())
 			}
-		} else {
-			wantUB := new(big.Rat).SetFloat64(hi)
-			if wantUB == nil || gotUB[j] == nil || gotUB[j].Cmp(wantUB) != 0 {
-				return fmt.Errorf("serialized ub[%d] mismatch (want %v)", j, hi)
-			}
+		} else if gotUB[j] == nil || gotUB[j].Cmp(wantUB) != 0 {
+			return fmt.Errorf("serialized ub[%d] mismatch (want %s)", j, wantUB.RatString())
 		}
 	}
 	for i := range wantRows {

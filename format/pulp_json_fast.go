@@ -3,6 +3,7 @@ package format
 import (
 	"encoding/binary"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"sync"
@@ -1608,6 +1609,581 @@ func fromPuLPJSONFast(data []byte) (*gb.Model, bool) {
 						}
 					}
 					st.m.SetObjectiveNamed(defObjName, gb.Expr{Terms: st.terms, Constant: defObjConst})
+					hasDeferred = false
+				}
+			case "constraints":
+				bit = 1 << 3
+				if st.m == nil || seen&(1<<2) == 0 {
+					return nil, false
+				}
+				ok = st.streamConstraints()
+			case "sos1":
+				bit = 1 << 4
+				_, ok = st.sc.readEmptyArray()
+			case "sos2":
+				bit = 1 << 5
+				_, ok = st.sc.readEmptyArray()
+			default:
+				return nil, false
+			}
+			if !ok || seen&bit != 0 {
+				return nil, false
+			}
+			seen |= bit
+			if st.sc.consumeByte(',') {
+				continue
+			}
+			if st.sc.consumeByte('}') {
+				break
+			}
+			return nil, false
+		}
+	}
+	st.sc.skipWS()
+	if st.sc.pos != len(st.sc.b) || st.m == nil || hasDeferred {
+		return nil, false
+	}
+	if err := st.m.Validate(); err != nil {
+		return nil, false
+	}
+	return st.m, true
+}
+
+func (sc *pulpScanner) readJSONNumberSpan() ([]byte, bool) {
+	sc.skipWS()
+	b := sc.b
+	i := sc.pos
+	n := len(b)
+	if i < 0 || i >= n {
+		return nil, false
+	}
+	start := i
+	if b[i] == '-' {
+		i++
+		if i >= n {
+			return nil, false
+		}
+	}
+	if b[i] == '0' {
+		i++
+		if i < n && b[i] >= '0' && b[i] <= '9' {
+			return nil, false
+		}
+	} else if b[i] >= '1' && b[i] <= '9' {
+		for i < n && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+	} else {
+		return nil, false
+	}
+	if i < n && b[i] == '.' {
+		i++
+		if i >= n || b[i] < '0' || b[i] > '9' {
+			return nil, false
+		}
+		for i < n && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+	}
+	if i < n && (b[i] == 'e' || b[i] == 'E') {
+		i++
+		if i < n && (b[i] == '+' || b[i] == '-') {
+			i++
+		}
+		if i >= n || b[i] < '0' || b[i] > '9' {
+			return nil, false
+		}
+		for i < n && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+	}
+	sc.pos = i
+	return b[start:i], true
+}
+
+func (sc *pulpScanner) readExactRat() (*big.Rat, bool) {
+	raw, ok := sc.readJSONNumberSpan()
+	if !ok {
+		return nil, false
+	}
+	r, err := gb.ParseExactRat(string(raw))
+	if err != nil {
+		return nil, false
+	}
+	return r, true
+}
+
+type rawExactObjCoeff struct {
+	start int
+	end   int
+	val   *big.Rat
+}
+
+type exactFastVarMeta struct {
+	lb  *big.Rat
+	ub  *big.Rat
+	cat gb.VarCategory
+}
+
+type pulpExactStreamer struct {
+	sc       pulpScanner
+	m        *gb.Model
+	table    []int32
+	terms    []gb.Term
+	varIDs   []gb.Var
+	varNames []string
+	objSpans []rawExactObjCoeff
+}
+
+func parseStreamCoeffExact(sc *pulpScanner) (start, end int, val *big.Rat, ok bool) {
+	if !sc.consumeByte('{') {
+		return 0, 0, nil, false
+	}
+	if sc.consumeByte('}') {
+		return 0, 0, new(big.Rat), true
+	}
+	var seen uint8
+	for {
+		key, keyOK := sc.readUnescapedBytes()
+		if !keyOK || !sc.consumeByte(':') {
+			return 0, 0, nil, false
+		}
+		var bit uint8
+		switch string(key) {
+		case "name":
+			bit = 1 << 0
+			start, end, keyOK = sc.readUnescapedSpan()
+		case "value":
+			bit = 1 << 1
+			val, keyOK = sc.readExactRat()
+		default:
+			return 0, 0, nil, false
+		}
+		if !keyOK || seen&bit != 0 {
+			return 0, 0, nil, false
+		}
+		seen |= bit
+		if sc.consumeByte(',') {
+			continue
+		}
+		if sc.consumeByte('}') {
+			if val == nil {
+				val = new(big.Rat)
+			}
+			return start, end, val, true
+		}
+		return 0, 0, nil, false
+	}
+}
+
+func (st *pulpExactStreamer) streamResolvedCoeffs() bool {
+	if st.sc.consumeNull() {
+		return true
+	}
+	if !st.sc.consumeByte('[') {
+		return false
+	}
+	if st.sc.consumeByte(']') {
+		return true
+	}
+	terms := st.terms
+	for {
+		s, e, val, cOK := parseStreamCoeffExact(&st.sc)
+		if !cOK {
+			st.terms = terms
+			return false
+		}
+		vid, hit := lookupStreamVarID(st.table, st.varNames, st.varIDs, st.sc.b[s:e])
+		if !hit {
+			st.terms = terms
+			return false
+		}
+		terms = append(terms, gb.TRat(vid, val))
+		if st.sc.consumeByte(',') {
+			continue
+		}
+		st.terms = terms
+		return st.sc.consumeByte(']')
+	}
+}
+
+func (st *pulpExactStreamer) streamObjective(varsReady bool) (objName string, objConst *big.Rat, hasDeferred, ok bool) {
+	sc := &st.sc
+	if !sc.consumeByte('{') {
+		return "", nil, false, false
+	}
+	if sc.consumeByte('}') {
+		return "", nil, false, true
+	}
+	st.objSpans = st.objSpans[:0]
+	st.terms = st.terms[:0]
+	var seen uint8
+	for {
+		key, keyOK := sc.readUnescapedBytes()
+		if !keyOK || !sc.consumeByte(':') {
+			return "", nil, false, false
+		}
+		var bit uint8
+		switch string(key) {
+		case "name":
+			bit = 1 << 0
+			if sc.consumeNull() {
+				objName = ""
+				keyOK = true
+			} else {
+				var raw []byte
+				raw, keyOK = sc.readUnescapedBytes()
+				if keyOK {
+					objName = cloneBytesToString(raw)
+				}
+			}
+		case "coefficients":
+			bit = 1 << 1
+			if varsReady {
+				keyOK = st.streamResolvedCoeffs()
+			} else if sc.consumeNull() {
+				keyOK = true
+			} else if !sc.consumeByte('[') {
+				keyOK = false
+			} else if sc.consumeByte(']') {
+				keyOK = true
+			} else {
+				spans := st.objSpans
+				for {
+					s, e, val, cOK := parseStreamCoeffExact(sc)
+					if !cOK {
+						keyOK = false
+						break
+					}
+					spans = append(spans, rawExactObjCoeff{start: s, end: e, val: val})
+					if sc.consumeByte(',') {
+						continue
+					}
+					keyOK = sc.consumeByte(']')
+					break
+				}
+				st.objSpans = spans
+			}
+		case "constant":
+			bit = 1 << 2
+			objConst, keyOK = sc.readExactRat()
+		default:
+			return "", nil, false, false
+		}
+		if !keyOK || seen&bit != 0 {
+			return "", nil, false, false
+		}
+		seen |= bit
+		if sc.consumeByte(',') {
+			continue
+		}
+		if !sc.consumeByte('}') {
+			return "", nil, false, false
+		}
+		break
+	}
+	if varsReady {
+		expr := gb.Expr{Terms: st.terms}
+		if objConst != nil {
+			expr = expr.AddConstantRat(objConst)
+		}
+		st.m.SetObjectiveNamed(objName, expr)
+		return objName, objConst, false, true
+	}
+	return objName, objConst, true, true
+}
+
+func (st *pulpExactStreamer) streamVariables() bool {
+	sc := &st.sc
+	if sc.consumeNull() {
+		st.table = nil
+		return true
+	}
+	if !sc.consumeByte('[') {
+		return false
+	}
+	if sc.consumeByte(']') {
+		st.table = nil
+		return true
+	}
+	rem := len(sc.b) - sc.pos
+	varDiv := 512
+	conDiv := 768
+	if sc.indented {
+		varDiv = 1024
+		conDiv = 1536
+	}
+	estVars := max(8, rem/varDiv)
+	metas := make([]exactFastVarMeta, 0, estVars)
+	var varSB strings.Builder
+	varSB.Grow(min(rem/4, estVars*8))
+	varEnds := sc.resetEnds(estVars)
+
+	for {
+		if !sc.consumeByte('{') {
+			return false
+		}
+		var (
+			nameRaw []byte
+			catRaw  []byte
+			lb      = new(big.Rat)
+			ub      *big.Rat
+			seen    uint8
+		)
+		if !sc.consumeByte('}') {
+			for {
+				key, ok := sc.readUnescapedBytes()
+				if !ok || !sc.consumeByte(':') {
+					return false
+				}
+				var bit uint8
+				switch string(key) {
+				case "name":
+					bit = 1 << 0
+					nameRaw, ok = sc.readUnescapedBytes()
+				case "cat":
+					bit = 1 << 1
+					catRaw, ok = sc.readUnescapedBytes()
+				case "lowBound":
+					bit = 1 << 2
+					if sc.consumeNull() {
+						lb = nil
+						ok = true
+					} else {
+						lb, ok = sc.readExactRat()
+					}
+				case "upBound":
+					bit = 1 << 3
+					if sc.consumeNull() {
+						ub = nil
+						ok = true
+					} else {
+						ub, ok = sc.readExactRat()
+					}
+				case "varValue":
+					bit = 1 << 4
+					ok = sc.skipIgnoredMetricFloat()
+				case "dj":
+					bit = 1 << 5
+					ok = sc.skipIgnoredMetricFloat()
+				default:
+					return false
+				}
+				if !ok || seen&bit != 0 {
+					return false
+				}
+				seen |= bit
+				if sc.consumeByte(',') {
+					continue
+				}
+				if sc.consumeByte('}') {
+					break
+				}
+				return false
+			}
+		}
+		if len(nameRaw) == 0 {
+			return false
+		}
+		var cat gb.VarCategory
+		var catOK bool
+		lb, ub, cat, catOK = resolvePuLPVarSpecExact(string(catRaw), lb, ub)
+		if !catOK {
+			return false
+		}
+		_, _ = varSB.Write(nameRaw)
+		varEnds = append(varEnds, varSB.Len())
+		metas = append(metas, exactFastVarMeta{lb: lb, ub: ub, cat: cat})
+		if sc.consumeByte(',') {
+			continue
+		}
+		if sc.consumeByte(']') {
+			break
+		}
+		return false
+	}
+
+	nVars := len(metas)
+	estCons := max(8, (len(sc.b)-sc.pos)/conDiv)
+	st.m.Reserve(nVars, estCons)
+
+	table, ok := allocVarHashTable(nil, nVars)
+	if !ok {
+		return false
+	}
+	st.table = table
+
+	varNames := make([]string, 0, nVars)
+	varIDs := make([]gb.Var, 0, nVars)
+	allNames := varSB.String()
+	off := 0
+	for i, end := range varEnds {
+		vName := allNames[off:end]
+		off = end
+		if !insertStreamVarHash(table, varNames, i, vName) {
+			return false
+		}
+		meta := metas[i]
+		vid := st.m.AddVarRat(vName, meta.lb, meta.ub, meta.cat)
+		varNames = append(varNames, vName)
+		varIDs = append(varIDs, vid)
+	}
+	st.varNames = varNames
+	st.varIDs = varIDs
+	return true
+}
+
+func (st *pulpExactStreamer) streamConstraints() bool {
+	sc := &st.sc
+	if sc.consumeNull() {
+		return true
+	}
+	if !sc.consumeByte('[') {
+		return false
+	}
+	if sc.consumeByte(']') {
+		return true
+	}
+	for {
+		if !sc.consumeByte('{') {
+			return false
+		}
+		var (
+			nameRaw  []byte
+			senseInt int
+			constRat *big.Rat
+			seen     uint8
+		)
+		st.terms = st.terms[:0]
+		if !sc.consumeByte('}') {
+			for {
+				key, ok := sc.readUnescapedBytes()
+				if !ok || !sc.consumeByte(':') {
+					return false
+				}
+				var bit uint8
+				switch string(key) {
+				case "name":
+					bit = 1 << 0
+					nameRaw, ok = sc.readUnescapedBytes()
+				case "sense":
+					bit = 1 << 1
+					senseInt, ok = sc.readInt()
+				case "coefficients":
+					bit = 1 << 2
+					ok = st.streamResolvedCoeffs()
+				case "pi":
+					bit = 1 << 3
+					ok = sc.skipIgnoredMetricFloat()
+				case "constant":
+					bit = 1 << 4
+					constRat, ok = sc.readExactRat()
+				default:
+					return false
+				}
+				if !ok || seen&bit != 0 {
+					return false
+				}
+				seen |= bit
+				if sc.consumeByte(',') {
+					continue
+				}
+				if sc.consumeByte('}') {
+					break
+				}
+				return false
+			}
+		}
+		csense, ok := parsePuLPConstraintSense(senseInt)
+		if !ok {
+			return false
+		}
+		var rhs *big.Rat
+		if constRat != nil {
+			rhs = new(big.Rat).Neg(constRat)
+		} else {
+			rhs = new(big.Rat)
+		}
+		e := gb.Expr{Terms: st.terms}
+		conName := cloneBytesToString(nameRaw)
+		switch csense {
+		case gb.LessEqual:
+			st.m.AddConstraint(conName, gb.LeRat(e, rhs))
+		case gb.GreaterEqual:
+			st.m.AddConstraint(conName, gb.GeRat(e, rhs))
+		case gb.Equal:
+			st.m.AddConstraint(conName, gb.EqRat(e, rhs))
+		}
+		if sc.consumeByte(',') {
+			continue
+		}
+		return sc.consumeByte(']')
+	}
+}
+
+func fromPuLPJSONExactFast(data []byte) (*gb.Model, bool) {
+	st := pulpExactStreamer{
+		sc: pulpScanner{
+			b:        data,
+			indented: detectIndented(data),
+		},
+	}
+	if !st.sc.consumeByte('{') {
+		return nil, false
+	}
+	var (
+		params        PuLPParameters
+		seen          uint8
+		hasDeferred   bool
+		defObjName    string
+		defObjConst   *big.Rat
+		hasObjSection bool
+	)
+	if !st.sc.consumeByte('}') {
+		for {
+			key, ok := st.sc.readUnescapedBytes()
+			if !ok || !st.sc.consumeByte(':') {
+				return nil, false
+			}
+			var bit uint8
+			switch string(key) {
+			case "parameters":
+				bit = 1 << 0
+				ok = st.sc.readParameters(&params)
+				if ok {
+					sense, senseOK := parsePuLPSense(params.Sense)
+					if !senseOK {
+						return nil, false
+					}
+					st.m = gb.NewModel(params.Name, sense)
+				}
+			case "objective":
+				bit = 1 << 1
+				hasObjSection = true
+				varsReady := seen&(1<<2) != 0
+				defObjName, defObjConst, hasDeferred, ok = st.streamObjective(varsReady)
+			case "variables":
+				bit = 1 << 2
+				if st.m == nil {
+					return nil, false
+				}
+				ok = st.streamVariables()
+				if ok && hasObjSection && seen&(1<<1) != 0 {
+					st.terms = st.terms[:0]
+					if hasDeferred {
+						for _, sp := range st.objSpans {
+							vid, hit := lookupStreamVarID(st.table, st.varNames, st.varIDs, st.sc.b[sp.start:sp.end])
+							if !hit {
+								return nil, false
+							}
+							st.terms = append(st.terms, gb.TRat(vid, sp.val))
+						}
+					}
+					expr := gb.Expr{Terms: st.terms}
+					if defObjConst != nil {
+						expr = expr.AddConstantRat(defObjConst)
+					}
+					st.m.SetObjectiveNamed(defObjName, expr)
 					hasDeferred = false
 				}
 			case "constraints":

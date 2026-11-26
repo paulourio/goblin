@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -446,6 +447,69 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	}
 }
 
+func TestRenderNonMADCBCNotesBranches(t *testing.T) {
+	t.Parallel()
+
+	mkBundle := func(goTrials, cbcTrials []float64, goMed, goMean, cbcMed, cbcMean float64) *TelemetryBundle {
+		return &TelemetryBundle{
+			Scalar: map[string]ProblemBenchResult{
+				"t2_binpack_44": {
+					TTotalMS:       goMed,
+					TTotalMeanMS:   goMean,
+					TTotalSDMS:     1.25,
+					TTotalTrialsMS: goTrials,
+					CP5Presolve:    CheckpointMetrics{TimeMS: 1.10},
+					CP6Cuts:        CheckpointMetrics{TimeMS: 2.30},
+				},
+			},
+			Goblin: map[string]ProblemBenchResult{
+				"t2_binpack_44": {
+					TTotalMS:       cbcMed,
+					TTotalMeanMS:   cbcMean,
+					TTotalSDMS:     0.50,
+					TTotalTrialsMS: cbcTrials,
+				},
+			},
+		}
+	}
+
+	var negBuf bytes.Buffer
+	tbTrail := mkBundle([]float64{20.0, 30.0}, []float64{10.0, 15.0}, 25.0, 25.0, 12.5, 12.5)
+	if err := renderNonMADCBCNotes(&negBuf, tbTrail); err != nil {
+		t.Fatalf("renderNonMADCBCNotes(trail): %v", err)
+	}
+	negOut := negBuf.String()
+	for _, want := range []string{
+		"Heavy-tail regression on `t2_binpack_44`",
+		"trails in-process `BackendCBC`",
+		"**0.50x** `BackendCBC / BackendGo` geometric-mean ratio (`Go / CBC = 2.00x`)",
+		"running slower on 2 of 2 trials (peaking at 30.00 ms vs. 15.00 ms)",
+		"while root cuts increase `CP5 +Presolve` (1.10 ms) to `CP6 +Cuts` (2.30 ms).",
+	} {
+		if !strings.Contains(negOut, want) {
+			t.Fatalf("trail output missing %q:\n%s", want, negOut)
+		}
+	}
+
+	var leadBuf bytes.Buffer
+	tbLead := mkBundle([]float64{8.0, 12.0, 14.0}, []float64{16.0, 18.0, 10.0}, 12.0, 11.33, 16.0, 14.67)
+	if err := renderNonMADCBCNotes(&leadBuf, tbLead); err != nil {
+		t.Fatalf("renderNonMADCBCNotes(lead): %v", err)
+	}
+	leadOut := leadBuf.String()
+	for _, want := range []string{
+		"Bin-packing tail behavior on `t2_binpack_44`",
+		"leads in-process `BackendCBC`",
+		"`BackendCBC / BackendGo` geometric-mean speedup",
+		"running slower on 1 of 3 trials (peaking at 14.00 ms vs. 10.00 ms)",
+		"with `CP5 +Presolve` at 1.10 ms vs. `CP6 +Cuts` at 2.30 ms.",
+	} {
+		if !strings.Contains(leadOut, want) {
+			t.Fatalf("lead output missing %q:\n%s", want, leadOut)
+		}
+	}
+}
+
 func TestCollectFormalInventoryAndHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -539,7 +603,7 @@ def helperWithString : String := "-- theorem notAComment"
 		t.Fatalf("unexpected kernel/lock counts: kernel=(%d+%d=%d) locks=%d",
 			inv.LeanGoblinKernel, inv.LeanAppsKernel, inv.LeanTotalKernel, inv.AxiomLocks)
 	}
-	if len(inv.ProdCertFiles) != 5 || inv.ProdCertLOC != 18254 {
+	if len(inv.ProdCertFiles) != 5 || inv.ProdCertLOC != 18475 {
 		t.Fatalf("unexpected prod cert files=%d loc=%d", len(inv.ProdCertFiles), inv.ProdCertLOC)
 	}
 	if len(inv.FormalTestFiles) != 21 || inv.TotalGoTestFiles != 30 {

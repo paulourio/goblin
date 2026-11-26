@@ -3,6 +3,7 @@ package goblin
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"slices"
 	"sync"
 )
@@ -146,8 +147,9 @@ type CompiledProblem struct {
 }
 
 type exactModelTerm struct {
-	col   int
-	coeff float64
+	col      int
+	coeff    float64
+	coeffRat *big.Rat
 }
 
 type exactModelRow struct {
@@ -155,8 +157,12 @@ type exactModelRow struct {
 	termEnd      int
 	rhs          float64
 	exprConst    float64
+	rhsRat       *big.Rat
+	exprConstRat *big.Rat
 	intTightRHS  float64
+	intTightRat  *big.Rat
 	hasDupLoss   bool
+	hasRatTerms  bool
 	rhsInexact   bool
 	intTightened bool
 	intEqInfeas  bool
@@ -164,12 +170,18 @@ type exactModelRow struct {
 
 type exactModelOrig struct {
 	objConst        float64
+	objConstRat     *big.Rat
 	objHasLoss      bool
+	objHasRat       bool
 	objTerms        []exactModelTerm
 	rows            []exactModelRow
 	rowTerms        []exactModelTerm
+	varLBRat        []*big.Rat
+	varUBRat        []*big.Rat
+	hasExactRat     bool
 	intEqInfeas     bool
 	hasIntTightened bool
+	hasExactOutward bool
 	origProb        *CompiledProblem
 }
 
@@ -179,7 +191,9 @@ func (e *exactModelOrig) cloneZeroObj() *exactModelOrig {
 	}
 	cp := *e
 	cp.objConst = 0
+	cp.objConstRat = nil
 	cp.objHasLoss = false
+	cp.objHasRat = false
 	cp.objTerms = nil
 	cp.origProb = nil
 	return &cp
@@ -196,10 +210,17 @@ func (e *exactModelOrig) cloneForContRelax(negateObj bool) *exactModelOrig {
 	if negateObj && cp.objConst != 0 {
 		cp.objConst = -cp.objConst
 	}
+	if negateObj && cp.objConstRat != nil {
+		cp.objConstRat = new(big.Rat).Neg(cp.objConstRat)
+	}
 	if negateObj && len(e.objTerms) > 0 {
 		cp.objTerms = make([]exactModelTerm, len(e.objTerms))
 		for k, t := range e.objTerms {
-			cp.objTerms[k] = exactModelTerm{col: t.col, coeff: -t.coeff}
+			var negR *big.Rat
+			if t.coeffRat != nil {
+				negR = new(big.Rat).Neg(t.coeffRat)
+			}
+			cp.objTerms[k] = exactModelTerm{col: t.col, coeff: -t.coeff, coeffRat: negR}
 		}
 	}
 	if len(e.rows) > 0 {
@@ -207,6 +228,7 @@ func (e *exactModelOrig) cloneForContRelax(negateObj bool) *exactModelOrig {
 		copy(cp.rows, e.rows)
 		for i := range cp.rows {
 			cp.rows[i].intTightRHS = 0
+			cp.rows[i].intTightRat = nil
 			cp.rows[i].intTightened = false
 			cp.rows[i].intEqInfeas = false
 		}
@@ -222,7 +244,7 @@ func (p *CompiledProblem) canonicalOrigProblem() *CompiledProblem {
 }
 
 func (p *CompiledProblem) exactTightenedProblem() *CompiledProblem {
-	if p == nil || p.exactOrig == nil || !p.exactOrig.hasIntTightened {
+	if p == nil || p.exactOrig == nil || (!p.exactOrig.hasIntTightened && !p.exactOrig.hasExactOutward) {
 		return p
 	}
 	if p.exactOrig.origProb != nil {
@@ -235,23 +257,101 @@ func (p *CompiledProblem) exactTightenedProblem() *CompiledProblem {
 	cp.rowUB = slices.Clone(p.rowUB)
 	eo := *p.exactOrig
 	eo.origProb = p.canonicalOrigProblem()
+	if len(eo.rows) > 0 {
+		eo.rows = slices.Clone(eo.rows)
+	}
 	cp.exactOrig = &eo
 	for i := range cp.numConstraints {
-		if i >= len(eo.rows) || !eo.rows[i].intTightened {
+		if i >= len(eo.rows) {
 			continue
 		}
-		tight := eo.rows[i].intTightRHS
-		cp.rowRHS[i] = tight
-		switch cp.rowSense[i] {
-		case LessEqual:
-			cp.rowLB[i] = math.Inf(-1)
-			cp.rowUB[i] = tight
-		case GreaterEqual:
-			cp.rowLB[i] = tight
-			cp.rowUB[i] = math.Inf(1)
-		case Equal:
-			cp.rowLB[i] = tight
-			cp.rowUB[i] = tight
+		if eo.rows[i].intTightened {
+			tight := eo.rows[i].intTightRHS
+			cp.rowRHS[i] = tight
+			switch cp.rowSense[i] {
+			case LessEqual:
+				cp.rowLB[i] = math.Inf(-1)
+				cp.rowUB[i] = tight
+			case GreaterEqual:
+				cp.rowLB[i] = tight
+				cp.rowUB[i] = math.Inf(1)
+			case Equal:
+				cp.rowLB[i] = tight
+				cp.rowUB[i] = tight
+			}
+			if eo.rows[i].intTightRat != nil {
+				eo.rows[i].rhsRat = eo.rows[i].intTightRat
+				eo.rows[i].exprConstRat = nil
+				eo.rows[i].rhs = tight
+				eo.rows[i].exprConst = 0
+				eo.rows[i].rhsInexact = false
+			}
+			continue
+		}
+		if (eo.rows[i].rhsRat != nil || eo.rows[i].exprConstRat != nil) &&
+			(cp.rowSense[i] == LessEqual || cp.rowSense[i] == GreaterEqual) {
+			rhsR := eo.rows[i].rhsRat
+			if rhsR == nil {
+				rhsR, _ = exactRatFromFloat(eo.rows[i].rhs)
+			}
+			ecR := eo.rows[i].exprConstRat
+			if ecR == nil {
+				ecR, _ = exactRatFromFloat(eo.rows[i].exprConst)
+			}
+			if rhsR != nil && ecR != nil {
+				netR := new(big.Rat).Sub(rhsR, ecR)
+				if cp.rowSense[i] == LessEqual {
+					ceilF := exactRatToFloatCeil(netR)
+					cp.rowRHS[i] = ceilF
+					cp.rowUB[i] = ceilF
+				} else {
+					floorF := exactRatToFloatFloor(netR)
+					cp.rowRHS[i] = floorF
+					cp.rowLB[i] = floorF
+				}
+			}
+		}
+	}
+	if eo.varLBRat != nil || eo.varUBRat != nil {
+		lbCloned := false
+		ubCloned := false
+		for j := range cp.numVars {
+			if eo.varLBRat != nil && eo.varLBRat[j] != nil {
+				if cp.varCat[j] != Continuous && !eo.varLBRat[j].IsInt() {
+					if !lbCloned {
+						cp.varLB = slices.Clone(p.varLB)
+						eo.varLBRat = slices.Clone(eo.varLBRat)
+						lbCloned = true
+					}
+					tightLB := new(big.Rat).SetInt(ceilExactRat(eo.varLBRat[j]))
+					eo.varLBRat[j] = tightLB
+					cp.varLB[j] = exactRatToFloatFloor(tightLB)
+				} else if outLB := exactRatToFloatFloor(eo.varLBRat[j]); outLB < cp.varLB[j] {
+					if !lbCloned {
+						cp.varLB = slices.Clone(p.varLB)
+						lbCloned = true
+					}
+					cp.varLB[j] = outLB
+				}
+			}
+			if eo.varUBRat != nil && eo.varUBRat[j] != nil {
+				if cp.varCat[j] != Continuous && !eo.varUBRat[j].IsInt() {
+					if !ubCloned {
+						cp.varUB = slices.Clone(p.varUB)
+						eo.varUBRat = slices.Clone(eo.varUBRat)
+						ubCloned = true
+					}
+					tightUB := new(big.Rat).SetInt(floorExactRat(eo.varUBRat[j]))
+					eo.varUBRat[j] = tightUB
+					cp.varUB[j] = exactRatToFloatCeil(tightUB)
+				} else if outUB := exactRatToFloatCeil(eo.varUBRat[j]); outUB > cp.varUB[j] {
+					if !ubCloned {
+						cp.varUB = slices.Clone(p.varUB)
+						ubCloned = true
+					}
+					cp.varUB[j] = outUB
+				}
+			}
 		}
 	}
 	return &cp
@@ -439,6 +539,10 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	n := len(m.vars)
 	mc := len(m.constraints)
 	numInt := 0
+	var varLBRat, varUBRat []*big.Rat
+	anyVarRat := false
+	anyVarIntTightened := false
+	anyExactOutward := false
 	for j := range n {
 		v := &m.vars[j]
 		if firstErr == nil {
@@ -446,6 +550,15 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 				firstErr = fmt.Errorf("variable %q has invalid category %d", v.name, uint8(v.cat))
 			} else if math.IsNaN(v.lb) || math.IsNaN(v.ub) || math.IsInf(v.lb, 1) || math.IsInf(v.ub, -1) {
 				firstErr = fmt.Errorf("variable %q has invalid bounds [%v, %v]", v.name, v.lb, v.ub)
+			} else if v.lbRat != nil {
+				if _, ok := ratToFiniteFloat(v.lbRat); !ok {
+					firstErr = fmt.Errorf("variable %q lower bound overflows finite float64", v.name)
+				}
+			}
+			if firstErr == nil && v.ubRat != nil {
+				if _, ok := ratToFiniteFloat(v.ubRat); !ok {
+					firstErr = fmt.Errorf("variable %q upper bound overflows finite float64", v.name)
+				}
 			}
 		}
 		if v.cat != Continuous {
@@ -454,6 +567,11 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	}
 	if firstErr == nil && (math.IsNaN(m.objConst) || math.IsInf(m.objConst, 0)) {
 		firstErr = fmt.Errorf("objective constant is non-finite (%v)", m.objConst)
+	}
+	if firstErr == nil && m.objConstRat != nil {
+		if _, ok := ratToFiniteFloat(m.objConstRat); !ok {
+			firstErr = fmt.Errorf("objective constant overflows finite float64 (%v)", m.objConst)
+		}
 	}
 	if abortOnErr && firstErr != nil {
 		return nil, firstErr
@@ -501,7 +619,24 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		v := &m.vars[j]
 		cat := v.cat
 		if cat == Integer && v.lb >= 0 && v.ub <= 1 && v.lb <= v.ub {
-			cat = Binary
+			promote := true
+			if v.lbRat != nil {
+				lbInt := ceilExactRat(v.lbRat)
+				if lbInt.Sign() < 0 || lbInt.Cmp(big.NewInt(1)) > 0 {
+					promote = false
+				}
+			}
+			if promote && v.ubRat != nil {
+				ubInt := floorExactRat(v.ubRat)
+				if ubInt.Sign() < 0 || ubInt.Cmp(big.NewInt(1)) > 0 {
+					promote = false
+				} else if v.lbRat != nil && ceilExactRat(v.lbRat).Cmp(ubInt) > 0 {
+					promote = false
+				}
+			}
+			if promote {
+				cat = Binary
+			}
 		}
 		p.varNames[j] = v.name
 		p.varLB[j] = v.lb
@@ -513,12 +648,36 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 				p.binaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			}
 		}
+		if v.lbRat != nil {
+			if varLBRat == nil {
+				varLBRat = make([]*big.Rat, n)
+			}
+			varLBRat[j] = cloneRat(v.lbRat)
+			anyVarRat = true
+			if cat != Continuous && !v.lbRat.IsInt() {
+				anyVarIntTightened = true
+			} else if exactRatToFloatFloor(v.lbRat) < v.lb {
+				anyExactOutward = true
+			}
+		}
+		if v.ubRat != nil {
+			if varUBRat == nil {
+				varUBRat = make([]*big.Rat, n)
+			}
+			varUBRat[j] = cloneRat(v.ubRat)
+			anyVarRat = true
+			if cat != Continuous && !v.ubRat.IsInt() {
+				anyVarIntTightened = true
+			} else if exactRatToFloatCeil(v.ubRat) > v.ub {
+				anyExactOutward = true
+			}
+		}
 	}
 
 	// Accumulate and validate objective terms in a single pass, routing duplicate columns through wideDotAcc.
 	inTouched := make([]uint8, n)
 	touched := make([]int, 0, min(n, defaultTouchedCap))
-	touched, _, objHasDupLoss, err := m.accumulateTerms(m.objTerms, true, "", abortOnErr, &firstErr, inTouched, touched, p.objCoeffs)
+	touched, _, objHasDupLoss, objHasRat, err := m.accumulateTerms(m.objTerms, true, "", abortOnErr, &firstErr, inTouched, touched, p.objCoeffs)
 	if err != nil {
 		return nil, err
 	}
@@ -558,6 +717,7 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	var origRows []exactModelRow
 	var origRowTerms []exactModelTerm
 	anyRowInexact := false
+	anyRowExactRat := false
 	anyIntTightened := false
 	anyIntEqInfeas := false
 
@@ -567,6 +727,29 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		netRHS := c.rhs - c.exprConst
 		if !rhsBad && (math.IsNaN(netRHS) || math.IsInf(netRHS, 0)) {
 			rhsBad = true
+		}
+		var netRat *big.Rat
+		rowHasConstRat := c.rhsRat != nil || c.exprConstRat != nil
+		if rowHasConstRat {
+			anyRowExactRat = true
+			rhsR := c.rhsRat
+			if rhsR == nil {
+				rhsR, _ = exactRatFromFloat(c.rhs)
+			}
+			ecR := c.exprConstRat
+			if ecR == nil {
+				ecR, _ = exactRatFromFloat(c.exprConst)
+			}
+			if rhsR == nil || ecR == nil {
+				rhsBad = true
+			} else {
+				netRat = new(big.Rat).Sub(rhsR, ecR)
+				var okNet bool
+				netRHS, okNet = ratToFiniteFloat(netRat)
+				if !okNet {
+					rhsBad = true
+				}
+			}
 		}
 		if firstErr == nil {
 			if !c.sense.valid() {
@@ -581,20 +764,29 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 				}
 			}
 		}
-		rhsHi, rhsLo := twoSumExact(c.rhs, -c.exprConst)
-		if rhsBad {
+		var rhsHi, rhsLo float64
+		if rowHasConstRat {
 			rhsHi = netRHS
 			rhsLo = 0
+		} else {
+			rhsHi, rhsLo = twoSumExact(c.rhs, -c.exprConst)
+			if rhsBad {
+				rhsHi = netRHS
+				rhsLo = 0
+			}
 		}
 
 		cTerms := m.conTerms[c.termStart:c.termEnd]
-		var sorted, rowHasDupLoss bool
-		touched, sorted, rowHasDupLoss, err = m.accumulateTerms(cTerms, false, c.name, abortOnErr, &firstErr, inTouched, touched[:0], rowAcc)
+		var sorted, rowHasDupLoss, rowHasRat bool
+		touched, sorted, rowHasDupLoss, rowHasRat, err = m.accumulateTerms(cTerms, false, c.name, abortOnErr, &firstErr, inTouched, touched[:0], rowAcc)
 		if err != nil {
 			return nil, err
 		}
 		if !sorted {
 			slices.Sort(touched)
+		}
+		if rowHasRat {
+			anyRowExactRat = true
 		}
 
 		p.rowPtr[i] = len(p.colIdx)
@@ -621,9 +813,37 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		}
 
 		tightRHS := rhsHi
+		var intTightRat *big.Rat
 		intTightened := false
 		intEqInfeas := false
-		if !rhsBad && rhsLo != 0 && allIntExactCoeffs &&
+		if rowHasRat || rowHasConstRat {
+			if !rhsBad && rowHasExactIntCoeffs(m, cTerms, touched) {
+				if netRat == nil {
+					rhsR, okR := exactRatFromFloat(c.rhs)
+					ecR, okE := exactRatFromFloat(c.exprConst)
+					if okR && okE {
+						netRat = new(big.Rat).Sub(rhsR, ecR)
+					}
+				}
+				if netRat != nil && !netRat.IsInt() {
+					switch c.sense {
+					case LessEqual:
+						intTightRat = new(big.Rat).SetInt(floorExactRat(netRat))
+						tightRHS = exactRatToFloatCeil(intTightRat)
+						intTightened = true
+						anyIntTightened = true
+					case GreaterEqual:
+						intTightRat = new(big.Rat).SetInt(ceilExactRat(netRat))
+						tightRHS = exactRatToFloatFloor(intTightRat)
+						intTightened = true
+						anyIntTightened = true
+					case Equal:
+						intEqInfeas = true
+						anyIntEqInfeas = true
+					}
+				}
+			}
+		} else if !rhsBad && rhsLo != 0 && allIntExactCoeffs &&
 			math.Abs(rhsLo) < 1 && math.Trunc(rhsHi) == rhsHi && math.Abs(rhsHi) <= 0x1p52 {
 			switch c.sense {
 			case LessEqual:
@@ -650,17 +870,38 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		switch c.sense {
 		case LessEqual:
 			p.rowLB[i] = math.Inf(-1)
-			p.rowUB[i] = rhsHi
+			if rowHasConstRat && !rhsBad && netRat != nil {
+				ceilF := exactRatToFloatCeil(netRat)
+				p.rowUB[i] = ceilF
+				if ceilF != rhsHi {
+					anyExactOutward = true
+				}
+			} else {
+				p.rowUB[i] = rhsHi
+			}
 		case GreaterEqual:
-			p.rowLB[i] = rhsHi
+			if rowHasConstRat && !rhsBad && netRat != nil {
+				floorF := exactRatToFloatFloor(netRat)
+				p.rowLB[i] = floorF
+				if floorF != rhsHi {
+					anyExactOutward = true
+				}
+			} else {
+				p.rowLB[i] = rhsHi
+			}
 			p.rowUB[i] = math.Inf(1)
 		case Equal:
-			p.rowLB[i] = rhsHi
-			p.rowUB[i] = rhsHi
+			if rowHasConstRat && !rhsBad && netRat != nil {
+				p.rowLB[i] = exactRatToFloatFloor(netRat)
+				p.rowUB[i] = exactRatToFloatCeil(netRat)
+			} else {
+				p.rowLB[i] = rhsHi
+				p.rowUB[i] = rhsHi
+			}
 		}
 
-		rhsInexact := !rhsBad && rhsLo != 0
-		if rhsInexact || rowHasDupLoss || intTightened || intEqInfeas {
+		rhsInexact := !rhsBad && rhsLo != 0 && !rowHasConstRat
+		if rhsInexact || rowHasDupLoss || rowHasRat || rowHasConstRat || intTightened || intEqInfeas {
 			anyRowInexact = true
 			if origRows == nil {
 				origRows = make([]exactModelRow, mc)
@@ -668,18 +909,35 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 			rowMeta := exactModelRow{
 				rhs:          c.rhs,
 				exprConst:    c.exprConst,
+				rhsRat:       cloneRat(c.rhsRat),
+				exprConstRat: cloneRat(c.exprConstRat),
 				intTightRHS:  tightRHS,
+				intTightRat:  intTightRat,
 				hasDupLoss:   rowHasDupLoss,
+				hasRatTerms:  rowHasRat,
 				rhsInexact:   rhsInexact,
 				intTightened: intTightened,
 				intEqInfeas:  intEqInfeas,
 			}
-			if rowHasDupLoss {
+			if rowHasDupLoss || rowHasRat {
 				rowMeta.termStart = len(origRowTerms)
 				for _, t := range cTerms {
-					if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
-						origRowTerms = append(origRowTerms, exactModelTerm{col: col, coeff: t.Coeff})
+					col, ok := m.validVar(t.Var)
+					if !ok || math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+						continue
 					}
+					if t.rat != nil {
+						if t.rat.Sign() == 0 {
+							continue
+						}
+					} else if t.Coeff == 0 {
+						continue
+					}
+					origRowTerms = append(origRowTerms, exactModelTerm{
+						col:      col,
+						coeff:    t.Coeff,
+						coeffRat: cloneRat(t.rat),
+					})
 				}
 				rowMeta.termEnd = len(origRowTerms)
 			}
@@ -687,21 +945,41 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 		}
 	}
 	p.rowPtr[mc] = len(p.colIdx)
-	if objHasDupLoss || anyRowInexact {
+	hasExactRat := m.objConstRat != nil || objHasRat || anyVarRat || anyRowExactRat
+	if objHasDupLoss || objHasRat || hasExactRat || anyRowInexact || anyVarIntTightened {
 		eo := &exactModelOrig{
 			objConst:        m.objConst,
+			objConstRat:     cloneRat(m.objConstRat),
 			objHasLoss:      objHasDupLoss,
+			objHasRat:       objHasRat,
 			rows:            origRows,
 			rowTerms:        origRowTerms,
+			varLBRat:        varLBRat,
+			varUBRat:        varUBRat,
+			hasExactRat:     hasExactRat,
 			intEqInfeas:     anyIntEqInfeas,
-			hasIntTightened: anyIntTightened,
+			hasIntTightened: anyIntTightened || anyVarIntTightened,
+			hasExactOutward: anyExactOutward,
 		}
-		if objHasDupLoss {
+		if objHasDupLoss || objHasRat {
 			eo.objTerms = make([]exactModelTerm, 0, len(m.objTerms))
 			for _, t := range m.objTerms {
-				if col, ok := m.validVar(t.Var); ok && !math.IsNaN(t.Coeff) && !math.IsInf(t.Coeff, 0) && t.Coeff != 0 {
-					eo.objTerms = append(eo.objTerms, exactModelTerm{col: col, coeff: t.Coeff})
+				col, ok := m.validVar(t.Var)
+				if !ok || math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+					continue
 				}
+				if t.rat != nil {
+					if t.rat.Sign() == 0 {
+						continue
+					}
+				} else if t.Coeff == 0 {
+					continue
+				}
+				eo.objTerms = append(eo.objTerms, exactModelTerm{
+					col:      col,
+					coeff:    t.Coeff,
+					coeffRat: cloneRat(t.rat),
+				})
 			}
 		}
 		p.exactOrig = eo
@@ -711,6 +989,55 @@ func (m *Model) compile(abortOnErr bool) (*CompiledProblem, error) {
 	buildCSCFromCSR(p)
 
 	return p, firstErr
+}
+
+func rowHasExactIntCoeffs(m *Model, cTerms []Term, touched []int) bool {
+	if len(touched) == 0 {
+		return true
+	}
+	acc := make(map[int]*big.Rat, len(touched))
+	for _, col := range touched {
+		if m.vars[col].cat == Continuous {
+			return false
+		}
+	}
+	for _, t := range cTerms {
+		col, ok := m.validVar(t.Var)
+		if !ok || math.IsNaN(t.Coeff) || math.IsInf(t.Coeff, 0) {
+			continue
+		}
+		var rv *big.Rat
+		if t.rat != nil {
+			if t.rat.Sign() == 0 {
+				continue
+			}
+			rv = t.rat
+		} else {
+			if t.Coeff == 0 {
+				continue
+			}
+			var okF bool
+			rv, okF = exactRatFromFloat(t.Coeff)
+			if !okF {
+				return false
+			}
+		}
+		if m.vars[col].cat == Continuous {
+			return false
+		}
+		cur := acc[col]
+		if cur == nil {
+			cur = new(big.Rat)
+			acc[col] = cur
+		}
+		cur.Add(cur, rv)
+	}
+	for _, v := range acc {
+		if v != nil && v.Sign() != 0 && !v.IsInt() {
+			return false
+		}
+	}
+	return true
 }
 
 // ObjectiveFromMin converts an internal minimized objective value back to the

@@ -338,6 +338,9 @@ func syncAllDocs(corpusDir, pyPath, scalarPath, simdPath, reportPath string, che
 			return fmt.Errorf("missing required documentation file %s", path)
 		}
 	}
+	if err := bench.SyncFormalDocs(".", checkOnly); err != nil {
+		return err
+	}
 	return nil
 }
 

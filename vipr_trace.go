@@ -453,8 +453,7 @@ func buildVIPRRatProblem(p *CompiledProblem) (*viprRatProblem, bool) {
 	}
 	n := p.numVars
 	m := p.numConstraints
-	constMin := p.objConstMin()
-	objConst, ok := exactRatFromFloat(constMin)
+	objConst, ok := exactObjConstMinRat(p)
 	if !ok {
 		return nil, false
 	}
@@ -478,19 +477,18 @@ func buildVIPRRatProblem(p *CompiledProblem) (*viprRatProblem, bool) {
 	}
 	for j := range n {
 		rp.isInt[j] = p.varCat[j] != Continuous
-		lo, hi := p.varLB[j], p.varUB[j]
-		if !math.IsInf(lo, -1) {
-			lr, okL := exactRatFromFloat(lo)
-			if !okL {
-				return nil, false
-			}
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		if !okL {
+			return nil, false
+		}
+		if hasLB {
 			rp.lb[j] = lr
 		}
-		if !math.IsInf(hi, 1) {
-			ur, okU := exactRatFromFloat(hi)
-			if !okU {
-				return nil, false
-			}
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if !okU {
+			return nil, false
+		}
+		if hasUB {
 			rp.ub[j] = ur
 		}
 	}
@@ -2003,6 +2001,17 @@ func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *ba
 		root:        &viprTreeNode{kind: viprNodeOpen},
 		disableSIMD: disableSIMD,
 	}
+	if !rec.initExactRootTightenings(origP) {
+		return &babVIPRRecorder{trace: tr, invalid: true}
+	}
+	return rec
+}
+
+func (r *babVIPRRecorder) initExactRootTightenings(origP *CompiledProblem) bool {
+	if r == nil || r.rp == nil || origP == nil {
+		return false
+	}
+	rp := r.rp
 	if eo := origP.exactOrig; eo != nil && len(eo.rows) == rp.m {
 		var rounded []int
 		for i := range rp.m {
@@ -2015,12 +2024,18 @@ func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *ba
 					rounded[j] = -1
 				}
 			}
-			tightRHS, okT := exactRatFromFloat(eo.rows[i].intTightRHS)
-			if !okT {
-				return &babVIPRRecorder{trace: tr, invalid: true}
+			var tightRHS *big.Rat
+			if eo.rows[i].intTightRat != nil {
+				tightRHS = new(big.Rat).Set(eo.rows[i].intTightRat)
+			} else {
+				var okT bool
+				tightRHS, okT = exactRatFromFloat(eo.rows[i].intTightRHS)
+				if !okT {
+					return false
+				}
 			}
-			cutID := len(rec.allCuts)
-			rec.allCuts = append(rec.allCuts, viprGlobalCut{
+			cutID := len(r.allCuts)
+			r.allCuts = append(r.allCuts, viprGlobalCut{
 				cols: slices.Clone(rp.rowCols[i]),
 				vals: cloneRatSlice(rp.rowVals[i]),
 				rhs:  tightRHS,
@@ -2030,9 +2045,32 @@ func newBabVIPRRecorder(tr *VIPRTrace, p *CompiledProblem, disableSIMD bool) *ba
 			})
 			rounded[i] = cutID
 		}
-		rec.roundedBaseRow = rounded
+		r.roundedBaseRow = rounded
 	}
-	return rec
+	for j := range rp.n {
+		if !rp.isInt[j] {
+			continue
+		}
+		if rp.lb[j] != nil && !rp.lb[j].IsInt() {
+			r.root.propSteps = append(r.root.propSteps, viprPropStep{
+				rowIdx:   -1,
+				col:      j,
+				isUpper:  false,
+				roundInt: true,
+				bound:    viprRatCeil(rp.lb[j]),
+			})
+		}
+		if rp.ub[j] != nil && !rp.ub[j].IsInt() {
+			r.root.propSteps = append(r.root.propSteps, viprPropStep{
+				rowIdx:   -1,
+				col:      j,
+				isUpper:  true,
+				roundInt: true,
+				bound:    viprRatFloor(rp.ub[j]),
+			})
+		}
+	}
+	return true
 }
 
 func (r *babVIPRRecorder) close() {
@@ -6791,6 +6829,15 @@ func (tr *VIPRTrace) recordPresolveInfeasible(p *CompiledProblem, disableSIMD bo
 		disableSIMD: disableSIMD,
 	}
 	defer rec.close()
+	if !rec.initExactRootTightenings(origP) {
+		return
+	}
+	if rec.checkNodeBoundConflict(rec.root) {
+		rec.finalize(Result{Status: StatusInfeasible})
+		if tr.hasCert {
+			return
+		}
+	}
 	if feas, _ := rec.propagateNode(rec.root, nil, nil, rootPropPasses); !feas {
 		rec.finalize(Result{Status: StatusInfeasible})
 		if tr.hasCert {

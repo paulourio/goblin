@@ -19,6 +19,8 @@ const (
 	rootCutsRowDiv           = 3
 	minCutRoundImprov        = 1e-3
 	maxStagnantCutRound      = 2
+	maxSpeculativeCutRounds  = 6
+	specReboundMinImprov     = 2.5 * minCutRoundImprov
 	cutDimReturnMinExtraRows = 64
 	cutDimReturnImprov       = 1.5e-3
 	cutDimReturnMaxRounds    = 2
@@ -1180,6 +1182,8 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 	lpSolver := b.lpSolver
 	stagnantRounds := 0
 	dimReturnRounds := 0
+	speculative := false
+	specRounds := 0
 	maxCutsPerRound := min(maxRootCutsCap, max(minRootCutsFloor, p.numConstraints/rootCutsRowDiv))
 	largePoolThresh := max(cutDimReturnMinExtraRows, p.numConstraints)
 	var anchorSnap lpSnapshot
@@ -1187,7 +1191,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 	anchorLPRes := curLPRes
 	anchorCuts := 0
 
-	for range b.opts.MaxCutPasses {
+	for pass := range b.opts.MaxCutPasses {
 		if b.timeExpired() {
 			break
 		}
@@ -1259,6 +1263,7 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 			if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 				b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
 				if b.bestPrimal != nil && !b.strictExactVIPRGap() && b.gapClosed(nextMin, b.bestObjMin, b.opts.RelGapTol) {
+					speculative = false
 					anchorLPRes = curLPRes
 					anchorCuts = b.cutsAdded
 					break
@@ -1267,21 +1272,40 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 		}
 
 		zeroGainTol := b.rootCutZeroGainTol(prevObj)
-		if nextMin-prevObj > zeroGainTol {
-			anchorLPRes = curLPRes
-			anchorCuts = b.cutsAdded
-		} else if anchorCuts == 0 {
-			break
-		}
-
 		improvement := (nextMin - prevObj) / max(1.0, math.Abs(prevObj))
-		if improvement < minCutRoundImprov {
-			stagnantRounds++
-			if stagnantRounds >= maxStagnantCutRound {
+		if !speculative {
+			if nextMin-prevObj > zeroGainTol {
+				anchorLPRes = curLPRes
+				anchorCuts = b.cutsAdded
+			} else if anchorCuts == 0 {
 				break
 			}
+			if improvement < minCutRoundImprov {
+				stagnantRounds++
+				if stagnantRounds >= maxStagnantCutRound {
+					// Pure-integer small models skip in-tree cuts and can exhibit steep
+					// multi-round GMI jumps, so probe cheap root rounds speculatively
+					// while the cut pool is still below structural row count.
+					if pass+1 < b.opts.MaxCutPasses && b.vipr == nil && p.numVars < inTreeCutMinVars && len(p.intCols) == p.numVars && len(lpSolver.extraRows) < p.numConstraints && nextMin-prevObj > zeroGainTol {
+						speculative = true
+					} else {
+						break
+					}
+				}
+			} else {
+				stagnantRounds = 0
+			}
 		} else {
-			stagnantRounds = 0
+			specRounds++
+			if improvement >= specReboundMinImprov {
+				speculative = false
+				specRounds = 0
+				stagnantRounds = 0
+				anchorLPRes = curLPRes
+				anchorCuts = b.cutsAdded
+			} else if nextMin-prevObj <= zeroGainTol || specRounds >= maxSpeculativeCutRounds {
+				break
+			}
 		}
 
 		// Stop early on basis bloat. Large cut pools need meaningful bound progress.
@@ -1299,13 +1323,20 @@ func (b *babEngine) runRootCutLoop(rootRes LPResult) LPResult {
 	}
 	curEndMin := b.lpSearchMin(curLPRes)
 	anchorEndMin := b.lpSearchMin(anchorLPRes)
-	if curEndMin-anchorEndMin <= b.rootCutZeroGainTol(anchorEndMin) && b.cutsAdded > anchorCuts {
+	if (speculative || curEndMin-anchorEndMin <= b.rootCutZeroGainTol(anchorEndMin)) && b.cutsAdded > anchorCuts {
 		lpSolver.restore(anchorSnap)
 		if b.vipr != nil {
 			b.vipr.restoreActiveCuts(anchorCutSnap)
 		}
 		curLPRes = anchorLPRes
 		b.cutsAdded = anchorCuts
+		if len(lpSolver.extraRows) > 0 && b.capLPIter(lpSolver, b.defaultLPIter) {
+			resyncRes := lpSolver.Solve()
+			b.totalLPIters += resyncRes.Iterations
+			if b.vipr != nil && resyncRes.Status == StatusOptimal {
+				b.vipr.recordNodeDual(b.vipr.rootNode(), lpSolver, resyncRes)
+			}
+		}
 	}
 	if len(lpSolver.extraRows) > 0 {
 		if b.vipr != nil {

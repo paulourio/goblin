@@ -4450,18 +4450,26 @@ func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
 	}
 	n := orig.numVars
 	m := orig.numConstraints
-	constMin := orig.objConstMin()
-	objConstRat, ok := exactRatFromFloat(constMin)
+	objConstRat, ok := exactObjConstMinRat(orig)
 	if !ok {
 		return nil, false
+	}
+	constMin := exactRatToFloat(objConstRat)
+	objMinVec, okObj := exactMinObjVecRat(orig)
+	if !okObj {
+		return nil, false
+	}
+	objF := make([]float64, n)
+	for j := range n {
+		objF[j] = exactRatToFloat(objMinVec[j])
 	}
 	st := &viprPresolveState{
 		orig:        orig,
 		n:           n,
 		objConstRat: objConstRat,
 		objConstF:   constMin,
-		objRat:      make([]*big.Rat, n),
-		objF:        slices.Clone(orig.objMin),
+		objRat:      objMinVec,
+		objF:        objF,
 		isInt:       make([]bool, n),
 		lbRat:       make([]*big.Rat, n),
 		ubRat:       make([]*big.Rat, n),
@@ -4470,46 +4478,36 @@ func newVIPRPresolveState(orig *CompiledProblem) (*viprPresolveState, bool) {
 		rows:        make([]viprPresolveRow, m),
 	}
 	for j := range n {
-		c, okC := exactRatFromFloat(orig.objMin[j])
-		if !okC {
+		st.isInt[j] = orig.varCat[j] != Continuous
+		hasLB, lr, okL := exactVarLBRat(orig, j)
+		if !okL {
 			return nil, false
 		}
-		st.objRat[j] = c
-		st.isInt[j] = orig.varCat[j] != Continuous
-		if !math.IsInf(st.lbF[j], -1) {
-			lr, okL := exactRatFromFloat(st.lbF[j])
-			if !okL {
-				return nil, false
-			}
+		if hasLB {
 			st.lbRat[j] = lr
-		}
-		if !math.IsInf(st.ubF[j], 1) {
-			ur, okU := exactRatFromFloat(st.ubF[j])
-			if !okU {
-				return nil, false
+			if orig.exactOrig != nil {
+				st.lbF[j] = exactRatToFloatFloor(lr)
 			}
+		}
+		hasUB, ur, okU := exactVarUBRat(orig, j)
+		if !okU {
+			return nil, false
+		}
+		if hasUB {
 			st.ubRat[j] = ur
+			if orig.exactOrig != nil {
+				st.ubF[j] = exactRatToFloatCeil(ur)
+			}
 		}
 	}
 	for i := range m {
-		rhs, okR := exactRatFromFloat(orig.rowRHS[i])
+		rhs, okR := exactRowRHSRat(orig, i)
 		if !okR {
 			return nil, false
 		}
-		rs, re := orig.rowPtr[i], orig.rowPtr[i+1]
-		cols := make([]int, 0, re-rs)
-		vals := make([]*big.Rat, 0, re-rs)
-		for k := rs; k < re; k++ {
-			v := orig.rowVal[k]
-			if v == 0 {
-				continue
-			}
-			vr, okV := exactRatFromFloat(v)
-			if !okV {
-				return nil, false
-			}
-			cols = append(cols, orig.colIdx[k])
-			vals = append(vals, vr)
+		cols, vals, okC := exactCanonicalRowTermsRat(orig, i)
+		if !okC {
+			return nil, false
 		}
 		st.rows[i] = viprPresolveRow{
 			name:   orig.rowNames[i],
@@ -4594,20 +4592,23 @@ func (st *viprPresolveState) buildCompiled() (*CompiledProblem, []int) {
 		if !r.active {
 			continue
 		}
-		rhsF, _ := r.rhs.Float64()
+		rhsFloor := exactRatToFloatFloor(r.rhs)
+		rhsCeil := exactRatToFloatCeil(r.rhs)
 		red.rowNames[rowOut] = r.name
 		red.rowSense[rowOut] = r.sense
-		red.rowRHS[rowOut] = rhsF
 		switch r.sense {
 		case LessEqual:
+			red.rowRHS[rowOut] = rhsCeil
 			red.rowLB[rowOut] = math.Inf(-1)
-			red.rowUB[rowOut] = rhsF
+			red.rowUB[rowOut] = rhsCeil
 		case GreaterEqual:
-			red.rowLB[rowOut] = rhsF
+			red.rowRHS[rowOut] = rhsFloor
+			red.rowLB[rowOut] = rhsFloor
 			red.rowUB[rowOut] = math.Inf(1)
 		case Equal:
-			red.rowLB[rowOut] = rhsF
-			red.rowUB[rowOut] = rhsF
+			red.rowRHS[rowOut] = exactRatToFloat(r.rhs)
+			red.rowLB[rowOut] = rhsFloor
+			red.rowUB[rowOut] = rhsCeil
 		}
 		rowStart := len(red.colIdx)
 		red.rowPtr[rowOut] = rowStart
@@ -4669,7 +4670,24 @@ func (st *viprPresolveState) buildCompiled() (*CompiledProblem, []int) {
 	for j := range n {
 		cat := orig.varCat[j]
 		if cat == Integer && red.varLB[j] >= 0 && red.varUB[j] <= 1 && red.varLB[j] <= red.varUB[j] {
-			cat = Binary
+			promote := true
+			if st.lbRat[j] != nil {
+				lbInt := ceilExactRat(st.lbRat[j])
+				if lbInt.Sign() < 0 || lbInt.Cmp(big.NewInt(1)) > 0 {
+					promote = false
+				}
+			}
+			if promote && st.ubRat[j] != nil {
+				ubInt := floorExactRat(st.ubRat[j])
+				if ubInt.Sign() < 0 || ubInt.Cmp(big.NewInt(1)) > 0 {
+					promote = false
+				} else if st.lbRat[j] != nil && ceilExactRat(st.lbRat[j]).Cmp(ubInt) > 0 {
+					promote = false
+				}
+			}
+			if promote {
+				cat = Binary
+			}
 		}
 		red.varCat[j] = cat
 		if cat != Continuous {
@@ -4677,6 +4695,94 @@ func (st *viprPresolveState) buildCompiled() (*CompiledProblem, []int) {
 			if cat == Binary {
 				red.binaryMask[j/bitsPerWord] |= 1 << (uint(j) % bitsPerWord)
 			}
+		}
+	}
+	if orig.exactOrig != nil {
+		var varLBRat, varUBRat []*big.Rat
+		anyVarIntTightened := false
+		for j := range n {
+			if st.lbRat[j] != nil {
+				if varLBRat == nil {
+					varLBRat = make([]*big.Rat, n)
+				}
+				varLBRat[j] = new(big.Rat).Set(st.lbRat[j])
+				if red.varCat[j] != Continuous && !st.lbRat[j].IsInt() {
+					anyVarIntTightened = true
+				}
+			}
+			if st.ubRat[j] != nil {
+				if varUBRat == nil {
+					varUBRat = make([]*big.Rat, n)
+				}
+				varUBRat[j] = new(big.Rat).Set(st.ubRat[j])
+				if red.varCat[j] != Continuous && !st.ubRat[j].IsInt() {
+					anyVarIntTightened = true
+				}
+			}
+		}
+		var objUserConstRat *big.Rat
+		if st.objConstRat != nil {
+			if sense == Maximize {
+				objUserConstRat = new(big.Rat).Neg(st.objConstRat)
+			} else {
+				objUserConstRat = new(big.Rat).Set(st.objConstRat)
+			}
+		}
+		var objTerms []exactModelTerm
+		for j := range n {
+			if st.objRat[j] == nil || st.objRat[j].Sign() == 0 {
+				continue
+			}
+			cr := new(big.Rat).Set(st.objRat[j])
+			if sense == Maximize {
+				cr.Neg(cr)
+			}
+			objTerms = append(objTerms, exactModelTerm{
+				col:      j,
+				coeff:    red.objCoeffs[j],
+				coeffRat: cr,
+			})
+		}
+		origRows := make([]exactModelRow, mc)
+		var origRowTerms []exactModelTerm
+		rowOutIdx := 0
+		for i := range st.rows {
+			r := &st.rows[i]
+			if !r.active {
+				continue
+			}
+			ts := len(origRowTerms)
+			for k, col := range r.cols {
+				if r.vals[k] == nil || r.vals[k].Sign() == 0 {
+					continue
+				}
+				vf, _ := r.vals[k].Float64()
+				origRowTerms = append(origRowTerms, exactModelTerm{
+					col:      col,
+					coeff:    vf,
+					coeffRat: new(big.Rat).Set(r.vals[k]),
+				})
+			}
+			origRows[rowOutIdx] = exactModelRow{
+				termStart:   ts,
+				termEnd:     len(origRowTerms),
+				rhs:         red.rowRHS[rowOutIdx],
+				rhsRat:      new(big.Rat).Set(r.rhs),
+				hasRatTerms: true,
+			}
+			rowOutIdx++
+		}
+		red.exactOrig = &exactModelOrig{
+			objConst:        red.objConstant,
+			objConstRat:     objUserConstRat,
+			objHasRat:       true,
+			objTerms:        objTerms,
+			rows:            origRows,
+			rowTerms:        origRowTerms,
+			varLBRat:        varLBRat,
+			varUBRat:        varUBRat,
+			hasExactRat:     true,
+			hasIntTightened: anyVarIntTightened,
 		}
 	}
 	return red, rowMap

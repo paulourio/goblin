@@ -206,13 +206,69 @@ func cloneRatSlice(src []*big.Rat) []*big.Rat {
 	return out
 }
 
+func exactObjConstMinRat(p *CompiledProblem) (*big.Rat, bool) {
+	if p == nil {
+		return nil, false
+	}
+	if eo := p.exactOrig; eo != nil && eo.objConstRat != nil {
+		if p.sense == Maximize {
+			return new(big.Rat).Neg(eo.objConstRat), true
+		}
+		return new(big.Rat).Set(eo.objConstRat), true
+	}
+	return exactRatFromFloat(p.objConstMin())
+}
+
+func exactVarLBRat(p *CompiledProblem, j int) (hasLB bool, lb *big.Rat, ok bool) {
+	if p == nil || j < 0 || j >= p.numVars || j >= len(p.varLB) {
+		return false, nil, false
+	}
+	if eo := p.exactOrig; eo != nil && j < len(eo.varLBRat) && eo.varLBRat[j] != nil {
+		return true, new(big.Rat).Set(eo.varLBRat[j]), true
+	}
+	lo := p.varLB[j]
+	if math.IsNaN(lo) || math.IsInf(lo, 1) {
+		return false, nil, false
+	}
+	if math.IsInf(lo, -1) {
+		return false, nil, true
+	}
+	r, okR := exactRatFromFloat(lo)
+	return true, r, okR
+}
+
+func exactVarUBRat(p *CompiledProblem, j int) (hasUB bool, ub *big.Rat, ok bool) {
+	if p == nil || j < 0 || j >= p.numVars || j >= len(p.varUB) {
+		return false, nil, false
+	}
+	if eo := p.exactOrig; eo != nil && j < len(eo.varUBRat) && eo.varUBRat[j] != nil {
+		return true, new(big.Rat).Set(eo.varUBRat[j]), true
+	}
+	hi := p.varUB[j]
+	if math.IsNaN(hi) || math.IsInf(hi, -1) {
+		return false, nil, false
+	}
+	if math.IsInf(hi, 1) {
+		return false, nil, true
+	}
+	r, okR := exactRatFromFloat(hi)
+	return true, r, okR
+}
+
+func exactModelTermRat(t exactModelTerm) (*big.Rat, bool) {
+	if t.coeffRat != nil {
+		return t.coeffRat, true
+	}
+	return exactRatFromFloat(t.coeff)
+}
+
 func exactMinObjVecRat(p *CompiledProblem) ([]*big.Rat, bool) {
 	if p == nil {
 		return nil, false
 	}
 	n := p.numVars
 	out := make([]*big.Rat, n)
-	if eo := p.exactOrig; eo != nil && eo.objHasLoss {
+	if eo := p.exactOrig; eo != nil && (eo.objHasLoss || eo.objHasRat) {
 		for j := range n {
 			out[j] = new(big.Rat)
 		}
@@ -220,7 +276,7 @@ func exactMinObjVecRat(p *CompiledProblem) ([]*big.Rat, bool) {
 			if t.col < 0 || t.col >= n {
 				return nil, false
 			}
-			rv, ok := exactRatFromFloat(t.coeff)
+			rv, ok := exactModelTermRat(t)
 			if !ok {
 				return nil, false
 			}
@@ -249,17 +305,38 @@ func exactRowRHSRat(p *CompiledProblem, i int) (*big.Rat, bool) {
 	if p == nil || i < 0 || i >= p.numConstraints {
 		return nil, false
 	}
-	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && eo.rows[i].rhsInexact {
+	if eo := p.exactOrig; eo != nil && i < len(eo.rows) {
 		er := eo.rows[i]
-		r, okR := exactRatFromFloat(er.rhs)
-		if !okR {
-			return nil, false
+		if er.rhsRat != nil || er.exprConstRat != nil {
+			rhsR := er.rhsRat
+			if rhsR == nil {
+				var okR bool
+				rhsR, okR = exactRatFromFloat(er.rhs)
+				if !okR {
+					return nil, false
+				}
+			}
+			ecR := er.exprConstRat
+			if ecR == nil {
+				var okE bool
+				ecR, okE = exactRatFromFloat(er.exprConst)
+				if !okE {
+					return nil, false
+				}
+			}
+			return new(big.Rat).Sub(rhsR, ecR), true
 		}
-		ec, okE := exactRatFromFloat(er.exprConst)
-		if !okE {
-			return nil, false
+		if er.rhsInexact {
+			r, okR := exactRatFromFloat(er.rhs)
+			if !okR {
+				return nil, false
+			}
+			ec, okE := exactRatFromFloat(er.exprConst)
+			if !okE {
+				return nil, false
+			}
+			return new(big.Rat).Sub(r, ec), true
 		}
-		return new(big.Rat).Sub(r, ec), true
 	}
 	return exactRatFromFloat(p.rowRHS[i])
 }
@@ -268,7 +345,7 @@ func exactCanonicalRowTermsRat(p *CompiledProblem, i int) ([]int, []*big.Rat, bo
 	if p == nil || i < 0 || i >= p.numConstraints {
 		return nil, nil, false
 	}
-	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && eo.rows[i].hasDupLoss {
+	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasDupLoss || eo.rows[i].hasRatTerms) {
 		er := eo.rows[i]
 		acc := make(map[int]*big.Rat, er.termEnd-er.termStart)
 		cols := make([]int, 0, er.termEnd-er.termStart)
@@ -276,7 +353,7 @@ func exactCanonicalRowTermsRat(p *CompiledProblem, i int) ([]int, []*big.Rat, bo
 			if t.col < 0 || t.col >= p.numVars {
 				return nil, nil, false
 			}
-			rv, ok := exactRatFromFloat(t.coeff)
+			rv, ok := exactModelTermRat(t)
 			if !ok {
 				return nil, nil, false
 			}
@@ -320,16 +397,22 @@ func exactCanonicalRowTermsRat(p *CompiledProblem, i int) ([]int, []*big.Rat, bo
 func exactEvalRowActivityRat(p *CompiledProblem, i int, x []*big.Rat) (*big.Rat, bool) {
 	act := new(big.Rat)
 	var prod big.Rat
-	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && eo.rows[i].hasDupLoss {
+	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasDupLoss || eo.rows[i].hasRatTerms) {
 		er := eo.rows[i]
 		for _, t := range eo.rowTerms[er.termStart:er.termEnd] {
 			if t.col < 0 || t.col >= len(x) {
 				return nil, false
 			}
-			if t.coeff == 0 || x[t.col].Sign() == 0 {
+			if x[t.col].Sign() == 0 {
 				continue
 			}
-			av, ok := exactRatFromFloat(t.coeff)
+			if t.coeffRat == nil && t.coeff == 0 {
+				continue
+			}
+			if t.coeffRat != nil && t.coeffRat.Sign() == 0 {
+				continue
+			}
+			av, ok := exactModelTermRat(t)
 			if !ok {
 				return nil, false
 			}
@@ -361,16 +444,19 @@ func exactEvalRowDualActivityRat(p *CompiledProblem, i int, x0, d []*big.Rat) (a
 	actX = new(big.Rat)
 	actD = new(big.Rat)
 	var prod big.Rat
-	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && eo.rows[i].hasDupLoss {
+	if eo := p.exactOrig; eo != nil && i < len(eo.rows) && (eo.rows[i].hasDupLoss || eo.rows[i].hasRatTerms) {
 		er := eo.rows[i]
 		for _, t := range eo.rowTerms[er.termStart:er.termEnd] {
 			if t.col < 0 || t.col >= len(x0) || t.col >= len(d) {
 				return nil, nil, false
 			}
-			if t.coeff == 0 {
+			if t.coeffRat == nil && t.coeff == 0 {
 				continue
 			}
-			av, okA := exactRatFromFloat(t.coeff)
+			if t.coeffRat != nil && t.coeffRat.Sign() == 0 {
+				continue
+			}
+			av, okA := exactModelTermRat(t)
 			if !okA {
 				return nil, nil, false
 			}
@@ -448,7 +534,13 @@ func buildExactSolverSnapshot(stop exactStop, s *LPSolver) (*exactSolverSnapshot
 		return nil, false
 	}
 
-	objConstM, ok := exactRatFromFloat(p.objConstMinVal)
+	var objConstM *big.Rat
+	var ok bool
+	if p.exactOrig != nil && p.exactOrig.objConstRat != nil {
+		objConstM, ok = exactObjConstMinRat(p)
+	} else {
+		objConstM, ok = exactRatFromFloat(p.objConstMinVal)
+	}
 	if !ok {
 		return nil, false
 	}
@@ -502,18 +594,26 @@ func buildExactSolverSnapshot(stop exactStop, s *LPSolver) (*exactSolverSnapshot
 			return nil, false
 		}
 		if !math.IsInf(loF, -1) {
-			lr, okL := exactRatFromFloat(loF)
-			if !okL {
-				return nil, false
+			if eo := p.exactOrig; eo != nil && j < len(eo.varLBRat) && eo.varLBRat[j] != nil && j < len(p.varLB) && loF == p.varLB[j] {
+				snap.lb[j] = new(big.Rat).Set(eo.varLBRat[j])
+			} else {
+				lr, okL := exactRatFromFloat(loF)
+				if !okL {
+					return nil, false
+				}
+				snap.lb[j] = lr
 			}
-			snap.lb[j] = lr
 		}
 		if !math.IsInf(hiF, 1) {
-			ur, okU := exactRatFromFloat(hiF)
-			if !okU {
-				return nil, false
+			if eo := p.exactOrig; eo != nil && j < len(eo.varUBRat) && eo.varUBRat[j] != nil && j < len(p.varUB) && hiF == p.varUB[j] {
+				snap.ub[j] = new(big.Rat).Set(eo.varUBRat[j])
+			} else {
+				ur, okU := exactRatFromFloat(hiF)
+				if !okU {
+					return nil, false
+				}
+				snap.ub[j] = ur
 			}
-			snap.ub[j] = ur
 		}
 
 		if exactCRows != nil {
@@ -2021,7 +2121,13 @@ func ExactSafeDualBound(p *CompiledProblem, dualMin []*big.Rat) (*big.Rat, bool)
 	}
 	n := p.numVars
 	m := p.numConstraints
-	objConst, ok := exactRatFromFloat(p.objConstMinVal)
+	var objConst *big.Rat
+	var ok bool
+	if p.exactOrig != nil && p.exactOrig.objConstRat != nil {
+		objConst, ok = exactObjConstMinRat(p)
+	} else {
+		objConst, ok = exactRatFromFloat(p.objConstMinVal)
+	}
 	if !ok {
 		return nil, false
 	}
@@ -2077,21 +2183,15 @@ func ExactSafeDualBound(p *CompiledProblem, dualMin []*big.Rat) (*big.Rat, bool)
 		for j := range n {
 			rc.Sub(objMinVec[j], colDots[j])
 			if rc.Sign() > 0 {
-				if math.IsInf(p.varLB[j], -1) {
-					return nil, false
-				}
-				lb, okL := exactRatFromFloat(p.varLB[j])
-				if !okL {
+				hasLB, lb, okL := exactVarLBRat(p, j)
+				if !hasLB || !okL {
 					return nil, false
 				}
 				prod.Mul(&rc, lb)
 				bnd.Add(bnd, &prod)
 			} else if rc.Sign() < 0 {
-				if math.IsInf(p.varUB[j], 1) {
-					return nil, false
-				}
-				ub, okU := exactRatFromFloat(p.varUB[j])
-				if !okU {
+				hasUB, ub, okU := exactVarUBRat(p, j)
+				if !hasUB || !okU {
 					return nil, false
 				}
 				prod.Mul(&rc, ub)
@@ -2204,7 +2304,7 @@ func VerifyUnboundedCertificate(p *CompiledProblem, cert UnboundedCertificate) b
 	}
 
 	var objMinVec []*big.Rat
-	if p.exactOrig != nil && p.exactOrig.objHasLoss {
+	if p.exactOrig != nil && (p.exactOrig.objHasLoss || p.exactOrig.objHasRat) {
 		var okO bool
 		objMinVec, okO = exactMinObjVecRat(p)
 		if !okO {
@@ -2218,22 +2318,24 @@ func VerifyUnboundedCertificate(p *CompiledProblem, cert UnboundedCertificate) b
 		if x0j == nil || dj == nil {
 			return false
 		}
-		lo, hi := p.varLB[j], p.varUB[j]
-		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+		hasLB, loRat, okL := exactVarLBRat(p, j)
+		hasUB, hiRat, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
 			return false
 		}
-		if !math.IsInf(lo, -1) {
-			loRat, ok := exactRatFromFloat(lo)
-			if !ok || x0j.Cmp(loRat) < 0 {
+		if hasLB && hasUB && loRat.Cmp(hiRat) > 0 {
+			return false
+		}
+		if hasLB {
+			if x0j.Cmp(loRat) < 0 {
 				return false
 			}
 			if dj.Sign() < 0 {
 				return false
 			}
 		}
-		if !math.IsInf(hi, 1) {
-			hiRat, ok := exactRatFromFloat(hi)
-			if !ok || x0j.Cmp(hiRat) > 0 {
+		if hasUB {
+			if x0j.Cmp(hiRat) > 0 {
 				return false
 			}
 			if dj.Sign() > 0 {
@@ -2498,31 +2600,31 @@ func extractFreeUnboundedCert(p *CompiledProblem, isMIP bool) (UnboundedCertific
 
 	for j := range n {
 		ray[j] = new(big.Rat)
-		lo, hi := p.varLB[j], p.varUB[j]
-		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+		hasLB, loRat, okL := exactVarLBRat(p, j)
+		hasUB, hiRat, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
+			return UnboundedCertificate{}, false
+		}
+		if hasLB && hasUB && loRat.Cmp(hiRat) > 0 {
 			return UnboundedCertificate{}, false
 		}
 		var xj *big.Rat
 		if isMIP && p.varCat[j] != Continuous {
-			cand, ok := pickIntegerInBounds(lo, hi)
+			cand, ok := pickIntegerInExactBounds(hasLB, loRat, hasUB, hiRat)
 			if !ok {
 				return UnboundedCertificate{}, false
 			}
 			xj = cand
 		} else {
-			cand, ok := pickRationalInBounds(lo, hi)
-			if !ok {
-				return UnboundedCertificate{}, false
-			}
-			xj = cand
+			xj = pickRationalInExactBounds(hasLB, loRat, hasUB, hiRat)
 		}
 		x0[j] = xj
 
 		if rayCol < 0 {
-			if objMinVec[j].Sign() < 0 && math.IsInf(hi, 1) {
+			if objMinVec[j].Sign() < 0 && !hasUB {
 				rayCol = j
 				rayDir = 1
-			} else if objMinVec[j].Sign() > 0 && math.IsInf(lo, -1) {
+			} else if objMinVec[j].Sign() > 0 && !hasLB {
 				rayCol = j
 				rayDir = -1
 			}
@@ -2545,41 +2647,28 @@ func extractFreeUnboundedCert(p *CompiledProblem, isMIP bool) (UnboundedCertific
 	return cert, true
 }
 
-func pickRationalInBounds(lo, hi float64) (*big.Rat, bool) {
-	hasLo := !math.IsInf(lo, -1)
-	hasHi := !math.IsInf(hi, 1)
-	if (!hasLo || lo <= 0) && (!hasHi || 0 <= hi) {
-		return new(big.Rat), true
+func pickRationalInExactBounds(hasLo bool, loRat *big.Rat, hasHi bool, hiRat *big.Rat) *big.Rat {
+	if (!hasLo || loRat.Sign() <= 0) && (!hasHi || hiRat.Sign() >= 0) {
+		return new(big.Rat)
 	}
 	if hasLo {
-		return exactRatFromFloat(lo)
+		return new(big.Rat).Set(loRat)
 	}
-	return exactRatFromFloat(hi)
+	return new(big.Rat).Set(hiRat)
 }
 
-func pickIntegerInBounds(lo, hi float64) (*big.Rat, bool) {
-	hasLo := !math.IsInf(lo, -1)
-	hasHi := !math.IsInf(hi, 1)
-	if (!hasLo || lo <= 0) && (!hasHi || 0 <= hi) {
+func pickIntegerInExactBounds(hasLo bool, loRat *big.Rat, hasHi bool, hiRat *big.Rat) (*big.Rat, bool) {
+	if (!hasLo || loRat.Sign() <= 0) && (!hasHi || hiRat.Sign() >= 0) {
 		return new(big.Rat), true
 	}
 	if hasLo {
-		cl := math.Ceil(lo)
-		if hasHi && cl > hi {
+		cl := new(big.Rat).SetInt(ceilExactRat(loRat))
+		if hasHi && cl.Cmp(hiRat) > 0 {
 			return nil, false
 		}
-		r, ok := exactRatFromFloat(cl)
-		if !ok || !r.IsInt() {
-			return nil, false
-		}
-		return r, true
+		return cl, true
 	}
-	fl := math.Floor(hi)
-	r, ok := exactRatFromFloat(fl)
-	if !ok || !r.IsInt() {
-		return nil, false
-	}
-	return r, true
+	return new(big.Rat).SetInt(floorExactRat(hiRat)), true
 }
 
 func extractExactLPRayFromSolver(stop exactStop, p *CompiledProblem, s *LPSolver) (x0, ray []*big.Rat, slope *big.Rat) {
@@ -2842,7 +2931,7 @@ func verifyExactRecessionRayOnly(p *CompiledProblem, d []*big.Rat) (*big.Rat, bo
 		return nil, false
 	}
 	var objMinVec []*big.Rat
-	if p.exactOrig != nil && p.exactOrig.objHasLoss {
+	if p.exactOrig != nil && (p.exactOrig.objHasLoss || p.exactOrig.objHasRat) {
 		var okO bool
 		objMinVec, okO = exactMinObjVecRat(p)
 		if !okO {
@@ -2856,10 +2945,15 @@ func verifyExactRecessionRayOnly(p *CompiledProblem, d []*big.Rat) (*big.Rat, bo
 		if dj == nil {
 			return nil, false
 		}
-		if dj.Sign() > 0 && !math.IsInf(p.varUB[j], 1) {
+		hasLB, _, okL := exactVarLBRat(p, j)
+		hasUB, _, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
 			return nil, false
 		}
-		if dj.Sign() < 0 && !math.IsInf(p.varLB[j], -1) {
+		if dj.Sign() > 0 && hasUB {
+			return nil, false
+		}
+		if dj.Sign() < 0 && hasLB {
 			return nil, false
 		}
 		if dj.Sign() != 0 {
@@ -2921,9 +3015,14 @@ func solveHomogeneousRecessionRayLP(stop exactStop, p *CompiledProblem) ([]*big.
 	hp.lazy = nil
 	hp.exactOrig = p.exactOrig.cloneForContRelax(p.sense == Maximize)
 	if hp.exactOrig != nil {
+		hp.exactOrig.objConstRat = nil
+		hp.exactOrig.varLBRat = nil
+		hp.exactOrig.varUBRat = nil
 		for i := range hp.exactOrig.rows {
 			hp.exactOrig.rows[i].rhs = 0
 			hp.exactOrig.rows[i].exprConst = 0
+			hp.exactOrig.rows[i].rhsRat = nil
+			hp.exactOrig.rows[i].exprConstRat = nil
 			hp.exactOrig.rows[i].rhsInexact = false
 		}
 	}
@@ -3057,10 +3156,15 @@ func stepExactRayAnchor(p *CompiledProblem, cand []float64, ray []*big.Rat, requ
 	}
 	x0 := make([]*big.Rat, n)
 	for j := range n {
-		lo, hi := p.varLB[j], p.varUB[j]
-		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+		hasLB, loRat, okL := exactVarLBRat(p, j)
+		hasUB, hiRat, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
 			return nil, false
 		}
+		if hasLB && hasUB && loRat.Cmp(hiRat) > 0 {
+			return nil, false
+		}
+		lo, hi := p.varLB[j], p.varUB[j]
 		isIntCol := requireInt && p.varCat[j] != Continuous
 		var xj *big.Rat
 		if len(cand) == n && !math.IsNaN(cand[j]) && !math.IsInf(cand[j], 0) {
@@ -3074,19 +3178,19 @@ func stepExactRayAnchor(p *CompiledProblem, cand []float64, ray []*big.Rat, requ
 					v = math.Floor(hi)
 				}
 			}
-			if r, okR := exactRatFromFloat(v); okR && (!isIntCol || r.IsInt()) && v >= lo && v <= hi {
+			if r, okR := exactRatFromFloat(v); okR && (!isIntCol || r.IsInt()) && (!hasLB || r.Cmp(loRat) >= 0) && (!hasUB || r.Cmp(hiRat) <= 0) {
 				xj = r
 			}
 		}
 		if xj == nil {
-			var okB bool
 			if isIntCol {
-				xj, okB = pickIntegerInBounds(lo, hi)
+				var okB bool
+				xj, okB = pickIntegerInExactBounds(hasLB, loRat, hasUB, hiRat)
+				if !okB {
+					return nil, false
+				}
 			} else {
-				xj, okB = pickRationalInBounds(lo, hi)
-			}
-			if !okB {
-				return nil, false
+				xj = pickRationalInExactBounds(hasLB, loRat, hasUB, hiRat)
 			}
 		}
 		x0[j] = xj
@@ -3223,21 +3327,19 @@ func verifyExactPrimalRat(p *CompiledProblem, x []*big.Rat, requireInt bool) boo
 		if requireInt && p.varCat[j] != Continuous && !xj.IsInt() {
 			return false
 		}
-		lo, hi := p.varLB[j], p.varUB[j]
-		if math.IsNaN(lo) || math.IsNaN(hi) || lo > hi {
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if !okL || !okU {
 			return false
 		}
-		if !math.IsInf(lo, -1) {
-			lr, ok := exactRatFromFloat(lo)
-			if !ok || xj.Cmp(lr) < 0 {
-				return false
-			}
+		if hasLB && hasUB && lr.Cmp(ur) > 0 {
+			return false
 		}
-		if !math.IsInf(hi, 1) {
-			ur, ok := exactRatFromFloat(hi)
-			if !ok || xj.Cmp(ur) > 0 {
-				return false
-			}
+		if hasLB && xj.Cmp(lr) < 0 {
+			return false
+		}
+		if hasUB && xj.Cmp(ur) > 0 {
+			return false
 		}
 	}
 	for i := range p.numConstraints {
@@ -3316,6 +3418,12 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 	fp := shallowContRelaxProblem(p.zeroObjCopy())
 	fp.sense = Minimize
 	if fp.exactOrig != nil && p.exactOrig != nil {
+		if fp.exactOrig.varLBRat != nil {
+			fp.exactOrig.varLBRat = slices.Clone(fp.exactOrig.varLBRat)
+		}
+		if fp.exactOrig.varUBRat != nil {
+			fp.exactOrig.varUBRat = slices.Clone(fp.exactOrig.varUBRat)
+		}
 		if p.exactOrig.hasIntTightened {
 			fp.rowRHS = slices.Clone(p.rowRHS)
 			fp.rowLB = slices.Clone(p.rowLB)
@@ -3325,6 +3433,10 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 			if i < len(p.exactOrig.rows) && p.exactOrig.rows[i].intTightened {
 				tight := p.exactOrig.rows[i].intTightRHS
 				fp.exactOrig.rows[i].rhsInexact = false
+				if p.exactOrig.rows[i].intTightRat != nil {
+					fp.exactOrig.rows[i].rhsRat = p.exactOrig.rows[i].intTightRat
+					fp.exactOrig.rows[i].exprConstRat = nil
+				}
 				fp.rowRHS[i] = tight
 				switch fp.rowSense[i] {
 				case LessEqual:
@@ -3345,15 +3457,31 @@ func refineExactMIPAnchor(stop exactStop, p *CompiledProblem, cand []float64) ([
 	for j := range p.numVars {
 		if p.varCat[j] != Continuous {
 			iv := math.Round(cand[j])
-			if math.IsNaN(iv) || math.IsInf(iv, 0) || iv < p.varLB[j] || iv > p.varUB[j] {
+			if math.IsNaN(iv) || math.IsInf(iv, 0) {
 				return nil, false
 			}
 			rInt, okI := exactRatFromFloat(iv)
 			if !okI || !rInt.IsInt() {
 				return nil, false
 			}
+			hasLB, loRat, okL := exactVarLBRat(p, j)
+			hasUB, hiRat, okU := exactVarUBRat(p, j)
+			if !okL || !okU {
+				return nil, false
+			}
+			if (hasLB && rInt.Cmp(loRat) < 0) || (hasUB && rInt.Cmp(hiRat) > 0) {
+				return nil, false
+			}
 			fp.varLB[j] = iv
 			fp.varUB[j] = iv
+			if fp.exactOrig != nil {
+				if j < len(fp.exactOrig.varLBRat) {
+					fp.exactOrig.varLBRat[j] = rInt
+				}
+				if j < len(fp.exactOrig.varUBRat) {
+					fp.exactOrig.varUBRat[j] = rInt
+				}
+			}
 		}
 	}
 
@@ -3702,6 +3830,16 @@ func floorExactRat(r *big.Rat) *big.Int {
 	return fl
 }
 
+func ceilExactRat(r *big.Rat) *big.Int {
+	cl := new(big.Int)
+	rem := new(big.Int)
+	cl.QuoRem(r.Num(), r.Denom(), rem)
+	if rem.Sign() > 0 {
+		cl.Add(cl, big.NewInt(1))
+	}
+	return cl
+}
+
 func pickExactFractionalIntCol(intCols []int, x []*big.Rat) (brCol int, flInt *big.Int, fracCnt int) {
 	brCol = -1
 	bestScore := math.Inf(1)
@@ -3813,20 +3951,16 @@ func solveExactMIPFeasibilityStop(
 	rootLB := make([]*big.Rat, wn)
 	rootUB := make([]*big.Rat, wn)
 	for j := range wn {
-		lo, hi := workProb.varLB[j], workProb.varUB[j]
-		if !math.IsInf(lo, -1) {
-			r, okR := exactRatFromFloat(lo)
-			if !okR {
-				return nil, StatusNumericalError, 0, 0
-			}
-			rootLB[j] = r
+		hasLB, lbR, okL := exactVarLBRat(workProb, j)
+		hasUB, ubR, okU := exactVarUBRat(workProb, j)
+		if !okL || !okU {
+			return nil, StatusNumericalError, 0, 0
 		}
-		if !math.IsInf(hi, 1) {
-			r, okR := exactRatFromFloat(hi)
-			if !okR {
-				return nil, StatusNumericalError, 0, 0
-			}
-			rootUB[j] = r
+		if hasLB {
+			rootLB[j] = lbR
+		}
+		if hasUB {
+			rootUB[j] = ubR
 		}
 		if rootLB[j] != nil && rootUB[j] != nil && rootLB[j].Cmp(rootUB[j]) > 0 {
 			return nil, StatusInfeasible, 0, 0
@@ -3983,7 +4117,7 @@ func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
 	if p.exactOrig != nil && p.exactOrig.intEqInfeas {
 		return true
 	}
-	if _, ok := exactRatFromFloat(p.objConstMin()); !ok {
+	if _, ok := exactObjConstMinRat(p); !ok {
 		return false
 	}
 	if p.exactOrig != nil {
@@ -3998,15 +4132,11 @@ func hasExactGCDInfeasibleEqRow(p *CompiledProblem) bool {
 		}
 	}
 	for j := range p.numVars {
-		if !math.IsInf(p.varLB[j], -1) {
-			if _, ok := exactRatFromFloat(p.varLB[j]); !ok {
-				return false
-			}
+		if _, _, okL := exactVarLBRat(p, j); !okL {
+			return false
 		}
-		if !math.IsInf(p.varUB[j], 1) {
-			if _, ok := exactRatFromFloat(p.varUB[j]); !ok {
-				return false
-			}
+		if _, _, okU := exactVarUBRat(p, j); !okU {
+			return false
 		}
 	}
 	var gcdSc exactGCDScratch

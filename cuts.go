@@ -7,40 +7,42 @@ import (
 )
 
 const (
-	minIntInfeas     = 0.01
-	minCutEfficacy   = 1e-3
-	maxCutDynamism   = 1e5
-	rhsSafetyMargin  = 1e-7
-	coverDPTol       = 1e-7
-	maxOrthoCosine   = 0.92
-	halfFracTarget   = 0.5
-	maxGMIFraqRows   = 25
-	cutCoeffZeroTol  = 1e-12
-	cutDropTol       = 1e-11
-	unitCoeffTol     = 1e-9
-	cutCompareTol    = 1e-6
-	minCoverItemVal  = 1e-4
-	minPairNNZ       = 2
-	maxFlowLookahead = 6
-	maxFlowChainLen  = 64
-	maxMIRDivisors   = 4
-	minMIRFrac       = 0.02
-	mirMaxRelSlack   = 0.05
-	aggMaxMu         = 1e4
-	aggMinMu         = 1e-4
-	aggMaxRelSlack   = 0.05
-	maxAggBaseRows   = 96
-	maxAggSteps      = 8
-	maxAggColDeg     = 64
-	maxPairAggRows   = 16
-	maxVUBClusterLen = 64
-	defaultMaxCuts   = 15
-	cutMaxNNZSmallN  = 100
-	cutMaxNNZFloor   = 50
-	cutMaxNNZCap     = 100
-	cutMaxNNZVarDiv  = 4
-	cutDenseSoftNNZ  = 24
-	cutDensityPen    = 0.01
+	minIntInfeas            = 0.01
+	minCutEfficacy          = 1e-3
+	maxCutDynamism          = 1e5
+	maxCutDynamismRelaxWeak = 1e-4
+	maxCutDynamismRelaxTerm = 1e-6
+	rhsSafetyMargin         = 1e-7
+	coverDPTol              = 1e-7
+	maxOrthoCosine          = 0.92
+	halfFracTarget          = 0.5
+	maxGMIFraqRows          = 25
+	cutCoeffZeroTol         = 1e-12
+	cutDropTol              = 1e-11
+	unitCoeffTol            = 1e-9
+	cutCompareTol           = 1e-6
+	minCoverItemVal         = 1e-4
+	minPairNNZ              = 2
+	maxFlowLookahead        = 6
+	maxFlowChainLen         = 64
+	maxMIRDivisors          = 4
+	minMIRFrac              = 0.02
+	mirMaxRelSlack          = 0.05
+	aggMaxMu                = 1e4
+	aggMinMu                = 1e-4
+	aggMaxRelSlack          = 0.05
+	maxAggBaseRows          = 96
+	maxAggSteps             = 8
+	maxAggColDeg            = 64
+	maxPairAggRows          = 16
+	maxVUBClusterLen        = 64
+	defaultMaxCuts          = 15
+	cutMaxNNZSmallN         = 100
+	cutMaxNNZFloor          = 50
+	cutMaxNNZCap            = 100
+	cutMaxNNZVarDiv         = 4
+	cutDenseSoftNNZ         = 24
+	cutDensityPen           = 0.01
 )
 
 // nextUp stays within the Go inline budget (cost <= 80) to avoid math.Nextafter calls in cut loops.
@@ -1071,6 +1073,7 @@ func separateGMICutsEx(solver *LPSolver, lpPrimal []float64, cutWS *cutGenWorksp
 			cutRHS = nextUp(cutRHS)
 		}
 
+		idxBuf, valBuf, cutRHS, _ = relaxCutDynamismTerms(p, idxBuf, valBuf, cutRHS)
 		if cut, ok := finalizeSparseCut(p, idxBuf, valBuf, cutRHS, lpPrimal, gmiMaxNNZ, cutWS); ok {
 			if obsColAtUpper != nil {
 				cutWS.certObs.gmis = append(cutWS.certObs.gmis, liveGMIRecord{
@@ -1122,6 +1125,84 @@ func addScaledRowAccSparse(p *CompiledProblem, extra []dynamicRow, rowIdx int, s
 		}
 		gmiAcc[col].addProd(scale, rVals[k])
 	}
+}
+
+// The relaxCutDynamismTerms helper absorbs bounded cut coefficients whose ratio
+// to the largest kept coefficient exceeds maxCutDynamism into the right-hand
+// side so safe tableau error inflation on zero entries does not discard valid
+// GMI cuts. Both the per-term coefficient ratio and the cumulative RHS weakening
+// remain tightly capped so wide-bound continuous terms cannot dilute strong cuts.
+func relaxCutDynamismTerms(p *CompiledProblem, idx []int, val []float64, rhs float64) ([]int, []float64, float64, bool) {
+	maxAbs := 0.0
+	for _, v := range val {
+		if av := math.Abs(v); av > cutDropTol && av > maxAbs {
+			maxAbs = av
+		}
+	}
+	if maxAbs == 0 {
+		return idx, val, rhs, false
+	}
+
+	needRelax := false
+	for _, v := range val {
+		av := math.Abs(v)
+		if av > cutDropTol && maxAbs/av > maxCutDynamism {
+			needRelax = true
+			break
+		}
+	}
+	if !needRelax {
+		return idx, val, rhs, true
+	}
+
+	curRHS := rhs
+	kept := 0
+	sumWeak := 0.0
+	maxRatio := 0.0
+	varLB, varUB := p.varLB, p.varUB
+	for k, col := range idx {
+		v := val[k]
+		av := math.Abs(v)
+		if av > cutDropTol && maxAbs/av <= maxCutDynamism {
+			kept++
+			continue
+		}
+		if av == 0 {
+			continue
+		}
+		if r := av / maxAbs; r > maxRatio {
+			maxRatio = r
+		}
+		if maxRatio > maxCutDynamismRelaxTerm {
+			return idx, val, rhs, false
+		}
+		nextRHS, ok := relaxCutRHSForTerm(curRHS, v, varLB[col], varUB[col])
+		if !ok {
+			return idx, val, rhs, false
+		}
+		if delta := nextRHS - curRHS; delta > 0 {
+			sumWeak += delta
+		}
+		if !(sumWeak <= maxCutDynamismRelaxWeak*maxAbs) {
+			return idx, val, rhs, false
+		}
+		curRHS = nextRHS
+	}
+	if kept == 0 {
+		return idx, val, rhs, false
+	}
+
+	write := 0
+	for k, col := range idx {
+		v := val[k]
+		av := math.Abs(v)
+		if av > cutDropTol && maxAbs/av <= maxCutDynamism {
+			idx[write] = col
+			val[write] = v
+			write++
+		}
+	}
+	return idx[:write], val[:write], curRHS, true
 }
 
 // separateKnapsackCoverCuts relaxes inequality rows to 0-1 knapsacks and sequentially lifts minimal covers via dynamic programming.

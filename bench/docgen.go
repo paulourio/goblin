@@ -1374,12 +1374,21 @@ func renderNonMADCBCNotes(b *bytes.Buffer, tb *TelemetryBundle) error {
 			worstCBC = ct
 		}
 	}
-	fmt.Fprintf(b, "- **Heavy-tail regression on `t2_binpack_44`**: pure-Go `BackendGo` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) trails in-process `BackendCBC` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) with a **%.2fx** `BackendCBC / BackendGo` geometric-mean ratio (`Go / CBC = %.2fx`), running slower on %d of %d trials (peaking at %.2f ms vs. %.2f ms) while root cuts increase `CP5 +Presolve` (%.2f ms) to `CP6 +Cuts` (%.2f ms).\n",
-		sc.TTotalMeanMS, sc.TTotalSDMS, sc.TTotalMS,
-		gbRes.TTotalMeanMS, gbRes.TTotalSDMS, gbRes.TTotalMS,
-		cbcOverGo, 1.0/max(cbcOverGo, geoMeanMinFloor),
-		losses, nTrials, worstGo, worstCBC,
-		sc.CP5Presolve.TimeMS, sc.CP6Cuts.TimeMS)
+	if cbcOverGo >= 1.0 {
+		fmt.Fprintf(b, "- **Bin-packing tail behavior on `t2_binpack_44`**: pure-Go `BackendGo` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) leads in-process `BackendCBC` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) with a **%.2fx** `BackendCBC / BackendGo` geometric-mean speedup (`Go / CBC = %.2fx`), running slower on %d of %d trials (peaking at %.2f ms vs. %.2f ms), with `CP5 +Presolve` at %.2f ms vs. `CP6 +Cuts` at %.2f ms.\n",
+			sc.TTotalMeanMS, sc.TTotalSDMS, sc.TTotalMS,
+			gbRes.TTotalMeanMS, gbRes.TTotalSDMS, gbRes.TTotalMS,
+			cbcOverGo, 1.0/max(cbcOverGo, geoMeanMinFloor),
+			losses, nTrials, worstGo, worstCBC,
+			sc.CP5Presolve.TimeMS, sc.CP6Cuts.TimeMS)
+	} else {
+		fmt.Fprintf(b, "- **Heavy-tail regression on `t2_binpack_44`**: pure-Go `BackendGo` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) trails in-process `BackendCBC` ($%.2f \\pm %.2f$ ms mean, %.2f ms median) with a **%.2fx** `BackendCBC / BackendGo` geometric-mean ratio (`Go / CBC = %.2fx`), running slower on %d of %d trials (peaking at %.2f ms vs. %.2f ms) while root cuts increase `CP5 +Presolve` (%.2f ms) to `CP6 +Cuts` (%.2f ms).\n",
+			sc.TTotalMeanMS, sc.TTotalSDMS, sc.TTotalMS,
+			gbRes.TTotalMeanMS, gbRes.TTotalSDMS, gbRes.TTotalMS,
+			cbcOverGo, 1.0/max(cbcOverGo, geoMeanMinFloor),
+			losses, nTrials, worstGo, worstCBC,
+			sc.CP5Presolve.TimeMS, sc.CP6Cuts.TimeMS)
+	}
 	return nil
 }
 

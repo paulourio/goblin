@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func randomBoxedLP(seed uint64, m, n int) *Model {
@@ -881,11 +882,11 @@ func TestExtraRowCSCSyncAndColumnParity(t *testing.T) {
 	}
 }
 
-func loadPublicPuLPJSONForTest(t *testing.T, id string) *Model {
-	t.Helper()
+func loadPublicPuLPJSONForTest(tb testing.TB, id string) *Model {
+	tb.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "public", id+".json"))
 	if err != nil {
-		t.Fatalf("read %s: %v", id, err)
+		tb.Fatalf("read %s: %v", id, err)
 	}
 	var doc struct {
 		Parameters struct {
@@ -916,7 +917,7 @@ func loadPublicPuLPJSONForTest(t *testing.T, id string) *Model {
 		} `json:"constraints"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("unmarshal %s: %v", id, err)
+		tb.Fatalf("unmarshal %s: %v", id, err)
 	}
 	sense := Minimize
 	if doc.Parameters.Sense == -1 {
@@ -958,7 +959,7 @@ func loadPublicPuLPJSONForTest(t *testing.T, id string) *Model {
 		case 1:
 			m.AddConstraint(con.Name, Ge(e, rhs))
 		default:
-			t.Fatalf("%s constraint %s invalid sense %d", id, con.Name, con.Sense)
+			tb.Fatalf("%s constraint %s invalid sense %d", id, con.Name, con.Sense)
 		}
 	}
 	return m
@@ -1918,7 +1919,7 @@ func TestPrimalUnboundedSubTolZeroNoise(t *testing.T) {
 	copy(ws.workCost, ws.cost)
 	lp.computeDualsAndReducedCosts(ws.workCost)
 
-	st, _ := lp.primalSimplexStep(false, false)
+	st, _, _, _ := lp.primalSimplexStep(false, false, true)
 	if st != StatusUnbounded {
 		t.Fatalf("primalSimplexStep status = %v, want StatusUnbounded", st)
 	}
@@ -2387,4 +2388,780 @@ func TestPolishIncumbentRepairsContinuousULPOvershoot(t *testing.T) {
 			}
 		})
 	}
+}
+
+func runForcedPrimalNetlibSolve(tb testing.TB, p *CompiledProblem, disableDevex bool) (*LPSolver, LPResult, int, int, error) {
+	tb.Helper()
+	s := NewLPSolver(p, nil)
+	s.disableDevex = disableDevex
+	limit := max(s.MaxIter, 50000)
+	st, iters, pFresh, dFresh := s.solveTwoPhasePrimalWithLimit(limit)
+	if st != StatusOptimal {
+		return s, LPResult{Status: st, Iterations: iters}, iters, s.devexResets, fmt.Errorf("status = %v (iters=%d)", st, iters)
+	}
+	s.dualValid = true
+	res, ok := s.finalizeOptimalResult(iters, pFresh, dFresh)
+	if !ok {
+		return s, LPResult{Status: StatusNumericalError, Iterations: iters}, iters, s.devexResets, fmt.Errorf("finalizeOptimalResult failed (iters=%d)", iters)
+	}
+	return s, res, iters, s.devexResets, nil
+}
+
+// TestPrimalDevexStateAndWeights verifies zero-allocation Workspace reuse, Devex vs Bland/Dantzig
+// pricing, large-violation overflow guards, sparse weight updates, Harris rectifier resets,
+// bound-flip skips, and lifecycle resets across solver entry points.
+func TestPrimalDevexStateAndWeights(t *testing.T) {
+	t.Run("workspace_reuse_zero_alloc", func(t *testing.T) {
+		m := NewModel("devex_zero_alloc", Minimize)
+		xs := make([]Var, 32)
+		obj := NewExpr()
+		for j := range xs {
+			xs[j] = m.AddContVar(fmt.Sprintf("x%d", j), 0, math.Inf(1))
+			obj = obj.AddTerm(xs[j], -float64(j+1))
+		}
+		m.SetObjective(obj)
+		for i := range 16 {
+			row := NewExpr()
+			for j := range xs {
+				row = row.AddTerm(xs[j], float64(1+(i+j)%5))
+			}
+			m.AddConstraint(fmt.Sprintf("r%d", i), Le(row, 100.0+float64(i)))
+		}
+		p := m.Compile()
+		ws := AcquireWorkspace(p.NumVars(), p.NumConstraints())
+		defer ReleaseWorkspace(ws)
+
+		s := newLPSolver(p, ws, true)
+		if err := s.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		s.computePrimalValues()
+		s.syncBasicBounds()
+		s.resetDevexFramework(false)
+		s.computeDualsAndReducedCosts(s.ws.cost)
+
+		var cp lpCheckpoint
+		s.captureCheckpoint(&cp)
+		// Warm up ComputeTableauRow / BTRAN / FTRAN buffers once before measuring.
+		if st, _, _, _ := s.primalSimplexStep(false, false, false); st != StatusNotSolved || s.devexPivotsSinceReset != 1 {
+			t.Fatalf("warmup primalSimplexStep status=%v pivots=%d, want (NotSolved, 1)", st, s.devexPivotsSinceReset)
+		}
+		s.restoreCheckpoint(&cp)
+
+		allocsStep := testing.AllocsPerRun(50, func() {
+			s.restoreCheckpoint(&cp)
+			s.resetDevexFramework(false)
+			s.computeDualsAndReducedCosts(s.ws.cost)
+			st, _, _, _ := s.primalSimplexStep(false, false, false)
+			if st != StatusNotSolved || s.devexPivotsSinceReset != 1 {
+				t.Fatalf("primalSimplexStep status=%v pivots=%d, want (NotSolved, 1)", st, s.devexPivotsSinceReset)
+			}
+		})
+		if allocsStep != 0 {
+			t.Fatalf("warm primal Devex step allocated %.1f allocs/run, want 0", allocsStep)
+		}
+
+		allocsResize := testing.AllocsPerRun(50, func() {
+			ws.ensureSize(p.NumVars(), p.NumConstraints())
+			s.resetDevexFramework(false)
+		})
+		if allocsResize != 0 {
+			t.Fatalf("workspace ensureSize + resetDevexFramework allocated %.1f allocs/run, want 0", allocsResize)
+		}
+
+		// Verify resetDevexFramework overwrites stale weights/refs on reused workspaces.
+		ws.devexWeight[0] = 777.0
+		ws.devexRef[0] = 9
+		ws.ensureSize(p.NumVars(), p.NumConstraints())
+		s.resetDevexFramework(false)
+		for k, st := range ws.status[:ws.totVar] {
+			wantRef := uint8(1)
+			if st == statusBasic {
+				wantRef = 0
+			}
+			if ws.devexWeight[k] != 1.0 || ws.devexRef[k] != wantRef {
+				t.Fatalf("resetDevexFramework left stale state at %d: w=%g ref=%d wantRef=%d",
+					k, ws.devexWeight[k], ws.devexRef[k], wantRef)
+			}
+		}
+
+		// Pure dual simplex solve on a fresh workspace must allocate zero Devex memory.
+		mDual := NewModel("devex_pure_dual_zero_alloc", Minimize)
+		d0 := mDual.AddContVar("d0", 0, math.Inf(1))
+		d1 := mDual.AddContVar("d1", 0, math.Inf(1))
+		mDual.SetObjective(NewExpr(d0.T(1), d1.T(1)))
+		mDual.AddConstraint("c0", Ge(NewExpr(d0.T(1), d1.T(1)), 2))
+		pDual := mDual.Compile()
+		dualWS := &Workspace{}
+		sDual := NewLPSolver(pDual, dualWS)
+		resDual := sDual.Solve()
+		if resDual.Status != StatusOptimal || math.Abs(resDual.Objective-2.0) > 1e-9 {
+			t.Fatalf("pure dual Solve = (%v, %g), want (Optimal, 2)", resDual.Status, resDual.Objective)
+		}
+		if sDual.lastPrimalFallback || sDual.lastDualIters == 0 {
+			t.Fatalf("expected pure dual path, got fallback=%v dualIters=%d", sDual.lastPrimalFallback, sDual.lastDualIters)
+		}
+		if cap(dualWS.devexWeight) != 0 || cap(dualWS.devexRef) != 0 {
+			t.Fatalf("pure dual solve allocated Devex buffers: capW=%d capRef=%d", cap(dualWS.devexWeight), cap(dualWS.devexRef))
+		}
+		allocsDualEnsure := testing.AllocsPerRun(50, func() {
+			dualWS.ensureSize(pDual.NumVars(), pDual.NumConstraints())
+		})
+		if allocsDualEnsure != 0 {
+			t.Fatalf("dual ensureSize allocated %.1f allocs/run, want 0", allocsDualEnsure)
+		}
+	})
+
+	t.Run("scoring_bland_and_large_viol", func(t *testing.T) {
+		m := NewModel("devex_price", Minimize)
+		x0 := m.AddContVar("x0", 0, 10)
+		x1 := m.AddContVar("x1", 0, 10)
+		x2 := m.AddContVar("x2", 0, 10)
+		m.SetObjective(NewExpr(x0.T(1), x1.T(1), x2.T(1)))
+		m.AddConstraint("r0", Le(NewExpr(x0.T(1), x1.T(1), x2.T(1)), 5))
+		p := m.Compile()
+
+		s := NewLPSolver(p, nil)
+		defer s.Close()
+		s.resetDevexFramework(false)
+		ws := s.ws
+		ws.dj[0] = -5.0
+		ws.dj[1] = -4.0
+		ws.dj[2] = -0.1
+		ws.devexWeight[0] = 25.0 // score = 25 / 25 = 1
+		ws.devexWeight[1] = 1.0  // score = 16 / 1 = 16
+		ws.devexWeight[2] = 1.0
+
+		// !bland && devexActive ranks by viol^2 / w -> x1 wins despite smaller |dj|.
+		ev, dir, hasNaN := s.pricePrimalEnter(false, false)
+		if hasNaN || ev != 1 || dir != 1.0 {
+			t.Fatalf("devex price = (%d, %g, %v), want (1, 1, false)", ev, dir, hasNaN)
+		}
+
+		// bland == true must still return lowest violated index immediately.
+		evB, dirB, hasNaNB := s.pricePrimalEnter(false, true)
+		if hasNaNB || evB != 0 || dirB != 1.0 {
+			t.Fatalf("bland price = (%d, %g, %v), want (0, 1, false)", evB, dirB, hasNaNB)
+		}
+
+		// devexActive == false preserves Dantzig largest-|dj| selection.
+		s.devexActive = false
+		evD, dirD, hasNaND := s.pricePrimalEnter(false, false)
+		if hasNaND || evD != 0 || dirD != 1.0 {
+			t.Fatalf("dantzig price = (%d, %g, %v), want (0, 1, false)", evD, dirD, hasNaND)
+		}
+
+		// Large violations (> 1e140) transition smoothly to |viol|/sqrt(w) without Inf/NaN.
+		s.devexActive = true
+		ws.dj[0] = -1e140
+		ws.devexWeight[0] = 1.0
+		ws.dj[1] = -1e145
+		ws.devexWeight[1] = 1.0
+		ws.dj[2] = -2e145
+		ws.devexWeight[2] = 16.0 // 2e145 / 4 = 0.5e145 < 1e145
+		evL, dirL, hasNaNL := s.pricePrimalEnter(false, false)
+		if hasNaNL || evL != 1 || dirL != 1.0 {
+			t.Fatalf("large-viol price = (%d, %g, %v), want (1, 1, false)", evL, dirL, hasNaNL)
+		}
+
+		// Superbasic column pricing selects sign-appropriate direction under Devex.
+		ws.status[0] = statusSuperBasic
+		ws.status[1] = statusAtLower
+		ws.status[2] = statusAtLower
+		ws.dj[0] = 3.0
+		ws.dj[1] = -2.0
+		ws.dj[2] = 0.0
+		ws.devexWeight[0] = 1.0
+		ws.devexWeight[1] = 1.0
+		evS, dirS, hasNaNS := s.pricePrimalEnter(false, false)
+		if hasNaNS || evS != 0 || dirS != -1.0 {
+			t.Fatalf("superbasic devex price = (%d, %g, %v), want (0, -1, false)", evS, dirS, hasNaNS)
+		}
+
+		// Phase I sub-tolerance fallback (> max(1e-13, 16*colDualNoiseTol)) remains active under Devex.
+		ws.status[0] = statusAtLower
+		ws.status[1] = statusAtLower
+		ws.status[2] = statusAtLower
+		ws.dj[0] = -1e-9
+		ws.dj[1] = 0.0
+		ws.dj[2] = 0.0
+		ws.x[0] = 0.0
+		evP1, dirP1, hasNaNP1 := s.pricePrimalEnter(true, false)
+		if hasNaNP1 || evP1 != 0 || dirP1 != 1.0 {
+			t.Fatalf("phase1 sub-tol devex fallback = (%d, %g, %v), want (0, 1, false)", evP1, dirP1, hasNaNP1)
+		}
+
+		// Phase II bound-weighted cleanup (viol <= effDualTol, viol*span > 10*primalTol) remains active under Devex.
+		ws.ub[0] = 1e6
+		ws.dj[0] = -1e-8 // viol*span = 1e-2 > 1e-6
+		evBW, dirBW, hasNaNBW := s.pricePrimalEnter(false, false)
+		if hasNaNBW || evBW != 0 || dirBW != 1.0 {
+			t.Fatalf("phase2 bound-weighted devex cleanup = (%d, %g, %v), want (0, 1, false)", evBW, dirBW, hasNaNBW)
+		}
+	})
+
+	t.Run("step_update_bound_flip_and_rectifier", func(t *testing.T) {
+		// 1. Bound flip (leaveRow == -1) must skip Devex update and not increment pivot counter.
+		mFlip := NewModel("devex_flip", Minimize)
+		xf := mFlip.AddContVar("xf", 0, 2)
+		mFlip.SetObjective(NewExpr(xf.T(-3)))
+		mFlip.AddConstraint("r0", Le(NewExpr(xf.T(1)), 10))
+		sFlip := NewLPSolver(mFlip.Compile(), nil)
+		defer sFlip.Close()
+		sFlip.ws.status[0] = statusAtLower
+		sFlip.ws.x[0] = 0
+		if err := sFlip.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		sFlip.computePrimalValues()
+		sFlip.computeDualsAndReducedCosts(sFlip.ws.cost)
+		sFlip.resetDevexFramework(false)
+		sFlip.ws.devexWeight[0] = 3.5
+		stFlip, thetaFlip, _, _ := sFlip.primalSimplexStep(false, false, false)
+		if stFlip != StatusNotSolved || thetaFlip != 2.0 {
+			t.Fatalf("bound flip step = (%v, %g), want (NotSolved, 2)", stFlip, thetaFlip)
+		}
+		if sFlip.ws.devexWeight[0] != 3.5 || sFlip.devexPivotsSinceReset != 0 || sFlip.devexResets != 0 {
+			t.Fatalf("bound flip modified devex state: w0=%g pivots=%d resets=%d",
+				sFlip.ws.devexWeight[0], sFlip.devexPivotsSinceReset, sFlip.devexResets)
+		}
+
+		// 2. Basis pivot updates touched nonbasics and leaveVar weight accurately.
+		// Row 0: 2 x0 + x1 + x2 <= 10 (s0=3); Row 1: x0 + 3 x1 + 5 x2 <= 12 (s1=4)
+		mPiv := NewModel("devex_piv", Minimize)
+		x0 := mPiv.AddContVar("x0", 0, math.Inf(1))
+		x1 := mPiv.AddContVar("x1", 0, math.Inf(1))
+		x2 := mPiv.AddContVar("x2", 0, math.Inf(1))
+		mPiv.SetObjective(NewExpr(x0.T(-10), x1.T(-2), x2.T(-1)))
+		mPiv.AddConstraint("r0", Le(NewExpr(x0.T(2), x1.T(1), x2.T(1)), 10))
+		mPiv.AddConstraint("r1", Le(NewExpr(x0.T(1), x1.T(3), x2.T(5)), 12))
+		sPiv := NewLPSolver(mPiv.Compile(), nil)
+		defer sPiv.Close()
+		if err := sPiv.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		sPiv.computePrimalValues()
+		sPiv.resetDevexFramework(false)
+
+		// Step 1: x0 enters, s0 leaves (pivot = 2.0, gammaExact = 1.0).
+		sPiv.computeDualsAndReducedCosts(sPiv.ws.cost)
+		if st, _, _, _ := sPiv.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("pivot 1 status = %v", st)
+		}
+		if sPiv.devexPivotsSinceReset != 1 || sPiv.devexResets != 0 {
+			t.Fatalf("after pivot 1: pivots=%d resets=%d, want 1, 0", sPiv.devexPivotsSinceReset, sPiv.devexResets)
+		}
+
+		// Step 2: make x1 most favorable so x1 enters (fCol=[0.5, 2.5]), s1 leaves (pivot=2.5),
+		// gammaExact = 1 + 0.5^2 = 1.25, a_{1,2} = -0.5*1 + 1*5 = 4.5 -> w[2] = (4.5/2.5)^2 * 1.25 = 4.05.
+		sPiv.ws.cost[1] = -20
+		sPiv.ws.cost[2] = 1
+		sPiv.computeDualsAndReducedCosts(sPiv.ws.cost)
+		if st, _, _, _ := sPiv.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("pivot 2 status = %v", st)
+		}
+		if sPiv.devexPivotsSinceReset != 2 || sPiv.devexResets != 0 {
+			t.Fatalf("after pivot 2: pivots=%d resets=%d, want 2, 0", sPiv.devexPivotsSinceReset, sPiv.devexResets)
+		}
+		if gotW2 := sPiv.ws.devexWeight[2]; math.Abs(gotW2-4.05) > 1e-12 {
+			t.Fatalf("updated w[x2] = %.12g, want 4.05", gotW2)
+		}
+
+		// 3. Rectifier trigger: gammaExact < 0.25*w_q (e.g. w_q=100, gammaExact=1.25) resets R and weights.
+		sPiv.ws.devexWeight[4] = 100.0
+		sPiv.ws.cost[4] = -50
+		sPiv.computeDualsAndReducedCosts(sPiv.ws.cost)
+		// Force x0 to be untouched and s1 (col 4) to enter, or pick x2/s1 cleanly:
+		sPiv.ws.dj[0], sPiv.ws.dj[1], sPiv.ws.dj[2], sPiv.ws.dj[3] = 0, 0, 10, 10
+		sPiv.ws.dj[4] = -50
+		if st, _, _, _ := sPiv.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("rectifier pivot status = %v", st)
+		}
+		if sPiv.devexResets != 1 || sPiv.devexPivotsSinceReset != 0 {
+			t.Fatalf("rectifier (<0.25*w_q) did not reset: resets=%d pivots=%d", sPiv.devexResets, sPiv.devexPivotsSinceReset)
+		}
+		for k, st := range sPiv.ws.status[:sPiv.ws.totVar] {
+			if sPiv.ws.devexWeight[k] != 1.0 {
+				t.Fatalf("post-reset w[%d]=%g, want 1", k, sPiv.ws.devexWeight[k])
+			}
+			wantRef := uint8(1)
+			if st == statusBasic {
+				wantRef = 0
+			}
+			if sPiv.ws.devexRef[k] != wantRef {
+				t.Fatalf("post-reset ref[%d]=%d, want %d", k, sPiv.ws.devexRef[k], wantRef)
+			}
+		}
+
+		// 4a. Widened rectifier keeps weights active inside [0.125*w_q, 9.0*w_q] (gammaExact = 1 + 2^2 = 5.0 <= 9.0).
+		mMid := NewModel("devex_mid_rect", Minimize)
+		mv0 := mMid.AddContVar("mv0", 0, math.Inf(1))
+		mv1 := mMid.AddContVar("mv1", 0, math.Inf(1))
+		mMid.SetObjective(NewExpr(mv0.T(-10), mv1.T(-1)))
+		mMid.AddConstraint("r0", Le(NewExpr(mv0.T(1), mv1.T(1)), 10))
+		mMid.AddConstraint("r1", Le(NewExpr(mv0.T(1), mv1.T(2)), 2))
+		sMid := NewLPSolver(mMid.Compile(), nil)
+		defer sMid.Close()
+		if err := sMid.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		sMid.computePrimalValues()
+		sMid.resetDevexFramework(false)
+		sMid.computeDualsAndReducedCosts(sMid.ws.cost)
+		if st, _, _, _ := sMid.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("mid rectifier pivot 1 = %v", st)
+		}
+		sMid.ws.cost[1] = -50
+		sMid.ws.devexWeight[1] = 1.0
+		sMid.computeDualsAndReducedCosts(sMid.ws.cost)
+		if st, _, _, _ := sMid.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("mid rectifier pivot 2 = %v", st)
+		}
+		if sMid.devexResets != 0 || sMid.devexPivotsSinceReset != 2 {
+			t.Fatalf("widened band (5.0 <= 9.0*w_q) reset unexpectedly: resets=%d pivots=%d", sMid.devexResets, sMid.devexPivotsSinceReset)
+		}
+
+		// 4b. Rectifier trigger: gammaExact > 9.0*w_q resets R and weights.
+		// Pivot v0 into row 1 (s1 leaves), so v0 stays in R; then v1 enters with fCol=[-3, 4],
+		// giving gammaExact = 1 + 4^2 = 17.0 > 9.0 * 1.0.
+		mUpper := NewModel("devex_upper_rect", Minimize)
+		v0 := mUpper.AddContVar("v0", 0, math.Inf(1))
+		v1 := mUpper.AddContVar("v1", 0, math.Inf(1))
+		mUpper.SetObjective(NewExpr(v0.T(-10), v1.T(-1)))
+		mUpper.AddConstraint("r0", Le(NewExpr(v0.T(1), v1.T(1)), 10))
+		mUpper.AddConstraint("r1", Le(NewExpr(v0.T(1), v1.T(4)), 2))
+		sUp := NewLPSolver(mUpper.Compile(), nil)
+		defer sUp.Close()
+		if err := sUp.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		sUp.computePrimalValues()
+		sUp.resetDevexFramework(false)
+		sUp.computeDualsAndReducedCosts(sUp.ws.cost)
+		if st, _, _, _ := sUp.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("upper rectifier pivot 1 = %v", st)
+		}
+		sUp.ws.cost[1] = -50
+		sUp.ws.devexWeight[1] = 1.0
+		sUp.computeDualsAndReducedCosts(sUp.ws.cost)
+		if st, _, _, _ := sUp.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("upper rectifier pivot 2 = %v", st)
+		}
+		if sUp.devexResets != 1 || sUp.devexPivotsSinceReset != 0 {
+			t.Fatalf("rectifier (>9.0*w_q) did not reset: resets=%d pivots=%d", sUp.devexResets, sUp.devexPivotsSinceReset)
+		}
+
+		// 5. Rectifier trigger: devexPivotsSinceReset >= max(500, 2*m) resets on next pivot.
+		sPiv.devexPivotsSinceReset = max(minDevexPivotLimit, 2*sPiv.TotalRows())
+		sPiv.ws.cost[2] = -50
+		sPiv.ws.cost[4] = 10
+		sPiv.computeDualsAndReducedCosts(sPiv.ws.cost)
+		if st, _, _, _ := sPiv.primalSimplexStep(false, false, false); st != StatusNotSolved {
+			t.Fatalf("pivot-limit rectifier status = %v", st)
+		}
+		if sPiv.devexResets != 2 || sPiv.devexPivotsSinceReset != 0 {
+			t.Fatalf("pivot-limit rectifier did not reset: resets=%d pivots=%d", sPiv.devexResets, sPiv.devexPivotsSinceReset)
+		}
+	})
+
+	t.Run("lifecycle_resets", func(t *testing.T) {
+		mdl := randomBoxedLP(77, 10, 16)
+		p := mdl.Compile()
+		s := NewLPSolver(p, nil)
+		defer s.Close()
+
+		altCost := make([]float64, p.numVars)
+		for j := range altCost {
+			altCost[j] = float64(j+1) * -0.5
+		}
+		res, _ := s.solvePrimalObjective(altCost, 50)
+		if res.Status != StatusOptimal {
+			t.Fatalf("solvePrimalObjective status = %v, want Optimal", res.Status)
+		}
+		if s.devexActive || s.devexPivotsSinceReset != 0 || s.devexResets != 0 {
+			t.Fatalf("solvePrimalObjective left dirty Devex state: active=%v pivots=%d resets=%d",
+				s.devexActive, s.devexPivotsSinceReset, s.devexResets)
+		}
+
+		// Simulate active/dirty Devex state before CopyRootBasisFrom and cloneForWorker.
+		s.devexActive = true
+		s.devexPivotsSinceReset = 17
+		s.devexResets = 3
+		src := NewLPSolver(p, nil)
+		defer src.Close()
+		_ = src.Solve()
+		s.CopyRootBasisFrom(src)
+		if s.devexActive || s.devexPivotsSinceReset != 0 || s.devexResets != 0 {
+			t.Fatalf("CopyRootBasisFrom left dirty Devex state: active=%v pivots=%d resets=%d",
+				s.devexActive, s.devexPivotsSinceReset, s.devexResets)
+		}
+
+		s.devexActive = true
+		s.devexPivotsSinceReset = 11
+		s.devexResets = 2
+		worker := s.cloneForWorker()
+		defer worker.Close()
+		if worker.devexActive || worker.devexPivotsSinceReset != 0 || worker.devexResets != 0 {
+			t.Fatalf("cloneForWorker left dirty Devex state: active=%v pivots=%d resets=%d",
+				worker.devexActive, worker.devexPivotsSinceReset, worker.devexResets)
+		}
+	})
+}
+
+// TestPrimalDevexKleeMintyAndCycling verifies that Harris Devex avoids exponential Klee-Minty
+// simplex paths vs Dantzig and terminates cleanly on classic Beale degenerate cycling LPs.
+func TestPrimalDevexKleeMintyAndCycling(t *testing.T) {
+	t.Parallel()
+
+	buildKleeMinty := func(d int) (*Model, float64) {
+		m := NewModel(fmt.Sprintf("klee_minty_%d", d), Maximize)
+		x := make([]Var, d)
+		obj := NewExpr()
+		for j := range d {
+			x[j] = m.AddContVar(fmt.Sprintf("x%d", j), 0, math.Inf(1))
+			obj = obj.AddTerm(x[j], math.Exp2(float64(d-1-j)))
+		}
+		m.SetObjective(obj)
+		rhs := 5.0
+		for i := range d {
+			row := NewExpr()
+			for k := range i {
+				row = row.AddTerm(x[k], math.Exp2(float64(i+1-k)))
+			}
+			row = row.AddTerm(x[i], 1.0)
+			m.AddConstraint(fmt.Sprintf("c%d", i), Le(row, rhs))
+			rhs *= 5.0
+		}
+		return m, math.Pow(5.0, float64(d))
+	}
+
+	for _, dim := range []int{4, 6, 8} {
+		t.Run(fmt.Sprintf("klee_minty_%d", dim), func(t *testing.T) {
+			t.Parallel()
+			mdl, wantObj := buildKleeMinty(dim)
+			p := mdl.Compile()
+
+			sDevex, resDevex, devexIters, resets, err := runForcedPrimalNetlibSolve(t, p, false)
+			if err != nil {
+				sDevex.Close()
+				t.Fatalf("Devex Klee-Minty(%d): %v", dim, err)
+			}
+			defer sDevex.Close()
+			sDantzig, resDantzig, dantzigIters, _, err := runForcedPrimalNetlibSolve(t, p, true)
+			if err != nil {
+				sDantzig.Close()
+				t.Fatalf("Dantzig Klee-Minty(%d): %v", dim, err)
+			}
+			defer sDantzig.Close()
+
+			t.Logf("Klee-Minty d=%d: devexIters=%d (resets=%d) dantzigIters=%d obj=%.10g",
+				dim, devexIters, resets, dantzigIters, resDevex.Objective)
+			if math.Abs(resDevex.Objective-wantObj) > 1e-6*wantObj || math.Abs(resDantzig.Objective-wantObj) > 1e-6*wantObj {
+				t.Fatalf("Klee-Minty(%d) objective mismatch: devex=%.10g dantzig=%.10g want=%.10g",
+					dim, resDevex.Objective, resDantzig.Objective, wantObj)
+			}
+			if devexIters >= dantzigIters {
+				t.Fatalf("Klee-Minty(%d): Devex (%d iters) did not beat Dantzig (%d iters)", dim, devexIters, dantzigIters)
+			}
+		})
+	}
+
+	t.Run("beale_1955_cycling", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("beale_cycling", Minimize)
+		x1 := m.AddContVar("x1", 0, math.Inf(1))
+		x2 := m.AddContVar("x2", 0, math.Inf(1))
+		x3 := m.AddContVar("x3", 0, math.Inf(1))
+		x4 := m.AddContVar("x4", 0, math.Inf(1))
+		m.SetObjective(NewExpr(x1.T(-0.75), x2.T(20), x3.T(-0.5), x4.T(6)))
+		m.AddConstraint("r0", Le(NewExpr(x1.T(0.25), x2.T(-8), x3.T(-1), x4.T(9)), 0))
+		m.AddConstraint("r1", Le(NewExpr(x1.T(0.5), x2.T(-12), x3.T(-0.5), x4.T(3)), 0))
+		m.AddConstraint("r2", Le(NewExpr(x3.T(1)), 1))
+		p := m.Compile()
+
+		s, res, iters, resets, err := runForcedPrimalNetlibSolve(t, p, false)
+		if err != nil {
+			s.Close()
+			t.Fatalf("Beale cycling solve failed: %v", err)
+		}
+		defer s.Close()
+		if math.Abs(res.Objective-(-1.25)) > 1e-9 {
+			t.Fatalf("Beale objective = %.12g, want -1.25", res.Objective)
+		}
+		bV, rV, _ := p.MaxViolation(res.Primal, false)
+		if bV > 1e-9 || rV > 1e-9 {
+			t.Fatalf("Beale primal violation b=%.2e r=%.2e", bV, rV)
+		}
+		t.Logf("Beale cycling LP solved in %d iters (resets=%d) obj=%.12g", iters, resets, res.Objective)
+	})
+}
+
+// TestPrimalDevexForcedNetlibLPs compares two-phase primal Devex vs Dantzig on
+// six held-out Netlib LPs forced directly through solveTwoPhasePrimalWithLimit.
+func TestPrimalDevexForcedNetlibLPs(t *testing.T) {
+	t.Parallel()
+
+	rawManifest, err := os.ReadFile(filepath.Join("testdata", "public", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest []struct {
+		ID                 string  `json:"id"`
+		ReferenceObjective float64 `json:"reference_objective"`
+	}
+	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	refByID := make(map[string]float64, len(manifest))
+	for _, entry := range manifest {
+		refByID[entry.ID] = entry.ReferenceObjective
+	}
+
+	netlibIDs := []string{
+		"netlib_brandy",
+		"netlib_e226",
+		"netlib_israel",
+		"netlib_lotfi",
+		"netlib_beaconfd",
+		"netlib_stocfor1",
+	}
+
+	for _, id := range netlibIDs {
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			wantObj, ok := refByID[id]
+			if !ok {
+				t.Fatalf("missing %s in manifest", id)
+			}
+			p := loadPublicPuLPJSONForTest(t, id).Compile()
+
+			t0 := time.Now()
+			sDev, resDev, itDev, resets, err := runForcedPrimalNetlibSolve(t, p, false)
+			devDur := time.Since(t0)
+			defer sDev.Close()
+			if err != nil {
+				t.Fatalf("%s Devex failed: %v", id, err)
+			}
+			relDev := math.Abs(resDev.Objective-wantObj) / max(1.0, math.Abs(wantObj))
+			if relDev > 1e-5 {
+				t.Fatalf("%s Devex obj=%.10g, want %.10g (rel=%.2e)", id, resDev.Objective, wantObj, relDev)
+			}
+			bV, rV, _ := p.MaxViolation(resDev.Primal, false)
+			if bV > 1e-5 || rV > 1e-5 {
+				t.Fatalf("%s Devex primal violation b=%.2e r=%.2e", id, bV, rV)
+			}
+			if !sDev.primalResidualsWithinTol(resDev.Primal) || !sDev.dualResidualsWithinTolWithRowRes(resDev.Primal, resDev.ObjectiveMin, nil) {
+				t.Fatalf("%s Devex KKT check failed", id)
+			}
+
+			t1 := time.Now()
+			sDan, resDan, itDan, _, errDan := runForcedPrimalNetlibSolve(t, p, true)
+			danDur := time.Since(t1)
+			defer sDan.Close()
+			if errDan != nil {
+				t.Logf("%s: devex=(iters=%d resets=%d dur=%s obj=%.10g) dantzig=(failed: %v dur=%s)",
+					id, itDev, resets, devDur, resDev.Objective, errDan, danDur)
+				return
+			}
+			relDan := math.Abs(resDan.Objective-wantObj) / max(1.0, math.Abs(wantObj))
+			if relDan > 1e-5 {
+				t.Fatalf("%s Dantzig obj=%.10g, want %.10g (rel=%.2e)", id, resDan.Objective, wantObj, relDan)
+			}
+			t.Logf("%s: devex=(iters=%d resets=%d dur=%s) dantzig=(iters=%d dur=%s) iterRatio=%.2fx",
+				id, itDev, resets, devDur, itDan, danDur, float64(itDan)/max(1.0, float64(itDev)))
+		})
+	}
+}
+
+func BenchmarkForcedPrimalNetlib(b *testing.B) {
+	netlibIDs := []string{
+		"netlib_brandy",
+		"netlib_e226",
+		"netlib_israel",
+		"netlib_lotfi",
+		"netlib_beaconfd",
+		"netlib_stocfor1",
+	}
+	for _, id := range netlibIDs {
+		p := loadPublicPuLPJSONForTest(b, id).Compile()
+		for _, mode := range []struct {
+			name         string
+			disableDevex bool
+		}{
+			{"devex", false},
+			{"dantzig", true},
+		} {
+			b.Run(id+"/"+mode.name, func(b *testing.B) {
+				ws := AcquireWorkspace(p.NumVars(), p.NumConstraints())
+				defer ReleaseWorkspace(ws)
+				b.ReportAllocs()
+				b.ResetTimer()
+				var lastIters int
+				for range b.N {
+					s := newLPSolver(p, ws, true)
+					s.disableDevex = mode.disableDevex
+					st, iters, _, _ := s.solveTwoPhasePrimalWithLimit(max(s.MaxIter, 50000))
+					if st != StatusOptimal {
+						b.Fatalf("%s/%s status = %v", id, mode.name, st)
+					}
+					lastIters = iters
+				}
+				b.ReportMetric(float64(lastIters), "iters/op")
+			})
+		}
+	}
+}
+
+// TestPrimalIncrementalDualAndDJUpdates verifies exact Phase I and Phase II incremental
+// dual/reduced-cost updates, Phase I sign-change invalidation, and bound-flip preservation
+// in primalSimplexStep.
+func TestPrimalIncrementalDualAndDJUpdates(t *testing.T) {
+	t.Parallel()
+
+	t.Run("phase2_exact_match_and_leaving_dj", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("inc_p2", Minimize)
+		x0 := m.AddContVar("x0", 0, math.Inf(1))
+		x1 := m.AddContVar("x1", 0, math.Inf(1))
+		x2 := m.AddContVar("x2", 0, math.Inf(1))
+		m.SetObjective(NewExpr(x0.T(-5), x1.T(-3), x2.T(2)))
+		m.AddConstraint("r0", Le(NewExpr(x0.T(2), x1.T(1), x2.T(3)), 10))
+		m.AddConstraint("r1", Le(NewExpr(x0.T(1), x1.T(4), x2.T(-1)), 12))
+		s := NewLPSolver(m.Compile(), nil)
+		defer s.Close()
+
+		if err := s.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		s.computePrimalValues()
+		s.syncBasicBounds()
+		s.resetDevexFramework(false)
+		s.computeDualsAndReducedCosts(s.ws.cost)
+
+		var dualsValid bool
+		dualsFresh := true
+		for step := range 2 {
+			var st Status
+			st, _, dualsValid, dualsFresh = s.primalSimplexStep(false, false, dualsFresh)
+			if st != StatusNotSolved || !dualsValid || dualsFresh {
+				t.Fatalf("step %d: st=%v dualsValid=%v dualsFresh=%v, want (NotSolved, true, false)",
+					step, st, dualsValid, dualsFresh)
+			}
+			gotY := slices.Clone(s.ws.y[:s.TotalRows()])
+			gotDJ := slices.Clone(s.ws.dj[:s.ws.totVar])
+			s.computeDualsAndReducedCosts(s.ws.cost)
+			for i, wantY := range s.ws.y[:s.TotalRows()] {
+				if math.Abs(gotY[i]-wantY) > 1e-11 {
+					t.Fatalf("step %d y[%d] = %.12g, want %.12g", step, i, gotY[i], wantY)
+				}
+			}
+			for k, wantDJ := range s.ws.dj[:s.ws.totVar] {
+				if math.Abs(gotDJ[k]-wantDJ) > 1e-11 {
+					t.Fatalf("step %d dj[%d] = %.12g, want %.12g", step, k, gotDJ[k], wantDJ)
+				}
+			}
+		}
+	})
+
+	t.Run("phase1_exact_match_sign_change_and_bound_flip", func(t *testing.T) {
+		t.Parallel()
+		// Case 1: non-leaving row r1 (bounded in [0, 10]) crosses from infeasible (+1 at 12)
+		// into [0, 10] (0 at 9) when r0 blocks at theta=3 -> dualsValid=false.
+		m := NewModel("inc_p1_sign_change", Minimize)
+		x0 := m.AddContVar("x0", 0, 10)
+		m.SetObjective(NewExpr(x0.T(1)))
+		m.AddConstraint("r0", Le(NewExpr(x0.T(1)), 3))  // s0 in [0, +inf): blocks at x0=3 (leaveRow=0)
+		m.AddConstraint("r1", Le(NewExpr(x0.T(1)), 12)) // s1 starts at 12; upper bound set to 10 below
+		s := NewLPSolver(m.Compile(), nil)
+		defer s.Close()
+
+		if err := s.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		s.computePrimalValues()
+		s.ws.ub[s.ws.basis[1]] = 10
+		s.syncBasicBounds()
+		s.resetDevexFramework(false)
+		clear(s.ws.workCost)
+		for i := range s.TotalRows() {
+			if c := phase1VarCost(s.ws.xb[i], s.ws.basicLB[i], s.ws.basicUB[i], s.ws.basicTol[i]); c != 0 {
+				s.ws.workCost[s.ws.basis[i]] = c
+			}
+		}
+		s.computeDualsAndReducedCosts(s.ws.workCost)
+
+		st, _, dualsValid, dualsFresh := s.primalSimplexStep(true, false, true)
+		if st != StatusNotSolved {
+			t.Fatalf("phase1 step status = %v, want NotSolved", st)
+		}
+		if dualsValid {
+			t.Fatalf("expected sign-change invalidation when non-leaving row 1 became feasible")
+		}
+		if dualsFresh {
+			t.Fatalf("expected dualsFresh=false after sign-changing pivot")
+		}
+
+		// Now test Phase I pivot where a basic infeasible variable (s0) leaves while row 1 stays infeasible (no non-leaving sign change):
+		m2 := NewModel("inc_p1_no_sign_change", Minimize)
+		y0 := m2.AddContVar("y0", 0, 10)
+		y1 := m2.AddContVar("y1", 0, 10)
+		m2.SetObjective(NewExpr(y0.T(1), y1.T(1)))
+		m2.AddConstraint("r0", Ge(NewExpr(y0.T(2), y1.T(1)), 4))  // xb0=4 > ub=0 -> cost +1
+		m2.AddConstraint("r1", Ge(NewExpr(y0.T(1), y1.T(1)), 10)) // xb1=10 > ub=0 -> cost +1; after y0=2, xb1=8 > 0 (still +1!)
+		s2 := NewLPSolver(m2.Compile(), nil)
+		defer s2.Close()
+		if err := s2.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		s2.computePrimalValues()
+		s2.syncBasicBounds()
+		s2.resetDevexFramework(false)
+		clear(s2.ws.workCost)
+		for i := range s2.TotalRows() {
+			s2.ws.workCost[s2.ws.basis[i]] = phase1VarCost(s2.ws.xb[i], s2.ws.basicLB[i], s2.ws.basicUB[i], s2.ws.basicTol[i])
+		}
+		s2.computeDualsAndReducedCosts(s2.ws.workCost)
+
+		st2, _, dv2, df2 := s2.primalSimplexStep(true, false, true)
+		if st2 != StatusNotSolved || !dv2 || df2 {
+			t.Fatalf("phase1 non-sign-change pivot = (%v, %v, %v), want (NotSolved, true, false)", st2, dv2, df2)
+		}
+		gotY := slices.Clone(s2.ws.y[:s2.TotalRows()])
+		gotDJ := slices.Clone(s2.ws.dj[:s2.ws.totVar])
+		clear(s2.ws.workCost)
+		for i := range s2.TotalRows() {
+			s2.ws.workCost[s2.ws.basis[i]] = phase1VarCost(s2.ws.xb[i], s2.ws.basicLB[i], s2.ws.basicUB[i], s2.ws.basicTol[i])
+		}
+		s2.computeDualsAndReducedCosts(s2.ws.workCost)
+		for i, wantY := range s2.ws.y[:s2.TotalRows()] {
+			if math.Abs(gotY[i]-wantY) > 1e-11 {
+				t.Fatalf("phase1 y[%d] = %.12g, want %.12g", i, gotY[i], wantY)
+			}
+		}
+		for k, wantDJ := range s2.ws.dj[:s2.ws.totVar] {
+			if math.Abs(gotDJ[k]-wantDJ) > 1e-11 {
+				t.Fatalf("phase1 dj[%d] = %.12g, want %.12g", k, gotDJ[k], wantDJ)
+			}
+		}
+
+		// Bound flip leaving row 1 still infeasible (+1 -> +1) preserves dualsValid=true and dualsFresh=true.
+		m3 := NewModel("inc_p1_flip", Minimize)
+		z0 := m3.AddContVar("z0", 0, 1)
+		m3.SetObjective(NewExpr(z0.T(1)))
+		m3.AddConstraint("r0", Ge(NewExpr(z0.T(1)), 5)) // xb0=5 -> after z0=1 flip, xb0=4 (still > 0 -> +1)
+		s3 := NewLPSolver(m3.Compile(), nil)
+		defer s3.Close()
+		if err := s3.factorizeBasis(); err != nil {
+			t.Fatalf("factorizeBasis: %v", err)
+		}
+		s3.computePrimalValues()
+		s3.syncBasicBounds()
+		s3.resetDevexFramework(false)
+		s3.ws.workCost[s3.ws.basis[0]] = 1.0
+		s3.computeDualsAndReducedCosts(s3.ws.workCost)
+		st3, th3, dv3, df3 := s3.primalSimplexStep(true, false, true)
+		if st3 != StatusNotSolved || th3 != 1.0 || !dv3 || !df3 {
+			t.Fatalf("phase1 flip = (%v, %g, %v, %v), want (NotSolved, 1, true, true)", st3, th3, dv3, df3)
+		}
+	})
 }

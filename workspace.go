@@ -66,11 +66,13 @@ type Workspace struct {
 	basicTol    []float64
 
 	// Primal, dual, reduced-cost, and steepest-edge vectors.
-	x   []float64
-	xb  []float64
-	y   []float64
-	dj  []float64
-	dse []float64
+	x           []float64
+	xb          []float64
+	y           []float64
+	dj          []float64
+	dse         []float64
+	devexWeight []float64
+	devexRef    []uint8
 
 	// Sparse linear-system scratch buffers: whenever a *Sparse flag is true, every nonzero entry of the paired slice is recorded inside its *Idx support list so subsequent clears touch only active positions.
 	rho             []float64

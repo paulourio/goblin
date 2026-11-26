@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -850,5 +851,148 @@ func TestCodecLowAllocations(t *testing.T) {
 	})
 	if prettyAllocs > 15 {
 		t.Fatalf("ToPuLPJSON allocs/run = %.1f, want <= 15", prettyAllocs)
+	}
+}
+
+func TestFromPuLPJSONExactBytesAndReader(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	// Fast unescaped path: omitted lowBound=0, null upBound=+Inf, non-dyadic decimals, obj constant.
+	// Minimizing 2*x1 + x2 + x3 + 0.1 s.t. -7.2*x1 - 4.1*x2 = -1, x1,x2>=0, x3>=0 yields
+	// exact x* = (0, 10/41, 0) and objective 10/41 + 1/10 = 141/410.
+	fastJSON := `{
+  "parameters": {"name": "q10_fast", "sense": 1, "status": 0, "sol_status": 0},
+  "objective": {
+    "name": "cost",
+    "coefficients": [{"name": "x1", "value": 2}, {"name": "x2", "value": 1}, {"name": "x3", "value": 1.5e-3}],
+    "constant": 0.1
+  },
+  "variables": [
+    {"name": "x1", "cat": "Continuous", "upBound": null, "varValue": null, "dj": null},
+    {"name": "x2", "cat": "Continuous", "lowBound": 0, "upBound": null},
+    {"name": "x3", "cat": "Binary"}
+  ],
+  "constraints": [
+    {
+      "name": "ANZ3",
+      "sense": 0,
+      "coefficients": [{"name": "x1", "value": -7.2}, {"name": "x2", "value": -4.1}, {"name": "x3", "value": 0.9}],
+      "pi": null,
+      "constant": 1
+    }
+  ],
+  "sos1": [],
+  "sos2": []
+}`
+	mFast, err := format.FromPuLPJSONExactBytes([]byte(fastJSON))
+	if err != nil {
+		t.Fatalf("FromPuLPJSONExactBytes(fast): %v", err)
+	}
+	pFast, err := mFast.CompileChecked()
+	if err != nil {
+		t.Fatalf("pFast.CompileChecked: %v", err)
+	}
+	if lb0, ub0 := pFast.VarBounds(0); lb0 != 0 || !math.IsInf(ub0, 1) {
+		t.Fatalf("x1 omitted lowBound / null upBound = [%v, %v], want [0, +Inf]", lb0, ub0)
+	}
+	if lb2, ub2 := pFast.VarBounds(2); lb2 != 0 || ub2 != 1 || pFast.VarCategory(2) != gb.Binary {
+		t.Fatalf("x3 Binary defaults = ([%v, %v], cat=%v), want ([0,1], Binary)", lb2, ub2, pFast.VarCategory(2))
+	}
+	var witFast gb.CertifiedWitness
+	resFast, err := gb.SolveCompiled(ctx, pFast, gb.WithCertified(true), gb.WithCertifiedWitness(&witFast))
+	if err != nil || resFast.Status != gb.StatusOptimal {
+		t.Fatalf("pFast certified solve = (%v, %v), want StatusOptimal", resFast.Status, err)
+	}
+	wantX2 := big.NewRat(10, 41)
+	wantObjFast := big.NewRat(141, 410)
+	if witFast.Values[0].Sign() != 0 || witFast.Values[1].Cmp(wantX2) != 0 || witFast.Values[2].Sign() != 0 {
+		t.Fatalf("fast exact primal = (%s, %s, %s), want (0, 10/41, 0)",
+			witFast.Values[0].RatString(), witFast.Values[1].RatString(), witFast.Values[2].RatString())
+	}
+	if witFast.Objective.Cmp(wantObjFast) != 0 || witFast.BestBound.Cmp(wantObjFast) != 0 {
+		t.Fatalf("fast exact obj/bound = (%s, %s), want 141/410", witFast.Objective.RatString(), witFast.BestBound.RatString())
+	}
+
+	// Std fallback path: constraints before variables, JSON string escapes, explicit null lowBound (-Inf), Python NaN.
+	// Maximize 0.3*x1 - 0.25 s.t. 0.9*x1 <= 1.8 => x1 = 2, obj = 0.6 - 0.25 = 7/20.
+	stdJSON := `{
+  "sos1": [],
+  "sos2": [],
+  "objective": {
+    "constant": -0.25,
+    "coefficients": [{"value": 0.3, "name": "\u00781"}],
+    "name": "obj"
+  },
+  "constraints": [
+    {
+      "constant": -1.8,
+      "coefficients": [{"name": "x1", "value": 0.9}],
+      "name": "c1",
+      "pi": NaN,
+      "sense": -1
+    }
+  ],
+  "variables": [
+    {"cat": "Continuous", "name": "x1", "lowBound": null, "upBound": 2.5, "varValue": -Infinity, "dj": Infinity}
+  ],
+  "parameters": {"sense": -1, "name": "q10_std"}
+}`
+	mStd, err := format.FromPuLPJSONExact(strings.NewReader(stdJSON))
+	if err != nil {
+		t.Fatalf("FromPuLPJSONExact(std): %v", err)
+	}
+	pStd, err := mStd.CompileChecked()
+	if err != nil {
+		t.Fatalf("pStd.CompileChecked: %v", err)
+	}
+	if lb, ub := pStd.VarBounds(0); !math.IsInf(lb, -1) || ub != 2.5 {
+		t.Fatalf("std x1 bounds = [%v, %v], want [-Inf, 2.5]", lb, ub)
+	}
+	var witStd gb.CertifiedWitness
+	resStd, err := gb.SolveCompiled(ctx, pStd, gb.WithCertified(true), gb.WithCertifiedWitness(&witStd))
+	if err != nil || resStd.Status != gb.StatusOptimal {
+		t.Fatalf("pStd certified solve = (%v, %v), want StatusOptimal", resStd.Status, err)
+	}
+	wantObjStd := big.NewRat(7, 20)
+	if witStd.Values[0].Cmp(big.NewRat(2, 1)) != 0 || witStd.Objective.Cmp(wantObjStd) != 0 {
+		t.Fatalf("std witness = (x=%s, obj=%s), want (2, 7/20)", witStd.Values[0].RatString(), witStd.Objective.RatString())
+	}
+
+	// Verify std fallback vs fast path on explicit exact fractional continuous bounds [0.1, 0.9].
+	bndJSON := `{
+  "variables": [
+    {"name": "\u0078", "cat": "Continuous", "lowBound": 0.1, "upBound": 0.9}
+  ],
+  "parameters": {"name": "bnd", "sense": 1},
+  "objective": {"coefficients": [{"name": "x", "value": 1}]},
+  "constraints": [],
+  "sos1": [],
+  "sos2": []
+}`
+	mBnd, err := format.FromPuLPJSONExactBytes([]byte(bndJSON))
+	if err != nil {
+		t.Fatalf("FromPuLPJSONExactBytes(bnd): %v", err)
+	}
+	var witBnd gb.CertifiedWitness
+	resBnd, err := gb.SolveCompiled(ctx, mBnd.Compile(), gb.WithCertified(true), gb.WithCertifiedWitness(&witBnd))
+	if err != nil || resBnd.Status != gb.StatusOptimal {
+		t.Fatalf("pBnd certified solve = (%v, %v)", resBnd.Status, err)
+	}
+	if witBnd.Values[0].Cmp(big.NewRat(1, 10)) != 0 || witBnd.Objective.Cmp(big.NewRat(1, 10)) != 0 {
+		t.Fatalf("bnd witness = (%s, %s), want (1/10, 1/10)", witBnd.Values[0].RatString(), witBnd.Objective.RatString())
+	}
+
+	// Negative controls: non-number strings, null coefficient, out-of-range exp10, unknown var.
+	badInputs := []string{
+		`{"parameters":{"name":"b","sense":1},"objective":{"coefficients":[{"name":"x","value":"0.9"}]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[],"sos1":[],"sos2":[]}`,
+		`{"parameters":{"name":"b","sense":1},"objective":{"coefficients":[{"name":"x","value":null}]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[],"sos1":[],"sos2":[]}`,
+		`{"parameters":{"name":"b","sense":1},"objective":{"coefficients":[{"name":"x","value":1e20000}]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[],"sos1":[],"sos2":[]}`,
+		`{"parameters":{"name":"b","sense":1},"objective":{"coefficients":[{"name":"missing","value":1}]},"variables":[{"name":"x","cat":"Continuous"}],"constraints":[],"sos1":[],"sos2":[]}`,
+	}
+	for i, bad := range badInputs {
+		if _, err := format.FromPuLPJSONExactBytes([]byte(bad)); err == nil {
+			t.Fatalf("badInputs[%d] unexpectedly succeeded", i)
+		}
 	}
 }

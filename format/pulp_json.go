@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"regexp"
 	"sync"
 
@@ -315,6 +316,282 @@ func FromPuLPJSON(r io.Reader) (*gb.Model, error) {
 		return nil, err
 	}
 	return FromPuLPJSONBytes(data)
+}
+
+type pulpExactCoeffJSON struct {
+	Name  string         `json:"name"`
+	Value jsontext.Value `json:"value"`
+}
+
+type pulpExactObjectiveJSON struct {
+	Name         *string              `json:"name"`
+	Coefficients []pulpExactCoeffJSON `json:"coefficients"`
+	Constant     jsontext.Value       `json:"constant"`
+}
+
+type pulpExactVariableJSON struct {
+	Name     string         `json:"name"`
+	Cat      string         `json:"cat"`
+	LowBound jsontext.Value `json:"lowBound"`
+	UpBound  jsontext.Value `json:"upBound"`
+	VarValue jsontext.Value `json:"varValue"`
+	Dj       jsontext.Value `json:"dj"`
+}
+
+type pulpExactConstraintJSON struct {
+	Name         string               `json:"name"`
+	Sense        int                  `json:"sense"`
+	Coefficients []pulpExactCoeffJSON `json:"coefficients"`
+	Pi           jsontext.Value       `json:"pi"`
+	Constant     jsontext.Value       `json:"constant"`
+}
+
+type pulpExactJSON struct {
+	Parameters  PuLPParameters            `json:"parameters"`
+	Objective   pulpExactObjectiveJSON    `json:"objective"`
+	Variables   []pulpExactVariableJSON   `json:"variables"`
+	Constraints []pulpExactConstraintJSON `json:"constraints"`
+	SOS1        []any                     `json:"sos1"`
+	SOS2        []any                     `json:"sos2"`
+}
+
+func isStrictJSONNumberToken(tok []byte) bool {
+	i := 0
+	n := len(tok)
+	if i >= n {
+		return false
+	}
+	if tok[i] == '-' {
+		i++
+		if i >= n {
+			return false
+		}
+	}
+	if tok[i] == '0' {
+		i++
+		if i < n && tok[i] >= '0' && tok[i] <= '9' {
+			return false
+		}
+	} else if tok[i] >= '1' && tok[i] <= '9' {
+		for i < n && tok[i] >= '0' && tok[i] <= '9' {
+			i++
+		}
+	} else {
+		return false
+	}
+	if i < n && tok[i] == '.' {
+		i++
+		if i >= n || tok[i] < '0' || tok[i] > '9' {
+			return false
+		}
+		for i < n && tok[i] >= '0' && tok[i] <= '9' {
+			i++
+		}
+	}
+	if i < n && (tok[i] == 'e' || tok[i] == 'E') {
+		i++
+		if i < n && (tok[i] == '+' || tok[i] == '-') {
+			i++
+		}
+		if i >= n || tok[i] < '0' || tok[i] > '9' {
+			return false
+		}
+		for i < n && tok[i] >= '0' && tok[i] <= '9' {
+			i++
+		}
+	}
+	return i == n
+}
+
+func parsePuLPJSONRatToken(raw jsontext.Value, allowNull, defaultZero bool) (*big.Rat, bool, error) {
+	tok := bytes.TrimSpace(raw)
+	if len(tok) == 0 {
+		if defaultZero {
+			return new(big.Rat), false, nil
+		}
+		return nil, true, nil
+	}
+	if bytes.Equal(tok, []byte("null")) {
+		if allowNull {
+			return nil, false, nil
+		}
+		return nil, false, errors.New("unexpected null numeric value")
+	}
+	if !isStrictJSONNumberToken(tok) {
+		return nil, false, fmt.Errorf("expected JSON number token, got %q", string(tok))
+	}
+	r, err := gb.ParseExactRat(string(tok))
+	if err != nil {
+		return nil, false, err
+	}
+	return r, false, nil
+}
+
+func resolvePuLPVarSpecExact(cat string, lb, ub *big.Rat) (*big.Rat, *big.Rat, gb.VarCategory, bool) {
+	switch cat {
+	case "Continuous":
+		return lb, ub, gb.Continuous, true
+	case "Binary":
+		if lb == nil {
+			lb = new(big.Rat)
+		}
+		if ub == nil {
+			ub = big.NewRat(1, 1)
+		}
+		if lb.Sign() >= 0 && ub.Cmp(big.NewRat(1, 1)) <= 0 && lb.Cmp(ub) <= 0 {
+			return lb, ub, gb.Binary, true
+		}
+		return lb, ub, gb.Integer, true
+	case "Integer":
+		if lb != nil && ub != nil && lb.Sign() >= 0 && ub.Cmp(big.NewRat(1, 1)) <= 0 && lb.Cmp(ub) <= 0 {
+			return lb, ub, gb.Binary, true
+		}
+		return lb, ub, gb.Integer, true
+	default:
+		return nil, nil, 0, false
+	}
+}
+
+func parsePuLPJSONExactStd(data []byte) (*gb.Model, error) {
+	var doc pulpExactJSON
+	if err := json.Unmarshal(data, &doc); err != nil {
+		if bytes.Contains(data, []byte("NaN")) || bytes.Contains(data, []byte("Infinity")) {
+			sanitized := reIgnoredPythonNonFinite.ReplaceAll(data, []byte("${1}null"))
+			if err2 := json.Unmarshal(sanitized, &doc); err2 == nil {
+				err = nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse PuLP JSON: %w", err)
+		}
+	}
+	if len(doc.SOS1) > 0 || len(doc.SOS2) > 0 {
+		return nil, fmt.Errorf("PuLP JSON contains unsupported SOS constraints (sos1=%d, sos2=%d)", len(doc.SOS1), len(doc.SOS2))
+	}
+	sense, ok := parsePuLPSense(doc.Parameters.Sense)
+	if !ok {
+		return nil, fmt.Errorf("PuLP JSON has invalid objective sense %d", doc.Parameters.Sense)
+	}
+	m := gb.NewModel(doc.Parameters.Name, sense)
+	m.Reserve(len(doc.Variables), len(doc.Constraints))
+
+	for i := range doc.Variables {
+		v := &doc.Variables[i]
+		if v.Name == "" {
+			return nil, errors.New("PuLP JSON contains variable with empty name")
+		}
+		if _, exists := m.VarByName(v.Name); exists {
+			return nil, fmt.Errorf("PuLP JSON contains duplicate variable name %q", v.Name)
+		}
+		lb, lbOmitted, err := parsePuLPJSONRatToken(v.LowBound, true, false)
+		if err != nil {
+			return nil, fmt.Errorf("variable %q lowBound: %w", v.Name, err)
+		}
+		if lbOmitted {
+			lb = new(big.Rat)
+		}
+		ub, _, err := parsePuLPJSONRatToken(v.UpBound, true, false)
+		if err != nil {
+			return nil, fmt.Errorf("variable %q upBound: %w", v.Name, err)
+		}
+		var cat gb.VarCategory
+		lb, ub, cat, ok = resolvePuLPVarSpecExact(v.Cat, lb, ub)
+		if !ok {
+			return nil, fmt.Errorf("variable %q has invalid category %q", v.Name, v.Cat)
+		}
+		m.AddVarRat(v.Name, lb, ub, cat)
+	}
+
+	maxTerms := len(doc.Objective.Coefficients)
+	for i := range doc.Constraints {
+		if n := len(doc.Constraints[i].Coefficients); n > maxTerms {
+			maxTerms = n
+		}
+	}
+	var terms []gb.Term
+	if maxTerms > 0 {
+		terms = make([]gb.Term, 0, maxTerms)
+	}
+
+	for _, c := range doc.Objective.Coefficients {
+		vid, exists := m.VarByName(c.Name)
+		if !exists {
+			return nil, fmt.Errorf("objective references unknown variable %q", c.Name)
+		}
+		r, _, err := parsePuLPJSONRatToken(c.Value, false, true)
+		if err != nil {
+			return nil, fmt.Errorf("objective coefficient for %q: %w", c.Name, err)
+		}
+		terms = append(terms, gb.TRat(vid, r))
+	}
+	objConst, _, err := parsePuLPJSONRatToken(doc.Objective.Constant, false, true)
+	if err != nil {
+		return nil, fmt.Errorf("objective constant: %w", err)
+	}
+	objName := ""
+	if doc.Objective.Name != nil {
+		objName = *doc.Objective.Name
+	}
+	objExpr := gb.NewExpr(terms...).AddConstantRat(objConst)
+	m.SetObjectiveNamed(objName, objExpr)
+
+	for i := range doc.Constraints {
+		c := &doc.Constraints[i]
+		terms = terms[:0]
+		for _, coeff := range c.Coefficients {
+			vid, exists := m.VarByName(coeff.Name)
+			if !exists {
+				return nil, fmt.Errorf("constraint %q references unknown variable %q", c.Name, coeff.Name)
+			}
+			r, _, err := parsePuLPJSONRatToken(coeff.Value, false, true)
+			if err != nil {
+				return nil, fmt.Errorf("constraint %q coefficient for %q: %w", c.Name, coeff.Name, err)
+			}
+			terms = append(terms, gb.TRat(vid, r))
+		}
+		csense, senseOK := parsePuLPConstraintSense(c.Sense)
+		if !senseOK {
+			return nil, fmt.Errorf("constraint %q has invalid sense %d", c.Name, c.Sense)
+		}
+		constRat, _, err := parsePuLPJSONRatToken(c.Constant, false, true)
+		if err != nil {
+			return nil, fmt.Errorf("constraint %q constant: %w", c.Name, err)
+		}
+		rhs := new(big.Rat).Neg(constRat)
+		e := gb.NewExpr(terms...)
+		switch csense {
+		case gb.LessEqual:
+			m.AddConstraint(c.Name, gb.LeRat(e, rhs))
+		case gb.GreaterEqual:
+			m.AddConstraint(c.Name, gb.GeRat(e, rhs))
+		case gb.Equal:
+			m.AddConstraint(c.Name, gb.EqRat(e, rhs))
+		}
+	}
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// FromPuLPJSONExactBytes decodes a PuLP JSON payload from bytes into a *gb.Model,
+// preserving exact decimal/rational bounds, coefficients, and constants via big.Rat.
+// Non-dyadic decimal coefficients such as 0.9 stay exact under certification.
+func FromPuLPJSONExactBytes(data []byte) (*gb.Model, error) {
+	if m, ok := fromPuLPJSONExactFast(data); ok {
+		return m, nil
+	}
+	return parsePuLPJSONExactStd(data)
+}
+
+// FromPuLPJSONExact reads a PuLP JSON document from r and returns a *gb.Model
+// preserving exact rational bounds, coefficients, and constants.
+func FromPuLPJSONExact(r io.Reader) (*gb.Model, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	return FromPuLPJSONExactBytes(data)
 }
 
 type pulpTokenWriter struct {
