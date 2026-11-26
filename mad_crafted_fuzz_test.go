@@ -1338,3 +1338,708 @@ func TestMADAdversarialSymmetryRootLPRegression(t *testing.T) {
 	res := mustSolveCompiled(t, p, gb.WithTimeLimit(2*time.Second), gb.WithMaxNodes(1500))
 	_ = assertDecomposedMADSoundness(t, "reg_6b6c62", "go", p, res, inst.plantedObj)
 }
+
+// =============================================================================
+// Structural PMAD Coverage & Exact Breakpoint Oracle Fuzzing
+// =============================================================================
+
+type pmadFuzzSeed struct {
+	seed     uint64
+	kByte    uint8
+	iByte    uint8
+	tByte    uint8
+	modeByte uint8
+	tolByte  uint8
+}
+
+type pmadFuzzMeta struct {
+	spec     pmadSpec
+	nGroups  int
+	nItems   int
+	nPeriods int
+	regime   uint8
+	totalAbs float64
+	hasExact bool
+	exactOpt float64
+}
+
+func pmadFuzzSeeds() []pmadFuzzSeed {
+	return []pmadFuzzSeed{
+		// Base-like scale (K=10, I=2, T=6, lambda=1, regime=0, absTol=1, relTol=1e-3).
+		{seed: 1, kByte: 9, iByte: 10, tByte: 5, modeByte: 3, tolByte: 10},
+		// Base-like scale at zero tolerances (K=10, I=2, T=6, lambda=1, regime=0).
+		{seed: 2, kByte: 9, iByte: 10, tByte: 5, modeByte: 3, tolByte: 0},
+		// lambda=0 omits n[k] and r[k] (K=4, I=3, T=4, regime=1 sparse baselines).
+		{seed: 3, kByte: 3, iByte: 20, tByte: 3, modeByte: 5, tolByte: 5},
+		// lambda=0.01 fractional rounding weight (K=6, I=4, T=5, regime=1).
+		{seed: 4, kByte: 5, iByte: 30, tByte: 4, modeByte: 6, tolByte: 6},
+		// lambda=0.5 with I=1 < K=5 decoupled median groups (T=3, regime=3).
+		{seed: 5, kByte: 4, iByte: 0, tByte: 2, modeByte: 17, tolByte: 9},
+		// lambda=2 with T=1 and zero gap tolerances (K=3, I=2, regime=0).
+		{seed: 6, kByte: 2, iByte: 10, tByte: 0, modeByte: 4, tolByte: 0},
+		// lambda=2 with T=1 and non-zero gap tolerances (K=5, I=3, regime=1).
+		{seed: 7, kByte: 4, iByte: 20, tByte: 0, modeByte: 9, tolByte: 15},
+		// Zero-reach boundary (reach==0, steps=1, K=3, I=2, T=2, regime=2).
+		{seed: 9, kByte: 2, iByte: 10, tByte: 1, modeByte: 13, tolByte: 0},
+		// Single group (K=1, I=4, T=8, lambda=0.5, regime=3).
+		{seed: 10, kByte: 0, iByte: 30, tByte: 7, modeByte: 17, tolByte: 11},
+		// Medium I=5 < K=8 (exact oracle 8^5 > 10000 skipped, solver cross-checked).
+		{seed: 11, kByte: 7, iByte: 5, tByte: 3, modeByte: 8, tolByte: 14},
+		// Exact oracle boundary I=8, K=3 (3^8=6561 <= 10000).
+		{seed: 13, kByte: 2, iByte: 35, tByte: 2, modeByte: 16, tolByte: 1},
+		// Larger multi-group stress I=15, K=6, T=6 (lambda=1, regime=0).
+		{seed: 14, kByte: 5, iByte: 48, tByte: 5, modeByte: 3, tolByte: 10},
+		// Zero-lambda large-UB regime (K=8, I=2, T=7, lambda=0, regime=0).
+		{seed: 15, kByte: 7, iByte: 10, tByte: 6, modeByte: 0, tolByte: 12},
+		// Zero-reach with lambda=0 (K=2, I=1, T=1, regime=2).
+		{seed: 18, kByte: 1, iByte: 0, tByte: 0, modeByte: 10, tolByte: 3},
+		// Degenerate root LP stress (K=10, I=17, T=7, lambda=0, regime=3).
+		{seed: 68, kByte: 'w', iByte: 'D', tByte: 'f', modeByte: 255, tolByte: 'L'},
+		// Root strong-branching prunedMinBound under non-zero AbsGapTol (K=8, I=3, T=7, lambda=0.01).
+		{seed: 64, kByte: 'a', iByte: 0x14, tByte: '.', modeByte: 0x0b, tolByte: 'b'},
+	}
+}
+
+func decodeFuzzPMADSpec(seed uint64, kByte, iByte, tByte, modeByte, tolByte uint8) pmadFuzzMeta {
+	rng := rand.New(rand.NewPCG(
+		seed^0x517cc1b727220a95,
+		(uint64(kByte)<<32)|(uint64(iByte)<<24)|(uint64(tByte)<<16)|(uint64(modeByte)<<8)|uint64(tolByte),
+	))
+
+	nGroups := 1 + int(kByte%10)
+	var nItems int
+	switch iByte % 10 {
+	case 0, 1, 2, 3, 4:
+		nItems = 1 + int((iByte/10)%4)
+	case 5, 6, 7:
+		nItems = 5 + int((iByte/10)%6)
+	default:
+		nItems = 11 + int((iByte/10)%20)
+	}
+
+	periods := [8]int{1, 2, 3, 4, 5, 6, 7, 8}
+	nPeriods := periods[int(tByte)%len(periods)]
+
+	lambdas := [5]float64{0, 0.01, 0.5, 1, 2}
+	lambda := lambdas[int(modeByte)%len(lambdas)]
+	regime := (modeByte / uint8(len(lambdas))) % 4
+
+	absTols := [4]float64{0, 0.01, 1, 10}
+	relTols := [4]float64{0, 1e-4, 1e-3, 1e-2}
+	absTol := absTols[int(tolByte&3)]
+	relTol := relTols[int((tolByte>>2)&3)]
+
+	items := make([][]float64, nItems)
+	baselines := make([][]float64, nGroups)
+	for i := range items {
+		items[i] = make([]float64, nPeriods)
+	}
+	for k := range baselines {
+		baselines[k] = make([]float64, nPeriods)
+	}
+
+	var b float64
+	switch regime {
+	case 0:
+		b = 100.0
+		for i := range items {
+			for tt := range nPeriods {
+				if nItems > 4 && rng.IntN(6) == 0 {
+					continue
+				}
+				items[i][tt] = float64(100 + rng.IntN(1901))
+			}
+		}
+		for k := range baselines {
+			for tt := range nPeriods {
+				baselines[k][tt] = float64(100 + rng.IntN(1901))
+			}
+		}
+	case 1:
+		bChoices := [5]float64{0.5, 10, 50, 100, 1000}
+		b = bChoices[rng.IntN(len(bChoices))]
+		scale := b * float64(2+rng.IntN(12))
+		for i := range items {
+			for tt := range nPeriods {
+				if rng.IntN(10) < 4 {
+					continue
+				}
+				items[i][tt] = math.Round((0.05+rng.Float64()*0.95)*scale*100) / 100
+			}
+		}
+		for k := range baselines {
+			if rng.IntN(5) == 0 {
+				continue
+			}
+			for tt := range nPeriods {
+				if rng.IntN(4) == 0 {
+					continue
+				}
+				baselines[k][tt] = math.Round((0.1+rng.Float64()*1.5)*scale*100) / 100
+			}
+		}
+	case 2:
+		bChoices := [3]float64{0.5, 10, 100}
+		b = bChoices[rng.IntN(len(bChoices))]
+		if seed%3 != 0 {
+			for i := range items {
+				for tt := range nPeriods {
+					if rng.IntN(2) == 0 {
+						continue
+					}
+					items[i][tt] = math.Round(rng.Float64()*b*2.0*100) / 100
+				}
+			}
+			for k := range baselines {
+				if k%2 == 0 {
+					continue
+				}
+				for tt := range nPeriods {
+					if rng.IntN(2) == 0 {
+						continue
+					}
+					baselines[k][tt] = math.Round(rng.Float64()*b*2.0*100) / 100
+				}
+			}
+		}
+	default:
+		bChoices := [4]float64{0.5, 10, 50, 1000}
+		b = bChoices[rng.IntN(len(bChoices))]
+		for i := range items {
+			for tt := range nPeriods {
+				items[i][tt] = math.Round(rng.Float64()*b*4.0*100) / 100
+			}
+		}
+		for k := range baselines {
+			for tt := range nPeriods {
+				baselines[k][tt] = math.Round(rng.Float64()*b*6.0*100) / 100
+			}
+		}
+	}
+
+	exactOpt, hasExact := exactPMADObjective(items, baselines, b, lambda, 10000)
+	return pmadFuzzMeta{
+		spec: pmadSpec{
+			items:     items,
+			baselines: baselines,
+			b:         b,
+			lambda:    lambda,
+			absTol:    absTol,
+			relTol:    relTol,
+			maxNodes:  2000,
+		},
+		nGroups:  nGroups,
+		nItems:   nItems,
+		nPeriods: nPeriods,
+		regime:   regime,
+		totalAbs: float64(nPeriods) * absTol,
+		hasExact: hasExact,
+		exactOpt: exactOpt,
+	}
+}
+
+func buildPMADPrimalWitness(t *testing.T, spec pmadSpec, p *gb.CompiledProblem) []float64 {
+	t.Helper()
+	nGroups := len(spec.baselines)
+	nItems := len(spec.items)
+	nPeriods := len(spec.baselines[0])
+
+	xVars := nGroups * nItems
+	perGroup := 1 + nPeriods
+	if spec.lambda > 0 {
+		perGroup += 2
+	}
+	w := make([]float64, 0, xVars+nGroups*perGroup)
+	for k := range nGroups {
+		for range nItems {
+			if k == 0 {
+				w = append(w, 1)
+			} else {
+				w = append(w, 0)
+			}
+		}
+	}
+
+	y := make([]float64, nPeriods)
+	for k, base := range spec.baselines {
+		reach := 0.0
+		for tt, a := range base {
+			s := a
+			for _, d := range spec.items {
+				s += d[tt]
+			}
+			reach = max(reach, s)
+			if k == 0 {
+				y[tt] = s
+			} else {
+				y[tt] = a
+			}
+		}
+		steps := max(1.0, math.Ceil(reach/spec.b))
+		_, bestM, bestN := exactPMADGroupCost(y, spec.b, spec.lambda, steps)
+		w = append(w, bestM)
+		for tt := range nPeriods {
+			w = append(w, math.Abs(y[tt]-bestM))
+		}
+		if spec.lambda > 0 {
+			w = append(w, bestN, math.Abs(bestM-spec.b*bestN))
+		}
+	}
+
+	if len(w) != p.NumVars() {
+		t.Fatalf("PMAD witness length %d != CompiledProblem NumVars %d", len(w), p.NumVars())
+	}
+	return w
+}
+
+func verifyPMADRootLPBothModes(t *testing.T, tag string, p *gb.CompiledProblem) {
+	t.Helper()
+	var objs [2]float64
+	var ok [2]bool
+	for idx, disableSIMD := range []bool{false, true} {
+		mode := "simd"
+		if disableSIMD {
+			mode = "scalar"
+		}
+		lp := gb.NewLPSolver(p, nil)
+		lp.DisableSIMD = disableSIMD
+		lp.MaxIter = max(lp.MaxIter, 50000)
+		res := lp.Solve()
+		lp.Close()
+		if res.Status == gb.StatusNumericalError {
+			t.Fatalf("[%s/%s] root LP NumericalError (iters=%d)", tag, mode, res.Iterations)
+		}
+		if res.Status != gb.StatusOptimal && (res.Status != gb.StatusIterationLimit || p.NumVars() <= 150) {
+			t.Fatalf("[%s/%s] root LP status=%v (iters=%d vars=%d)", tag, mode, res.Status, res.Iterations, p.NumVars())
+		}
+		if res.Status == gb.StatusOptimal {
+			if !hasFiniteBound(res.Objective) {
+				t.Fatalf("[%s/%s] root LP non-finite Objective=%.10g", tag, mode, res.Objective)
+			}
+			bV, rV, _ := p.MaxViolation(res.Primal, false)
+			if bV > 1e-6 || rV > 1e-6 {
+				t.Fatalf("[%s/%s] root LP primal violation b=%.3e r=%.3e", tag, mode, bV, rV)
+			}
+			evalObj := p.EvaluateObjective(res.Primal)
+			evalTol := 1e-5 * max(1.0, math.Abs(res.Objective))
+			if !hasFiniteBound(evalObj) || math.Abs(evalObj-res.Objective) > evalTol {
+				t.Fatalf("[%s/%s] root LP EvaluateObjective=%.10g != res.Objective=%.10g", tag, mode, evalObj, res.Objective)
+			}
+			objs[idx] = res.Objective
+			ok[idx] = true
+		}
+	}
+	if ok[0] && ok[1] {
+		tol := 1e-5 * max(1.0, max(math.Abs(objs[0]), math.Abs(objs[1])))
+		if math.Abs(objs[0]-objs[1]) > tol {
+			t.Fatalf("[%s] root LP simd=%.10g != scalar=%.10g", tag, objs[0], objs[1])
+		}
+	}
+}
+
+func assertPMADSolvesConsistent(
+	t *testing.T,
+	tag, nameA string,
+	resA gb.Result,
+	hasIncA bool,
+	nameB string,
+	resB gb.Result,
+	hasIncB bool,
+	absTol, relTol float64,
+) {
+	t.Helper()
+	if !hasFiniteBound(resA.RootLPBound) {
+		t.Fatalf("[%s] %s RootLPBound=%.10g is non-finite on feasible PMAD model", tag, nameA, resA.RootLPBound)
+	}
+	if !hasFiniteBound(resB.RootLPBound) {
+		t.Fatalf("[%s] %s RootLPBound=%.10g is non-finite on feasible PMAD model", tag, nameB, resB.RootLPBound)
+	}
+	if (hasIncA || resA.Status == gb.StatusOptimal) && !hasFiniteBound(resA.Objective) {
+		t.Fatalf("[%s] %s Objective=%.10g is non-finite", tag, nameA, resA.Objective)
+	}
+	if (hasIncB || resB.Status == gb.StatusOptimal) && !hasFiniteBound(resB.Objective) {
+		t.Fatalf("[%s] %s Objective=%.10g is non-finite", tag, nameB, resB.Objective)
+	}
+	if hasIncA && hasFiniteBound(resB.BestBound) {
+		tolA := 1e-5 * max(1.0, math.Abs(resA.Objective))
+		if resB.BestBound > resA.Objective+tolA {
+			t.Fatalf("[%s] %s BestBound %.10g exceeds %s incumbent %.10g",
+				tag, nameB, resB.BestBound, nameA, resA.Objective)
+		}
+	}
+	if hasIncB && hasFiniteBound(resA.BestBound) {
+		tolB := 1e-5 * max(1.0, math.Abs(resB.Objective))
+		if resA.BestBound > resB.Objective+tolB {
+			t.Fatalf("[%s] %s BestBound %.10g exceeds %s incumbent %.10g",
+				tag, nameA, resA.BestBound, nameB, resB.Objective)
+		}
+	}
+	if resA.Status == gb.StatusOptimal && resB.Status == gb.StatusOptimal {
+		scale := max(1.0, max(math.Abs(resA.Objective), math.Abs(resB.Objective)))
+		allowedA := max(absTol, relTol*max(1.0, math.Abs(resA.Objective)))
+		allowedB := max(absTol, relTol*max(1.0, math.Abs(resB.Objective)))
+		gapAllow := max(allowedA, allowedB) + 1e-5*scale
+		if math.Abs(resA.Objective-resB.Objective) > gapAllow {
+			t.Fatalf("[%s] optimal gap disagreement: %s=%.10g (bnd=%.10g) vs %s=%.10g (bnd=%.10g), allow=%.10g",
+				tag, nameA, resA.Objective, resA.BestBound, nameB, resB.Objective, resB.BestBound, gapAllow)
+		}
+	}
+}
+
+// FuzzPMADStructuralAndOracle exercises PMAD MILP structural gaps (finite m[k]/n[k]
+// upper bounds, rounding weight T*lambda including lambda==0, asymmetric per-group
+// baselines without designated items, small I < K with exact breakpoint oracle, and
+// non-zero AbsGapTol/RelGapTol presolve parity) with formal Lean checks under GOBLIN_FORMAL=1.
+//
+//	go test -run=^$ -fuzz=^FuzzPMADStructuralAndOracle$ -fuzztime=30s .
+func FuzzPMADStructuralAndOracle(f *testing.F) {
+	for _, s := range pmadFuzzSeeds() {
+		f.Add(s.seed, s.kByte, s.iByte, s.tByte, s.modeByte, s.tolByte)
+	}
+
+	f.Fuzz(func(t *testing.T, seed uint64, kByte, iByte, tByte, modeByte, tolByte uint8) {
+		meta := decodeFuzzPMADSpec(seed, kByte, iByte, tByte, modeByte, tolByte)
+		if raceEnabled && testing.Short() && meta.nItems > 18 {
+			t.Skipf("skipping %d-item PMAD instance under -race -short", meta.nItems)
+		}
+
+		tag := fmt.Sprintf("pmad_k%d_i%d_t%d_r%d_l%.2g_%d",
+			meta.nGroups, meta.nItems, meta.nPeriods, meta.regime, meta.spec.lambda, seed)
+		m := buildPMADModel(tag, meta.spec)
+		p, err := m.CompileChecked()
+		if err != nil {
+			t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+		}
+
+		verifyPMADRootLPBothModes(t, tag, p)
+
+		timeLimit := 350 * time.Millisecond
+		if meta.nItems > 16 {
+			timeLimit = 500 * time.Millisecond
+		}
+		const maxNodes = 2000
+		wPre := 1 + int(seed%2)
+
+		resPre := mustSolveCompiled(t, p,
+			gb.WithPureGo(),
+			gb.WithPresolve(true),
+			gb.WithCuts(true),
+			gb.WithHeuristics(true),
+			gb.WithWorkers(wPre),
+			gb.WithAbsGapTol(meta.totalAbs),
+			gb.WithRelGapTol(meta.spec.relTol),
+			gb.WithMaxNodes(maxNodes),
+			gb.WithTimeLimit(timeLimit),
+		)
+		hasIncPre := verifyPMADResult(t, tag+"/pre", p, resPre, meta.exactOpt, meta.hasExact, meta.totalAbs, meta.spec.relTol, false, false)
+
+		noPreOpts := []gb.Option{
+			gb.WithPureGo(),
+			gb.WithPresolve(false),
+			gb.WithWorkers(1),
+			gb.WithAbsGapTol(meta.totalAbs),
+			gb.WithRelGapTol(meta.spec.relTol),
+			gb.WithMaxNodes(maxNodes),
+			gb.WithTimeLimit(timeLimit),
+		}
+		if seed%4 == 0 {
+			noPreOpts = append(noPreOpts, gb.WithoutSIMD())
+		}
+		resNoPre := mustSolveCompiled(t, p, noPreOpts...)
+		hasIncNoPre := verifyPMADResult(t, tag+"/nopre", p, resNoPre, meta.exactOpt, meta.hasExact, meta.totalAbs, meta.spec.relTol, false, false)
+
+		assertPMADSolvesConsistent(t, tag, "pre", resPre, hasIncPre, "nopre", resNoPre, hasIncNoPre, meta.totalAbs, meta.spec.relTol)
+
+		if formalFuzzEnabled() && p.NumVars() <= 600 {
+			_, _ = verifyFormalPresolveRules(t, p)
+			verifyFormalRootLP(t, tag+"/rootLP", p)
+			sols := [][]float64{buildPMADPrimalWitness(t, meta.spec, p)}
+			if hasIncPre {
+				sols = append(sols, resPre.Values)
+			}
+			if hasIncNoPre {
+				sols = append(sols, resNoPre.Values)
+			}
+			verifyFormalSeparatedCuts(t, tag+"/cuts", p, sols)
+			if p.NumVars() <= 240 {
+				resTr, tr := verifyFormalVIPRTrace(
+					t,
+					tag+"/vipr",
+					p,
+					40,
+					250*time.Millisecond,
+					gb.WithPresolve(false),
+					gb.WithCuts(true),
+					gb.WithHeuristics(true),
+					gb.WithRelGapTol(meta.spec.relTol),
+					gb.WithAbsGapTol(meta.totalAbs),
+				)
+				verifyPMADResult(t, tag+"/vipr", p, resTr, meta.exactOpt, meta.hasExact, meta.totalAbs, meta.spec.relTol, false, false)
+				if !hasFiniteBound(resTr.RootLPBound) {
+					t.Fatalf("[%s/vipr] RootLPBound=%.10g is non-finite on feasible PMAD model", tag, resTr.RootLPBound)
+				}
+				assertFullFeatureVsVIPR(t, tag+"/full_vs_vipr", p, resPre, resTr, tr, meta.spec.relTol, meta.totalAbs)
+			}
+		}
+	})
+}
+
+func TestPMADExactOracleAndModelInvariants(t *testing.T) {
+	t.Parallel()
+
+	validItems := [][]float64{{10, 20}}
+	validBase := [][]float64{{5, 15}, {8, 12}}
+	badGuards := []struct {
+		name      string
+		items     [][]float64
+		baselines [][]float64
+		b         float64
+		lambda    float64
+		maxComb   int
+	}{
+		{name: "zero_maxComb", items: validItems, baselines: validBase, b: 10, lambda: 1, maxComb: 0},
+		{name: "neg_maxComb", items: validItems, baselines: validBase, b: 10, lambda: 1, maxComb: -5},
+		{name: "empty_baselines", items: validItems, baselines: nil, b: 10, lambda: 1, maxComb: 100},
+		{name: "zero_periods", items: [][]float64{{}}, baselines: [][]float64{{}}, b: 10, lambda: 1, maxComb: 100},
+		{name: "too_many_items", items: make([][]float64, 13), baselines: validBase, b: 10, lambda: 1, maxComb: 100000},
+		{name: "zero_b", items: validItems, baselines: validBase, b: 0, lambda: 1, maxComb: 100},
+		{name: "neg_b", items: validItems, baselines: validBase, b: -5, lambda: 1, maxComb: 100},
+		{name: "nan_b", items: validItems, baselines: validBase, b: math.NaN(), lambda: 1, maxComb: 100},
+		{name: "inf_b", items: validItems, baselines: validBase, b: math.Inf(1), lambda: 1, maxComb: 100},
+		{name: "neg_lambda", items: validItems, baselines: validBase, b: 10, lambda: -0.1, maxComb: 100},
+		{name: "nan_lambda", items: validItems, baselines: validBase, b: 10, lambda: math.NaN(), maxComb: 100},
+		{name: "inf_lambda", items: validItems, baselines: validBase, b: 10, lambda: math.Inf(1), maxComb: 100},
+		{name: "nan_item", items: [][]float64{{math.NaN(), 1}}, baselines: validBase, b: 10, lambda: 1, maxComb: 100},
+		{name: "inf_base", items: validItems, baselines: [][]float64{{1, math.Inf(1)}}, b: 10, lambda: 1, maxComb: 100},
+		{name: "ragged_items", items: [][]float64{{1}}, baselines: validBase, b: 10, lambda: 1, maxComb: 100},
+		{name: "ragged_bases", items: validItems, baselines: [][]float64{{1, 2}, {3}}, b: 10, lambda: 1, maxComb: 100},
+		{name: "comb_cap", items: [][]float64{{1, 2}, {3, 4}, {5, 6}}, baselines: [][]float64{{1, 2}, {3, 4}, {5, 6}, {7, 8}}, b: 10, lambda: 1, maxComb: 63},
+	}
+	for _, tc := range badGuards {
+		if tc.name == "too_many_items" {
+			for i := range tc.items {
+				tc.items[i] = []float64{1, 2}
+			}
+		}
+		if opt, ok := exactPMADObjective(tc.items, tc.baselines, tc.b, tc.lambda, tc.maxComb); ok || opt != 0 {
+			t.Fatalf("[%s] exactPMADObjective=(%.10g, %t), want (0, false)", tc.name, opt, ok)
+		}
+	}
+
+	dimCases := []struct {
+		name      string
+		spec      pmadSpec
+		wantExact bool
+	}{
+		{
+			name: "zero_items_lambda_pos",
+			spec: pmadSpec{
+				items:     nil,
+				baselines: [][]float64{{12, 48, 30}, {0, 0, 0}, {25, 75, 50}},
+				b:         20,
+				lambda:    0.5,
+			},
+			wantExact: true,
+		},
+		{
+			name: "small_i_lt_k_lambda_zero",
+			spec: pmadSpec{
+				items:     [][]float64{{0, 45, 10, 0}, {30, 0, 20, 50}},
+				baselines: [][]float64{{15, 25, 35, 45}, {80, 10, 0, 40}, {0, 0, 0, 0}, {50, 60, 70, 80}},
+				b:         25,
+				lambda:    0,
+			},
+			wantExact: true,
+		},
+		{
+			name: "reach_zero_lambda_pos",
+			spec: pmadSpec{
+				items:     [][]float64{{0, 0}, {0, 0}},
+				baselines: [][]float64{{0, 0}, {0, 0}, {0, 0}},
+				b:         10,
+				lambda:    1,
+			},
+			wantExact: true,
+		},
+		{
+			name: "single_period_t1",
+			spec: pmadSpec{
+				items:     [][]float64{{35}, {15}},
+				baselines: [][]float64{{10}, {40}, {75}},
+				b:         25,
+				lambda:    1,
+			},
+			wantExact: true,
+		},
+	}
+
+	for _, tc := range dimCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := buildPMADModel(tc.name, tc.spec)
+			p, err := m.CompileChecked()
+			if err != nil {
+				t.Fatalf("CompileChecked failed: %v", err)
+			}
+
+			nGroups := len(tc.spec.baselines)
+			nItems := len(tc.spec.items)
+			nPeriods := len(tc.spec.baselines[0])
+			var wantVars, wantRows, wantInt int
+			if tc.spec.lambda > 0 {
+				wantVars = nGroups * (nItems + nPeriods + 3)
+				wantRows = nGroups*(2*nPeriods+2) + nItems
+				wantInt = nGroups*nItems + nGroups
+			} else {
+				wantVars = nGroups * (nItems + nPeriods + 1)
+				wantRows = 2*nGroups*nPeriods + nItems
+				wantInt = nGroups * nItems
+			}
+			if p.NumVars() != wantVars || p.NumConstraints() != wantRows || p.NumIntVars() != wantInt {
+				t.Fatalf("dims=(%d,%d,%d), want (%d,%d,%d)",
+					p.NumVars(), p.NumConstraints(), p.NumIntVars(), wantVars, wantRows, wantInt)
+			}
+
+			col := nGroups * nItems
+			for k, base := range tc.spec.baselines {
+				reach := 0.0
+				for tt, a := range base {
+					s := a
+					for _, d := range tc.spec.items {
+						s += d[tt]
+					}
+					reach = max(reach, s)
+				}
+				steps := max(1.0, math.Ceil(reach/tc.spec.b))
+				lbM, ubM := p.VarBounds(col)
+				if lbM != 0 || math.Abs(ubM-tc.spec.b*steps) > 1e-12 {
+					t.Fatalf("group %d m bounds=(%.10g, %.10g), want (0, %.10g)", k, lbM, ubM, tc.spec.b*steps)
+				}
+				col += 1 + nPeriods
+				if tc.spec.lambda > 0 {
+					lbN, ubN := p.VarBounds(col)
+					if lbN != 1 || ubN != steps || p.VarCategory(col) == gb.Continuous {
+						t.Fatalf("group %d n bounds=(%.10g, %.10g) cat=%v, want (1, %.10g) integer/binary",
+							k, lbN, ubN, p.VarCategory(col), steps)
+					}
+					col += 2
+				}
+			}
+
+			w := buildPMADPrimalWitness(t, tc.spec, p)
+			bV, rV, iV := p.MaxViolation(w, true)
+			if bV > 1e-9 || rV > 1e-9 || iV > 1e-9 {
+				t.Fatalf("witness violation b=%.2e r=%.2e i=%.2e", bV, rV, iV)
+			}
+
+			exactOpt, ok := exactPMADObjective(tc.spec.items, tc.spec.baselines, tc.spec.b, tc.spec.lambda, 10000)
+			if ok != tc.wantExact || exactOpt < 0 {
+				t.Fatalf("exactPMADObjective=(%.10g, %t), want (>=0, %t)", exactOpt, ok, tc.wantExact)
+			}
+			for _, lam := range []float64{0, 0.01, 0.5, 1, 2} {
+				spec := tc.spec
+				spec.lambda = lam
+				optLam, okLam := exactPMADObjective(spec.items, spec.baselines, spec.b, spec.lambda, 10000)
+				if !okLam {
+					t.Fatalf("lambda=%.2g exactPMADObjective returned false", lam)
+				}
+				mLam := buildPMADModel(fmt.Sprintf("%s_l%.2g", tc.name, lam), spec)
+				pLam, errLam := mLam.CompileChecked()
+				if errLam != nil {
+					t.Fatalf("lambda=%.2g CompileChecked failed: %v", lam, errLam)
+				}
+				reqOpt := nPeriods > 1
+				resPre := mustSolveCompiled(t, pLam, gb.WithPureGo(), gb.WithPresolve(true), gb.WithMaxNodes(5000))
+				hasIncPre := verifyPMADResult(t, tc.name+"/pre", pLam, resPre, optLam, true, 0, 0, reqOpt, reqOpt)
+				resNoPre := mustSolveCompiled(t, pLam, gb.WithPureGo(), gb.WithPresolve(false), gb.WithMaxNodes(5000))
+				hasIncNoPre := verifyPMADResult(t, tc.name+"/nopre", pLam, resNoPre, optLam, true, 0, 0, reqOpt, reqOpt)
+				assertPMADSolvesConsistent(t, tc.name, "pre", resPre, hasIncPre, "nopre", resNoPre, hasIncNoPre, 0, 0)
+			}
+		})
+	}
+
+	for idx, s := range pmadFuzzSeeds() {
+		t.Run(fmt.Sprintf("seed_%02d", idx), func(t *testing.T) {
+			t.Parallel()
+			meta := decodeFuzzPMADSpec(s.seed, s.kByte, s.iByte, s.tByte, s.modeByte, s.tolByte)
+			tag := fmt.Sprintf("seed_%02d", idx)
+			m := buildPMADModel(tag, meta.spec)
+			p, err := m.CompileChecked()
+			if err != nil {
+				t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+			}
+			w := buildPMADPrimalWitness(t, meta.spec, p)
+			bV, rV, iV := p.MaxViolation(w, true)
+			if bV > 1e-9 || rV > 1e-9 || iV > 1e-9 {
+				t.Fatalf("[%s] witness violation b=%.2e r=%.2e i=%.2e", tag, bV, rV, iV)
+			}
+
+			for _, zeroTol := range []bool{false, true} {
+				absTol, relTol := meta.totalAbs, meta.spec.relTol
+				modeTag := "pmad_tol"
+				if zeroTol {
+					absTol, relTol = 0, 0
+					modeTag = "zero_tol"
+				}
+				resPre := mustSolveCompiled(t, p,
+					gb.WithPureGo(),
+					gb.WithPresolve(true),
+					gb.WithAbsGapTol(absTol),
+					gb.WithRelGapTol(relTol),
+					gb.WithMaxNodes(meta.spec.maxNodes),
+					gb.WithTimeLimit(500*time.Millisecond),
+				)
+				hasIncPre := verifyPMADResult(t, tag+"/"+modeTag+"/pre", p, resPre, meta.exactOpt, meta.hasExact, absTol, relTol, false, false)
+
+				resNoPre := mustSolveCompiled(t, p,
+					gb.WithPureGo(),
+					gb.WithPresolve(false),
+					gb.WithAbsGapTol(absTol),
+					gb.WithRelGapTol(relTol),
+					gb.WithMaxNodes(meta.spec.maxNodes),
+					gb.WithTimeLimit(500*time.Millisecond),
+				)
+				hasIncNoPre := verifyPMADResult(t, tag+"/"+modeTag+"/nopre", p, resNoPre, meta.exactOpt, meta.hasExact, absTol, relTol, false, false)
+				assertPMADSolvesConsistent(t, tag+"/"+modeTag, "pre", resPre, hasIncPre, "nopre", resNoPre, hasIncNoPre, absTol, relTol)
+			}
+		})
+	}
+}
+
+func TestPMADRootGapPrunedBoundRegression(t *testing.T) {
+	t.Parallel()
+
+	meta := decodeFuzzPMADSpec(64, 'a', 0x14, '.', 0x0b, 'b')
+	if !meta.hasExact || math.Abs(meta.exactOpt-100.0948) > 1e-6 {
+		t.Fatalf("decoded exactOpt=(%.10g, %t), want (100.0948, true)", meta.exactOpt, meta.hasExact)
+	}
+	if meta.totalAbs != 7 {
+		t.Fatalf("decoded totalAbs=%.10g, want 7", meta.totalAbs)
+	}
+
+	m := buildPMADModel("pmad_root_gap_pruned_bound", meta.spec)
+	p, err := m.CompileChecked()
+	if err != nil {
+		t.Fatalf("CompileChecked failed: %v", err)
+	}
+
+	for _, presolve := range []bool{true, false} {
+		label := fmt.Sprintf("presolve_%t", presolve)
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			res := mustSolveCompiled(t, p,
+				gb.WithPureGo(),
+				gb.WithPresolve(presolve),
+				gb.WithCuts(true),
+				gb.WithHeuristics(true),
+				gb.WithWorkers(1),
+				gb.WithAbsGapTol(7),
+				gb.WithRelGapTol(0),
+			)
+			verifyPMADResult(t, label, p, res, 100.0948, true, 7, 0, true, false)
+			if res.BestBound > 100.0948+1e-6 {
+				t.Fatalf("[%s] BestBound=%.10g exceeds exactOpt=100.0948+1e-6", label, res.BestBound)
+			}
+		})
+	}
+}

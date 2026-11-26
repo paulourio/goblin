@@ -47,3 +47,4 @@
 45	/app/bin/goblin.test	/app/work	FuzzExactRatAndPuLPJSONVIPR	heavy	16
 46	/app/bin/goblin.test	/app/work	FuzzPrimalDevexAndIncrementalDuals	heavy	16
 47	/app/bin/goblin.test	/app/work	FuzzRelaxCutDynamismAndRootCuts	heavy	16
+48	/app/bin/goblin.test	/app/work	FuzzPMADStructuralAndOracle	heavy	16

@@ -718,7 +718,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 			b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
 			if b.rootGapClosed(rootVN, &b.rootLPMin) {
 				b.rootLPUser = b.userObjFromSearchMin(b.rootLPMin)
-				return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootLPMin), b.rootLPUser, 1, 0, true))
+				return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootLPMin), b.rootLPUser, 1, 0))
 			}
 		}
 	}
@@ -730,7 +730,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 
 	if b.rootGapClosed(rootVN, &b.rootLPMin) {
 		b.rootLPUser = b.userObjFromSearchMin(b.rootLPMin)
-		return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootLPMin), b.rootLPUser, b.nodesExplored, 0, true))
+		return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootLPMin), b.rootLPUser, b.nodesExplored, 0))
 	}
 
 	curLPRes := b.runRootCutLoop(rootRes)
@@ -774,7 +774,7 @@ func solveBranchAndCutWithDone(p *CompiledProblem, opts Options, startTime, dead
 	}
 	if b.rootGapClosed(rootVN, &b.rootCutMin) {
 		b.rootCutUser = b.userObjFromSearchMin(b.rootCutMin)
-		return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootCutMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, true))
+		return b.finishVIPR(b.optimalRootResult(min(b.bestObjMin, b.rootCutMin), b.rootCutUser, b.nodesExplored, b.cutsAdded))
 	}
 
 	if earlyRes, doneEarly := b.exploreTree(curLPRes); doneEarly {
@@ -1594,12 +1594,9 @@ const (
 	postFixLimitStop
 )
 
-func (b *babEngine) optimalRootResult(boundMin, rootCutBound float64, nodes, cutsAdded int, clampBound bool) Result {
+func (b *babEngine) optimalRootResult(boundMin, rootCutBound float64, nodes, cutsAdded int) Result {
 	obj := b.p.EvaluateObjective(b.bestPrimal)
-	bestBound := b.userObjFromSearchMin(boundMin)
-	if clampBound {
-		bestBound = clampBestBoundToObj(b.p.sense, bestBound, obj)
-	}
+	bestBound := clampBestBoundToObj(b.p.sense, b.userObjFromSearchMin(boundMin), obj)
 	return b.optimalOrNumErr(Result{
 		modelID:      b.p.modelID,
 		Status:       StatusOptimal,
@@ -1688,7 +1685,7 @@ func (b *babEngine) resolveRootLP(
 		}
 	}
 	if b.rootGapClosed(rootVN, rootNodeMin) {
-		return b.optimalRootResult(min(b.bestObjMin, *rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true, true
+		return b.optimalRootResult(min(b.bestObjMin, min(*rootNodeMin, b.prunedMinBound)), b.rootCutUser, b.nodesExplored, b.cutsAdded), true, true
 	}
 	if b.bestPrimal == nil && !b.strictExactVIPRGap() && b.gapClosed(*rootNodeMin, b.bestObjMin, b.opts.RelGapTol) {
 		b.prunedMinBound = min(b.prunedMinBound, *rootNodeMin)
@@ -2020,7 +2017,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 		if cand, ok := b.polishIncumbent(curLPRes.Primal); ok {
 			b.acceptPolishedIncumbent(cand, b.evalSearchMin(cand))
 			if b.rootGapClosed(rootVN, &rootNodeMin) {
-				return b.optimalRootResult(min(b.bestObjMin, rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true
+				return b.optimalRootResult(min(b.bestObjMin, min(rootNodeMin, b.prunedMinBound)), b.rootCutUser, b.nodesExplored, b.cutsAdded), true
 			}
 		}
 		brVar, brVal = selectNearIntegralBranchVar(p, curLPRes.Primal, curLB, curUB)
@@ -2040,7 +2037,7 @@ func (b *babEngine) exploreTree(curLPRes LPResult) (Result, bool) {
 			}
 			if prune, inf := b.shouldPruneNode(rootVN, &rootNodeMin, b.opts.RelGapTol); prune || inf {
 				if prune && b.bestPrimal != nil {
-					return b.optimalRootResult(min(b.bestObjMin, rootNodeMin), b.rootCutUser, b.nodesExplored, b.cutsAdded, false), true
+					return b.optimalRootResult(min(b.bestObjMin, min(rootNodeMin, b.prunedMinBound)), b.rootCutUser, b.nodesExplored, b.cutsAdded), true
 				}
 				return Result{}, false
 			}
