@@ -738,7 +738,209 @@ func funcIsVerifierHelper(fn *ast.FuncDecl) bool {
 	return false
 }
 
-func auditFormalBridgeSource(filename string, src []byte, onlyFormalNamed bool) ([]string, error) {
+func funcCallsFormalOrCertified(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var callee string
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			callee = fn.Name
+		case *ast.SelectorExpr:
+			callee = fn.Sel.Name
+		}
+		if callee == "formalFuzzEnabled" ||
+			callee == "formalAssignOracleEnabled" ||
+			callee == "FormalOracleEnabled" ||
+			strings.HasPrefix(callee, "FormalCheck") ||
+			callee == "WithCertified" ||
+			callee == "WithCertifiedWitness" ||
+			callee == "VerifyVIPRTrace" ||
+			callee == "WithVIPRTrace" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func exprIsNonFormalShortOrRaceGate(e ast.Expr) bool {
+	if e == nil || exprContainsBuilderFailCond(e) || exprContainsMathIsInf(e) || exprContainsResourceLimitCond(e) {
+		return false
+	}
+	hasShortOrRace := false
+	hasForbidden := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if hasForbidden || n == nil {
+			return false
+		}
+		switch v := n.(type) {
+		case *ast.Ident:
+			if v.Name == "raceEnabled" {
+				hasShortOrRace = true
+			}
+			if v.Name == "formalFuzzEnabled" || v.Name == "formalAssignOracleEnabled" {
+				hasForbidden = true
+				return false
+			}
+		case *ast.SelectorExpr:
+			if pkg, ok := v.X.(*ast.Ident); ok && pkg.Name == "testing" && v.Sel.Name == "Short" {
+				hasShortOrRace = true
+			}
+			if v.Sel.Name == "FormalOracleEnabled" {
+				hasForbidden = true
+				return false
+			}
+		}
+		return true
+	})
+	return hasShortOrRace && !hasForbidden
+}
+
+func blockHasEscapeOrFormalGate(blk *ast.BlockStmt) bool {
+	if blk == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(blk, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		switch node := n.(type) {
+		case *ast.ReturnStmt:
+			found = true
+			return false
+		case *ast.BranchStmt:
+			if node.Tok == token.CONTINUE || node.Tok == token.BREAK || node.Tok == token.GOTO {
+				found = true
+				return false
+			}
+		case *ast.CallExpr:
+			var callee string
+			switch fn := node.Fun.(type) {
+			case *ast.Ident:
+				callee = fn.Name
+			case *ast.SelectorExpr:
+				callee = fn.Sel.Name
+			}
+			if callee == "Skip" || callee == "Skipf" || callee == "SkipNow" ||
+				callee == "formalFuzzEnabled" || callee == "formalAssignOracleEnabled" ||
+				callee == "FormalOracleEnabled" || strings.HasPrefix(callee, "FormalCheck") ||
+				strings.HasPrefix(callee, "verifyFormal") || strings.HasPrefix(callee, "checkFormal") ||
+				callee == "WithCertified" || callee == "WithCertifiedWitness" ||
+				callee == "VerifyVIPRTrace" || callee == "WithVIPRTrace" {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func exprHasRowsTimesColsSizeCap(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			return true
+		}
+		switch bin.Op {
+		case token.GTR, token.GEQ, token.LSS, token.LEQ:
+			if (exprIsRowsTimesCols(bin.X) && exprIsSizeCapBound(bin.Y)) ||
+				(exprIsRowsTimesCols(bin.Y) && exprIsSizeCapBound(bin.X)) {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func recordAllowedFuzzIf(
+	ifStmt *ast.IfStmt,
+	allowedSkipCalls map[*ast.CallExpr]bool,
+	allowedSizeCapBins map[*ast.BinaryExpr]bool,
+) {
+	if ifStmt == nil {
+		return
+	}
+	if exprIsNonFormalShortOrRaceGate(ifStmt.Cond) && ifStmt.Body != nil {
+		for _, stmt := range ifStmt.Body.List {
+			exprStmt, ok := stmt.(*ast.ExprStmt)
+			if !ok {
+				continue
+			}
+			call, ok := exprStmt.X.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if sel, okSel := call.Fun.(*ast.SelectorExpr); okSel {
+				switch sel.Sel.Name {
+				case "Skip", "Skipf", "SkipNow":
+					allowedSkipCalls[call] = true
+				}
+			}
+		}
+	}
+	if exprHasRowsTimesColsSizeCap(ifStmt.Cond) && !blockHasEscapeOrFormalGate(ifStmt.Body) {
+		ast.Inspect(ifStmt.Cond, func(sub ast.Node) bool {
+			if bin, okBin := sub.(*ast.BinaryExpr); okBin {
+				allowedSizeCapBins[bin] = true
+			}
+			return true
+		})
+	}
+}
+
+func checkSkipOrSizeCapNode(
+	fset *token.FileSet,
+	filename, funcName, skipContext string,
+	n ast.Node,
+	allowedSkipCalls map[*ast.CallExpr]bool,
+	allowedSizeCapBins map[*ast.BinaryExpr]bool,
+	violations *[]string,
+) {
+	switch node := n.(type) {
+	case *ast.CallExpr:
+		if !allowedSkipCalls[node] {
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
+				switch sel.Sel.Name {
+				case "Skip", "Skipf", "SkipNow":
+					pos := fset.Position(node.Pos())
+					*violations = append(*violations, fmt.Sprintf("%s:%d: forbidden %s inside %s%s", filename, pos.Line, sel.Sel.Name, skipContext, funcName))
+				}
+			}
+		}
+	case *ast.BinaryExpr:
+		if !allowedSizeCapBins[node] {
+			switch node.Op {
+			case token.GTR, token.GEQ, token.LSS, token.LEQ:
+				if (exprIsRowsTimesCols(node.X) && exprIsSizeCapBound(node.Y)) ||
+					(exprIsRowsTimesCols(node.Y) && exprIsSizeCapBound(node.X)) {
+					pos := fset.Position(node.Pos())
+					*violations = append(*violations, fmt.Sprintf("%s:%d: forbidden rows*cols size-cap comparison inside %s", filename, pos.Line, funcName))
+				}
+			}
+		}
+	}
+}
+
+func auditFormalBridgeSource(filename string, src []byte, auditAllHelpers bool) ([]string, error) {
 	fset := token.NewFileSet()
 	fileAST, err := parser.ParseFile(fset, filename, src, 0)
 	if err != nil {
@@ -754,10 +956,14 @@ func auditFormalBridgeSource(filename string, src []byte, onlyFormalNamed bool) 
 		if strings.HasPrefix(name, "Test") || strings.HasPrefix(name, "Benchmark") {
 			continue
 		}
-		if onlyFormalNamed && !strings.Contains(name, "Formal") {
+		isFuzz := strings.HasPrefix(name, "Fuzz")
+		isVerifier := funcIsVerifierHelper(fn)
+		if !auditAllHelpers && !isFuzz && (!isVerifier || !funcCallsFormalOrCertified(fn.Body)) {
 			continue
 		}
-		isVerifier := funcIsVerifierHelper(fn)
+
+		allowedSkipCalls := make(map[*ast.CallExpr]bool)
+		allowedSizeCapBins := make(map[*ast.BinaryExpr]bool)
 
 		var walk func(n ast.Node)
 		walk = func(n ast.Node) {
@@ -768,60 +974,33 @@ func auditFormalBridgeSource(filename string, src []byte, onlyFormalNamed bool) 
 			// to the enclosing verifier function's return path, while still scanning them for Skip/size caps.
 			if lit, isLit := n.(*ast.FuncLit); isLit {
 				ast.Inspect(lit.Body, func(inner ast.Node) bool {
-					if call, ok := inner.(*ast.CallExpr); ok {
-						if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-							switch sel.Sel.Name {
-							case "Skip", "Skipf", "SkipNow":
-								pos := fset.Position(call.Pos())
-								violations = append(violations, fmt.Sprintf("%s:%d: forbidden %s inside %s", filename, pos.Line, sel.Sel.Name, name))
-							}
+					if isFuzz {
+						if ifStmt, okIf := inner.(*ast.IfStmt); okIf {
+							recordAllowedFuzzIf(ifStmt, allowedSkipCalls, allowedSizeCapBins)
 						}
 					}
-					if bin, ok := inner.(*ast.BinaryExpr); ok {
-						switch bin.Op {
-						case token.GTR, token.GEQ, token.LSS, token.LEQ:
-							if (exprIsRowsTimesCols(bin.X) && exprIsSizeCapBound(bin.Y)) ||
-								(exprIsRowsTimesCols(bin.Y) && exprIsSizeCapBound(bin.X)) {
-								pos := fset.Position(bin.Pos())
-								violations = append(violations, fmt.Sprintf("%s:%d: forbidden rows*cols size-cap comparison inside %s", filename, pos.Line, name))
-							}
-						}
-					}
+					checkSkipOrSizeCapNode(fset, filename, name, "", inner, allowedSkipCalls, allowedSizeCapBins, &violations)
 					return true
 				})
 				return
 			}
 
-			switch node := n.(type) {
-			case *ast.CallExpr:
-				if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
-					switch sel.Sel.Name {
-					case "Skip", "Skipf", "SkipNow":
-						pos := fset.Position(node.Pos())
-						violations = append(violations, fmt.Sprintf("%s:%d: forbidden %s inside formal helper %s", filename, pos.Line, sel.Sel.Name, name))
-					}
+			checkSkipOrSizeCapNode(fset, filename, name, "formal helper ", n, allowedSkipCalls, allowedSizeCapBins, &violations)
+			if ifStmt, okIf := n.(*ast.IfStmt); okIf {
+				if isFuzz {
+					recordAllowedFuzzIf(ifStmt, allowedSkipCalls, allowedSizeCapBins)
 				}
-			case *ast.BinaryExpr:
-				switch node.Op {
-				case token.GTR, token.GEQ, token.LSS, token.LEQ:
-					if (exprIsRowsTimesCols(node.X) && exprIsSizeCapBound(node.Y)) ||
-						(exprIsRowsTimesCols(node.Y) && exprIsSizeCapBound(node.X)) {
-						pos := fset.Position(node.Pos())
-						violations = append(violations, fmt.Sprintf("%s:%d: forbidden rows*cols size-cap comparison inside %s", filename, pos.Line, name))
-					}
-				}
-			case *ast.IfStmt:
-				if isVerifier && blockHasSilentPassReturn(node.Body) {
-					if exprContainsMathIsInf(node.Cond) {
-						pos := fset.Position(node.Pos())
+				if isVerifier && blockHasSilentPassReturn(ifStmt.Body) {
+					if exprContainsMathIsInf(ifStmt.Cond) {
+						pos := fset.Position(ifStmt.Pos())
 						violations = append(violations, fmt.Sprintf("%s:%d: forbidden math.IsInf silent return inside %s", filename, pos.Line, name))
 					}
-					if exprContainsBuilderFailCond(node.Cond) {
-						pos := fset.Position(node.Pos())
+					if exprContainsBuilderFailCond(ifStmt.Cond) {
+						pos := fset.Position(ifStmt.Pos())
 						violations = append(violations, fmt.Sprintf("%s:%d: forbidden silent error/!ok return inside %s", filename, pos.Line, name))
 					}
-					if exprContainsResourceLimitCond(node.Cond) {
-						pos := fset.Position(node.Pos())
+					if exprContainsResourceLimitCond(ifStmt.Cond) {
+						pos := fset.Position(ifStmt.Pos())
 						violations = append(violations, fmt.Sprintf("%s:%d: forbidden silent resource-limit return inside %s", filename, pos.Line, name))
 					}
 				}
@@ -845,33 +1024,40 @@ func TestFormalNoSilentFuzzBridgeEscapes(t *testing.T) {
 
 	targets := []struct {
 		relPath         string
-		onlyFormalNamed bool
+		auditAllHelpers bool
 	}{
-		{relPath: "formal_fuzz_bridge_test.go", onlyFormalNamed: false},
-		{relPath: "fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "mad_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "mad_crafted_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "certified_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "bab_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "struct_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "stress_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "stateful_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "cbc_fuzz_test.go", onlyFormalNamed: true},
-		{relPath: "mad_exact_opt_bugfix_test.go", onlyFormalNamed: true},
-		{relPath: "vipr_fixed_leaf_bugfix_test.go", onlyFormalNamed: true},
-		{relPath: "exact_polish_test.go", onlyFormalNamed: true},
-		{relPath: "vipr_json_test.go", onlyFormalNamed: true},
-		{relPath: filepath.Join("assign", "formal_fuzz_bridge_test.go"), onlyFormalNamed: false},
-		{relPath: filepath.Join("assign", "crafted_fuzz_test.go"), onlyFormalNamed: true},
-		{relPath: filepath.Join("assign", "fuzz_test.go"), onlyFormalNamed: true},
+		{relPath: "formal_fuzz_bridge_test.go", auditAllHelpers: true},
+		{relPath: "fuzz_test.go"},
+		{relPath: "mad_fuzz_test.go"},
+		{relPath: "mad_crafted_fuzz_test.go"},
+		{relPath: "certified_fuzz_test.go"},
+		{relPath: "bab_fuzz_test.go"},
+		{relPath: "struct_fuzz_test.go"},
+		{relPath: "stress_fuzz_test.go"},
+		{relPath: "stateful_fuzz_test.go"},
+		{relPath: "cbc_fuzz_test.go"},
+		{relPath: "mad_exact_opt_bugfix_test.go"},
+		{relPath: "vipr_fixed_leaf_bugfix_test.go"},
+		{relPath: "exact_polish_test.go"},
+		{relPath: "vipr_json_test.go"},
+		{relPath: "lu_fuzz_test.go"},
+		{relPath: filepath.Join("format", "format_fuzz_test.go")},
+		{relPath: filepath.Join("format", "mps_cbc_fuzz_test.go")},
+		{relPath: filepath.Join("internal", "simd", "simd_fuzz_test.go")},
+		{relPath: filepath.Join("assign", "formal_fuzz_bridge_test.go"), auditAllHelpers: true},
+		{relPath: filepath.Join("assign", "crafted_fuzz_test.go")},
+		{relPath: filepath.Join("assign", "fuzz_test.go")},
+		{relPath: filepath.Join("assign", "certified_fuzz_test.go")},
 	}
 
+	registered := make(map[string]bool, len(targets))
 	for _, tgt := range targets {
+		registered[filepath.ToSlash(tgt.relPath)] = true
 		src, err := os.ReadFile(tgt.relPath)
 		if err != nil {
 			t.Fatalf("read %s: %v", tgt.relPath, err)
 		}
-		viols, err := auditFormalBridgeSource(tgt.relPath, src, tgt.onlyFormalNamed)
+		viols, err := auditFormalBridgeSource(tgt.relPath, src, tgt.auditAllHelpers)
 		if err != nil {
 			t.Fatalf("parse %s: %v", tgt.relPath, err)
 		}
@@ -881,15 +1067,56 @@ func TestFormalNoSilentFuzzBridgeEscapes(t *testing.T) {
 		}
 	}
 
-	// Verify that the static AST gate rejects synthetic poisoned helpers.
+	// Ensure every *_test.go file defining a Fuzz* function is registered in targets.
+	fset := token.NewFileSet()
+	for _, dir := range []string{".", "assign", "format", filepath.Join("internal", "simd")} {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read dir %s: %v", dir, err)
+		}
+		for _, ent := range ents {
+			if ent.IsDir() || !strings.HasSuffix(ent.Name(), "_test.go") {
+				continue
+			}
+			rel := filepath.ToSlash(filepath.Join(dir, ent.Name()))
+			f, err := parser.ParseFile(fset, rel, nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", rel, err)
+			}
+			for _, decl := range f.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Fuzz") && !registered[rel] {
+					t.Fatalf("fuzz test file %s defines %s but is not registered in TestFormalNoSilentFuzzBridgeEscapes", rel, fn.Name.Name)
+				}
+			}
+		}
+	}
+
+	// Verify legitimate non-formal -race -short skips inside Fuzz* produce zero false positives.
+	cleanRaceShort := `package p
+import "testing"
+const raceEnabled = true
+func FuzzCleanRaceShort(f *testing.F) {
+	f.Fuzz(func(t *testing.T, n int) {
+		if raceEnabled && testing.Short() && n > 100 {
+			t.Skipf("skipping large %d under -race -short", n)
+		}
+	})
+}`
+	if viols, err := auditFormalBridgeSource("clean_race_short.go", []byte(cleanRaceShort), false); err != nil || len(viols) != 0 {
+		t.Fatalf("expected 0 violations on legitimate -race -short skip, got err=%v viols=%v", err, viols)
+	}
+
+	// Verify that the static AST gate rejects synthetic poisoned helpers regardless of name.
 	poisonCases := []struct {
 		name            string
-		onlyFormalNamed bool
+		auditAllHelpers bool
 		src             string
 		wantSubstr      string
 	}{
 		{
-			name: "rows_cols_cap_bailout",
+			name:            "rows_cols_cap_bailout",
+			auditAllHelpers: true,
 			src: `package p
 func checkFormalAssign(rows, cols int) error {
 	if rows*cols > 4096 {
@@ -900,11 +1127,13 @@ func checkFormalAssign(rows, cols int) error {
 			wantSubstr: "rows*cols size-cap",
 		},
 		{
-			name:            "math_is_inf_silent_return",
-			onlyFormalNamed: true,
+			name: "non_formal_named_math_is_inf_silent_return",
 			src: `package p
 import "math"
-func verifyAdversarialFormalLSAP(x float64) {
+func verifyAdversarialLSAP(x float64) {
+	if !formalAssignOracleEnabled() {
+		return
+	}
 	if math.IsInf(x, 0) {
 		return
 	}
@@ -912,30 +1141,33 @@ func verifyAdversarialFormalLSAP(x float64) {
 			wantSubstr: "math.IsInf silent return",
 		},
 		{
-			name:            "not_ok_silent_return",
-			onlyFormalNamed: true,
+			name: "non_formal_named_not_ok_silent_return",
 			src: `package p
-func verifyAdversarialFormalLSAP() {
+func checkCertifiedWitnessGap() error {
+	_ = WithCertified(true)
 	okFull := false
 	if !okFull {
-		return
+		return nil
 	}
+	return nil
 }`,
 			wantSubstr: "silent error/!ok return",
 		},
 		{
-			name: "helper_t_skip",
+			name: "non_formal_named_helper_t_skip",
 			src: `package p
 import "testing"
-func verifyFormalHelper(tb testing.TB) {
+func assertVIPRBridgeResult(tb testing.TB) {
+	_ = VerifyVIPRTrace(nil)
 	tb.Skip("too large")
 }`,
 			wantSubstr: "forbidden Skip",
 		},
 		{
-			name: "resource_limit_silent_return",
+			name: "non_formal_named_resource_limit_silent_return",
 			src: `package p
-func checkFormalLimit(st int) error {
+func verifyTracedResultLimit(st int) error {
+	_ = WithVIPRTrace(nil)
 	if isResourceLimitStatus(st) {
 		return nil
 	}
@@ -943,10 +1175,47 @@ func checkFormalLimit(st int) error {
 }`,
 			wantSubstr: "silent resource-limit return",
 		},
+		{
+			name: "non_formal_named_oracle_helper_skip",
+			src: `package p
+import "testing"
+func checkOracleDisabledSkip(tb testing.TB) {
+	if !FormalOracleEnabled() {
+		tb.Skip("GOBLIN_FORMAL disabled")
+	}
+}`,
+			wantSubstr: "forbidden Skip",
+		},
+		{
+			name: "fuzz_direct_formal_skip",
+			src: `package p
+import "testing"
+func FuzzSilentSkip(f *testing.F) {
+	f.Fuzz(func(t *testing.T, x int) {
+		if !formalFuzzEnabled() {
+			t.Skip("formal disabled")
+		}
+	})
+}`,
+			wantSubstr: "forbidden Skip",
+		},
+		{
+			name: "fuzz_rows_cols_gated_formal_call",
+			src: `package p
+import "testing"
+func FuzzRowsColsGate(f *testing.F) {
+	f.Fuzz(func(t *testing.T, rows, cols int) {
+		if rows*cols <= 4096 {
+			_ = WithCertified(true)
+		}
+	})
+}`,
+			wantSubstr: "rows*cols size-cap",
+		},
 	}
 
 	for _, pc := range poisonCases {
-		viols, err := auditFormalBridgeSource(pc.name+".go", []byte(pc.src), pc.onlyFormalNamed)
+		viols, err := auditFormalBridgeSource(pc.name+".go", []byte(pc.src), pc.auditAllHelpers)
 		if err != nil {
 			t.Fatalf("[%s] parse error: %v", pc.name, err)
 		}

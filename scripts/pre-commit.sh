@@ -288,6 +288,13 @@ run_lake_build() {
     )
 }
 
+run_formal_short() {
+    (
+        unset $(git rev-parse --local-env-vars)
+        env GOBLIN_FORMAL=1 go test -short -run '^TestFormal' . ./assign
+    )
+}
+
 if [ "${HAS_LAKE}" -eq 1 ]; then
     log_step "4/5 Building Lean 4 proofs and verifying Track 5 ELF binaries..."
     start_job "lake-build" run_lake_build
@@ -308,7 +315,7 @@ start_job "test-simd" env GOEXPERIMENT=simd go test ./...
 start_job "test-cgo0" env CGO_ENABLED=0 go test ./...
 start_job "test-race-short" go test -race -short ./...
 if [ "${HAS_LAKE}" -eq 1 ]; then
-    start_job "test-formal-short" env GOBLIN_FORMAL=1 go test -short -run '^TestFormal' . ./assign
+    start_job "test-formal-short" run_formal_short
 fi
 if [ "${HAS_CBC}" -eq 1 ]; then
     start_job "test-cbc" go test -tags=cbc ./...

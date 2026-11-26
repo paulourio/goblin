@@ -5,8 +5,11 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -24,6 +27,7 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 		"docs/modeling-and-formats.md",
 		"docs/solver-internals.md",
 		"docs/benchmarks.md",
+		"docs/formal-verification.md",
 		"bench/results/final_report.md",
 	}
 	for _, p := range requiredDocs {
@@ -61,6 +65,9 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 		if err := bench.SyncMarkdownFile(path, tb, true); err != nil {
 			t.Errorf("documentation sync gate failed: %v", err)
 		}
+	}
+	if err := bench.SyncFormalDocs(".", true); err != nil {
+		t.Errorf("formal documentation sync gate failed: %v", err)
 	}
 
 	expectedReport, err := bench.BuildFinalReportMarkdown(tb)
@@ -225,5 +232,58 @@ func TestDocBacktickIdentifiersResolve(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestFuzzHarnessTargetsSync checks that Go Fuzz* functions match
+// scripts/gcp-fuzz/targets.tsv, scripts/corpus_audit.sh, and scripts/local_fuzz_soak.sh.
+func TestFuzzHarnessTargetsSync(t *testing.T) {
+	t.Parallel()
+	inv, err := bench.CollectFormalInventory(".")
+	if err != nil {
+		t.Fatalf("CollectFormalInventory: %v", err)
+	}
+	wantAll := make([]string, 0, len(inv.FuzzTargets))
+	wantDef := make([]string, 0, inv.DefaultFuzzCount)
+	for _, ft := range inv.FuzzTargets {
+		wantAll = append(wantAll, ft.Name)
+		if !ft.IsCBC {
+			wantDef = append(wantDef, ft.Name)
+		}
+	}
+	slices.Sort(wantAll)
+	slices.Sort(wantDef)
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	listFromScript := func(args ...string) []string {
+		cmd := exec.CommandContext(t.Context(), "bash", args...)
+		out, cmdErr := cmd.CombinedOutput()
+		if cmdErr != nil {
+			t.Fatalf("bash %v failed: %v\n%s", args, cmdErr, out)
+		}
+		var got []string
+		for line := range strings.SplitSeq(string(out), "\n") {
+			s := strings.TrimSpace(line)
+			if s != "" {
+				got = append(got, s)
+			}
+		}
+		slices.Sort(got)
+		return got
+	}
+
+	gotAudit := listFromScript(filepath.Join("scripts", "corpus_audit.sh"), "--skip-gcs", "--list-targets")
+	if !slices.Equal(gotAudit, wantAll) {
+		t.Fatalf("corpus_audit.sh targets mismatch:\ngot=%v\nwant=%v", gotAudit, wantAll)
+	}
+	gotSoakAllCBC := listFromScript(filepath.Join("scripts", "local_fuzz_soak.sh"), "--phase=all-cbc", "--list-targets")
+	if !slices.Equal(gotSoakAllCBC, wantAll) {
+		t.Fatalf("local_fuzz_soak.sh --phase=all-cbc targets mismatch:\ngot=%v\nwant=%v", gotSoakAllCBC, wantAll)
+	}
+	gotSoakDefault := listFromScript(filepath.Join("scripts", "local_fuzz_soak.sh"), "--phase=all", "--list-targets")
+	if !slices.Equal(gotSoakDefault, wantDef) {
+		t.Fatalf("local_fuzz_soak.sh --phase=all targets mismatch:\ngot=%v\nwant=%v", gotSoakDefault, wantDef)
 	}
 }

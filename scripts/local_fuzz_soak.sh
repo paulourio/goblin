@@ -31,6 +31,7 @@ WINDOW_EXECS="${WINDOW_EXECS:-}"
 WINDOW_MIN_NEW="${WINDOW_MIN_NEW:-}"
 RUN_ID="${RUN_ID:-local-$(date -u +%Y%m%d-%H%M%S)}"
 VERIFY_LOG_ONLY=""
+LIST_TARGETS=0
 
 usage() {
     cat >&2 <<'EOF'
@@ -41,7 +42,7 @@ usage: local_fuzz_soak.sh [--formal] [--simd-max-tier=auto|scalar|avx2|avx512]
   [--mad-time=20m] [--assert-time=20m] [--race-time=10m] [--cbc-time=20m]
   [--early-stop=local|soak|deep|off] [--min-time=D] [--min-execs=N]
   [--stall-time=D] [--stall-execs=N] [--window-time=D] [--window-execs=N] [--window-min-new=N]
-  [--verify-log=PATH]
+  [--verify-log=PATH] [--list-targets]
 EOF
 }
 
@@ -71,6 +72,7 @@ for arg in "$@"; do
         --window-execs=*) WINDOW_EXECS="${arg#*=}" ;;
         --window-min-new=*) WINDOW_MIN_NEW="${arg#*=}" ;;
         --verify-log=*) VERIFY_LOG_ONLY="${arg#*=}" ;;
+        --list-targets) LIST_TARGETS=1 ;;
         *)
             usage
             exit 2
@@ -131,7 +133,7 @@ if [[ -n "${SIMD_MAX_TIER}" ]]; then
     esac
 fi
 
-if [[ "${FORMAL}" == "1" ]]; then
+if [[ "${LIST_TARGETS}" -eq 0 && "${FORMAL}" == "1" ]]; then
     export GOBLIN_FORMAL=1
     if ! command -v lake >/dev/null 2>&1 && [[ -n "${HOME:-}" && -x "${HOME}/.elan/bin/lake" ]]; then
         export PATH="${HOME}/.elan/bin:${PATH}"
@@ -155,6 +157,20 @@ if [[ "${FORMAL}" == "1" ]]; then
     fi
 fi
 
+case "${PHASE}" in
+    assign|simd|format|mad|assert|race|cbc|all|all-cbc) ;;
+    *)
+        echo "ERROR: unknown --phase=${PHASE} (expected assign, simd, format, mad, assert, race, cbc, all, or all-cbc)" >&2
+        exit 2
+        ;;
+esac
+
+TARGETS_TSV="${GOBLIN_ROOT}/scripts/gcp-fuzz/targets.tsv"
+if [[ ! -f "${TARGETS_TSV}" ]]; then
+    echo "ERROR: fuzz target manifest missing at ${TARGETS_TSV}" >&2
+    exit 2
+fi
+
 declare -a JOBS=()
 NEED_ASSIGN_BIN=0
 NEED_SIMD_BIN=0
@@ -165,103 +181,105 @@ NEED_ASSERT_BIN=0
 NEED_RACE_BIN=0
 NEED_CBC_BIN=0
 
-add_assign_jobs() {
-    NEED_ASSIGN_BIN=1
-    JOBS+=(
-        "./assign|FuzzAssignAdversarialFormal|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignPlantedCancellationAndStage2|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignCollinearAndRowDominated|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignWideAccAndIEEE754Edges|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignHallAndTopology|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignMetamorphicAndDirtyWorkspace|fast|${ASSIGN_TIME}"
-        "./assign|FuzzLinearSum|fast|${ASSIGN_TIME}"
-        "./assign|FuzzCertifiedAssign|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignDyadic2304|fast|${ASSIGN_TIME}"
-        "./assign|FuzzAssignSparseCoreTraps|fast|${SPARSE_TIME}"
-    )
-}
-add_simd_jobs() {
-    NEED_SIMD_BIN=1
-    JOBS+=(
-        "./internal/simd|FuzzSIMDKernelTierParity|fast|${SIMD_TIME}"
-    )
-}
-add_format_jobs() {
-    NEED_FORMAT_BIN=1
-    JOBS+=(
-        "./format|FuzzPuLPJSONFastVsStd|parser|${FORMAT_TIME}"
-        "./format|FuzzWriteMPSRoundTrip|parser|${FORMAT_TIME}"
-    )
-}
-add_mad_jobs() {
-    NEED_GOBLIN_BIN=1
-    JOBS+=(
-        ".|FuzzAdversarialLPFormal|heavy|${MAD_TIME}"
-        ".|FuzzAdversarialMIPFormal|heavy|${MAD_TIME}"
-        ".|FuzzMIPSmall|heavy|${MAD_TIME}"
-        ".|FuzzLPSmall|fast|${MAD_TIME}"
-        ".|FuzzCertifiedMILP|heavy|${MAD_TIME}"
-        ".|FuzzMADExactOptimum|heavy|${MAD_TIME}"
-        ".|FuzzMADAdversarialRegimes|heavy|${MAD_TIME}"
-        ".|FuzzMADMetamorphicAndLimits|heavy|${MAD_TIME}"
-        ".|FuzzMADMediumDecomposed|heavy|${MAD_TIME}"
-        ".|FuzzMILPSolver|heavy|${MAD_TIME}"
-        ".|FuzzLPSolver|fast|${MAD_TIME}"
-        ".|FuzzPuLPJSON|parser|${MAD_TIME}"
-        ".|FuzzLUForrestTomlinVsExact|fast|${MAD_TIME}"
-        ".|FuzzVerifyVIPRTraceVsLean|heavy|${MAD_TIME}"
-        ".|FuzzCertifiedAdversarialAndWitness|heavy|${MAD_TIME}"
-        ".|FuzzParallelBABStateMachine|heavy|${MAD_TIME}"
-        ".|FuzzOptionMatrixAndExactReference|heavy|${MAD_TIME}"
-        ".|FuzzSparseLPStress|heavy|${MAD_TIME}"
-        ".|FuzzAdversarialMediumMILP|heavy|${MAD_TIME}"
-    )
-}
-add_assert_jobs() {
-    NEED_ASSERT_BIN=1
-    JOBS+=(
-        ".-assert|FuzzStructLPAndMILP|heavy|${ASSERT_TIME}"
-        ".-assert|FuzzMutatePublicBenchmarks|heavy|${ASSERT_TIME}"
-        ".-assert|FuzzGeneralMetamorphicAndPresolveParity|heavy|${ASSERT_TIME}"
-        ".-assert|FuzzLPSolverIncrementalStateMachine|fast|${ASSERT_TIME}"
-    )
-}
-add_race_jobs() {
-    NEED_RACE_BIN=1
-    JOBS+=(
-        ".-race|FuzzParallelBABRace|race|${RACE_TIME}"
-    )
-}
-add_cbc_jobs() {
-    NEED_CBC_BIN=1
-    NEED_FORMAT_CBC_BIN=1
-    JOBS+=(
-        "./format-cbc|FuzzWriteMPSCBCParity|heavy|${CBC_TIME}"
-        ".-cbc|FuzzMADDifferentialCBC|heavy|${CBC_TIME}"
-        ".-cbc|FuzzMADMediumDecomposedCBC|heavy|${CBC_TIME}"
-        ".-cbc|FuzzMADExactOptimumCBC|heavy|${CBC_TIME}"
-        ".-cbc|FuzzMADAdversarialCBC|heavy|${CBC_TIME}"
-        ".-cbc|FuzzMADLimitsCBC|heavy|${CBC_TIME}"
-        ".-cbc|FuzzGeneralLPAndMILPCBC|heavy|${CBC_TIME}"
-        ".-cbc|FuzzCBCLPSolverIncremental|heavy|${CBC_TIME}"
-    )
-}
-
-case "${PHASE}" in
-    assign) add_assign_jobs ;;
-    simd) add_simd_jobs ;;
-    format) add_format_jobs ;;
-    mad) add_mad_jobs ;;
-    assert) add_assert_jobs ;;
-    race) add_race_jobs ;;
-    cbc) add_cbc_jobs ;;
-    all) add_assign_jobs; add_simd_jobs; add_format_jobs; add_mad_jobs; add_assert_jobs; add_race_jobs ;;
-    all-cbc) add_assign_jobs; add_simd_jobs; add_format_jobs; add_mad_jobs; add_assert_jobs; add_race_jobs; add_cbc_jobs ;;
-    *)
-        echo "ERROR: unknown --phase=${PHASE} (expected assign, simd, format, mad, assert, race, cbc, all, or all-cbc)" >&2
+# Derive fuzz soak jobs and required test binaries dynamically from targets.tsv.
+while IFS=$'\t' read -r _idx _bin _workdir _target _class _maxpar _extra; do
+    [[ -n "${_idx}" ]] || continue
+    [[ "${_idx}" == \#* ]] && continue
+    if [[ -z "${_bin}" || -z "${_workdir}" || -z "${_target}" || -z "${_class}" || -n "${_extra:-}" ]]; then
+        echo "ERROR: malformed row in ${TARGETS_TSV}: ${_idx}" >&2
         exit 2
-        ;;
-esac
+    fi
+    job_phase=""
+    pkg_tok=""
+    dur=""
+    need_var=""
+    case "$(basename "${_bin}")" in
+        assign.test)
+            job_phase="assign"
+            pkg_tok="./assign"
+            dur="${ASSIGN_TIME}"
+            if [[ "${_target}" == "FuzzAssignSparseCoreTraps" ]]; then
+                dur="${SPARSE_TIME}"
+            fi
+            need_var="NEED_ASSIGN_BIN"
+            ;;
+        simd.test)
+            job_phase="simd"
+            pkg_tok="./internal/simd"
+            dur="${SIMD_TIME}"
+            need_var="NEED_SIMD_BIN"
+            ;;
+        format.test)
+            job_phase="format"
+            pkg_tok="./format"
+            dur="${FORMAT_TIME}"
+            need_var="NEED_FORMAT_BIN"
+            ;;
+        format_cbc.test)
+            job_phase="cbc"
+            pkg_tok="./format-cbc"
+            dur="${CBC_TIME}"
+            need_var="NEED_FORMAT_CBC_BIN"
+            ;;
+        goblin.test)
+            job_phase="mad"
+            pkg_tok="."
+            dur="${MAD_TIME}"
+            need_var="NEED_GOBLIN_BIN"
+            ;;
+        goblin_assert.test)
+            job_phase="assert"
+            pkg_tok=".-assert"
+            dur="${ASSERT_TIME}"
+            need_var="NEED_ASSERT_BIN"
+            ;;
+        goblin_race.test)
+            job_phase="race"
+            pkg_tok=".-race"
+            dur="${RACE_TIME}"
+            need_var="NEED_RACE_BIN"
+            ;;
+        goblin_cbc.test)
+            job_phase="cbc"
+            pkg_tok=".-cbc"
+            dur="${CBC_TIME}"
+            need_var="NEED_CBC_BIN"
+            ;;
+        *)
+            echo "ERROR: unsupported binary ${_bin} in ${TARGETS_TSV}" >&2
+            exit 2
+            ;;
+    esac
+
+    include_job=0
+    case "${PHASE}" in
+        all)
+            if [[ "${job_phase}" != "cbc" ]]; then
+                include_job=1
+            fi
+            ;;
+        all-cbc)
+            include_job=1
+            ;;
+        *)
+            if [[ "${job_phase}" == "${PHASE}" ]]; then
+                include_job=1
+            fi
+            ;;
+    esac
+    if [[ "${include_job}" -eq 1 ]]; then
+        printf -v "${need_var}" '1'
+        JOBS+=("${pkg_tok}|${_target}|${_class}|${dur}")
+    fi
+done < "${TARGETS_TSV}"
+
+if [[ "${LIST_TARGETS}" -eq 1 ]]; then
+    for spec in "${JOBS[@]}"; do
+        IFS='|' read -r _pkg target _class _dur <<< "${spec}"
+        printf '%s\n' "${target}"
+    done
+    exit 0
+fi
 
 if [[ ( "${NEED_CBC_BIN}" -eq 1 || "${NEED_FORMAT_CBC_BIN}" -eq 1 ) && ! -d "${GOBLIN_ROOT}/third_party/Cbc/dist/lib" ]]; then
     echo "ERROR: Cbc artifacts not found in ${GOBLIN_ROOT}/third_party/Cbc/dist/lib; run scripts/build_cbc.sh first." >&2

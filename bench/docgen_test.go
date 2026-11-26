@@ -3,6 +3,8 @@ package bench
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -441,5 +443,113 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	wantBPRatio := fmt.Sprintf("**%.2fx**", pairedRatioOrFallback(gbBP.TTotalTrialsMS, scBP.TTotalTrialsMS, gbBP.TTotalMS, scBP.TTotalMS))
 	if !strings.Contains(cbcNotes, "t2_binpack_44") || !strings.Contains(cbcNotes, wantBPRatio) {
 		t.Fatalf("NON_MAD_CBC_NOTES missing t2_binpack_44 %s disclosure:\n%s", wantBPRatio, cbcNotes)
+	}
+}
+
+func TestCollectFormalInventoryAndHelpers(t *testing.T) {
+	t.Parallel()
+
+	rawLean := `
+/-
+  theorem ignoredInBlockComment : True := trivial
+  /- nested comment with lemma nestedIgnored : True := trivial -/
+-/
+-- theorem ignoredInLineComment : True := trivial
+theorem pubOne : True := trivial
+private theorem privOne : True := trivial
+@[simp] private lemma privAttr : True := trivial
+protected noncomputable lemma pubProt : True := trivial
+def helperWithString : String := "-- theorem notAComment"
+`
+	stripped := stripLeanComments(rawLean)
+	pub, priv := countLeanTheoremDecls(stripped)
+	if pub != 2 || priv != 2 {
+		t.Fatalf("countLeanTheoremDecls = (%d pub, %d priv), want (2, 2); stripped:\n%s", pub, priv, stripped)
+	}
+
+	// Verify .lake is ignored whether it is a directory or a symlink.
+	tmp := t.TempDir()
+	extDir := filepath.Join(tmp, "external_lake")
+	if err := os.MkdirAll(extDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "Ignored.lean"), []byte("theorem leaked : True := trivial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	formalDir := filepath.Join(tmp, "formal")
+	if err := os.MkdirAll(filepath.Join(formalDir, "GoblinFormal"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(formalDir, "Apps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(extDir, filepath.Join(formalDir, ".lake")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formalDir, "GoblinFormal.lean"), []byte("import GoblinFormal.Track1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formalDir, "GoblinFormal", "Track1.lean"), []byte("theorem t1 : True := trivial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formalDir, "GoblinFormal", "AxiomAudit.lean"), []byte("#guard_msgs in\n#print axioms GoblinFormal.Track1.t1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(formalDir, "Apps", "Common.lean"), []byte("def c : Nat := 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var synthInv FormalInventory
+	if err := collectLeanInventory(tmp, &synthInv); err != nil {
+		t.Fatalf("collectLeanInventory symlink .lake test failed: %v", err)
+	}
+	if synthInv.LeanTotalFiles != 4 || synthInv.LeanTotalAuthored != 1 || synthInv.AxiomLocks != 1 {
+		t.Fatalf("unexpected symlink .lake inventory: %+v", synthInv)
+	}
+
+	// Verify collectFuzzTargetsInventory rejects drift against targets.tsv.
+	if err := os.MkdirAll(filepath.Join(tmp, "scripts", "gcp-fuzz"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "foo_test.go"), []byte("package foo\nimport \"testing\"\nfunc FuzzOne(f *testing.F) {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "scripts", "gcp-fuzz", "targets.tsv"), []byte("0\t/app/bin/goblin.test\t/app/work\tFuzzOther\tfast\t16\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var driftInv FormalInventory
+	if err := collectFuzzTargetsInventory(tmp, &driftInv); err == nil {
+		t.Fatal("expected collectFuzzTargetsInventory to reject Go vs targets.tsv mismatch")
+	}
+
+	// Verify live repository inventory matches exact expected counts.
+	inv, err := CollectFormalInventory("..")
+	if err != nil {
+		t.Fatalf("CollectFormalInventory: %v", err)
+	}
+	if inv.LeanGoblinFiles != 16 || inv.LeanAppsFiles != 8 || inv.LeanTotalFiles != 24 {
+		t.Fatalf("unexpected Lean file counts: goblin=%d apps=%d total=%d", inv.LeanGoblinFiles, inv.LeanAppsFiles, inv.LeanTotalFiles)
+	}
+	if inv.LeanGoblinLOC != 51295 || inv.LeanAppsLOC != 2577 || inv.LeanTotalLOC != 53872 {
+		t.Fatalf("unexpected Lean LOC: goblin=%d apps=%d total=%d", inv.LeanGoblinLOC, inv.LeanAppsLOC, inv.LeanTotalLOC)
+	}
+	if inv.LeanGoblinAuthored != 1324 || inv.LeanGoblinPublic != 620 || inv.LeanGoblinPrivate != 704 || inv.LeanAppsAuthored != 1 || inv.LeanTotalAuthored != 1325 {
+		t.Fatalf("unexpected authored theorem counts: %+v", inv)
+	}
+	if inv.LeanGoblinKernel != 5843 || inv.LeanAppsKernel != 33 || inv.LeanTotalKernel != 5876 || inv.AxiomLocks != 220 {
+		t.Fatalf("unexpected kernel/lock counts: kernel=(%d+%d=%d) locks=%d",
+			inv.LeanGoblinKernel, inv.LeanAppsKernel, inv.LeanTotalKernel, inv.AxiomLocks)
+	}
+	if len(inv.ProdCertFiles) != 5 || inv.ProdCertLOC != 18254 {
+		t.Fatalf("unexpected prod cert files=%d loc=%d", len(inv.ProdCertFiles), inv.ProdCertLOC)
+	}
+	if len(inv.FormalTestFiles) != 21 || inv.TotalGoTestFiles != 30 {
+		t.Fatalf("unexpected Go test file counts: formal=%d total=%d", len(inv.FormalTestFiles), inv.TotalGoTestFiles)
+	}
+	if inv.DefaultFuzzCount != 37 || inv.CBCFuzzCount != 8 || inv.TotalFuzzCount != 45 || inv.TSVActiveRowCount != 45 {
+		t.Fatalf("unexpected Fuzz counts: default=%d cbc=%d total=%d tsv=%d",
+			inv.DefaultFuzzCount, inv.CBCFuzzCount, inv.TotalFuzzCount, inv.TSVActiveRowCount)
+	}
+	if err := SyncFormalDocs("..", true); err != nil {
+		t.Fatalf("SyncFormalDocs: %v", err)
 	}
 }

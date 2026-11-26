@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-lint-and-test:
+    name: Go Lint, Codegen, Python, and Test Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Go formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            printf '%s\n' "${unformatted}"
+            exit 1
+          fi
+
+      - name: Run golangci-lint (default build)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+
+      - name: Run golangci-lint (SIMD and CGO_ENABLED=0 builds)
+        run: |
+          GOEXPERIMENT=simd golangci-lint run ./...
+          CGO_ENABLED=0 golangci-lint run ./...
+
+      - name: Run Python lint and static type checks
+        run: |
+          python -m pip install --upgrade pip ruff mypy
+          ruff check --no-cache bench/ scripts/
+          ruff format --check --no-cache bench/ scripts/
+          mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports bench/ scripts/
+
+      - name: Check shell script syntax
+        run: bash -n scripts/*.sh scripts/gcp-fuzz/*.sh
+
+      - name: Check compiler codegen and SIMD invariants
+        run: |
+          go run ./cmd/goblin-optcheck -check-invariants
+          go run ./cmd/goblin-optcheck -check-invariants -simd
+
+      - name: Run Go unit and documentation sync tests (default)
+        run: go test ./...
+
+      - name: Run Go tests (GOEXPERIMENT=simd)
+        env:
+          GOEXPERIMENT: simd
+        run: go test ./...
+
+      - name: Run Go tests (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: 0
+        run: go test ./...
+
+      - name: Run Go race detector tests
+        run: go test -race -short ./...
+
+      - name: Run Go assert-enabled tests
+        run: go test -tags=goblin_assert -short . ./assign
+
+  formal-lean-and-track5:
+    name: Lean 4 Prove Lane and Track 5 ELF Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Lean toolchain and Lake build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            formal/.lake
+          key: ${{ runner.os }}-lean-${{ hashFiles('formal/lean-toolchain', 'formal/lakefile.toml', 'formal/lake-manifest.json') }}
+
+      - name: Install Elan and pinned Lean 4 toolchain
+        run: |
+          if ! command -v lake >/dev/null 2>&1 && [ ! -x "${HOME}/.elan/bin/lake" ]; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain "$(tr -d '[:space:]' < formal/lean-toolchain)"
+          fi
+          echo "${HOME}/.elan/bin" >> "${GITHUB_PATH}"
+
+      - name: Build Lean 4 proofs and run Batteries lint
+        working-directory: formal
+        run: |
+          lake build --wfail
+          lake lint
+
+      - name: Verify Track 5 ARM64 and Track 5E AMD64 ELF binaries
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 scripts/extract_elf_track5.py --verify
+          python3 scripts/extract_amd64_track5e.py --verify
+
+      - name: Run Lean formal differential tests
+        env:
+          GOBLIN_FORMAL: "1"
+        run: go test -short -run '^TestFormal' . ./assign
+
+      - name: Run formal and pure-Go fuzz seed corpora
+        env:
+          GOEXPERIMENT: simd
+          GOBLIN_FORMAL: "1"
+        run: go test -count=1 -run '^Fuzz' ./...

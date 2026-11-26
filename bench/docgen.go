@@ -5,10 +5,16 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/build/constraint"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/paulourio/goblin/assign"
@@ -981,6 +987,8 @@ type subsetSpec[T any] struct {
 type docgenCorpus struct {
 	cases       []CorpusCase
 	assignCases []AssignCorpusCase
+	repoRoot    string
+	formalInv   *FormalInventory
 }
 
 func (dc *docgenCorpus) milp() []CorpusCase {
@@ -995,6 +1003,26 @@ func (dc *docgenCorpus) assign() []AssignCorpusCase {
 		dc.assignCases = AssignCorpusSpecs()
 	}
 	return dc.assignCases
+}
+
+func (dc *docgenCorpus) formal() (*FormalInventory, error) {
+	if dc.formalInv != nil {
+		return dc.formalInv, nil
+	}
+	root := dc.repoRoot
+	if root == "" {
+		found, err := findRepoRoot(".")
+		if err != nil {
+			return nil, err
+		}
+		root = found
+	}
+	inv, err := CollectFormalInventory(root)
+	if err != nil {
+		return nil, err
+	}
+	dc.formalInv = inv
+	return inv, nil
 }
 
 // cbcBackendDescription states which CBC build and flag mapping produced goblin_cbc.json.
@@ -1067,6 +1095,18 @@ func renderBlockWith(blockName string, tb *TelemetryBundle, dc *docgenCorpus) (s
 		if err := renderBinarySizeTable(&b, tb); err != nil {
 			return "", err
 		}
+	case "README_FORMAL_SUMMARY",
+		"INDEX_FORMAL_SUMMARY",
+		"BENCHMARKS_FORMAL_SUMMARY",
+		"FORMAL_OVERVIEW_STATS",
+		"FORMAL_GO_STATS",
+		"FORMAL_MODULE_MATRIX",
+		"FORMAL_FUZZ_INVENTORY":
+		inv, err := dc.formal()
+		if err != nil {
+			return "", err
+		}
+		return renderFormalBlock(blockName, inv)
 	default:
 		return "", fmt.Errorf("unknown generated block %q", blockName)
 	}
@@ -1812,14 +1852,15 @@ func renderBinarySizeTable(b *bytes.Buffer, tb *TelemetryBundle) error {
 	return nil
 }
 
-// SyncMarkdownContent replaces all <!-- BEGIN GENERATED:NAME --> ... <!-- END GENERATED:NAME -->
-// regions in content with fresh markdown rendered from tb.
-func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
+func replaceGeneratedBlocks(
+	content string,
+	shouldRender func(blockName string) bool,
+	render func(blockName string) (string, error),
+) (out string, replaced int, err error) {
 	const beginPrefix = "<!-- BEGIN GENERATED:"
 	const markerSuffix = " -->"
 
-	var dc docgenCorpus
-	out := content
+	out = content
 	searchFrom := 0
 	for {
 		idx := strings.Index(out[searchFrom:], beginPrefix)
@@ -1830,7 +1871,7 @@ func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
 		nameStart := startMarkerPos + len(beginPrefix)
 		nameEndRel := strings.Index(out[nameStart:], markerSuffix)
 		if nameEndRel < 0 {
-			return "", fmt.Errorf("malformed BEGIN GENERATED marker at byte %d", startMarkerPos)
+			return "", 0, fmt.Errorf("malformed BEGIN GENERATED marker at byte %d", startMarkerPos)
 		}
 		blockName := out[nameStart : nameStart+nameEndRel]
 		bodyStart := nameStart + nameEndRel + len(markerSuffix)
@@ -1838,20 +1879,40 @@ func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
 		endMarker := fmt.Sprintf("<!-- END GENERATED:%s -->", blockName)
 		endRel := strings.Index(out[bodyStart:], endMarker)
 		if endRel < 0 {
-			return "", fmt.Errorf("missing %s marker", endMarker)
+			return "", 0, fmt.Errorf("missing %s marker", endMarker)
 		}
 		bodyEnd := bodyStart + endRel
 
-		rendered, err := renderBlockWith(blockName, tb, &dc)
+		if shouldRender != nil && !shouldRender(blockName) {
+			searchFrom = bodyEnd + len(endMarker)
+			continue
+		}
+
+		rendered, err := render(blockName)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 
 		replacement := "\n" + rendered + "\n"
 		out = out[:bodyStart] + replacement + out[bodyEnd:]
+		replaced++
 		searchFrom = bodyStart + len(replacement) + len(endMarker)
 	}
-	return out, nil
+	return out, replaced, nil
+}
+
+// SyncMarkdownContent replaces all <!-- BEGIN GENERATED:NAME --> ... <!-- END GENERATED:NAME -->
+// regions in content with fresh markdown rendered from tb.
+func SyncMarkdownContent(content string, tb *TelemetryBundle) (string, error) {
+	var dc docgenCorpus
+	return syncMarkdownContentWith(content, tb, &dc)
+}
+
+func syncMarkdownContentWith(content string, tb *TelemetryBundle, dc *docgenCorpus) (string, error) {
+	synced, _, err := replaceGeneratedBlocks(content, nil, func(blockName string) (string, error) {
+		return renderBlockWith(blockName, tb, dc)
+	})
+	return synced, err
 }
 
 // SyncMarkdownFile updates a markdown file in place (or checks it without writing when checkOnly is true).
@@ -1861,7 +1922,11 @@ func SyncMarkdownFile(path string, tb *TelemetryBundle, checkOnly bool) error {
 		return err
 	}
 	orig := string(raw)
-	synced, err := SyncMarkdownContent(orig, tb)
+	var dc docgenCorpus
+	if root, rootErr := findRepoRoot(filepath.Dir(path)); rootErr == nil {
+		dc.repoRoot = root
+	}
+	synced, err := syncMarkdownContentWith(orig, tb, &dc)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
@@ -1973,4 +2038,1023 @@ Standalone ` + "`CGO_ENABLED=0`" + ` binaries compiled across the four canonical
 <!-- END GENERATED:BINARY_SIZE_TABLE -->
 `
 	return SyncMarkdownContent(tpl, tb)
+}
+
+// LeanModuleStats summarizes source size, authored declarations, kernel checks, and axiom locks.
+type LeanModuleStats struct {
+	Name          string
+	Files         int
+	LOC           int
+	AuthoredDecls int
+	PublicDecls   int
+	PrivateDecls  int
+	KernelDecls   int
+	AxiomLocks    int
+}
+
+// GoFileStats records line count for a single Go source or test file.
+type GoFileStats struct {
+	RelPath string
+	LOC     int
+}
+
+// FuzzTargetInfo records a Go fuzz entry point parsed via go/parser and cross-checked against targets.tsv.
+type FuzzTargetInfo struct {
+	Name       string
+	RelPath    string
+	PkgDir     string
+	IsCBC      bool
+	TSVBinary  string
+	TSVWorkdir string
+	TSVClass   string
+}
+
+// FormalInventory captures deterministic disk counts across Lean 4 proofs, Go certifiers, and Fuzz targets.
+type FormalInventory struct {
+	LeanGoblinFiles    int
+	LeanGoblinLOC      int
+	LeanAppsFiles      int
+	LeanAppsLOC        int
+	LeanTotalFiles     int
+	LeanTotalLOC       int
+	LeanGoblinAuthored int
+	LeanGoblinPublic   int
+	LeanGoblinPrivate  int
+	LeanAppsAuthored   int
+	LeanAppsPublic     int
+	LeanAppsPrivate    int
+	LeanTotalAuthored  int
+	LeanTotalPublic    int
+	LeanTotalPrivate   int
+	LeanGoblinKernel   int
+	LeanAppsKernel     int
+	LeanTotalKernel    int
+	AxiomLocks         int
+	LeanModules        []LeanModuleStats
+	ProdCertFiles      []GoFileStats
+	ProdCertLOC        int
+	FormalTestFiles    []GoFileStats
+	FormalTestLOC      int
+	CertVIPRTestFiles  []GoFileStats
+	CertVIPRTestLOC    int
+	TotalGoTestFiles   int
+	TotalGoTestLOC     int
+	FuzzTargets        []FuzzTargetInfo
+	DefaultFuzzCount   int
+	CBCFuzzCount       int
+	TotalFuzzCount     int
+	FuzzPackageCounts  map[string]int
+	FuzzBinaryCounts   map[string]int
+	TSVActiveRowCount  int
+}
+
+// leanKernelTheoremCounts tracks per-module Lean kernel TheoremInfo declarations checked
+// by Lean.collectAxioms in scripts/verify_formal.sh without spawning Lake during go test.
+var leanKernelTheoremCounts = map[string]int{
+	"GoblinFormal.Common.Basic": 98,
+	"GoblinFormal.Common.Json":  188,
+	"GoblinFormal.Track1":       110,
+	"GoblinFormal.Track2A":      314,
+	"GoblinFormal.Track2B":      97,
+	"GoblinFormal.Track2C":      334,
+	"GoblinFormal.Track3":       72,
+	"GoblinFormal.Track3B":      203,
+	"GoblinFormal.Track4":       690,
+	"GoblinFormal.Track5A":      648,
+	"GoblinFormal.Track5B":      408,
+	"GoblinFormal.Track5C":      185,
+	"GoblinFormal.Track5D":      377,
+	"GoblinFormal.Track5E":      2119,
+	"Apps.Common":               4,
+	"Apps.BinCheck":             3,
+	"Apps.CutsCheck":            0,
+	"Apps.LpCheck":              3,
+	"Apps.LsapCheck":            21,
+	"Apps.RulesCheck":           2,
+	"Apps.SimdCfgCheck":         0,
+	"Apps.ViprCheck":            0,
+}
+
+var formalGeneratedBlocks = map[string]bool{
+	"README_FORMAL_SUMMARY":     true,
+	"INDEX_FORMAL_SUMMARY":      true,
+	"BENCHMARKS_FORMAL_SUMMARY": true,
+	"FORMAL_OVERVIEW_STATS":     true,
+	"FORMAL_GO_STATS":           true,
+	"FORMAL_MODULE_MATRIX":      true,
+	"FORMAL_FUZZ_INVENTORY":     true,
+}
+
+func findRepoRoot(start string) (string, error) {
+	abs, err := filepath.Abs(start)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err == nil && !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+	for cur := abs; ; {
+		goMod := filepath.Join(cur, "go.mod")
+		lakeToml := filepath.Join(cur, "formal", "lakefile.toml")
+		if _, err1 := os.Stat(goMod); err1 == nil {
+			if _, err2 := os.Stat(lakeToml); err2 == nil {
+				return cur, nil
+			}
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("could not locate repository root from %s", start)
+		}
+		cur = parent
+	}
+}
+
+func countFileLines(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	lines := bytes.Count(data, []byte{'\n'})
+	if data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+func formatCommaInt(n int) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	rem := len(s) % 3
+	if rem > 0 {
+		b.WriteString(s[:rem])
+		if len(s) > rem {
+			b.WriteByte(',')
+		}
+	}
+	for i := rem; i < len(s); i += 3 {
+		if i > rem {
+			b.WriteByte(',')
+		}
+		b.WriteString(s[i : i+3])
+	}
+	return b.String()
+}
+
+func stripLeanComments(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	depth := 0
+	inStr := false
+	for i := 0; i < len(src); {
+		if depth > 0 {
+			if strings.HasPrefix(src[i:], "/-") {
+				depth++
+				i += 2
+				continue
+			}
+			if strings.HasPrefix(src[i:], "-/") {
+				depth--
+				i += 2
+				continue
+			}
+			if src[i] == '\n' {
+				b.WriteByte('\n')
+			}
+			i++
+			continue
+		}
+		if inStr {
+			b.WriteByte(src[i])
+			if src[i] == '\\' && i+1 < len(src) {
+				i++
+				b.WriteByte(src[i])
+				i++
+				continue
+			}
+			if src[i] == '"' {
+				inStr = false
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(src[i:], "/-") {
+			depth++
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(src[i:], "--") {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if src[i] == '"' {
+			inStr = true
+		}
+		b.WriteByte(src[i])
+		i++
+	}
+	return b.String()
+}
+
+func countLeanTheoremDecls(stripped string) (pub, priv int) {
+	modifiers := []string{"private ", "private\t", "protected ", "protected\t", "noncomputable ", "noncomputable\t", "unsafe ", "unsafe\t", "partial ", "partial\t"}
+	for line := range strings.SplitSeq(stripped, "\n") {
+		s := strings.TrimLeft(line, " \t")
+		for strings.HasPrefix(s, "@[") {
+			end := strings.IndexByte(s, ']')
+			if end < 0 {
+				break
+			}
+			s = strings.TrimLeft(s[end+1:], " \t")
+		}
+		isPriv := false
+		for {
+			matched := false
+			for _, mod := range modifiers {
+				if strings.HasPrefix(s, mod) {
+					if strings.HasPrefix(mod, "private") {
+						isPriv = true
+					}
+					s = strings.TrimLeft(s[len(mod):], " \t")
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				break
+			}
+		}
+		if s == "theorem" || s == "lemma" ||
+			strings.HasPrefix(s, "theorem ") || strings.HasPrefix(s, "theorem\t") ||
+			strings.HasPrefix(s, "lemma ") || strings.HasPrefix(s, "lemma\t") {
+			if isPriv {
+				priv++
+			} else {
+				pub++
+			}
+		}
+	}
+	return pub, priv
+}
+
+func countAxiomAuditLocks(stripped string) (total int, byModule map[string]int, err error) {
+	byModule = make(map[string]int)
+	sawGuardMsgs := false
+	for line := range strings.SplitSeq(stripped, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		if strings.HasPrefix(s, "#guard_msgs") {
+			sawGuardMsgs = true
+			continue
+		}
+		if strings.HasPrefix(s, "#print") {
+			fields := strings.Fields(s)
+			if len(fields) >= 3 && fields[0] == "#print" && fields[1] == "axioms" {
+				if !sawGuardMsgs {
+					return 0, nil, fmt.Errorf("unguarded #print axioms %s in AxiomAudit.lean", fields[2])
+				}
+				total++
+				sym := fields[2]
+				modKey := "Common"
+				if rest, ok := strings.CutPrefix(sym, "GoblinFormal."); ok {
+					if strings.HasPrefix(rest, "Track") {
+						if dot := strings.IndexByte(rest, '.'); dot > 0 {
+							modKey = rest[:dot]
+						}
+					}
+				}
+				byModule[modKey]++
+			}
+		}
+		sawGuardMsgs = false
+	}
+	return total, byModule, nil
+}
+
+func leanRelToModuleName(relSlash string) string {
+	noExt := strings.TrimSuffix(relSlash, ".lean")
+	return strings.ReplaceAll(noExt, "/", ".")
+}
+
+func leanModuleGroup(modName string) string {
+	if strings.HasPrefix(modName, "Apps.") {
+		return "Apps"
+	}
+	if modName == "GoblinFormal.Common.Basic" || modName == "GoblinFormal.Common.Json" {
+		return "Common"
+	}
+	if rest, ok := strings.CutPrefix(modName, "GoblinFormal."); ok {
+		if strings.HasPrefix(rest, "Track") {
+			return rest
+		}
+	}
+	return ""
+}
+
+func collectLeanInventory(root string, inv *FormalInventory) error {
+	formalDir := filepath.Join(root, "formal")
+	moduleOrder := []string{
+		"Common", "Track1", "Track2A", "Track2B", "Track2C",
+		"Track3", "Track3B", "Track4", "Track5A", "Track5B", "Track5C", "Track5D", "Track5E", "Apps",
+	}
+	modStats := make(map[string]*LeanModuleStats, len(moduleOrder))
+	for _, name := range moduleOrder {
+		modStats[name] = &LeanModuleStats{Name: name}
+	}
+
+	var axiomAuditStripped string
+	err := filepath.WalkDir(formalDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		// Skip .lake whether directory or symlink to shared build cache.
+		if d.Name() == ".lake" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".lean") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(formalDir, path)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		loc := countFileLines(data)
+		stripped := stripLeanComments(string(data))
+		pub, priv := countLeanTheoremDecls(stripped)
+
+		modName := leanRelToModuleName(relSlash)
+		if modName == "GoblinFormal.AxiomAudit" {
+			axiomAuditStripped = stripped
+		}
+		kernelCount := 0
+		if modName != "GoblinFormal" && modName != "GoblinFormal.AxiomAudit" {
+			cnt, ok := leanKernelTheoremCounts[modName]
+			if !ok {
+				return fmt.Errorf("lean module %s missing from leanKernelTheoremCounts manifest", modName)
+			}
+			kernelCount = cnt
+		}
+
+		isApps := strings.HasPrefix(relSlash, "Apps/")
+		if isApps {
+			inv.LeanAppsFiles++
+			inv.LeanAppsLOC += loc
+			inv.LeanAppsPublic += pub
+			inv.LeanAppsPrivate += priv
+			inv.LeanAppsAuthored += pub + priv
+			inv.LeanAppsKernel += kernelCount
+		} else {
+			inv.LeanGoblinFiles++
+			inv.LeanGoblinLOC += loc
+			inv.LeanGoblinPublic += pub
+			inv.LeanGoblinPrivate += priv
+			inv.LeanGoblinAuthored += pub + priv
+			inv.LeanGoblinKernel += kernelCount
+		}
+
+		if grp := leanModuleGroup(modName); grp != "" {
+			st := modStats[grp]
+			st.Files++
+			st.LOC += loc
+			st.PublicDecls += pub
+			st.PrivateDecls += priv
+			st.AuthoredDecls += pub + priv
+			st.KernelDecls += kernelCount
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk formal Lean files: %w", err)
+	}
+	if axiomAuditStripped == "" {
+		return errors.New("missing formal/GoblinFormal/AxiomAudit.lean")
+	}
+	locks, locksByMod, err := countAxiomAuditLocks(axiomAuditStripped)
+	if err != nil {
+		return err
+	}
+	inv.AxiomLocks = locks
+	for modKey, count := range locksByMod {
+		if st, ok := modStats[modKey]; ok {
+			st.AxiomLocks += count
+		}
+	}
+
+	inv.LeanTotalFiles = inv.LeanGoblinFiles + inv.LeanAppsFiles
+	inv.LeanTotalLOC = inv.LeanGoblinLOC + inv.LeanAppsLOC
+	inv.LeanTotalPublic = inv.LeanGoblinPublic + inv.LeanAppsPublic
+	inv.LeanTotalPrivate = inv.LeanGoblinPrivate + inv.LeanAppsPrivate
+	inv.LeanTotalAuthored = inv.LeanGoblinAuthored + inv.LeanAppsAuthored
+	inv.LeanTotalKernel = inv.LeanGoblinKernel + inv.LeanAppsKernel
+
+	inv.LeanModules = make([]LeanModuleStats, 0, len(moduleOrder))
+	for _, name := range moduleOrder {
+		inv.LeanModules = append(inv.LeanModules, *modStats[name])
+	}
+	return nil
+}
+
+func isRepoSkipDir(name string) bool {
+	switch name {
+	case ".git", ".lake", ".cache", "third_party", "testdata":
+		return true
+	default:
+		return false
+	}
+}
+
+func collectGoFormalInventory(root string, inv *FormalInventory) error {
+	prodRelPaths := []string{
+		"exact_polish.go",
+		"vipr_json.go",
+		"vipr_trace.go",
+		"certified.go",
+		filepath.Join("assign", "certified.go"),
+	}
+	for _, rel := range prodRelPaths {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", rel, err)
+		}
+		loc := countFileLines(data)
+		inv.ProdCertFiles = append(inv.ProdCertFiles, GoFileStats{
+			RelPath: filepath.ToSlash(rel),
+			LOC:     loc,
+		})
+		inv.ProdCertLOC += loc
+	}
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if path != root && isRepoSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == ".lake" {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		base := d.Name()
+		isFormal := strings.HasPrefix(base, "formal")
+		isCertOrVIPR := strings.Contains(base, "certified") ||
+			strings.Contains(base, "vipr") ||
+			strings.Contains(base, "exact_polish") ||
+			strings.Contains(base, "tcb")
+		if !isFormal && !isCertOrVIPR {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		loc := countFileLines(data)
+		st := GoFileStats{RelPath: relSlash, LOC: loc}
+		if isFormal {
+			inv.FormalTestFiles = append(inv.FormalTestFiles, st)
+			inv.FormalTestLOC += loc
+		} else {
+			inv.CertVIPRTestFiles = append(inv.CertVIPRTestFiles, st)
+			inv.CertVIPRTestLOC += loc
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk Go formal test files: %w", err)
+	}
+	inv.TotalGoTestFiles = len(inv.FormalTestFiles) + len(inv.CertVIPRTestFiles)
+	inv.TotalGoTestLOC = inv.FormalTestLOC + inv.CertVIPRTestLOC
+	return nil
+}
+
+type fuzzTSVRow struct {
+	binary  string
+	workdir string
+	target  string
+	class   string
+}
+
+func parseTargetsTSV(path string) (map[string]fuzzTSVRow, int, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows := make(map[string]fuzzTSVRow)
+	count := 0
+	for lineNo, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 6 {
+			return nil, 0, fmt.Errorf("%s:%d expected 6 tab-separated fields, got %d", path, lineNo+1, len(fields))
+		}
+		row := fuzzTSVRow{
+			binary:  fields[1],
+			workdir: fields[2],
+			target:  fields[3],
+			class:   fields[4],
+		}
+		if _, dup := rows[row.target]; dup {
+			return nil, 0, fmt.Errorf("%s:%d duplicate target %q", path, lineNo+1, row.target)
+		}
+		rows[row.target] = row
+		count++
+	}
+	return rows, count, nil
+}
+
+func fileRequiresCBCTag(fileAST *ast.File) (bool, error) {
+	for _, cg := range fileAST.Comments {
+		if cg.Pos() > fileAST.Package {
+			break
+		}
+		for _, c := range cg.List {
+			if constraint.IsGoBuild(c.Text) || constraint.IsPlusBuild(c.Text) {
+				expr, err := constraint.Parse(c.Text)
+				if err != nil {
+					return false, err
+				}
+				defaultOK := expr.Eval(func(tag string) bool { return tag == "cgo" })
+				cbcOK := expr.Eval(func(tag string) bool { return tag == "cbc" || tag == "cgo" })
+				if !defaultOK && cbcOK {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+func collectFuzzTargetsInventory(root string, inv *FormalInventory) error {
+	inv.FuzzPackageCounts = make(map[string]int)
+	inv.FuzzBinaryCounts = make(map[string]int)
+
+	tsvPath := filepath.Join(root, "scripts", "gcp-fuzz", "targets.tsv")
+	tsvRows, tsvCount, err := parseTargetsTSV(tsvPath)
+	if err != nil {
+		return fmt.Errorf("parse targets.tsv: %w", err)
+	}
+	inv.TSVActiveRowCount = tsvCount
+
+	fset := token.NewFileSet()
+	discovered := make(map[string]FuzzTargetInfo)
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if path != root && isRepoSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == ".lake" || !strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		fileAST, parseErr := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if parseErr != nil {
+			return fmt.Errorf("parse %s: %w", path, parseErr)
+		}
+		isCBC, tagErr := fileRequiresCBCTag(fileAST)
+		if tagErr != nil {
+			return fmt.Errorf("parse build tag in %s: %w", path, tagErr)
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relSlash := filepath.ToSlash(rel)
+		pkgDir := filepath.ToSlash(filepath.Dir(rel))
+		for _, decl := range fileAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Fuzz") {
+				continue
+			}
+			name := fn.Name.Name
+			if prev, dup := discovered[name]; dup {
+				return fmt.Errorf("duplicate Fuzz declaration %s in %s and %s", name, prev.RelPath, relSlash)
+			}
+			discovered[name] = FuzzTargetInfo{
+				Name:    name,
+				RelPath: relSlash,
+				PkgDir:  pkgDir,
+				IsCBC:   isCBC,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk Fuzz declarations: %w", err)
+	}
+
+	var missingInTSV []string
+	for name, info := range discovered {
+		tsvRow, ok := tsvRows[name]
+		if !ok {
+			missingInTSV = append(missingInTSV, name)
+			continue
+		}
+		wantWorkdir := "/app/work"
+		if info.PkgDir != "." {
+			wantWorkdir = "/app/work/" + info.PkgDir
+		}
+		if tsvRow.workdir != wantWorkdir {
+			return fmt.Errorf("targets.tsv workdir mismatch for %s: got %q, want %q", name, tsvRow.workdir, wantWorkdir)
+		}
+		tsvCBC := strings.HasSuffix(tsvRow.binary, "_cbc.test")
+		if info.IsCBC != tsvCBC {
+			return fmt.Errorf("targets.tsv cbc binary mismatch for %s: binary=%s vs go:build cbc=%v", name, tsvRow.binary, info.IsCBC)
+		}
+		info.TSVBinary = tsvRow.binary
+		info.TSVWorkdir = tsvRow.workdir
+		info.TSVClass = tsvRow.class
+		inv.FuzzTargets = append(inv.FuzzTargets, info)
+		if info.IsCBC {
+			inv.CBCFuzzCount++
+		} else {
+			inv.DefaultFuzzCount++
+		}
+		inv.FuzzPackageCounts[info.PkgDir]++
+		inv.FuzzBinaryCounts[filepath.Base(info.TSVBinary)]++
+	}
+	if len(missingInTSV) > 0 {
+		slices.Sort(missingInTSV)
+		return fmt.Errorf("fuzz declarations missing from scripts/gcp-fuzz/targets.tsv: %v", missingInTSV)
+	}
+
+	var missingInGo []string
+	for name := range tsvRows {
+		if _, ok := discovered[name]; !ok {
+			missingInGo = append(missingInGo, name)
+		}
+	}
+	if len(missingInGo) > 0 {
+		slices.Sort(missingInGo)
+		return fmt.Errorf("scripts/gcp-fuzz/targets.tsv targets missing from Go *_test.go AST: %v", missingInGo)
+	}
+
+	slices.SortFunc(inv.FuzzTargets, func(a, b FuzzTargetInfo) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	inv.TotalFuzzCount = inv.DefaultFuzzCount + inv.CBCFuzzCount
+	return nil
+}
+
+// CollectFormalInventory deterministically computes Lean 4 proof counts, Go cert/VIPR
+// code counts, and Go AST Fuzz* target counts cross-checked against targets.tsv.
+func CollectFormalInventory(root string) (*FormalInventory, error) {
+	inv := &FormalInventory{}
+	if err := collectLeanInventory(root, inv); err != nil {
+		return nil, err
+	}
+	if err := collectGoFormalInventory(root, inv); err != nil {
+		return nil, err
+	}
+	if err := collectFuzzTargetsInventory(root, inv); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+func renderFormalBlock(blockName string, inv *FormalInventory) (string, error) {
+	var b strings.Builder
+	switch blockName {
+	case "README_FORMAL_SUMMARY":
+		fmt.Fprintf(&b,
+			"An isolated offline Lean 4 workspace ([`formal/`](formal/lakefile.toml), pinned to `v4.36.0` with `batteries` `v4.36.0` as `lintDriver`) with zero `sorry` or custom axioms proves soundness for the standalone CLI certificate checkers, abstract algebraic presolve and cutting-plane models, and compiled `arm64`/`amd64` zero-allocation kernels across `%d` Lean files (`%s` LOC: `%s` authored `theorem` and `lemma` declarations with `%s` in `GoblinFormal` plus `%d` in `Apps/LsapCheck.lean`, `%s` kernel `TheoremInfo` declarations including compiler-synthesized helper, equation, and splitter lemmas, and `%d` `#print axioms` locks), paired with `%d` pure-Go certification files (`%s` LOC), `%d` formal and certified Go test files (`%s` LOC), and `%d` `Fuzz*` targets (`%d` default-build and `%d` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](scripts/gcp-fuzz/targets.tsv)). Hosted CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs Go test matrices, codegen invariants, and Lean verification (`lake build --wfail && lake lint` plus Track 5 ELF checks), [`scripts/pre-commit.sh`](scripts/pre-commit.sh) runs those checks locally (emitting a warning and skipping Lean if `lake` is absent unless `GOBLIN_STRICT_GATES=1`), [`scripts/verify_formal.sh`](scripts/verify_formal.sh) runs full formal suites and all `%d` default-build `^Fuzz` seed corpora, and plain `go test ./...` skips Lean subprocess checks.",
+			inv.LeanTotalFiles,
+			formatCommaInt(inv.LeanTotalLOC),
+			formatCommaInt(inv.LeanTotalAuthored),
+			formatCommaInt(inv.LeanGoblinAuthored),
+			inv.LeanAppsAuthored,
+			formatCommaInt(inv.LeanTotalKernel),
+			inv.AxiomLocks,
+			len(inv.ProdCertFiles),
+			formatCommaInt(inv.ProdCertLOC),
+			inv.TotalGoTestFiles,
+			formatCommaInt(inv.TotalGoTestLOC),
+			inv.TotalFuzzCount,
+			inv.DefaultFuzzCount,
+			inv.CBCFuzzCount,
+			inv.DefaultFuzzCount,
+		)
+	case "INDEX_FORMAL_SUMMARY":
+		fmt.Fprintf(&b,
+			"4. **[Formal Verification Architecture (Lean 4 Prove Lane)](formal-verification.md)**: Industry precedents, anti-translation-gap boundaries, pure-Go runtime checking (`WithCertified`, `WithCertifiedWitness`, and `assign.WithCertified`, which never invoke Lean at runtime and carry no formal proof of their Go code), and offline Lean 4 CLI equivalence validated under `GOBLIN_FORMAL=1`. Hosted CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) enforces Go tests and Lean checks, [`scripts/pre-commit.sh`](../scripts/pre-commit.sh) runs incremental `lake build --wfail` and `lake lint` alongside Track 5 ELF verification locally (emitting a warning and skipping Lean gates if `lake` is missing unless `GOBLIN_STRICT_GATES=1`), [`scripts/verify_formal.sh`](../scripts/verify_formal.sh) runs all `%d` default-build `^Fuzz` seed corpora across `./...` alongside `%d` `-tags=cbc` targets (`%d` total in `scripts/gcp-fuzz/targets.tsv`), and plain `go test ./...` skips Lean subprocess checks. Across `%d` Lean files (`%s` LOC), the suite contains `%s` authored `theorem` and `lemma` declarations (`%s` in `formal/GoblinFormal` plus `%d` private lemma in `Apps/LsapCheck.lean`), while Lean checks `%s` kernel declarations including compiler-synthesized helper, equation, and splitter lemmas (`%d` axiom locks plus `#verify_all_goblin_axioms` and `Apps.*` audits in `formal/GoblinFormal/AxiomAudit.lean`, with `0` `sorry` or custom axioms). Standalone Lean CLI checkers prove certificate validity (`assign`, `simplex.go`, `exact_polish.go`, `certified.go`, `vipr_trace.go`), Track 2 rules, Track 3B LP dual postsolve, and Track 4 B&B state invariants formalize abstract standalone Lean models with no mechanical link to imperative Go files (`presolve.go`, `cuts.go`, `bab.go`), and Track 5 checks `14` `arm64` ELF routines (`7` `-gcflags=-l` standalone builds of functions inlined in production) plus `6` `amd64` AVX kernels for uncertified solves only (assuming panic-free comparison guards by trace hypothesis on guarded branches and trusting an `18`-symbol Zero-GC allow-list up to the first external call).",
+			inv.DefaultFuzzCount,
+			inv.CBCFuzzCount,
+			inv.TotalFuzzCount,
+			inv.LeanTotalFiles,
+			formatCommaInt(inv.LeanTotalLOC),
+			formatCommaInt(inv.LeanTotalAuthored),
+			formatCommaInt(inv.LeanGoblinAuthored),
+			inv.LeanAppsAuthored,
+			formatCommaInt(inv.LeanTotalKernel),
+			inv.AxiomLocks,
+		)
+	case "BENCHMARKS_FORMAL_SUMMARY":
+		fmt.Fprintf(&b,
+			"Automated formal inventory across the workspace covers `%d` Lean files (`%s` LOC: `%s` authored `theorem` and `lemma` declarations, `%s` kernel `TheoremInfo` entries, and `%d` axiom locks), `%d` Go certification files (`%s` LOC) paired with `%d` formal and certified test files (`%s` LOC), and `%d` `Fuzz*` targets (`%d` default-build across `./...` plus `%d` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](../scripts/gcp-fuzz/targets.tsv)).",
+			inv.LeanTotalFiles,
+			formatCommaInt(inv.LeanTotalLOC),
+			formatCommaInt(inv.LeanTotalAuthored),
+			formatCommaInt(inv.LeanTotalKernel),
+			inv.AxiomLocks,
+			len(inv.ProdCertFiles),
+			formatCommaInt(inv.ProdCertLOC),
+			inv.TotalGoTestFiles,
+			formatCommaInt(inv.TotalGoTestLOC),
+			inv.TotalFuzzCount,
+			inv.DefaultFuzzCount,
+			inv.CBCFuzzCount,
+		)
+	case "FORMAL_OVERVIEW_STATS":
+		fmt.Fprintf(&b,
+			"All proofs and standalone verifiers live in [`formal/`](../formal/lakefile.toml), pinned to Lean `v4.36.0` with `batteries` `v4.36.0` as `lintDriver`, compiling across 78 Lake build jobs with zero warnings (`%d` Lean files, `%s` LOC: `%d` modules in `GoblinFormal` totaling `%s` LOC and `%d` files in `Apps/`, comprising shared `Apps/Common.lean` plus `7` CLI executables, totaling `%s` LOC, paired with `%d` formal, certified, and VIPR Go files totaling `%s` LOC). Across that codebase, the suite contains `%s` authored `theorem` and `lemma` declarations (`%s` in `GoblinFormal`: `%s` public and `%s` private, plus `%d` private bounds lemma in `Apps/LsapCheck.lean`). Programmatic `Lean.collectAxioms` inspection via `#verify_all_goblin_axioms` (`GoblinFormal` and `Apps.Common` at build time) and `auditAllAppsModules` across all `%d` `Apps.*` modules checks `%s` kernel `TheoremInfo` declarations (`%s` in `GoblinFormal` plus `%s` in `Apps.*`, a total that includes compiler-synthesized helper, equation, and splitter lemmas) alongside `%d` `#guard_msgs in #print axioms` locks in [`AxiomAudit.lean`](../formal/GoblinFormal/AxiomAudit.lean).",
+			inv.LeanTotalFiles,
+			formatCommaInt(inv.LeanTotalLOC),
+			inv.LeanGoblinFiles,
+			formatCommaInt(inv.LeanGoblinLOC),
+			inv.LeanAppsFiles,
+			formatCommaInt(inv.LeanAppsLOC),
+			len(inv.ProdCertFiles)+inv.TotalGoTestFiles,
+			formatCommaInt(inv.ProdCertLOC+inv.TotalGoTestLOC),
+			formatCommaInt(inv.LeanTotalAuthored),
+			formatCommaInt(inv.LeanGoblinAuthored),
+			formatCommaInt(inv.LeanGoblinPublic),
+			formatCommaInt(inv.LeanGoblinPrivate),
+			inv.LeanAppsAuthored,
+			inv.LeanAppsFiles,
+			formatCommaInt(inv.LeanTotalKernel),
+			formatCommaInt(inv.LeanGoblinKernel),
+			formatCommaInt(inv.LeanAppsKernel),
+			inv.AxiomLocks,
+		)
+	case "FORMAL_GO_STATS":
+		byRel := make(map[string]int, len(inv.ProdCertFiles))
+		for _, f := range inv.ProdCertFiles {
+			byRel[f.RelPath] = f.LOC
+		}
+		fmt.Fprintf(&b,
+			"On the Go side, `%d` production files ([`exact_polish.go`](../exact_polish.go) at `%s` LOC, [`vipr_json.go`](../vipr_json.go) at `%s` LOC, [`vipr_trace.go`](../vipr_trace.go) at `%s` LOC, [`certified.go`](../certified.go) at `%s` LOC, and [`assign/certified.go`](../assign/certified.go) at `%s` LOC; `%s` LOC combined) implement exact `*big.Rat` basis polishing, LP/MILP unboundedness extraction, zero-reflection Mini-VIPR JSON codecs, presolve-enveloped and orbital-symmetry `WithVIPRTrace` proof recording, and opt-in fail-closed `WithCertified` / `assign.WithCertified` runtime verification in pure standard-library Go (never linking or invoking Lean CLI binaries at runtime) with zero hot-path overhead when disabled, while `%d` formal, certified, and VIPR test files (`%s` LOC total: `%d` `formal*` test files at `%s` LOC plus `%d` certified, VIPR, exact-polish, and TCB test files at `%s` LOC) house negative controls, subprocess pools, linker dead-code-elimination checks, and live observer bridges.",
+			len(inv.ProdCertFiles),
+			formatCommaInt(byRel["exact_polish.go"]),
+			formatCommaInt(byRel["vipr_json.go"]),
+			formatCommaInt(byRel["vipr_trace.go"]),
+			formatCommaInt(byRel["certified.go"]),
+			formatCommaInt(byRel["assign/certified.go"]),
+			formatCommaInt(inv.ProdCertLOC),
+			inv.TotalGoTestFiles,
+			formatCommaInt(inv.TotalGoTestLOC),
+			len(inv.FormalTestFiles),
+			formatCommaInt(inv.FormalTestLOC),
+			len(inv.CertVIPRTestFiles),
+			formatCommaInt(inv.CertVIPRTestLOC),
+		)
+	case "FORMAL_MODULE_MATRIX":
+		renderFormalModuleMatrix(&b, inv)
+	case "FORMAL_FUZZ_INVENTORY":
+		renderFormalFuzzInventory(&b, inv)
+	default:
+		return "", fmt.Errorf("unknown formal generated block %q", blockName)
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func renderFormalModuleMatrix(b *strings.Builder, inv *FormalInventory) {
+	type rowMeta struct {
+		component string
+		module    string
+		theorems  string
+		harness   string
+	}
+	metaByGroup := map[string]rowMeta{
+		"Common": {
+			component: "**Common**",
+			module:    "[`Common/Basic.lean`](../formal/GoblinFormal/Common/Basic.lean), [`Common/Json.lean`](../formal/GoblinFormal/Common/Json.lean)",
+			theorems:  "`finSum_inj_le`, `finSum_inj_eq`, `intFinSum_dvd`, `float64BitsToRat_isNone_iff`, `float64BitsToRat_eq_ieee754`",
+			harness:   "[`formal_common_test.go`](../formal_common_test.go), [`formal_oracle_pool_test.go`](../formal_oracle_pool_test.go)",
+		},
+		"Track1": {
+			component: "**Track 1 (LSAP)**",
+			module:    "[`Track1.lean`](../formal/GoblinFormal/Track1.lean), `lsap-check`",
+			theorems:  "`checkLSAP_sound`, `checkLSAPTranspose_sound`, `checkLSAPForbidden_sound`, `checkHallInfeasible_sound`, `safe_objective_within_tol`",
+			harness:   "[`assign/certified.go`](../assign/certified.go), [`assign/formal_lsap_test.go`](../assign/formal_lsap_test.go), [`assign/formal_fuzz_bridge_test.go`](../assign/formal_fuzz_bridge_test.go)",
+		},
+		"Track2A": {
+			component: "**Track 2A (Presolve)**",
+			module:    "[`Track2A.lean`](../formal/GoblinFormal/Track2A.lean), `rules-check`",
+			theorems:  "`divCeilSpec_spec`, `hasInfeasibleIntEqSpec_sound`, `evalActivitySummarySpec_sound`, `checkBinStrengthenFromRowSpec_sound`, `verifyOrbitSymmetrySpec_sound`, `orbit_chain_ordering_forced_zero_sound`",
+			harness:   "[`formal_track2a_test.go`](../formal_track2a_test.go), [`formal_export_test.go`](../formal_export_test.go), [`formal_adversarial_regression_test.go`](../formal_adversarial_regression_test.go)",
+		},
+		"Track2B": {
+			component: "**Track 2B (Core Cuts)**",
+			module:    "[`Track2B.lean`](../formal/GoblinFormal/Track2B.lean), `cuts-check`",
+			theorems:  "`gmi_cut_sound`, `checkTableauGMI_sound`, `checkRowAgg_sound`, `cmir_safe_rounded_sound`, `checkCMIRCertificate_sound`, `checkVUBDisagg_sound`",
+			harness:   "[`formal_track2b_test.go`](../formal_track2b_test.go), [`formal_track2_live_export_test.go`](../formal_track2_live_export_test.go), [`formal_export_test.go`](../formal_export_test.go)",
+		},
+		"Track2C": {
+			component: "**Track 2C (Adv. Cuts)**",
+			module:    "[`Track2C.lean`](../formal/GoblinFormal/Track2C.lean), `cuts-check` (`gmi-check`, `vub-check`, `cover-check`, `lotsizing-check`, `agg-cmir-check`, `drop-check`)",
+			theorems:  "`checkStructuralGMICert_sound`, `checkStructuralGMICertFast_sound`, `checkStructuralVUBCert_sound`, `checkKnapsackCoverCert_sound`, `checkLotSizingCutCert_sound`, `checkAggCMIRCert_sound`, `checkFinalizedCutCert_sound`",
+			harness:   "[`formal_track2c_test.go`](../formal_track2c_test.go), [`formal_track2_live_export_test.go`](../formal_track2_live_export_test.go), [`formal_parallel_adversarial_test.go`](../formal_parallel_adversarial_test.go)",
+		},
+		"Track3": {
+			component: "**Track 3 (LP/Farkas)**",
+			module:    "[`Track3.lean`](../formal/GoblinFormal/Track3.lean), `lp-check`",
+			theorems:  "`checkPrimalFeasible_sound`, `safeDualBound_sound`, `checkLPOptimal_sound`, `checkFarkas_sound`, `checkBoundConflict_sound`",
+			harness:   "[`certified.go`](../certified.go), [`formal_track3_test.go`](../formal_track3_test.go), [`formal_fuzz_bridge_test.go`](../formal_fuzz_bridge_test.go)",
+		},
+		"Track3B": {
+			component: "**Track 3B (Rays/Postsolve)**",
+			module:    "[`Track3B.lean`](../formal/GoblinFormal/Track3B.lean), `lp-check` (`unbounded`, `milp-unbounded`, `lp-presolve`), `rules-check` (`gcd-div-check`)",
+			theorems:  "`checkLPUnbounded_sound`, `checkMILPUnbounded_sound`, `gcd_row_div_sound`, `evalGcdRowDiv_sound`, `lp_presolve_primal_lift`, `lp_presolve_chain_dual_sound`",
+			harness:   "[`formal_track3b_test.go`](../formal_track3b_test.go), [`exact_polish.go`](../exact_polish.go), [`formal_export_test.go`](../formal_export_test.go)",
+		},
+		"Track4": {
+			component: "**Track 4 (B&B/VIPR)**",
+			module:    "[`Track4.lean`](../formal/GoblinFormal/Track4.lean), `vipr-check`",
+			theorems:  "`bestBound_global_valid`, `exactGapClosedSpec_sound`, `checkOrbitAutomorphism_sound`, `runPresolveSteps_sound`, `checkMiniVIPR_sound`, `checkVIPRWithPresolve_optimal_same_n_sound`, `checkVIPRWithPresolve_eps_optimal_sound`",
+			harness:   "[`certified.go`](../certified.go), [`vipr_trace.go`](../vipr_trace.go), [`vipr_trace_test.go`](../vipr_trace_test.go), [`certified_test.go`](../certified_test.go)",
+		},
+		"Track5A": {
+			component: "**Track 5A (ARM64 Leaf)**",
+			module:    "[`Track5A.lean`](../formal/GoblinFormal/Track5A.lean), `bin-check`",
+			theorems:  "`splitmix64_arm64_equiv`, `canonicalFloatBits_arm64_equiv`, `divCeilInt64_arm64_equiv`, `gcdInt64_arm64_equiv`",
+			harness:   "[`formal_track5_test.go`](../formal_track5_test.go), [`scripts/extract_elf_track5.py`](../scripts/extract_elf_track5.py)",
+		},
+		"Track5B": {
+			component: "**Track 5B (ARM64 Kernel)**",
+			module:    "[`Track5B.lean`](../formal/GoblinFormal/Track5B.lean), `bin-check`",
+			theorems:  "`checkZeroGC_run_sound`, `checkStackGuard_sound`, `checkPanicBoundsReachability_run_safe`, `checkPanicBoundsReachability_run_unconditional`, `hasInfeasibleIntegerEqRow_elf_safe`, `augmentRowScalar_elf_safe`",
+			harness:   "[`formal_track5_test.go`](../formal_track5_test.go), [`scripts/extract_elf_track5.py`](../scripts/extract_elf_track5.py)",
+		},
+		"Track5C": {
+			component: "**Track 5C (SIMD CFG)**",
+			module:    "[`Track5C.lean`](../formal/GoblinFormal/Track5C.lean), `simd-cfg-check`",
+			theorems:  "`checkVectorCFG_sound`, `unguardedSucc_fallthroughGuarded_keeps_target`, `unguardedSucc_targetGuarded_keeps_fallthrough`, `unguardedSucc_ambiguous_keeps_both`",
+			harness:   "[`formal_track5_test.go`](../formal_track5_test.go), [`cmd/goblin-optcheck/main.go`](../cmd/goblin-optcheck/main.go)",
+		},
+		"Track5D": {
+			component: "**Track 5D (LSAP ELF/SIMD)**",
+			module:    "[`Track5D.lean`](../formal/GoblinFormal/Track5D.lean), `bin-check`",
+			theorems:  "`twoSumAssign_arm64_equiv`, `exactReducedCost_and_leaves_elf_safe`, `exactReducedCostNoinline_elf_safe`, `hasPotentialCancellation_elf_safe`, `vminpdLane_signed_zero_asymmetry`, `simdTree4Reduce_eq_scalarMin2Fold`, `simdTree8Reduce_eq_scalarMin2Fold`",
+			harness:   "[`formal_track5d_test.go`](../formal_track5d_test.go), [`scripts/extract_elf_track5.py`](../scripts/extract_elf_track5.py), [`internal/simd/assign_test.go`](../internal/simd/assign_test.go)",
+		},
+		"Track5E": {
+			component: "**Track 5E (AMD64 SIMD)**",
+			module:    "[`Track5E.lean`](../formal/GoblinFormal/Track5E.lean)",
+			theorems:  "`checkDecodedAbiSafety_sound`, `checkDecodedFrameAbi_sound`, `byteRangeDisjoint64_of_aligned_ne`, `allAbsLE64AVX2_aligned_byteDisjoint_equiv`, `allAbsLE64_avx2_eq_avx512_mult8`, `minNoNaN64_avx2_eq_avx512`, `initReducedRow64_avx2_eq_avx512_mult8`",
+			harness:   "[`formal_track5e_test.go`](../formal_track5e_test.go), [`scripts/extract_amd64_track5e.py`](../scripts/extract_amd64_track5e.py)",
+		},
+		"Apps": {
+			component: "**Apps (8 CLI Modules)**",
+			module:    "[`Apps/Common.lean`](../formal/Apps/Common.lean) + `7` CLI executables",
+			theorems:  "Private bounds lemma in `Apps/LsapCheck.lean`; all `8` `Apps.*` modules checked by `auditAllAppsModules`",
+			harness:   "[`scripts/verify_formal.sh`](../scripts/verify_formal.sh), [`formal_oracle_pool_test.go`](../formal_oracle_pool_test.go)",
+		},
+	}
+
+	b.WriteString("| Component | Module / App | Decls (`Auth / Pub / Kernel`, Locks; Kernel includes synthesized helpers) | Key Top-Level Theorems | Go Test & Oracle Harness |\n")
+	b.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
+	for _, mod := range inv.LeanModules {
+		m := metaByGroup[mod.Name]
+		fmt.Fprintf(b, "| %s | %s | `%s / %s / %s` (`%d`) | %s | %s |\n",
+			m.component,
+			m.module,
+			formatCommaInt(mod.AuthoredDecls),
+			formatCommaInt(mod.PublicDecls),
+			formatCommaInt(mod.KernelDecls),
+			mod.AxiomLocks,
+			m.theorems,
+			m.harness,
+		)
+	}
+	fmt.Fprintf(b,
+		"| **Total / Axiom Lock** | [`AxiomAudit.lean`](../formal/GoblinFormal/AxiomAudit.lean) (`%d` Lean files, `%s` LOC) | **`%s / %s / %s` (`%d`)** | `%s` authored `theorem`/`lemma` decls (`%s` in `GoblinFormal` + `%d` in `Apps/LsapCheck.lean`); `%s` kernel `TheoremInfo` entries include synthesized helpers; `%d` axiom locks + `#verify_all_goblin_axioms` + `auditAllAppsModules`; `0` `sorryAx` or custom axioms | Enforced by [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`scripts/pre-commit.sh`](../scripts/pre-commit.sh), `lake build --wfail && lake lint` (`78/78` jobs), `auditAllAppsModules`, and `lake env leanchecker --fresh GoblinFormal` |\n",
+		inv.LeanTotalFiles,
+		formatCommaInt(inv.LeanTotalLOC),
+		formatCommaInt(inv.LeanTotalAuthored),
+		formatCommaInt(inv.LeanTotalPublic),
+		formatCommaInt(inv.LeanTotalKernel),
+		inv.AxiomLocks,
+		formatCommaInt(inv.LeanTotalAuthored),
+		formatCommaInt(inv.LeanGoblinAuthored),
+		inv.LeanAppsAuthored,
+		formatCommaInt(inv.LeanTotalKernel),
+		inv.AxiomLocks,
+	)
+}
+
+func renderFormalFuzzInventory(b *strings.Builder, inv *FormalInventory) {
+	b.WriteString("| Build Profile | Binary (`targets.tsv`) | Package | Targets | Execution Scope |\n")
+	b.WriteString("| :--- | :--- | :--- | ---: | :--- |\n")
+	rows := []struct {
+		profile string
+		bin     string
+		pkg     string
+		scope   string
+	}{
+		{"Default (`GOBLIN_FORMAL=1` + Pure Go)", "`assign.test`", "`./assign`", "LSAP `--jsonl` differential oracles (`lsap-check`), dyadic2304, and `assign.WithCertified`"},
+		{"Default (`GOBLIN_FORMAL=1` + Pure Go)", "`goblin.test`", "`.`", "LP/MILP/MAD `--jsonl` differential oracles (`lp-check`, `rules-check`, `cuts-check`, `vipr-check`), `WithCertified`, `VerifyVIPRTrace`, LU, and `PuLP` JSON"},
+		{"Assert (`-tags=goblin_assert`)", "`goblin_assert.test`", "`.`", "Structural, public-corpus mutation, metamorphic, presolve parity, and incremental LP state checks"},
+		{"Race (`-race`)", "`goblin_race.test`", "`.`", "Parallel Branch-and-Bound race detection (`FuzzParallelBABRace`)"},
+		{"Default Parser", "`format.test`", "`./format`", "Streaming `PuLP` JSON parity and MPS round-trip invariance"},
+		{"Default SIMD", "`simd.test`", "`./internal/simd`", "Scalar vs. AVX2 vs. AVX-512 tier bit-parity (`FuzzSIMDKernelTierParity`)"},
+		{"Optional CBC (`-tags=cbc`)", "`goblin_cbc.test`", "`.`", "Pure-Go vs. COIN-OR CBC differential LP/MILP/MAD and incremental LP checks"},
+		{"Optional CBC (`-tags=cbc`)", "`format_cbc.test`", "`./format`", "MPS export parity against COIN-OR CBC (`FuzzWriteMPSCBCParity`)"},
+	}
+	for _, r := range rows {
+		binKey := strings.Trim(r.bin, "`")
+		cnt := inv.FuzzBinaryCounts[binKey]
+		fmt.Fprintf(b, "| %s | %s | %s | `%d` | %s |\n", r.profile, r.bin, r.pkg, cnt, r.scope)
+	}
+	fmt.Fprintf(b, "| **Total Active Fuzz Targets** | **`targets.tsv` (`%d` rows)** | **`4` Go packages** | **`%d`** | **`%d` default-build (`go test -run '^Fuzz' ./...`) + `%d` `-tags=cbc`** |\n",
+		inv.TSVActiveRowCount,
+		inv.TotalFuzzCount,
+		inv.DefaultFuzzCount,
+		inv.CBCFuzzCount,
+	)
+}
+
+// SyncFormalDocs updates or verifies formal verification and fuzz inventory blocks
+// across README.md, docs/index.md, docs/benchmarks.md, and docs/formal-verification.md.
+func SyncFormalDocs(root string, checkOnly bool) error {
+	inv, err := CollectFormalInventory(root)
+	if err != nil {
+		return err
+	}
+	docs := []string{
+		"README.md",
+		filepath.Join("docs", "index.md"),
+		filepath.Join("docs", "benchmarks.md"),
+		filepath.Join("docs", "formal-verification.md"),
+	}
+	for _, rel := range docs {
+		path := filepath.Join(root, rel)
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		orig := string(raw)
+		synced, replaced, repErr := replaceGeneratedBlocks(
+			orig,
+			func(blockName string) bool { return formalGeneratedBlocks[blockName] },
+			func(blockName string) (string, error) { return renderFormalBlock(blockName, inv) },
+		)
+		if repErr != nil {
+			return fmt.Errorf("%s: %w", rel, repErr)
+		}
+		if replaced == 0 {
+			return fmt.Errorf("%s has no formal generated block markers", rel)
+		}
+		if checkOnly {
+			if orig != synced {
+				return fmt.Errorf("%s formal inventory block is out of sync with repository sources", rel)
+			}
+			continue
+		}
+		if orig != synced {
+			if writeErr := os.WriteFile(path, []byte(synced), syncedDocPerm); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
+	return nil
 }

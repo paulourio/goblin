@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
+unset $(git rev-parse --local-env-vars)
 
 if ! command -v lake >/dev/null 2>&1; then
     if [ -n "${HOME:-}" ] && [ -x "${HOME}/.elan/bin/lake" ]; then
@@ -158,6 +159,58 @@ import GoblinFormal.AxiomAudit
 #eval GoblinFormal.AxiomAudit.auditAllAppsModules
 EOF
 )
+(cd formal && lake env lean --stdin <<'EOF'
+import GoblinFormal.AxiomAudit
+open Lean Elab Command in
+#eval show CommandElabM Unit from do
+  let env ← getEnv
+  let mut counts : Std.HashMap String Nat := {}
+  for (declName, cinfo) in env.constants.toList do
+    if let .thmInfo _ := cinfo then
+      let mn := match env.getModuleIdxFor? declName with
+        | some idx => if h : idx.toNat < env.header.moduleNames.size then env.header.moduleNames[idx.toNat].toString else ""
+        | none => env.mainModule.toString
+      if mn == "GoblinFormal" || mn.startsWith "GoblinFormal." then
+        counts := counts.insert mn (counts.getD mn 0 + 1)
+  for (m, c) in counts.toList do
+    IO.println s!"{m}={c}"
+  let appMods : List Name := [
+    `Apps.Common, `Apps.BinCheck, `Apps.CutsCheck, `Apps.LpCheck,
+    `Apps.LsapCheck, `Apps.RulesCheck, `Apps.SimdCfgCheck, `Apps.ViprCheck
+  ]
+  for modName in appMods do
+    let mEnv ← importModules #[{ module := modName }] {}
+    let mut c := 0
+    for (declName, cinfo) in mEnv.constants.toList do
+      if let .thmInfo _ := cinfo then
+        let mn := match mEnv.getModuleIdxFor? declName with
+          | some idx => if h : idx.toNat < mEnv.header.moduleNames.size then mEnv.header.moduleNames[idx.toNat].toString else ""
+          | none => mEnv.mainModule.toString
+        if mn == modName.toString then
+          c := c + 1
+    IO.println s!"{modName}={c}"
+EOF
+) | PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import pathlib, re, sys
+docgen_src = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"var leanKernelTheoremCounts = map\[string\]int\{(.*?)\n\}", docgen_src, re.S)
+if not m:
+    raise SystemExit("ERROR: missing leanKernelTheoremCounts in bench/docgen.go")
+expected = {k: int(v) for k, v in re.findall(r"\"([^\"]+)\":\s*(\d+)", m.group(1))}
+actual = {}
+for line in sys.stdin.read().splitlines():
+    if "=" in line:
+        k, v = line.strip().split("=", 1)
+        actual[k] = int(v)
+for k, exp in sorted(expected.items()):
+    got = actual.get(k, 0)
+    if got != exp:
+        raise SystemExit(f"ERROR: Lean TheoremInfo drift for {k}: docgen={exp} vs live={got}")
+extra = {k: v for k, v in actual.items() if k not in expected and v > 0}
+if extra:
+    raise SystemExit(f"ERROR: untracked Lean TheoremInfo modules in live env: {extra}")
+print(f"Verified Lean TheoremInfo manifest ({sum(expected.values())} declarations across {len(expected)} modules).")
+' bench/docgen.go
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_elf_track5.py --verify
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_amd64_track5e.py --verify
 
@@ -381,7 +434,7 @@ GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool|Certified
 log_step "4/5 Running Go formal differential and certified tests (GOEXPERIMENT=simd)..."
 GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool|Certified|AssignCertified|MiniVIPR)' . ./assign
 
-log_step "5/5 Running Go formal fuzz seed corpora (GOEXPERIMENT=simd)..."
-GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -run '^Fuzz' . ./assign
+log_step "5/5 Running Go formal fuzz seed corpora across all packages (GOEXPERIMENT=simd)..."
+GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -run '^Fuzz' ./...
 
 printf '\nAll Lean 4 formal verification gates passed.\n'

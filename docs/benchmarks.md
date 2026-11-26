@@ -502,10 +502,14 @@ python3 bench/difftest_assign.py --instances 500 --seed 1
 go run ./cmd/goblin-optcheck -benchtime=200ms
 go run ./cmd/goblin-optcheck -simd -benchtime=200ms
 
-# 11. Lean 4 Prove Lane build (78 jobs), arm64 + amd64 ELF verification, CLI/JSONL checks, and 21 default-build Fuzz corpora
+# 11. Lean 4 Prove Lane build (78 jobs), arm64 + amd64 ELF verification, CLI/JSONL checks, and 37 default-build Fuzz corpora
 ./scripts/verify_formal.sh
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_elf_track5.py --verify
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/extract_amd64_track5e.py --verify
 ```
 
-Running `go test ./...` also executes `TestDocumentationAndBenchmarkSync`, which validates corpus dimensions, parity, symbol identifiers, provenance, and every generated block across `README.md`, `docs/benchmarks.md`, and `bench/results/final_report.md`.
+Running `go test ./...` also executes `TestDocumentationAndBenchmarkSync`, which validates corpus dimensions, parity, symbol identifiers, provenance, formal inventory blocks, and every generated table across `README.md`, `docs/index.md`, `docs/benchmarks.md`, `docs/formal-verification.md`, and `bench/results/final_report.md`.
+
+<!-- BEGIN GENERATED:BENCHMARKS_FORMAL_SUMMARY -->
+Automated formal inventory across the workspace covers `24` Lean files (`53,872` LOC: `1,325` authored `theorem` and `lemma` declarations, `5,876` kernel `TheoremInfo` entries, and `220` axiom locks), `5` Go certification files (`18,254` LOC) paired with `30` formal and certified test files (`33,960` LOC), and `45` `Fuzz*` targets (`37` default-build across `./...` plus `8` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](../scripts/gcp-fuzz/targets.tsv)).
+<!-- END GENERATED:BENCHMARKS_FORMAL_SUMMARY -->

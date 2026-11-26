@@ -34,6 +34,7 @@ PROJECT="${GCP_PROJECT:-$(gcloud_project)}"
 BUCKET="${GCS_BUCKET:-${PROJECT:+${PROJECT}-goblin-fuzz}}"
 SKIP_GCS=0
 KEEP=0
+LIST_TARGETS=0
 WORK_DIR=""
 JOBS="${CORPUS_AUDIT_JOBS:-$(default_jobs)}"
 REPLAY_TIMEOUT="${CORPUS_AUDIT_TIMEOUT:-240m}"
@@ -41,7 +42,7 @@ declare -a ONLY_TARGETS=()
 
 usage() {
     cat >&2 <<'EOF'
-usage: corpus_audit.sh [--skip-gcs] [--only=<target>] [--work-dir=<tmp>] [--keep] [--jobs=<n>]
+usage: corpus_audit.sh [--skip-gcs] [--only=<target>] [--work-dir=<tmp>] [--keep] [--jobs=<n>] [--list-targets]
 
 Options:
   --skip-gcs         Skip GCS corpus sync and replay local/staged corpora only
@@ -49,6 +50,7 @@ Options:
   --work-dir=<tmp>   Use an explicit scratch directory outside the repository
   --keep             Preserve the scratch directory, staged corpora, logs, and profiles
   --jobs=<n>         Max concurrent target replay workers (default: min(6, max(1, nproc/4)))
+  --list-targets     Print selected target names derived from targets.tsv and exit
   -h, --help         Show this help message
 EOF
 }
@@ -93,6 +95,10 @@ while [[ $# -gt 0 ]]; do
             KEEP=1
             shift
             ;;
+        --list-targets)
+            LIST_TARGETS=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -110,45 +116,58 @@ if ! [[ "${JOBS}" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-# Order heaviest formal targets first to minimize parallel tail latency.
+# Discover all fuzz targets and their build/package metadata dynamically from targets.tsv.
+TARGETS_TSV="${REPO_ROOT}/scripts/gcp-fuzz/targets.tsv"
+if [[ ! -f "${TARGETS_TSV}" ]]; then
+    echo "error: fuzz target manifest missing at ${TARGETS_TSV}" >&2
+    exit 2
+fi
+
+declare -A TARGET_BIN=()
+declare -A TARGET_WORKDIR=()
+declare -A TARGET_CLASS=()
+declare -a _RACE_TARGETS=()
+declare -a _HEAVY_TARGETS=()
+declare -a _PARSER_TARGETS=()
+declare -a _FAST_TARGETS=()
+declare -a _OTHER_TARGETS=()
+
+while IFS=$'\t' read -r _idx _bin _workdir _target _class _maxpar _extra; do
+    [[ -n "${_idx}" ]] || continue
+    [[ "${_idx}" == \#* ]] && continue
+    if [[ -z "${_bin}" || -z "${_workdir}" || -z "${_target}" || -z "${_class}" || -n "${_extra:-}" ]]; then
+        echo "error: malformed row in ${TARGETS_TSV}: ${_idx}" >&2
+        exit 2
+    fi
+    TARGET_BIN["${_target}"]="${_bin}"
+    TARGET_WORKDIR["${_target}"]="${_workdir}"
+    TARGET_CLASS["${_target}"]="${_class}"
+    case "${_class}" in
+        race) _RACE_TARGETS+=("${_target}") ;;
+        heavy) _HEAVY_TARGETS+=("${_target}") ;;
+        parser) _PARSER_TARGETS+=("${_target}") ;;
+        fast) _FAST_TARGETS+=("${_target}") ;;
+        *) _OTHER_TARGETS+=("${_target}") ;;
+    esac
+done < "${TARGETS_TSV}"
+
+# Order race and heaviest targets first to minimize parallel tail latency.
 ALL_TARGETS=(
-    "FuzzAssignSparseCoreTraps"
-    "FuzzMADMetamorphicAndLimits"
-    "FuzzMADAdversarialRegimes"
-    "FuzzMADExactOptimum"
-    "FuzzMADAdversarialCBC"
-    "FuzzMADMediumDecomposed"
-    "FuzzMADExactOptimumCBC"
-    "FuzzMADDifferentialCBC"
-    "FuzzMADLimitsCBC"
-    "FuzzMADMediumDecomposedCBC"
-    "FuzzCertifiedMILP"
-    "FuzzMILPSolver"
-    "FuzzMIPSmall"
-    "FuzzAdversarialMIPFormal"
-    "FuzzLPSmall"
-    "FuzzPuLPJSON"
-    "FuzzAssignPlantedCancellationAndStage2"
-    "FuzzLPSolver"
-    "FuzzCertifiedAssign"
-    "FuzzAssignHallAndTopology"
-    "FuzzAssignMetamorphicAndDirtyWorkspace"
-    "FuzzAssignAdversarialFormal"
-    "FuzzLinearSum"
-    "FuzzAssignCollinearAndRowDominated"
-    "FuzzAdversarialLPFormal"
-    "FuzzAssignWideAccAndIEEE754Edges"
+    "${_RACE_TARGETS[@]}"
+    "${_HEAVY_TARGETS[@]}"
+    "${_PARSER_TARGETS[@]}"
+    "${_FAST_TARGETS[@]}"
+    "${_OTHER_TARGETS[@]}"
 )
+
+if [[ "${#ALL_TARGETS[@]}" -eq 0 ]]; then
+    echo "error: no targets discovered in ${TARGETS_TSV}" >&2
+    exit 2
+fi
 
 is_known_target() {
     local cand="$1"
-    local known
-    for known in "${ALL_TARGETS[@]}"; do
-        if [[ "${cand}" == "${known}" ]]; then
-            return 0
-        fi
-    done
-    return 1
+    [[ -n "${TARGET_BIN[${cand}]:-}" ]]
 }
 
 declare -a SELECTED_TARGETS=()
@@ -171,6 +190,11 @@ if [[ "${#ONLY_TARGETS[@]}" -gt 0 ]]; then
     fi
 else
     SELECTED_TARGETS=("${ALL_TARGETS[@]}")
+fi
+
+if [[ "${LIST_TARGETS}" -eq 1 ]]; then
+    printf '%s\n' "${SELECTED_TARGETS[@]}"
+    exit 0
 fi
 
 if [[ "${SKIP_GCS}" -eq 0 ]]; then
@@ -198,7 +222,7 @@ fi
 
 NEED_CBC=0
 for t in "${SELECTED_TARGETS[@]}"; do
-    if [[ "${t}" == *CBC ]]; then
+    if [[ "${TARGET_BIN[${t}]}" == *_cbc.test ]]; then
         NEED_CBC=1
         break
     fi
@@ -301,6 +325,8 @@ tar -C "${REPO_ROOT}" \
     --exclude='./formal/.lake' \
     --exclude='./testdata/fuzz' \
     --exclude='./assign/testdata/fuzz' \
+    --exclude='./format/testdata/fuzz' \
+    --exclude='./internal/simd/testdata/fuzz' \
     -cf - . | tar -C "${STAGE_DIR}" -xf -
 
 if [[ -e "${REPO_ROOT}/third_party/Cbc/dist" ]]; then
@@ -326,19 +352,37 @@ declare -a COVER_PROFILES=()
 
 stage_and_run_target() {
     local t="$1"
+    local tsv_bin="${TARGET_BIN[${t}]}"
+    local tsv_workdir="${TARGET_WORKDIR[${t}]}"
+    local sub_pkg="${tsv_workdir#/app/work}"
+    sub_pkg="${sub_pkg#/}"
+
     local pkg_arg="."
     local pkg_rel=""
     local coverpkg_arg="github.com/paulourio/goblin,github.com/paulourio/goblin/format"
-    local -a extra_flags=()
+    if [[ -n "${sub_pkg}" ]]; then
+        pkg_arg="./${sub_pkg}"
+        pkg_rel="${sub_pkg}/"
+        case "${sub_pkg}" in
+            assign|format)
+                coverpkg_arg="github.com/paulourio/goblin,github.com/paulourio/goblin/${sub_pkg}"
+                ;;
+            *)
+                coverpkg_arg="github.com/paulourio/goblin/${sub_pkg}"
+                ;;
+        esac
+    fi
 
-    case "${t}" in
-        FuzzAssign*|FuzzLinearSum|FuzzCertifiedAssign)
-            pkg_arg="./assign"
-            pkg_rel="assign/"
-            coverpkg_arg="github.com/paulourio/goblin,github.com/paulourio/goblin/assign"
-            ;;
-        *CBC)
+    local -a extra_flags=()
+    case "$(basename "${tsv_bin}")" in
+        *_cbc.test)
             extra_flags+=("-tags=cbc")
+            ;;
+        *_assert.test)
+            extra_flags+=("-tags=goblin_assert")
+            ;;
+        *_race.test)
+            extra_flags+=("-race")
             ;;
     esac
 
