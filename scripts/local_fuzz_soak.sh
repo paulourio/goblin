@@ -11,6 +11,7 @@ GOBLIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PHASE="assign"
 FORMAL="${GOBLIN_FORMAL:-0}"
 SIMD_MAX_TIER="${GOBLIN_SIMD_MAX_TIER:-}"
+GOAMD64_LEVEL="${GOAMD64:-}"
 CONCURRENCY="${CONCURRENCY:-5}"
 WORKERS_PER_TARGET="${WORKERS_PER_TARGET:-6}"
 ASSIGN_TIME="${ASSIGN_TIME:-5m}"
@@ -36,6 +37,7 @@ LIST_TARGETS=0
 usage() {
     cat >&2 <<'EOF'
 usage: local_fuzz_soak.sh [--formal] [--simd-max-tier=auto|scalar|avx2|avx512]
+  [--goamd64=v1|v2|v3|v4]
   [--phase=assign|simd|format|mad|assert|race|cbc|all|all-cbc]
   [--concurrency=5] [--workers=6]
   [--assign-time=5m] [--sparse-time=10m] [--simd-time=5m] [--format-time=10m]
@@ -52,6 +54,7 @@ for arg in "$@"; do
         --formal=1|--formal=true) FORMAL="1" ;;
         --formal=0|--formal=false) FORMAL="0" ;;
         --simd-max-tier=*) SIMD_MAX_TIER="${arg#*=}" ;;
+        --goamd64=*) GOAMD64_LEVEL="${arg#*=}" ;;
         --phase=*) PHASE="${arg#*=}" ;;
         --concurrency=*) CONCURRENCY="${arg#*=}" ;;
         --workers=*) WORKERS_PER_TARGET="${arg#*=}" ;;
@@ -128,6 +131,16 @@ if [[ -n "${SIMD_MAX_TIER}" ]]; then
         auto|scalar|avx2|avx512) export GOBLIN_SIMD_MAX_TIER="${SIMD_MAX_TIER}" ;;
         *)
             echo "ERROR: unknown --simd-max-tier=${SIMD_MAX_TIER} (expected auto, scalar, avx2, or avx512)" >&2
+            exit 2
+            ;;
+    esac
+fi
+
+if [[ -n "${GOAMD64_LEVEL}" ]]; then
+    case "${GOAMD64_LEVEL}" in
+        v1|v2|v3|v4) export GOAMD64="${GOAMD64_LEVEL}" ;;
+        *)
+            echo "ERROR: unknown --goamd64=${GOAMD64_LEVEL} (expected v1, v2, v3, or v4)" >&2
             exit 2
             ;;
     esac
@@ -311,8 +324,15 @@ cleanup_exit() {
 trap cleanup INT TERM
 trap cleanup_exit EXIT
 
+HOST_GOARCH="$(go env GOARCH)"
+EFFECTIVE_GOAMD64="$(go env GOAMD64)"
+if [[ -z "${EFFECTIVE_GOAMD64}" ]]; then
+    EFFECTIVE_GOAMD64="n/a"
+fi
+
 echo "=== Local Parallel Fuzz Soak (${RUN_ID}) ==="
 echo "  Phase:       ${PHASE} (${#JOBS[@]} targets)"
+echo "  Target ISA:  GOARCH=${HOST_GOARCH} GOAMD64=${EFFECTIVE_GOAMD64}"
 echo "  Formal/SIMD: GOBLIN_FORMAL=${FORMAL} GOBLIN_SIMD_MAX_TIER=${SIMD_MAX_TIER:-auto}"
 echo "  Early stop:  preset=${EARLY_STOP_PRESET}"
 echo "  Parallelism: ${CONCURRENCY} targets x ${WORKERS_PER_TARGET} workers = $((CONCURRENCY * WORKERS_PER_TARGET)) threads"

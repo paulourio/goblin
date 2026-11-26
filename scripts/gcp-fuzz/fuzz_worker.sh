@@ -167,11 +167,60 @@ if [[ -f "${STATUS_FILE}" ]]; then
     fi
 fi
 
-CPU_MODEL="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo || true)"
-HAS_AVX2="$(grep -o 'avx2' /proc/cpuinfo | head -n1 || echo none)"
-HAS_AVX512="$(grep -o 'avx512f' /proc/cpuinfo | head -n1 || echo none)"
+# Read build metadata and architecture-specific CPU flags for startup telemetry.
+HOST_ARCH="$(uname -m)"
+BUILD_GOARCH="unknown"
+BUILD_GOAMD64="na"
+BUILD_GOEXPERIMENT="none"
+BUILD_CBC="unknown"
+if [[ -r /app/build_info.txt ]]; then
+    BUILD_GOARCH="$(awk -F= '/^GOARCH=/{print $2; exit}' /app/build_info.txt || true)"
+    BUILD_GOAMD64="$(awk -F= '/^GOAMD64=/{print $2; exit}' /app/build_info.txt || true)"
+    BUILD_GOEXPERIMENT="$(awk -F= '/^GOEXPERIMENT=/{print $2; exit}' /app/build_info.txt || true)"
+    BUILD_CBC="$(awk -F= '/^CBC=/{print $2; exit}' /app/build_info.txt || true)"
+fi
+
+CPU_MODEL="$(awk '/^model name[[:space:]]*:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }' /proc/cpuinfo || true)"
+if [[ -z "${CPU_MODEL}" ]]; then
+    CPU_IMPL="$(awk '/^CPU implementer[[:space:]]*:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }' /proc/cpuinfo || true)"
+    CPU_PART="$(awk '/^CPU part[[:space:]]*:/ { sub(/^[^:]*:[[:space:]]*/, ""); print; exit }' /proc/cpuinfo || true)"
+    if [[ -n "${CPU_IMPL}" || -n "${CPU_PART}" ]]; then
+        CPU_MODEL="arm64(impl=${CPU_IMPL:-?},part=${CPU_PART:-?})"
+    fi
+fi
+
+cpu_has_flag() {
+    local flag="$1"
+    if awk -v f="${flag}" '
+        /^(flags|Features)[[:space:]]*:/ {
+            sub(/^[^:]*:[[:space:]]*/, "")
+            for (i = 1; i <= NF; i++) {
+                if ($i == f) {
+                    found = 1
+                    exit
+                }
+            }
+        }
+        END { exit !found }
+    ' /proc/cpuinfo 2>/dev/null; then
+        printf '%s' "${flag}"
+    else
+        printf 'none'
+    fi
+}
+
 echo "[worker ${TASK_INDEX}] target=${TARGET} class=${TARGET_CLASS} bin=${BIN} parallel=${PARALLEL}/${MAX_PARALLEL} slices=${SLICES}x${SLICE_DURATION} early_stop=${EARLY_STOP_PRESET} formal=${FORMAL} simd_max_tier=${SIMD_MAX_TIER:-auto}"
-echo "[worker ${TASK_INDEX}] host=$(hostname) nproc=${HOST_CPUS} mem_mib=${CONTAINER_MEM_MIB} gomemlimit=${GOMEMLIMIT} gogc=${GOGC:-default} avx2=${HAS_AVX2} avx512=${HAS_AVX512} cpu=${CPU_MODEL:-unknown}"
+if [[ "${HOST_ARCH}" == "aarch64" || "${HOST_ARCH}" == "arm64" || "${BUILD_GOARCH}" == "arm64" ]]; then
+    HAS_ASIMD="$(cpu_has_flag asimd)"
+    HAS_SVE="$(cpu_has_flag sve)"
+    HAS_SVE2="$(cpu_has_flag sve2)"
+    echo "[worker ${TASK_INDEX}] host=$(hostname) arch=${HOST_ARCH} goarch=${BUILD_GOARCH:-unknown} goamd64=${BUILD_GOAMD64:-na} goexp=${BUILD_GOEXPERIMENT:-none} cbc=${BUILD_CBC:-unknown} nproc=${HOST_CPUS} mem_mib=${CONTAINER_MEM_MIB} gomemlimit=${GOMEMLIMIT} gogc=${GOGC:-default} asimd=${HAS_ASIMD} sve=${HAS_SVE} sve2=${HAS_SVE2} cpu=${CPU_MODEL:-unknown}"
+else
+    HAS_AVX2="$(cpu_has_flag avx2)"
+    HAS_AVX512="$(cpu_has_flag avx512f)"
+    HAS_FMA="$(cpu_has_flag fma)"
+    echo "[worker ${TASK_INDEX}] host=$(hostname) arch=${HOST_ARCH} goarch=${BUILD_GOARCH:-unknown} goamd64=${BUILD_GOAMD64:-na} goexp=${BUILD_GOEXPERIMENT:-none} cbc=${BUILD_CBC:-unknown} nproc=${HOST_CPUS} mem_mib=${CONTAINER_MEM_MIB} gomemlimit=${GOMEMLIMIT} gogc=${GOGC:-default} avx2=${HAS_AVX2} avx512=${HAS_AVX512} fma=${HAS_FMA} cpu=${CPU_MODEL:-unknown}"
+fi
 
 # Set up fast RAM-disk workspace and fuzz cache.
 LOCAL_BASE="/dev/shm/goblin-fuzz-${TASK_INDEX}"

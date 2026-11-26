@@ -1,0 +1,15 @@
+.git
+.cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.test
+*.prof
+third_party/Cbc/dist
+formal/.lake/*
+!formal/.lake/build
+formal/.lake/build/*
+!formal/.lake/build/bin
+formal/.lake/build/bin/*.hash
+formal/.lake/build/bin/*.rsp
+formal/.lake/build/bin/*.trace

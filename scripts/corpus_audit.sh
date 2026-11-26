@@ -38,11 +38,12 @@ LIST_TARGETS=0
 WORK_DIR=""
 JOBS="${CORPUS_AUDIT_JOBS:-$(default_jobs)}"
 REPLAY_TIMEOUT="${CORPUS_AUDIT_TIMEOUT:-240m}"
+GOAMD64_LEVEL="${GOAMD64:-}"
 declare -a ONLY_TARGETS=()
 
 usage() {
     cat >&2 <<'EOF'
-usage: corpus_audit.sh [--skip-gcs] [--only=<target>] [--work-dir=<tmp>] [--keep] [--jobs=<n>] [--list-targets]
+usage: corpus_audit.sh [--skip-gcs] [--only=<target>] [--work-dir=<tmp>] [--keep] [--jobs=<n>] [--goamd64=v1|v2|v3|v4] [--list-targets]
 
 Options:
   --skip-gcs         Skip GCS corpus sync and replay local/staged corpora only
@@ -50,6 +51,7 @@ Options:
   --work-dir=<tmp>   Use an explicit scratch directory outside the repository
   --keep             Preserve the scratch directory, staged corpora, logs, and profiles
   --jobs=<n>         Max concurrent target replay workers (default: min(6, max(1, nproc/4)))
+  --goamd64=LEVEL    Set GOAMD64 microarchitecture level (v1, v2, v3, or v4)
   --list-targets     Print selected target names derived from targets.tsv and exit
   -h, --help         Show this help message
 EOF
@@ -91,6 +93,15 @@ while [[ $# -gt 0 ]]; do
             JOBS="${1:?--jobs requires an integer count}"
             shift
             ;;
+        --goamd64=*)
+            GOAMD64_LEVEL="${1#*=}"
+            shift
+            ;;
+        --goamd64)
+            shift
+            GOAMD64_LEVEL="${1:?--goamd64 requires v1, v2, v3, or v4}"
+            shift
+            ;;
         --keep)
             KEEP=1
             shift
@@ -114,6 +125,18 @@ done
 if ! [[ "${JOBS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: --jobs must be a positive integer, got '${JOBS}'" >&2
     exit 2
+fi
+
+if [[ -n "${GOAMD64_LEVEL}" ]]; then
+    case "${GOAMD64_LEVEL}" in
+        v1|v2|v3|v4)
+            export GOAMD64="${GOAMD64_LEVEL}"
+            ;;
+        *)
+            echo "error: --goamd64 must be one of v1, v2, v3, or v4, got '${GOAMD64_LEVEL}'" >&2
+            exit 2
+            ;;
+    esac
 fi
 
 # Discover all fuzz targets and their build/package metadata dynamically from targets.tsv.
@@ -345,7 +368,13 @@ export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 
-echo "=== Replaying ${#SELECTED_TARGETS[@]} fuzz targets (jobs=${JOBS}, timeout=${REPLAY_TIMEOUT}) under GOEXPERIMENT=simd GOBLIN_FORMAL=1 ==="
+HOST_GOARCH="$(go env GOARCH)"
+EFFECTIVE_GOAMD64="$(go env GOAMD64)"
+if [[ -z "${EFFECTIVE_GOAMD64}" ]]; then
+    EFFECTIVE_GOAMD64="n/a"
+fi
+
+echo "=== Replaying ${#SELECTED_TARGETS[@]} fuzz targets (jobs=${JOBS}, timeout=${REPLAY_TIMEOUT}) under GOARCH=${HOST_GOARCH} GOAMD64=${EFFECTIVE_GOAMD64} GOEXPERIMENT=simd GOBLIN_FORMAL=1 ==="
 FAILURES=0
 declare -a FAILED_TARGETS=()
 declare -a COVER_PROFILES=()

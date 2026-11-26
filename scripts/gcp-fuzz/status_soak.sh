@@ -15,6 +15,7 @@ gcloud_cfg() {
 PROJECT="${GCP_PROJECT:-$(gcloud_cfg project)}"
 REGION="${GCP_REGION:-$(gcloud_cfg compute/region)}"
 REGION2="${GCP_REGION2:-}"
+TWO_REGIONS=0
 RUN_ID=""
 DOWNLOAD_CRASHES_DIR=""
 
@@ -23,6 +24,7 @@ while [[ $# -gt 0 ]]; do
         --project=*) PROJECT="${1#*=}"; shift ;;
         --region=*) REGION="${1#*=}"; shift ;;
         --region2=*) REGION2="${1#*=}"; shift ;;
+        --two-regions) TWO_REGIONS=1; shift ;;
         --download-crashes=*) DOWNLOAD_CRASHES_DIR="${1#*=}"; shift ;;
         --download-crashes)
             shift
@@ -30,7 +32,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "usage: $0 <run-id> [--project=P] [--region=R] [--region2=R2] [--download-crashes <dir>]" >&2
+            echo "usage: $0 <run-id> [--project=P] [--region=R] [--region2=R2] [--two-regions] [--download-crashes <dir>]" >&2
             exit 0
             ;;
         -*)
@@ -50,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${RUN_ID}" ]]; then
-    echo "usage: $0 <run-id> [--project=P] [--region=R] [--region2=R2] [--download-crashes <dir>]" >&2
+    echo "usage: $0 <run-id> [--project=P] [--region=R] [--region2=R2] [--two-regions] [--download-crashes <dir>]" >&2
     exit 2
 fi
 if [[ -z "${PROJECT}" ]]; then
@@ -71,9 +73,13 @@ if gcloud batch jobs describe "${JOB_NAME}" --project="${PROJECT}" --location="$
 else
     echo "--- Group A (${REGION}) ---"
     gcloud batch jobs describe "${JOB_NAME}-a" --project="${PROJECT}" --location="${REGION}" --format="yaml(status.state,status.taskGroups.group0.counts,status.statusEvents)" --quiet || true
-    if [[ -n "${REGION2}" ]]; then
-        echo "--- Group B (${REGION2}) ---"
-        gcloud batch jobs describe "${JOB_NAME}-b" --project="${PROJECT}" --location="${REGION2}" --format="yaml(status.state,status.taskGroups.group0.counts,status.statusEvents)" --quiet || true
+    LOC_B="${REGION2:-${REGION}}"
+    if [[ -n "${REGION2}" || "${TWO_REGIONS}" -eq 1 ]]; then
+        echo "--- Group B (${LOC_B}) ---"
+        gcloud batch jobs describe "${JOB_NAME}-b" --project="${PROJECT}" --location="${LOC_B}" --format="yaml(status.state,status.taskGroups.group0.counts,status.statusEvents)" --quiet || true
+    elif B_OUT="$(gcloud batch jobs describe "${JOB_NAME}-b" --project="${PROJECT}" --location="${LOC_B}" --format="yaml(status.state,status.taskGroups.group0.counts,status.statusEvents)" --quiet 2>/dev/null)"; then
+        echo "--- Group B (${LOC_B}) ---"
+        printf '%s\n' "${B_OUT}"
     fi
 fi
 
