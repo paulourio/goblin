@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Preemption-resilient Cloud Batch fuzz worker for goblin.
-# Maps BATCH_TASK_INDEX (0..44) via /app/targets.tsv, runs fuzzing in
+# Maps BATCH_TASK_INDEX (0..47) via /app/targets.tsv, runs fuzzing in
 # checkpointed slices on RAM disk (/dev/shm) under goblin-fuzzwatch,
 # and syncs corpus, crashes, logs, and saturation state to GCS.
 

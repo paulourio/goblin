@@ -268,17 +268,6 @@ func isTerminalFailureStatus(st gb.Status) bool {
 	}
 }
 
-func fuzzRatFromFloat(v float64) (fuzzRatJSON, bool) {
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return fuzzRatJSON{}, false
-	}
-	r := new(big.Rat).SetFloat64(v)
-	if r == nil {
-		return fuzzRatJSON{}, false
-	}
-	return fuzzRatJSON{Num: r.Num().String(), Den: r.Denom().String()}, true
-}
-
 func fuzzRatFromBigRat(r *big.Rat) fuzzRatJSON {
 	if r == nil {
 		return fuzzRatJSON{Num: "0", Den: "1"}
@@ -311,9 +300,10 @@ func encodeProblemHeaderForLPCheck(p *gb.CompiledProblem) (
 		return fuzzRatJSON{}, nil, nil, nil, nil, errors.New("nil CompiledProblem")
 	}
 	objConstRat, objMinRats, rowRHSRats, rowCols, rowVals, _, okRats := gb.ExactProblemRatsForTest(p)
+	lbRats, ubRats, okBnds := gb.ExactVarBoundsRatsForTest(p)
 	n := p.NumVars()
 	m := p.NumConstraints()
-	if !okRats || len(objMinRats) != n || len(rowRHSRats) != m || len(rowCols) != m || len(rowVals) != m {
+	if !okRats || !okBnds || len(objMinRats) != n || len(lbRats) != n || len(ubRats) != n || len(rowRHSRats) != m || len(rowCols) != m || len(rowVals) != m {
 		return fuzzRatJSON{}, nil, nil, nil, nil, errors.New("failed to extract exact CompiledProblem rationals")
 	}
 	oc := fuzzRatFromBigRat(objConstRat)
@@ -322,22 +312,12 @@ func encodeProblemHeaderForLPCheck(p *gb.CompiledProblem) (
 	ub = make([]*fuzzRatJSON, n)
 	for j := range n {
 		obj[j] = fuzzRatFromBigRat(objMinRats[j])
-		lo, hi := p.VarBounds(j)
-		if math.IsNaN(lo) || math.IsNaN(hi) || math.IsInf(lo, 1) || math.IsInf(hi, -1) {
-			return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("invalid bounds [%v, %v] at col %d", lo, hi, j)
-		}
-		if !math.IsInf(lo, -1) {
-			lr, okL := fuzzRatFromFloat(lo)
-			if !okL {
-				return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("invalid lower bound %v at col %d", lo, j)
-			}
+		if lbRats[j] != nil {
+			lr := fuzzRatFromBigRat(lbRats[j])
 			lb[j] = &lr
 		}
-		if !math.IsInf(hi, 1) {
-			ur, okU := fuzzRatFromFloat(hi)
-			if !okU {
-				return fuzzRatJSON{}, nil, nil, nil, nil, fmt.Errorf("invalid upper bound %v at col %d", hi, j)
-			}
+		if ubRats[j] != nil {
+			ur := fuzzRatFromBigRat(ubRats[j])
 			ub[j] = &ur
 		}
 	}
@@ -1392,25 +1372,20 @@ func isExactRatSliceMIPFeasible(p *gb.CompiledProblem, xRats []*big.Rat) bool {
 	n := p.NumVars()
 	m := p.NumConstraints()
 	_, _, rowRHSRats, rowCols, rowVals, _, okRats := gb.ExactProblemRatsForTest(p)
-	if !okRats || len(rowRHSRats) != m || len(rowCols) != m || len(rowVals) != m {
+	lbRats, ubRats, okBnds := gb.ExactVarBoundsRatsForTest(p)
+	if !okRats || !okBnds || len(lbRats) != n || len(ubRats) != n || len(rowRHSRats) != m || len(rowCols) != m || len(rowVals) != m {
 		return false
 	}
-	bndRat := new(big.Rat)
 	for j := range n {
 		xr := xRats[j]
 		if xr == nil {
 			return false
 		}
-		lb, ub := p.VarBounds(j)
-		if !math.IsInf(lb, -1) {
-			if bndRat.SetFloat64(lb) == nil || xr.Cmp(bndRat) < 0 {
-				return false
-			}
+		if lbRats[j] != nil && xr.Cmp(lbRats[j]) < 0 {
+			return false
 		}
-		if !math.IsInf(ub, 1) {
-			if bndRat.SetFloat64(ub) == nil || xr.Cmp(bndRat) > 0 {
-				return false
-			}
+		if ubRats[j] != nil && xr.Cmp(ubRats[j]) > 0 {
+			return false
 		}
 	}
 	for k := range p.NumIntVars() {
@@ -2063,7 +2038,9 @@ func TestFormalFuzzBridgeOffline(t *testing.T) {
 		t.Fatalf("expected bounded LP to fail unbounded fallback, got ok=true mode=%q", modeBad)
 	}
 
-	// #128 item 2: 370516fcda6dcbb4 sub-ULP Q-infeasible presolved StatusOptimal ("safe-bound") vs auxLP=Infeasible.
+	// #128 item 2: 370516fcda6dcbb4 is exact-Q infeasible (0 <= x0 <= -1e-12).
+	// Dual-amplified residual checks now prove StatusInfeasible directly under presolve, while
+	// passing the historical sub-tol StatusOptimal candidate still exercises the safe-bound bridge.
 	m3705 := gb.NewModel("sub_ulp_pre_opt_3705", gb.Minimize)
 	x3705 := m3705.AddContVar("x0", math.Inf(-1), math.Inf(1))
 	m3705.SetObjective(gb.NewExpr(x3705.T(1e12)).AddConstant(-0.1))
@@ -2071,12 +2048,27 @@ func TestFormalFuzzBridgeOffline(t *testing.T) {
 	m3705.AddConstraint("r1", gb.Le(gb.NewExpr(x3705.T(-1e-8)), 0))
 	p3705 := m3705.Compile()
 	res3705, err3705 := gb.SolveCompiled(t.Context(), p3705, gb.WithPureGo(), gb.WithPresolve(true))
-	if err3705 != nil || res3705.Status != gb.StatusOptimal {
-		t.Fatalf("370516fcda6dcbb4 presolved solve failed: status=%s err=%v", res3705.Status, err3705)
+	if err3705 != nil || res3705.Status != gb.StatusInfeasible {
+		t.Fatalf("370516fcda6dcbb4 presolved solve failed: status=%s err=%v, want StatusInfeasible", res3705.Status, err3705)
 	}
 	if formalFuzzEnabled() {
-		if err := checkFormalPresolvedLPResult(t, "sub_ulp_pre_opt_3705", p3705, res3705, false); err != nil {
-			t.Fatalf("checkFormalPresolvedLPResult rejected 370516fcda6dcbb4: %v", err)
+		if err := checkFormalPresolvedLPResult(t, "sub_ulp_pre_inf_3705", p3705, res3705, false); err != nil {
+			t.Fatalf("checkFormalPresolvedLPResult rejected infeasible 370516fcda6dcbb4: %v", err)
+		}
+		mSubTolSafe := gb.NewModel("sub_ulp_pre_opt_dyadic", gb.Minimize)
+		xST := mSubTolSafe.AddContVar("x0", math.Inf(-1), math.Inf(1))
+		mSubTolSafe.SetObjective(gb.NewExpr(xST.T(math.Ldexp(1, 40))).AddConstant(-0.1))
+		mSubTolSafe.AddConstraint("r0", gb.Le(gb.NewExpr(xST.T(math.Ldexp(1, 40))), -1))
+		mSubTolSafe.AddConstraint("r1", gb.Le(gb.NewExpr(xST.T(-math.Ldexp(1, -26))), 0))
+		pSubTolSafe := mSubTolSafe.Compile()
+		synthST := gb.Result{
+			Status:    gb.StatusOptimal,
+			Objective: -1.1,
+			Values:    []float64{-math.Ldexp(1, -40)},
+			Duals:     []float64{0, -math.Ldexp(1, 66)},
+		}
+		if err := checkFormalPresolvedLPResult(t, "sub_ulp_pre_opt_dyadic", pSubTolSafe, synthST, false); err != nil {
+			t.Fatalf("checkFormalPresolvedLPResult rejected synthetic sub-tol safe-bound: %v", err)
 		}
 	}
 

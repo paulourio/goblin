@@ -3165,3 +3165,145 @@ func TestPrimalIncrementalDualAndDJUpdates(t *testing.T) {
 		}
 	})
 }
+
+// TestPrimalPhase2SlackBTRANNoiseGuard verifies that Phase-2 Devex and Dantzig pricing
+// suppress sub-ULP BTRAN rounding noise on zero-cost slack variables when extreme
+// objective magnitudes exceed ruizObjMaxExp (reproducing arm64 FMSUBD BTRAN residuals).
+func TestPrimalPhase2SlackBTRANNoiseGuard(t *testing.T) {
+	t.Parallel()
+	bigC := math.Ldexp(1, 56)
+	m := NewModel("slack_btran_noise_guard", Minimize)
+	z0 := m.AddContVar("z0", 0, 1)
+	z1 := m.AddContVar("z1", 0, 1)
+	x := m.AddContVar("x", 0, 10)
+	m.SetObjective(NewExpr(z0.T(-bigC), z1.T(-bigC), x.T(3)).AddConstant(bigC))
+	m.AddConstraint("clq", Le(NewExpr(z0.T(1), z1.T(1)), 1))
+	m.AddConstraint("cov", Ge(NewExpr(z0.T(1), z1.T(1)), 1))
+	m.AddConstraint("x_lb", Ge(NewExpr(x.T(1)), 2))
+
+	s := NewLPSolver(m.Compile(), nil)
+	defer s.Close()
+	res := s.Solve()
+	if res.Status != StatusOptimal {
+		t.Fatalf("initial solve status = %v, want Optimal", res.Status)
+	}
+	if err := s.factorizeBasis(); err != nil {
+		t.Fatalf("factorizeBasis: %v", err)
+	}
+	s.computeDualsAndReducedCosts(s.ws.cost[:s.ws.totVar])
+	s.computePrimalValues()
+	s.syncBasicBounds()
+
+	// Find a nonbasic at-lower slack variable and inject a 0.5-ULP BTRAN residual (-dj > effDualTol)
+	// while the exact basis duals remain optimal under compensated Phase-2 fallback pricing.
+	n := s.mat.numVars
+	maxY := s.maxAbsWorkingDual()
+	if maxY < 1e9 {
+		t.Fatalf("expected large working dual magnitude, got %g", maxY)
+	}
+	subULP := 0.5 * 2.0 * unitRoundoff64 * maxY
+	if subULP <= s.effDualTol {
+		t.Fatalf("expected subULP (%g) > effDualTol (%g)", subULP, s.effDualTol)
+	}
+	slackCol := -1
+	for k := n; k < s.ws.totVar; k++ {
+		if s.ws.status[k] == statusAtLower {
+			slackCol = k
+			break
+		}
+	}
+	if slackCol == -1 {
+		t.Fatalf("expected at least one nonbasic at-lower slack variable")
+	}
+
+	for _, devexOn := range []bool{false, true} {
+		s.devexActive = devexOn
+		if devexOn {
+			s.resetDevexFramework(false)
+		}
+		s.ws.dj[slackCol] = -subULP
+		enterVar, _, nanFound := s.pricePrimalEnter(false, false)
+		if nanFound || enterVar != -1 {
+			t.Fatalf("devex=%v: pricePrimalEnter selected col %d (nan=%v) on sub-ULP slack noise %g",
+				devexOn, enterVar, nanFound, -subULP)
+		}
+	}
+}
+
+// TestDomainActivityAndDualShiftSlackTighteningRegression locks in the crasher
+// d4915d0e1c998ea4 from FuzzGeneralMetamorphicAndPresolveParity together with unit-matrix
+// tiny-domain and unbounded high-cost-sensitivity slack-tolerance edge cases.
+func TestDomainActivityAndDualShiftSlackTighteningRegression(t *testing.T) {
+	t.Parallel()
+
+	t.Run("dyadic_presolved_tiny_domain_d4915d0e1c998ea4", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("d4915d0e1c998ea4", Minimize)
+		x0 := m.AddContVar("x0", math.Ldexp(1, -16), math.Ldexp(9, -16))
+		x1 := m.AddContVar("x1", math.Ldexp(1, -16), math.Ldexp(9, -16))
+		x2 := m.AddContVar("x2", 65536, 589824)
+		m.SetObjective(Sum(NewExpr(x0.T(3221225472), x1.T(3221225472), x2.T(0.75)), ConstExpr(-81920)))
+		m.AddConstraint("r0", Eq(NewExpr(x0.T(math.Ldexp(1, -9)), x1.T(math.Ldexp(3, -9))), math.Ldexp(5, -25)))
+		m.AddConstraint("r1", Le(NewExpr(x1.T(math.Ldexp(1, 39))), 41943040))
+		p, err := m.CompileChecked()
+		if err != nil {
+			t.Fatalf("CompileChecked: %v", err)
+		}
+		resPre, err := SolveCompiled(t.Context(), p, WithPureGo(), WithPresolve(true))
+		if err != nil {
+			t.Fatalf("SolveCompiled(presolve): %v", err)
+		}
+		if resPre.Status != StatusOptimal {
+			t.Fatalf("status = %v, want Optimal", resPre.Status)
+		}
+		if math.Abs(resPre.Objective-81920) > 1e-6 {
+			t.Fatalf("presolved objective = %.12g, want 81920", resPre.Objective)
+		}
+		// Verify the post-singleton reduced LP directly via LPSolver as well.
+		mRed := NewModel("d4915d0e1c998ea4_reduced", Minimize)
+		rx0 := mRed.AddContVar("x0", math.Ldexp(1, -16), math.Ldexp(9, -16))
+		rx1 := mRed.AddContVar("x1", math.Ldexp(1, -16), math.Ldexp(5, -16))
+		rx2 := mRed.AddContVar("x2", 65536, 589824)
+		mRed.SetObjective(Sum(NewExpr(rx0.T(3221225472), rx1.T(3221225472), rx2.T(0.75)), ConstExpr(-81920)))
+		mRed.AddConstraint("r0", Eq(NewExpr(rx0.T(math.Ldexp(1, -9)), rx1.T(math.Ldexp(3, -9))), math.Ldexp(5, -25)))
+		lp := NewLPSolver(mRed.Compile(), nil)
+		defer lp.Close()
+		lpRes := lp.Solve()
+		if lpRes.Status != StatusOptimal || math.Abs(lpRes.Objective-81920) > 1e-6 {
+			t.Fatalf("reduced LP = (%v, %.12g), want (Optimal, 81920)", lpRes.Status, lpRes.Objective)
+		}
+	})
+
+	t.Run("unit_matrix_tiny_domain_bounds", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("unit_mat_tiny_dom", Minimize)
+		x0 := m.AddContVar("x0", math.Ldexp(1, -24), math.Ldexp(9, -24))
+		x1 := m.AddContVar("x1", math.Ldexp(1, -24), math.Ldexp(9, -24))
+		c := math.Ldexp(1.5, 24)
+		m.SetObjective(NewExpr(x0.T(c), x1.T(c)))
+		m.AddConstraint("r0", Eq(NewExpr(x0.T(1), x1.T(3)), math.Ldexp(5, -24)))
+		lp := NewLPSolver(m.Compile(), nil)
+		defer lp.Close()
+		res := lp.Solve()
+		// Exact optimum: x0 = 2^-24, x1 = (4/3)*2^-24 -> obj = 1.5 * (7/3) = 3.5.
+		if res.Status != StatusOptimal || math.Abs(res.Objective-3.5) > 1e-6 {
+			t.Fatalf("unit-matrix tiny-domain LP = (%v, %.12g), want (Optimal, 3.5)", res.Status, res.Objective)
+		}
+	})
+
+	t.Run("unbounded_high_cost_dual_shift_repair_rate", func(t *testing.T) {
+		t.Parallel()
+		m := NewModel("unbounded_high_cost", Minimize)
+		x0 := m.AddContVar("x0", 0, math.Inf(1))
+		x1 := m.AddContVar("x1", 0, math.Inf(1))
+		m.SetObjective(NewExpr(x0.T(1e8), x1.T(1e8)))
+		m.AddConstraint("r0", Eq(NewExpr(x0.T(1), x1.T(3)), 4e-8))
+		lp := NewLPSolver(m.Compile(), nil)
+		defer lp.Close()
+		res := lp.Solve()
+		want := 4.0 / 3.0
+		if res.Status != StatusOptimal || math.Abs(res.Objective-want) > 1e-6 {
+			t.Fatalf("unbounded high-cost LP = (%v, %.12g), want (Optimal, %.12g)", res.Status, res.Objective, want)
+		}
+	})
+}

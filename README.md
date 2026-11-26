@@ -114,17 +114,17 @@ Every table below renders automatically from canonical JSON telemetry in `bench/
 Keep two corpus properties in mind when reading LP and MILP speedups against the Python `PuLP + cbc` subprocess baseline. First, 10 Tier 1 micro-models are dominated by Python's CBC subprocess startup cost. Second, 8 of the 31 synthetic families are planted-gap MAD models with a zero root LP gap by construction that close without branching. The bold `Tier 2+3 non-planted MILPs` row excludes both groups to isolate solver-dominated branching workloads, while Section 9 of [Benchmark Methodology and Corpus Results](docs/benchmarks.md#9-pure-go-vs-in-process-c-cbc-performance-analysis) compares pure-Go directly against in-process `BackendCBC`. Columns report cumulative end-to-end wall time (`JSON -> solution`) summed across all randomized trials in each subset alongside equal-family geometric-mean speedup (`Python / Go`).
 
 <!-- BEGIN GENERATED:README_CBC_HEADLINE -->
-Across the 14 solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **12.30x** [7.28x-20.77x] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **4.61x** [3.14x-6.76x] total (**4.88x** [3.20x-7.45x] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.
+Across the 14 solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **11.93x** [7.19x-19.82x] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **4.57x** [3.12x-6.71x] total (**4.85x** [3.17x-7.40x] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.
 <!-- END GENERATED:README_CBC_HEADLINE -->
 
 <!-- BEGIN GENERATED:README_MILP_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | Python Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Micro-models (`N <= 26`, spawn-dominated) | 10 (110) | 8.8 | 1098.1 | **402.11x** [180.62x-895.25x] | 686.80x [40.42x-1803.14x] |
-| Tier 2: Medium MILPs (`30 <= N <= 84`) | 13 (143) | 552.4 | 4442.1 | **19.49x** [11.70x-32.49x] | 22.29x [1.36x-155.94x] |
-| Tier 3: Large MILPs (`145 <= N <= 4036`) | 8 (40) | 908.0 | 6366.4 | **9.83x** [4.54x-21.29x] | 9.43x [1.04x-63.30x] |
-| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | 1132.9 | 6954.5 | **12.30x** [7.28x-20.77x] | 12.98x [1.36x-155.94x] |
-| All 31 synthetic families | 31 (293) | 1469.2 | 11906.6 | **43.37x** [22.10x-85.11x] | 44.43x [1.04x-1803.14x] |
+| Tier 1: Micro-models (`N <= 26`, spawn-dominated) | 10 (110) | 9.1 | 980.4 | **341.25x** [149.23x-780.36x] | 567.01x [34.38x-1747.57x] |
+| Tier 2: Medium MILPs (`30 <= N <= 84`) | 13 (143) | 526.1 | 4184.9 | **18.64x** [11.37x-30.54x] | 23.29x [1.26x-144.07x] |
+| Tier 3: Large MILPs (`145 <= N <= 4036`) | 8 (40) | 857.1 | 5924.1 | **9.07x** [4.53x-18.18x] | 8.91x [1.04x-56.87x] |
+| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | 1070.8 | 6564.8 | **11.93x** [7.19x-19.82x] | 12.44x [1.26x-144.07x] |
+| All 31 synthetic families | 31 (293) | 1392.4 | 11089.4 | **39.54x** [20.51x-76.21x] | 38.96x [1.04x-1747.57x] |
 <!-- END GENERATED:README_MILP_SUMMARY_TABLE -->
 
 Full provenance, per-family breakdowns across all 31 families, solver-core checkpoints, and pure-Go vs. in-process C++ CBC analysis live in [Benchmark Methodology and Corpus Results](docs/benchmarks.md).
@@ -136,17 +136,17 @@ The synthetic Mean Absolute Deviation (`MAD`) family assigns $I$ items across $G
 <!-- BEGIN GENERATED:README_MAD_SUMMARY_TABLE -->
 | Problem | $G \times I$ | Trials | Go (ms) | Python (ms) | Speedup |
 | :--- | :---: | ---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | 11 | 0.08 | 9.95 | **109.5x** |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | 0.50 | 34.20 | **64.1x** |
-| `t2_mad_g2_i8` | $2 \times 8$ | 11 | 0.17 | 10.16 | **57.2x** |
-| `t2_mad_g3_i9` | $3 \times 9$ | 11 | 0.18 | 11.11 | **57.0x** |
-| `t2_mad_g4_i12` | $4 \times 12$ | 11 | 0.43 | 12.06 | **27.4x** |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | 3.32 | 48.53 | **9.3x** |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | 18.92 | 171.45 | **6.9x** |
-| `t3_mad_g5_i20` | $5 \times 20$ | 5 | 0.60 | 18.64 | **30.4x** |
-| `t3_mad_g6_i30` | $6 \times 30$ | 5 | 1.06 | 19.93 | **18.5x** |
-| `t3_mad_g10_i100` | $10 \times 100$ | 5 | 8.43 | 61.42 | **5.6x** |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | 37.54 | 379.67 | **10.0x** |
+| `t1_mad_g2_i4` | $2 \times 4$ | 11 | 0.11 | 9.14 | **78.8x** |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | 0.48 | 31.81 | **62.6x** |
+| `t2_mad_g2_i8` | $2 \times 8$ | 11 | 0.16 | 8.78 | **56.1x** |
+| `t2_mad_g3_i9` | $3 \times 9$ | 11 | 0.19 | 9.01 | **46.4x** |
+| `t2_mad_g4_i12` | $4 \times 12$ | 11 | 0.36 | 10.36 | **29.2x** |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | 2.97 | 44.51 | **9.6x** |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | 16.77 | 168.32 | **7.0x** |
+| `t3_mad_g5_i20` | $5 \times 20$ | 5 | 0.78 | 16.84 | **21.0x** |
+| `t3_mad_g6_i30` | $6 \times 30$ | 5 | 1.05 | 16.82 | **14.5x** |
+| `t3_mad_g10_i100` | $10 \times 100$ | 5 | 8.02 | 58.52 | **5.6x** |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | 36.29 | 353.02 | **9.8x** |
 <!-- END GENERATED:README_MAD_SUMMARY_TABLE -->
 
 **Note on SIMD**: Experimental `GOEXPERIMENT=simd` builds deliver little overall speedup on MAD and other sparse LP/MILP workloads because scalar matrix factorization dominates runtime. Full dispersion (`Mean ± SD`), prep/solve splits, checkpoint progression, and paired scalar-vs-SIMD benchmarks appear in [MAD Benchmarks](docs/benchmarks.md#3-mad-group-item-allocation-formulation) and [Default Build vs. `GOEXPERIMENT=simd`](docs/benchmarks.md#5-default-build-vs-goexperimentsimd).
@@ -158,10 +158,10 @@ The `goblin/assign` corpus compares in-memory pure-Go execution directly against
 <!-- BEGIN GENERATED:README_ASSIGN_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Small (`N <= 32`) | 6 (66) | 0.237 | 0.322 | **1.30x** [1.06x-1.61x] | 1.36x [0.29x-2.85x] |
-| Tier 2: Medium (`64 <= N <= 256`) | 9 (99) | 9.236 | 32.796 | **2.94x** [1.88x-4.61x] | 2.62x [0.96x-15.04x] |
-| Tier 3: Large (`500 <= N <= 2000`) | 7 (35) | 225.633 | 997.660 | **2.88x** [1.85x-4.50x] | 2.59x [1.45x-6.13x] |
-| **All 22 synthetic LSAP families** | 22 (200) | 235.106 | 1030.778 | **2.34x** [1.81x-3.03x] | 2.01x [0.29x-15.04x] |
+| Tier 1: Small (`N <= 32`) | 6 (66) | 0.202 | 0.309 | **1.55x** [1.24x-1.95x] | 1.59x [1.02x-3.34x] |
+| Tier 2: Medium (`64 <= N <= 256`) | 9 (99) | 9.031 | 31.191 | **2.83x** [1.77x-4.53x] | 2.50x [1.07x-14.57x] |
+| Tier 3: Large (`500 <= N <= 2000`) | 7 (35) | 207.176 | 892.875 | **2.86x** [1.83x-4.47x] | 2.64x [1.49x-6.17x] |
+| **All 22 synthetic LSAP families** | 22 (200) | 216.409 | 924.375 | **2.41x** [1.89x-3.07x] | 1.97x [1.02x-14.57x] |
 <!-- END GENERATED:README_ASSIGN_SUMMARY_TABLE -->
 
 Unlike sparse MILPs, dense assignment matrices benefit substantially from AVX2 and AVX-512 vectorization under `GOEXPERIMENT=simd`. Per-family results, square vs. rectangular splits, and scalar-vs-SIMD tables live in [Linear Sum Assignment Benchmarks](docs/benchmarks.md#71-aggregate-lsap-workload-summary) and [LSAP SIMD Analysis](docs/benchmarks.md#73-lsap-scalar-vs-goexperimentsimd).
@@ -188,7 +188,7 @@ Optimization solvers balance numerical speed against mathematical certainty. The
 ### Lean 4 Proofs and Honest Scope Boundaries
 
 <!-- BEGIN GENERATED:README_FORMAL_SUMMARY -->
-An isolated offline Lean 4 workspace ([`formal/`](formal/lakefile.toml), pinned to `v4.36.0` with `batteries` `v4.36.0` as `lintDriver`) with zero `sorry` or custom axioms proves soundness for the standalone CLI certificate checkers, abstract algebraic presolve and cutting-plane models, and compiled `arm64`/`amd64` zero-allocation kernels across `24` Lean files (`53,872` LOC: `1,325` authored `theorem` and `lemma` declarations with `1,324` in `GoblinFormal` plus `1` in `Apps/LsapCheck.lean`, `5,876` kernel `TheoremInfo` declarations including compiler-synthesized helper, equation, and splitter lemmas, and `220` `#print axioms` locks), paired with `5` pure-Go certification files (`18,475` LOC), `30` formal and certified Go test files (`34,014` LOC), and `45` `Fuzz*` targets (`37` default-build and `8` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](scripts/gcp-fuzz/targets.tsv)). Hosted CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs Go test matrices, codegen invariants, and Lean verification (`lake build --wfail && lake lint` plus Track 5 ELF checks), [`scripts/pre-commit.sh`](scripts/pre-commit.sh) runs those checks locally (emitting a warning and skipping Lean if `lake` is absent unless `GOBLIN_STRICT_GATES=1`), [`scripts/verify_formal.sh`](scripts/verify_formal.sh) runs full formal suites and all `37` default-build `^Fuzz` seed corpora, and plain `go test ./...` skips Lean subprocess checks.
+An isolated offline Lean 4 workspace ([`formal/`](formal/lakefile.toml), pinned to `v4.36.0` with `batteries` `v4.36.0` as `lintDriver`) with zero `sorry` or custom axioms proves soundness for the standalone CLI certificate checkers, abstract algebraic presolve and cutting-plane models, and compiled `arm64`/`amd64` zero-allocation kernels across `24` Lean files (`53,872` LOC: `1,325` authored `theorem` and `lemma` declarations with `1,324` in `GoblinFormal` plus `1` in `Apps/LsapCheck.lean`, `5,876` kernel `TheoremInfo` declarations including compiler-synthesized helper, equation, and splitter lemmas, and `220` `#print axioms` locks), paired with `5` pure-Go certification files (`18,489` LOC), `30` formal and certified Go test files (`34,044` LOC), and `48` `Fuzz*` targets (`40` default-build and `8` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](scripts/gcp-fuzz/targets.tsv)). Hosted CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs Go test matrices, codegen invariants, and Lean verification (`lake build --wfail && lake lint` plus Track 5 ELF checks), [`scripts/pre-commit.sh`](scripts/pre-commit.sh) runs those checks locally (emitting a warning and skipping Lean if `lake` is absent unless `GOBLIN_STRICT_GATES=1`), [`scripts/verify_formal.sh`](scripts/verify_formal.sh) runs full formal suites and all `40` default-build `^Fuzz` seed corpora, and plain `go test ./...` skips Lean subprocess checks.
 <!-- END GENERATED:README_FORMAL_SUMMARY -->
 
 Several parts of the system stay outside formal proof scope by design:
@@ -196,7 +196,7 @@ Several parts of the system stay outside formal proof scope by design:
 - **Unproved Go runtime and solver code**: Default uncertified solves execute floating-point Go code without source-to-Lean lifting, and runtime `WithCertified(true)` runs unproved pure-Go rational checkers (`certified.go`, `exact_polish.go`, `vipr_trace.go`, `assign/certified.go`) rather than Lean executables.
 - **Abstract standalone Lean models**: Track 2 rules, Track 3B `postsolveLPDual`, and Track 4 `BabState` formalize abstract standalone Lean models with no mechanical link to imperative `presolve.go`, `cuts.go`, or `bab.go`.
 - **Out-of-scope internals**: Sparse Markowitz `LU` factorization, Forrest-Tomlin updates, simplex termination, parallel search (`WithWorkers > 1`), the Go runtime and garbage collector, and the optional C++ CBC backend are not formally proven.
-- **Track 5 binary proof boundaries**: Machine-code checks run against hand-authored Lean ARM64 and x86-64 ISA decoders/operational models (trusted computing base). The `14` ARM64 routines (`7` standalone `-gcflags=-l` builds of functions inlined in production, while benchmarks run on `amd64`) and `6` `GOEXPERIMENT=simd` `amd64` AVX kernels add assurance only for uncertified solves; for certified results they add no extra soundness assurance because post-solve exact rational checking makes kernel bugs irrelevant. The `BoundsGuardsHold` hypothesis assumes panic-free runtime comparisons by hypothesis (syntactic CFG guard mediation: every edge to `runtime.panicBounds` traverses a `CMP` plus conditional branch, not value-level bounds safety; only the `4` zero-`panicBounds` ARM64 leaves prove unconditional unreachability). Zero-GC checks direct call targets up to the first external `BL` against the trusted `18`-symbol `allowedZeroGCSyms` allow-list without verifying those callees. Track 5E AVX2/AVX-512 cross-ISA proofs for `allAbsLE64` and `initReducedRow64` cover the `n % 8 == 0` vector body (outer Go wrappers handle scalar tails and `-0.0 -> +0.0` normalization, while `minNoNaN64` covers its scalar tail inline).
+- **Track 5 binary proof boundaries**: Machine-code checks run against hand-authored Lean ARM64 and x86-64 ISA decoders/operational models (trusted computing base). The `14` ARM64 routines (`7` standalone `-gcflags=-l` builds of functions inlined in production, while primary CBC/SciPy benchmarks run on `amd64` and point-in-time AVX-512 plus `linux/arm64` target-silicon snapshots live in `bench/results/target_silicon/`) and `6` `GOEXPERIMENT=simd` `amd64` AVX kernels add assurance only for uncertified solves; for certified results they add no extra soundness assurance because post-solve exact rational checking makes kernel bugs irrelevant. The `BoundsGuardsHold` hypothesis assumes panic-free runtime comparisons by hypothesis (syntactic CFG guard mediation: every edge to `runtime.panicBounds` traverses a `CMP` plus conditional branch, not value-level bounds safety; only the `4` zero-`panicBounds` ARM64 leaves prove unconditional unreachability). Zero-GC checks direct call targets up to the first external `BL` against the trusted `18`-symbol `allowedZeroGCSyms` allow-list without verifying those callees. Track 5E AVX2/AVX-512 cross-ISA proofs for `allAbsLE64` and `initReducedRow64` cover the `n % 8 == 0` vector body (outer Go wrappers handle scalar tails and `-0.0 -> +0.0` normalization, while `minNoNaN64` covers its scalar tail inline).
 - **Soundness over completeness**: Certified mode ensures accepted results hold over exact rationals against the caller's original model, including continuous-variable vertex polishing and 1-ULP presolve-bound repair on mixed-integer traces. Severely ill-conditioned instances can still fail closed instead of producing a witness.
 
 Read [Formal Verification Architecture](docs/formal-verification.md#verification-strength-and-scope-boundaries) for the full five-track proof inventory, trusted computing base, soundness bug ledger, and Lean commands.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"slices"
 	"testing"
 
@@ -729,6 +730,7 @@ func TestTierIntrospectionAndCaps(t *testing.T) {
 	}()
 
 	hw := simd.HardwareSIMDTier()
+	t.Logf("SIMD tier introspection: hardware=%s initial_active=%s", hw, simd.ActiveSIMDTier())
 	if hw != simd.TierScalar && hw != simd.TierAVX2 && hw != simd.TierAVX512 {
 		t.Fatalf("unexpected HardwareSIMDTier: %q", hw)
 	}
@@ -1076,13 +1078,17 @@ func TestMultiTierCoreKernelsParity(t *testing.T) {
 func BenchmarkKernelCrossover(b *testing.B) {
 	defer func() { _ = simd.SetMaxTier("auto") }()
 
-	sizes := []int{16, 32, 64, 128, 256, 512, 1024, 2048, 4096}
+	sizes := []int{16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192}
 	tiers := availableTiers()
+	if only := os.Getenv("GOBLIN_BENCH_SIMD_TIER"); only != "" {
+		tiers = []string{only}
+	}
 
 	for _, n := range sizes {
 		a := make([]float64, n)
 		v := make([]float64, n)
 		d := make([]float64, n)
+		dNaN := make([]float64, n)
 		lb := make([]float64, n)
 		ub := make([]float64, n)
 		tol := make([]float64, n)
@@ -1102,6 +1108,11 @@ func BenchmarkKernelCrossover(b *testing.B) {
 			a[i] = rng.Float64() * 100.0
 			v[i] = rng.Float64() * 50.0
 			d[i] = 100.0 + rng.Float64()*50.0
+			if i%4 == 0 {
+				dNaN[i] = math.NaN()
+			} else {
+				dNaN[i] = d[i]
+			}
 			rc[i] = 100.0 + rng.Float64()*50.0
 			dRelax[i] = 60.0
 			lb[i] = 0.0
@@ -1133,6 +1144,20 @@ func BenchmarkKernelCrossover(b *testing.B) {
 			if err := simd.SetMaxTier(tier); err != nil {
 				b.Fatalf("SetMaxTier(%s): %v", tier, err)
 			}
+			b.Run(fmt.Sprintf("AllAbsLE64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink bool
+				for range b.N {
+					sink = simd.AllAbsLE64With(a, 1e290, false)
+				}
+				_ = sink
+			})
+			b.Run(fmt.Sprintf("MinNoNaN64/N=%d/%s", n, tier), func(b *testing.B) {
+				var sink float64
+				for range b.N {
+					sink = simd.MinNoNaN64With(dNaN, false)
+				}
+				_ = sink
+			})
 			b.Run(fmt.Sprintf("Dot64/N=%d/%s", n, tier), func(b *testing.B) {
 				var sink float64
 				for range b.N {

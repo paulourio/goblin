@@ -704,3 +704,73 @@ func TestExactPuLPJSONFlugplCertifiedAndFormalVIPR(t *testing.T) {
 		}
 	}
 }
+
+func TestExactBasisSolutionAfterSetStructuralBoundsRegression(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	// Case 1: Fixing integer variables whose compiled bounds were rounded from fractional
+	// exact rational bounds must preserve fixed values in ExactBasisSolution rather than
+	// reverting to un-tightened fractional bounds (-1/3 or 1e-20).
+	tiny, err := gb.ParseExactRat("1e-20")
+	if err != nil {
+		t.Fatalf("ParseExactRat(1e-20): %v", err)
+	}
+	twoMinusTiny := new(big.Rat).Sub(big.NewRat(2, 1), tiny)
+	m := gb.NewModel("exact_basis_fixed_int_rat", gb.Maximize)
+	x0 := m.AddIntVarRat("x0", big.NewRat(-1, 3), big.NewRat(7, 3))
+	x1 := m.AddIntVarRat("x1", big.NewRat(0, 1), big.NewRat(5, 1))
+	x2 := m.AddIntVarRat("x2", tiny, twoMinusTiny)
+	x3 := m.AddContVarRat("x3", big.NewRat(0, 1), big.NewRat(5, 1))
+	m.AddConstraint("c", gb.LeRat(
+		gb.NewExpr(x0.TRat(big.NewRat(3, 2)), x1.TRat(big.NewRat(-1, 1)), x2.TDec("0.9"), x3.TRat(big.NewRat(5, 2))),
+		big.NewRat(1, 1),
+	))
+	m.SetObjective(gb.NewExpr(x0.TDec("-0.7"), x1.TDec("1.5"), x2.TDec("-1"), x3.TDec("0.9")))
+	p, err := m.CompileChecked()
+	if err != nil {
+		t.Fatalf("CompileChecked: %v", err)
+	}
+
+	lp := gb.NewLPSolver(p, nil)
+	defer lp.Close()
+	lp.SetStructuralBounds([]float64{0, 5, 1, 0}, []float64{0, 5, 1, 5})
+	lpRes := lp.Solve()
+	if lpRes.Status != gb.StatusOptimal {
+		t.Fatalf("lp.Solve status=%v, want Optimal", lpRes.Status)
+	}
+	sol, ok := gb.ExactBasisSolution(ctx, lp)
+	if !ok {
+		t.Fatal("ExactBasisSolution returned ok=false on fixed-integer exact-rat LP")
+	}
+	wantPrimal := []*big.Rat{big.NewRat(0, 1), big.NewRat(5, 1), big.NewRat(1, 1), big.NewRat(51, 25)}
+	for j, want := range wantPrimal {
+		if sol.Primal[j].Cmp(want) != 0 {
+			t.Fatalf("sol.Primal[%d] = %s, want %s", j, sol.Primal[j].RatString(), want.RatString())
+		}
+	}
+
+	// Case 2: Dynamically fixing a continuous variable with non-dyadic upper bound 9/10 at 0.9
+	// must keep snap.lb == snap.ub instead of inverting float64(0.9) > 9/10.
+	mCont := gb.NewModel("exact_basis_fixed_cont_rat", gb.Minimize)
+	xc := mCont.AddContVarRat("xc", big.NewRat(0, 1), big.NewRat(9, 10))
+	mCont.SetObjective(gb.VarExpr(xc))
+	pCont, err := mCont.CompileChecked()
+	if err != nil {
+		t.Fatalf("mCont.CompileChecked: %v", err)
+	}
+	lpCont := gb.NewLPSolver(pCont, nil)
+	defer lpCont.Close()
+	lpCont.SetStructuralBounds([]float64{0.9}, []float64{0.9})
+	if resCont := lpCont.Solve(); resCont.Status != gb.StatusOptimal {
+		t.Fatalf("lpCont.Solve status=%v, want Optimal", resCont.Status)
+	}
+	solCont, okCont := gb.ExactBasisSolution(ctx, lpCont)
+	if !okCont {
+		t.Fatal("ExactBasisSolution returned ok=false after fixing continuous 9/10 var at 0.9")
+	}
+	wantF09 := new(big.Rat).SetFloat64(0.9)
+	if solCont.Primal[0].Cmp(wantF09) != 0 {
+		t.Fatalf("solCont.Primal[0] = %s, want %s", solCont.Primal[0].RatString(), wantF09.RatString())
+	}
+}

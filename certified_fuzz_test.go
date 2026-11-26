@@ -1122,25 +1122,26 @@ func verifyWitnessRationalInvariants(
 				}
 			}
 			// Farkas ray obeys projectVIPRFarkas: w^T A x <= w^T b contradicted by min_x (w^T A) x > w^T b (gap = w^T b - minActivity < 0).
+			lbRats, ubRats, okBnds := gb.ExactVarBoundsRatsForTest(p)
+			if !okBnds || len(lbRats) != p.NumVars() || len(ubRats) != p.NumVars() {
+				tb.Fatalf("[%s] ExactVarBoundsRatsForTest failed", label)
+			}
 			minActivity := new(big.Rat)
 			for j := range p.NumVars() {
 				c := atW[j]
 				if c.Sign() == 0 {
 					continue
 				}
-				lbj, ubj := p.VarBounds(j)
 				if c.Sign() > 0 {
-					lbRat := new(big.Rat).SetFloat64(lbj)
-					if math.IsInf(lbj, -1) || lbRat == nil {
+					if lbRats[j] == nil {
 						tb.Fatalf("[%s] Farkas unbounded lower col %d with w^T A > 0", label, j)
 					}
-					prod.Mul(c, lbRat)
+					prod.Mul(c, lbRats[j])
 				} else {
-					ubRat := new(big.Rat).SetFloat64(ubj)
-					if math.IsInf(ubj, 1) || ubRat == nil {
+					if ubRats[j] == nil {
 						tb.Fatalf("[%s] Farkas unbounded upper col %d with w^T A < 0", label, j)
 					}
-					prod.Mul(c, ubRat)
+					prod.Mul(c, ubRats[j])
 				}
 				minActivity.Add(minActivity, &prod)
 			}

@@ -56,6 +56,14 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	tsBundle, err := bench.LoadTargetSiliconBundle(filepath.Join("bench", "results", "target_silicon"))
+	if err != nil {
+		t.Fatalf("failed to load target-silicon telemetry: %v", err)
+	}
+	if err := bench.ValidateTargetSiliconTelemetry(bench.BuildCorpus(), bench.AssignCorpusSpecs(), tsBundle); err != nil {
+		t.Fatalf("target-silicon telemetry validation failed: %v", err)
+	}
+
 	syncedFiles := []string{
 		"README.md",
 		"docs/benchmarks.md",
@@ -285,5 +293,86 @@ func TestFuzzHarnessTargetsSync(t *testing.T) {
 	gotSoakDefault := listFromScript(filepath.Join("scripts", "local_fuzz_soak.sh"), "--phase=all", "--list-targets")
 	if !slices.Equal(gotSoakDefault, wantDef) {
 		t.Fatalf("local_fuzz_soak.sh --phase=all targets mismatch:\ngot=%v\nwant=%v", gotSoakDefault, wantDef)
+	}
+}
+
+// TestTargetSiliconDocumentationSync verifies that bench/results/target_silicon/*.json
+// satisfy schema and parity invariants and match docs/benchmarks.md (TARGET_SILICON_SUMMARY)
+// and formal inventory blocks byte-for-byte without requiring live cloud access.
+func TestTargetSiliconDocumentationSync(t *testing.T) {
+	t.Parallel()
+	tsBundle, err := bench.LoadTargetSiliconBundle(filepath.Join("bench", "results", "target_silicon"))
+	if err != nil {
+		t.Fatalf("load target-silicon telemetry: %v", err)
+	}
+	if err := bench.ValidateTargetSiliconTelemetry(bench.BuildCorpus(), bench.AssignCorpusSpecs(), tsBundle); err != nil {
+		t.Fatalf("validate target-silicon telemetry: %v", err)
+	}
+	if err := bench.SyncFormalDocs(".", true); err != nil {
+		t.Fatalf("target-silicon and formal documentation sync check failed: %v", err)
+	}
+}
+
+// TestTargetSiliconHygieneGate ensures scripts/verify_target_silicon.sh and the committed
+// target-silicon JSON files never leak cloud project IDs, account emails, IP addresses,
+// GCP regions/zones, deprecated storage CLI names, VM hostnames, or local user home paths.
+func TestTargetSiliconHygieneGate(t *testing.T) {
+	t.Parallel()
+
+	checks := []struct {
+		path                string
+		allowInstancePrefix bool
+	}{
+		{path: filepath.Join("scripts", "verify_target_silicon.sh"), allowInstancePrefix: true},
+		{path: filepath.Join("bench", "results", "target_silicon", "amd64_avx512.json"), allowInstancePrefix: false},
+		{path: filepath.Join("bench", "results", "target_silicon", "linux_arm64.json"), allowInstancePrefix: false},
+	}
+
+	var dynamicSecrets []string
+	if gcloudExe, err := exec.LookPath("gcloud"); err == nil {
+		for _, prop := range []string{"project", "account"} {
+			cmd := exec.CommandContext(t.Context(), gcloudExe, "config", "get-value", prop, "--quiet")
+			if out, cmdErr := cmd.Output(); cmdErr == nil {
+				val := strings.TrimSpace(string(out))
+				if val != "" && val != "(unset)" && len(val) >= 4 {
+					dynamicSecrets = append(dynamicSecrets, val)
+				}
+			}
+		}
+	}
+
+	for _, c := range checks {
+		raw, err := os.ReadFile(c.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", c.path, err)
+		}
+		txt := string(raw)
+		if err := bench.ValidateTargetSiliconHygiene(c.path, txt, c.allowInstancePrefix); err != nil {
+			t.Fatalf("hygiene check failed: %v", err)
+		}
+		for _, secret := range dynamicSecrets {
+			if strings.Contains(txt, secret) {
+				t.Fatalf("%s leaked active local gcloud configuration token", c.path)
+			}
+		}
+	}
+
+	// Negative controls verifying that each forbidden pattern class fails closed.
+	poisonSamples := []struct {
+		name  string
+		input string
+		allow bool
+	}{
+		{name: "email", input: "operator" + "@" + "corp.example.org", allow: true},
+		{name: "home_path", input: "/" + "ho" + "me/operator/work", allow: true},
+		{name: "ipv4", input: "10." + "128.0.42", allow: true},
+		{name: "gcp_zone", input: "us-" + "central1-a", allow: true},
+		{name: "legacy_storage_cli", input: "gs" + "util cp", allow: true},
+		{name: "vm_hostname_in_json", input: "goblin-" + "silicon-amd64-123", allow: false},
+	}
+	for _, ps := range poisonSamples {
+		if err := bench.ValidateTargetSiliconHygiene(ps.name, ps.input, ps.allow); err == nil {
+			t.Fatalf("expected ValidateTargetSiliconHygiene to reject synthetic %s sample", ps.name)
+		}
 	}
 }

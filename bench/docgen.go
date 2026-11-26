@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -985,10 +986,11 @@ type subsetSpec[T any] struct {
 }
 
 type docgenCorpus struct {
-	cases       []CorpusCase
-	assignCases []AssignCorpusCase
-	repoRoot    string
-	formalInv   *FormalInventory
+	cases         []CorpusCase
+	assignCases   []AssignCorpusCase
+	repoRoot      string
+	formalInv     *FormalInventory
+	targetSilicon *TargetSiliconBundle
 }
 
 func (dc *docgenCorpus) milp() []CorpusCase {
@@ -1023,6 +1025,26 @@ func (dc *docgenCorpus) formal() (*FormalInventory, error) {
 	}
 	dc.formalInv = inv
 	return inv, nil
+}
+
+func (dc *docgenCorpus) loadTargetSilicon() (*TargetSiliconBundle, error) {
+	if dc.targetSilicon != nil {
+		return dc.targetSilicon, nil
+	}
+	root := dc.repoRoot
+	if root == "" {
+		found, err := findRepoRoot(".")
+		if err != nil {
+			return nil, err
+		}
+		root = found
+	}
+	ts, err := LoadTargetSiliconBundle(filepath.Join(root, "bench", "results", "target_silicon"))
+	if err != nil {
+		return nil, err
+	}
+	dc.targetSilicon = ts
+	return ts, nil
 }
 
 // cbcBackendDescription states which CBC build and flag mapping produced goblin_cbc.json.
@@ -1093,6 +1115,14 @@ func renderBlockWith(blockName string, tb *TelemetryBundle, dc *docgenCorpus) (s
 		renderAssignSIMDTable(&b, dc.assign(), tb)
 	case "BINARY_SIZE_TABLE":
 		if err := renderBinarySizeTable(&b, tb); err != nil {
+			return "", err
+		}
+	case "TARGET_SILICON_SUMMARY":
+		ts, err := dc.loadTargetSilicon()
+		if err != nil {
+			return "", err
+		}
+		if err := renderTargetSiliconSummary(&b, dc.milp(), dc.assign(), ts); err != nil {
 			return "", err
 		}
 	case "README_FORMAL_SUMMARY",
@@ -3029,6 +3059,19 @@ func SyncFormalDocs(root string, checkOnly bool) error {
 	if err != nil {
 		return err
 	}
+	var tsBundle *TargetSiliconBundle
+	tsDir := filepath.Join(root, "bench", "results", "target_silicon")
+	if _, statErr := os.Stat(filepath.Join(tsDir, "amd64_avx512.json")); statErr == nil {
+		loadedTS, tsErr := LoadTargetSiliconBundle(tsDir)
+		if tsErr != nil {
+			return tsErr
+		}
+		tsBundle = loadedTS
+	}
+	var dc docgenCorpus
+	dc.repoRoot = root
+	dc.formalInv = inv
+	dc.targetSilicon = tsBundle
 	docs := []string{
 		"README.md",
 		filepath.Join("docs", "index.md"),
@@ -3044,8 +3087,22 @@ func SyncFormalDocs(root string, checkOnly bool) error {
 		orig := string(raw)
 		synced, replaced, repErr := replaceGeneratedBlocks(
 			orig,
-			func(blockName string) bool { return formalGeneratedBlocks[blockName] },
-			func(blockName string) (string, error) { return renderFormalBlock(blockName, inv) },
+			func(blockName string) bool {
+				if formalGeneratedBlocks[blockName] {
+					return true
+				}
+				return blockName == "TARGET_SILICON_SUMMARY" && tsBundle != nil
+			},
+			func(blockName string) (string, error) {
+				if blockName == "TARGET_SILICON_SUMMARY" {
+					var tbBuf bytes.Buffer
+					if renderErr := renderTargetSiliconSummary(&tbBuf, dc.milp(), dc.assign(), tsBundle); renderErr != nil {
+						return "", renderErr
+					}
+					return strings.TrimRight(tbBuf.String(), "\n"), nil
+				}
+				return renderFormalBlock(blockName, inv)
+			},
 		)
 		if repErr != nil {
 			return fmt.Errorf("%s: %w", rel, repErr)
@@ -3064,6 +3121,573 @@ func SyncFormalDocs(root string, checkOnly bool) error {
 				return writeErr
 			}
 		}
+	}
+	return nil
+}
+
+// TargetSiliconTestRun records one executed test configuration on a target-silicon instance.
+type TargetSiliconTestRun struct {
+	Profile             string `json:"profile"`
+	ArchLevel           string `json:"arch_level"`
+	SIMDEnabled         bool   `json:"simd_enabled"`
+	SIMDMaxTier         string `json:"simd_max_tier"`
+	ActiveSIMDTier      string `json:"active_simd_tier"`
+	PackagesPassed      int    `json:"packages_passed"`
+	ExplicitTestsPassed int    `json:"explicit_tests_passed"`
+	ElapsedSec          int    `json:"elapsed_sec"`
+}
+
+// TargetSiliconTestSummary summarizes test matrix execution across packages and ISA tiers.
+type TargetSiliconTestSummary struct {
+	ProfilesVerified          int                    `json:"profiles_verified"`
+	GOAMD64Levels             []string               `json:"goamd64_levels,omitempty"`
+	SIMDMaxTiers              []string               `json:"simd_max_tiers,omitempty"`
+	Packages                  []string               `json:"packages"`
+	ExplicitFormalAndFMATests []string               `json:"explicit_formal_and_fma_tests"`
+	TotalFailures             int                    `json:"total_failures"`
+	Runs                      []TargetSiliconTestRun `json:"runs"`
+}
+
+// TargetSiliconKernelEntry stores 6-round interleaved AB/BA nanosecond timings for one kernel and size.
+type TargetSiliconKernelEntry struct {
+	Kernel         string    `json:"kernel"`
+	Size           int       `json:"size"`
+	ScalarRoundsNS []float64 `json:"scalar_rounds_ns"`
+	AVX2RoundsNS   []float64 `json:"avx2_rounds_ns"`
+	AVX512RoundsNS []float64 `json:"avx512_rounds_ns"`
+}
+
+// TargetSiliconKernelABBA holds interleaved vector kernel timings from simd.test on AVX-512 silicon.
+type TargetSiliconKernelABBA struct {
+	Rounds    int                        `json:"rounds"`
+	OrderOdd  []string                   `json:"order_odd"`
+	OrderEven []string                   `json:"order_even"`
+	Entries   []TargetSiliconKernelEntry `json:"entries"`
+}
+
+// TargetSiliconMILPEntry stores per-family LP/MILP solve and total trial timings on target silicon.
+type TargetSiliconMILPEntry struct {
+	Tier           string    `json:"tier"`
+	NumVars        int       `json:"num_vars"`
+	NumConstraints int       `json:"num_constraints"`
+	Status         string    `json:"status"`
+	Objective      float64   `json:"objective"`
+	RootLPObj      float64   `json:"root_lp_obj"`
+	TSolveMS       float64   `json:"t_solve_ms"`
+	TTotalMS       float64   `json:"t_total_ms"`
+	TSolveTrialsMS []float64 `json:"t_solve_trials_ms"`
+	TTotalTrialsMS []float64 `json:"t_total_trials_ms"`
+}
+
+// TargetSiliconAssignEntry stores per-family LSAP solve and total trial timings on target silicon.
+type TargetSiliconAssignEntry struct {
+	Tier           string    `json:"tier"`
+	Rows           int       `json:"rows"`
+	Cols           int       `json:"cols"`
+	Family         string    `json:"family"`
+	Objective      float64   `json:"objective"`
+	TSolveMS       float64   `json:"t_solve_ms"`
+	TTotalMS       float64   `json:"t_total_ms"`
+	TSolveTrialsMS []float64 `json:"t_solve_trials_ms"`
+	TTotalTrialsMS []float64 `json:"t_total_trials_ms"`
+}
+
+// TargetSiliconAMD64MILPCorpus holds 31-family LP/MILP telemetry across scalar, AVX2, and AVX-512 tiers.
+type TargetSiliconAMD64MILPCorpus struct {
+	Families         int                               `json:"families"`
+	Trials           int                               `json:"trials"`
+	ParityMismatches int                               `json:"parity_mismatches"`
+	DefaultScalar    map[string]TargetSiliconMILPEntry `json:"default_scalar"`
+	SIMDAVX2         map[string]TargetSiliconMILPEntry `json:"simd_avx2"`
+	SIMDAVX512       map[string]TargetSiliconMILPEntry `json:"simd_avx512"`
+}
+
+// TargetSiliconAMD64AssignCorpus holds 22-family LSAP telemetry across scalar, AVX2, and AVX-512 tiers.
+type TargetSiliconAMD64AssignCorpus struct {
+	Families         int                                 `json:"families"`
+	Trials           int                                 `json:"trials"`
+	ParityMismatches int                                 `json:"parity_mismatches"`
+	DefaultScalar    map[string]TargetSiliconAssignEntry `json:"default_scalar"`
+	SIMDAVX2         map[string]TargetSiliconAssignEntry `json:"simd_avx2"`
+	SIMDAVX512       map[string]TargetSiliconAssignEntry `json:"simd_avx512"`
+}
+
+// TargetSiliconAMD64Report captures sanitized hardware telemetry from an n4-standard-4 AVX-512 run.
+type TargetSiliconAMD64Report struct {
+	SchemaVersion      int                            `json:"schema_version"`
+	PlatformID         string                         `json:"platform_id"`
+	MachineType        string                         `json:"machine_type"`
+	OSImageFamily      string                         `json:"os_image_family"`
+	BootDiskType       string                         `json:"boot_disk_type"`
+	GOOS               string                         `json:"goos"`
+	GOARCH             string                         `json:"goarch"`
+	UnameSRM           string                         `json:"uname_srm"`
+	CPUModel           string                         `json:"cpu_model"`
+	VCPUs              int                            `json:"vcpus"`
+	CoresPerSocket     int                            `json:"cores_per_socket"`
+	ThreadsPerCore     int                            `json:"threads_per_core"`
+	LSCPUSummary       map[string]string              `json:"lscpu_summary"`
+	AVX512Flags        []string                       `json:"avx512_flags"`
+	HardwareSIMDTier   string                         `json:"hardware_simd_tier"`
+	ActiveSIMDTier     string                         `json:"active_simd_tier"`
+	GitCommit          string                         `json:"git_commit"`
+	SourceFingerprint  string                         `json:"source_fingerprint"`
+	DefaultGoVersion   string                         `json:"default_go_version"`
+	SIMDGoVersion      string                         `json:"simd_go_version"`
+	CPUAffinity        string                         `json:"cpu_affinity"`
+	PreTestCPUBusyPct  float64                        `json:"pre_test_cpu_busy_pct"`
+	PreBenchCPUBusyPct float64                        `json:"pre_bench_cpu_busy_pct"`
+	MeasuredAt         string                         `json:"measured_at"`
+	TestVerification   TargetSiliconTestSummary       `json:"test_verification"`
+	KernelABBA         TargetSiliconKernelABBA        `json:"kernel_abba"`
+	MILPCorpus         TargetSiliconAMD64MILPCorpus   `json:"milp_corpus"`
+	AssignCorpus       TargetSiliconAMD64AssignCorpus `json:"assign_corpus"`
+}
+
+// TargetSiliconARM64MILPCorpus holds 31-family LP/MILP telemetry on linux/arm64.
+type TargetSiliconARM64MILPCorpus struct {
+	Families         int                               `json:"families"`
+	Trials           int                               `json:"trials"`
+	ParityMismatches int                               `json:"parity_mismatches"`
+	Default          map[string]TargetSiliconMILPEntry `json:"default"`
+}
+
+// TargetSiliconARM64AssignCorpus holds 22-family LSAP telemetry on linux/arm64.
+type TargetSiliconARM64AssignCorpus struct {
+	Families         int                                 `json:"families"`
+	Trials           int                                 `json:"trials"`
+	ParityMismatches int                                 `json:"parity_mismatches"`
+	Default          map[string]TargetSiliconAssignEntry `json:"default"`
+}
+
+// TargetSiliconARM64Report captures sanitized hardware telemetry from a linux/arm64 GCE run.
+type TargetSiliconARM64Report struct {
+	SchemaVersion              int                            `json:"schema_version"`
+	PlatformID                 string                         `json:"platform_id"`
+	MachineType                string                         `json:"machine_type"`
+	OSImageFamily              string                         `json:"os_image_family"`
+	BootDiskType               string                         `json:"boot_disk_type"`
+	GOOS                       string                         `json:"goos"`
+	GOARCH                     string                         `json:"goarch"`
+	GOARM64                    string                         `json:"goarm64"`
+	UnameSRM                   string                         `json:"uname_srm"`
+	CPUModel                   string                         `json:"cpu_model"`
+	VCPUs                      int                            `json:"vcpus"`
+	CoresPerSocket             int                            `json:"cores_per_socket"`
+	ThreadsPerCore             int                            `json:"threads_per_core"`
+	LSCPUSummary               map[string]string              `json:"lscpu_summary"`
+	CPUFeatures                []string                       `json:"cpu_features"`
+	HardwareSIMDTier           string                         `json:"hardware_simd_tier"`
+	ActiveSIMDTier             string                         `json:"active_simd_tier"`
+	GoExperimentSIMDCompiles   bool                           `json:"goexperiment_simd_compiles"`
+	GoExperimentSIMDSuitesPass bool                           `json:"goexperiment_simd_suites_passed"`
+	GitCommit                  string                         `json:"git_commit"`
+	SourceFingerprint          string                         `json:"source_fingerprint"`
+	DefaultGoVersion           string                         `json:"default_go_version"`
+	SIMDGoVersion              string                         `json:"simd_go_version,omitempty"`
+	CPUAffinity                string                         `json:"cpu_affinity"`
+	PreTestCPUBusyPct          float64                        `json:"pre_test_cpu_busy_pct"`
+	PreBenchCPUBusyPct         float64                        `json:"pre_bench_cpu_busy_pct"`
+	MeasuredAt                 string                         `json:"measured_at"`
+	TestVerification           TargetSiliconTestSummary       `json:"test_verification"`
+	MILPCorpus                 TargetSiliconARM64MILPCorpus   `json:"milp_corpus"`
+	AssignCorpus               TargetSiliconARM64AssignCorpus `json:"assign_corpus"`
+}
+
+// TargetSiliconBundle pairs sanitized amd64 AVX-512 and linux/arm64 target-silicon telemetry.
+type TargetSiliconBundle struct {
+	AMD64 TargetSiliconAMD64Report
+	ARM64 TargetSiliconARM64Report
+}
+
+var (
+	reHygieneEmail = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+	reHygieneIPv4  = regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
+	reHygieneZone  = regexp.MustCompile(`\b(?:us|europe|asia|australia|northamerica|southamerica|me|africa)-[a-z]+[0-9](?:-[a-z])?\b`)
+)
+
+// ValidateTargetSiliconHygiene rejects strings containing private cloud identifiers, emails,
+// IPv4 addresses, GCP regions/zones, deprecated storage CLI names, or local user home paths.
+func ValidateTargetSiliconHygiene(label, raw string, allowInstancePrefix bool) error {
+	if m := reHygieneEmail.FindString(raw); m != "" {
+		return fmt.Errorf("%s contains forbidden email pattern %q", label, m)
+	}
+	if m := reHygieneIPv4.FindString(raw); m != "" && m != "0.0."+"0.0" {
+		return fmt.Errorf("%s contains forbidden IPv4 literal %q", label, m)
+	}
+	if m := reHygieneZone.FindString(raw); m != "" {
+		return fmt.Errorf("%s contains forbidden GCP region/zone literal %q", label, m)
+	}
+	forbiddenTokens := []string{
+		"/" + "ho" + "me/",
+		"/" + "Users/",
+		"gs" + "util",
+		"gs:" + "//",
+		"compute." + "internal",
+		"gserviceaccount." + "com",
+	}
+	if !allowInstancePrefix {
+		forbiddenTokens = append(forbiddenTokens, "goblin-"+"silicon-")
+	}
+	for _, tok := range forbiddenTokens {
+		if strings.Contains(raw, tok) {
+			return fmt.Errorf("%s contains forbidden token %q", label, tok)
+		}
+	}
+	return nil
+}
+
+// LoadTargetSiliconBundle reads and hygiene-checks amd64_avx512.json and linux_arm64.json from dir.
+func LoadTargetSiliconBundle(dir string) (*TargetSiliconBundle, error) {
+	amd64Path := filepath.Join(dir, "amd64_avx512.json")
+	rawAMD64, err := os.ReadFile(amd64Path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", amd64Path, err)
+	}
+	if err := ValidateTargetSiliconHygiene(amd64Path, string(rawAMD64), false); err != nil {
+		return nil, err
+	}
+	var amd64Rep TargetSiliconAMD64Report
+	if err := json.Unmarshal(rawAMD64, &amd64Rep); err != nil {
+		return nil, fmt.Errorf("unmarshal %s: %w", amd64Path, err)
+	}
+
+	arm64Path := filepath.Join(dir, "linux_arm64.json")
+	rawARM64, err := os.ReadFile(arm64Path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", arm64Path, err)
+	}
+	if err := ValidateTargetSiliconHygiene(arm64Path, string(rawARM64), false); err != nil {
+		return nil, err
+	}
+	var arm64Rep TargetSiliconARM64Report
+	if err := json.Unmarshal(rawARM64, &arm64Rep); err != nil {
+		return nil, fmt.Errorf("unmarshal %s: %w", arm64Path, err)
+	}
+
+	return &TargetSiliconBundle{
+		AMD64: amd64Rep,
+		ARM64: arm64Rep,
+	}, nil
+}
+
+var canonicalTargetSiliconKernels = []string{
+	"AllAbsLE64",
+	"MinNoNaN64",
+	"InitReducedRow64",
+	"Min2ReducedRow64",
+	"RelaxRow64",
+	"Dot64",
+	"Axpy64",
+	"SelectDualLeaveRow64",
+	"ScanDualRatioCand64",
+}
+
+func validateTargetSiliconMILPMap(label string, cases []CorpusCase, m map[string]TargetSiliconMILPEntry) error {
+	if len(m) != len(cases) {
+		return fmt.Errorf("%s has %d MILP families, want %d", label, len(m), len(cases))
+	}
+	for _, c := range cases {
+		e, ok := m[c.ID]
+		if !ok {
+			return fmt.Errorf("%s missing MILP family %q", label, c.ID)
+		}
+		if e.TSolveMS <= 0 || e.TTotalMS <= 0 || len(e.TSolveTrialsMS) == 0 || len(e.TTotalTrialsMS) != len(e.TSolveTrialsMS) {
+			return fmt.Errorf("%s family %q has invalid trial timings", label, c.ID)
+		}
+	}
+	return nil
+}
+
+func validateTargetSiliconAssignMap(label string, assignCases []AssignCorpusCase, m map[string]TargetSiliconAssignEntry) error {
+	if len(m) != len(assignCases) {
+		return fmt.Errorf("%s has %d LSAP families, want %d", label, len(m), len(assignCases))
+	}
+	for _, ac := range assignCases {
+		e, ok := m[ac.ID]
+		if !ok {
+			return fmt.Errorf("%s missing LSAP family %q", label, ac.ID)
+		}
+		if e.Rows != ac.Rows || e.Cols != ac.Cols {
+			return fmt.Errorf("%s family %q shape (%d,%d) != (%d,%d)", label, ac.ID, e.Rows, e.Cols, ac.Rows, ac.Cols)
+		}
+		if e.TSolveMS <= 0 || e.TTotalMS <= 0 || len(e.TSolveTrialsMS) == 0 || len(e.TTotalTrialsMS) != len(e.TSolveTrialsMS) {
+			return fmt.Errorf("%s family %q has invalid trial timings", label, ac.ID)
+		}
+	}
+	return nil
+}
+
+// ValidateTargetSiliconTelemetry verifies structural invariants, hardware tier detection,
+// quiescence bounds, 6-round kernel AB/BA completeness, and corpus parity across both reports.
+func ValidateTargetSiliconTelemetry(cases []CorpusCase, assignCases []AssignCorpusCase, ts *TargetSiliconBundle) error {
+	if ts == nil {
+		return errors.New("nil target-silicon telemetry bundle")
+	}
+	a := &ts.AMD64
+	if a.SchemaVersion != 1 || a.PlatformID != "linux_amd64_avx512" || a.MachineType != "n4-standard-4" || a.GOARCH != "amd64" {
+		return fmt.Errorf("amd64_avx512 metadata mismatch: schema=%d platform=%q machine=%q arch=%q",
+			a.SchemaVersion, a.PlatformID, a.MachineType, a.GOARCH)
+	}
+	if a.HardwareSIMDTier != "avx512" || a.ActiveSIMDTier != "avx512" {
+		return fmt.Errorf("amd64_avx512 expected hardware/active tier avx512, got %q/%q", a.HardwareSIMDTier, a.ActiveSIMDTier)
+	}
+	if len(a.GitCommit) < 7 || len(a.SourceFingerprint) != 16 || a.CPUModel == "" || a.UnameSRM == "" {
+		return errors.New("amd64_avx512 missing provenance or hardware identity fields")
+	}
+	for _, reqFlag := range []string{"avx512f", "avx512dq", "avx512bw", "avx512vl"} {
+		if !slices.Contains(a.AVX512Flags, reqFlag) {
+			return fmt.Errorf("amd64_avx512 missing required CPU flag %q", reqFlag)
+		}
+	}
+	if a.PreBenchCPUBusyPct >= 5.0 || a.PreBenchCPUBusyPct < 0 {
+		return fmt.Errorf("amd64_avx512 pre_bench_cpu_busy_pct %.2f outside [0, 5.0)", a.PreBenchCPUBusyPct)
+	}
+	if a.TestVerification.TotalFailures != 0 || a.TestVerification.ProfilesVerified < 10 || len(a.TestVerification.Runs) != a.TestVerification.ProfilesVerified {
+		return fmt.Errorf("amd64_avx512 invalid test verification summary: failures=%d profiles=%d",
+			a.TestVerification.TotalFailures, a.TestVerification.ProfilesVerified)
+	}
+	for _, r := range a.TestVerification.Runs {
+		if r.PackagesPassed != 4 || r.ExplicitTestsPassed != 5 {
+			return fmt.Errorf("amd64_avx512 profile %q passed (%d pkgs, %d explicit), want (4, 5)",
+				r.Profile, r.PackagesPassed, r.ExplicitTestsPassed)
+		}
+	}
+	if a.KernelABBA.Rounds != 6 {
+		return fmt.Errorf("amd64_avx512 kernel_abba rounds=%d, want 6", a.KernelABBA.Rounds)
+	}
+	seenKernels := make(map[string]bool, len(canonicalTargetSiliconKernels))
+	for _, ke := range a.KernelABBA.Entries {
+		if len(ke.ScalarRoundsNS) != 6 || len(ke.AVX2RoundsNS) != 6 || len(ke.AVX512RoundsNS) != 6 {
+			return fmt.Errorf("amd64_avx512 kernel %s N=%d does not carry 6 rounds per tier", ke.Kernel, ke.Size)
+		}
+		seenKernels[ke.Kernel] = true
+	}
+	for _, wantK := range canonicalTargetSiliconKernels {
+		if !seenKernels[wantK] {
+			return fmt.Errorf("amd64_avx512 kernel_abba missing kernel %q", wantK)
+		}
+	}
+	if a.MILPCorpus.ParityMismatches != 0 || a.AssignCorpus.ParityMismatches != 0 {
+		return fmt.Errorf("amd64_avx512 parity mismatches: milp=%d assign=%d", a.MILPCorpus.ParityMismatches, a.AssignCorpus.ParityMismatches)
+	}
+	for _, sub := range []struct {
+		lbl string
+		m   map[string]TargetSiliconMILPEntry
+	}{
+		{"amd64.milp.default_scalar", a.MILPCorpus.DefaultScalar},
+		{"amd64.milp.simd_avx2", a.MILPCorpus.SIMDAVX2},
+		{"amd64.milp.simd_avx512", a.MILPCorpus.SIMDAVX512},
+	} {
+		if err := validateTargetSiliconMILPMap(sub.lbl, cases, sub.m); err != nil {
+			return err
+		}
+	}
+	for _, sub := range []struct {
+		lbl string
+		m   map[string]TargetSiliconAssignEntry
+	}{
+		{"amd64.assign.default_scalar", a.AssignCorpus.DefaultScalar},
+		{"amd64.assign.simd_avx2", a.AssignCorpus.SIMDAVX2},
+		{"amd64.assign.simd_avx512", a.AssignCorpus.SIMDAVX512},
+	} {
+		if err := validateTargetSiliconAssignMap(sub.lbl, assignCases, sub.m); err != nil {
+			return err
+		}
+	}
+
+	r := &ts.ARM64
+	if r.SchemaVersion != 1 || r.PlatformID != "linux_arm64" || r.GOARCH != "arm64" {
+		return fmt.Errorf("linux_arm64 metadata mismatch: schema=%d platform=%q arch=%q",
+			r.SchemaVersion, r.PlatformID, r.GOARCH)
+	}
+	if r.MachineType != "c4a-standard-4" && r.MachineType != "t2a-standard-4" {
+		return fmt.Errorf("linux_arm64 unexpected machine_type %q", r.MachineType)
+	}
+	if r.HardwareSIMDTier != "scalar" || r.ActiveSIMDTier != "scalar" {
+		return fmt.Errorf("linux_arm64 expected scalar tier, got %q/%q", r.HardwareSIMDTier, r.ActiveSIMDTier)
+	}
+	if len(r.GitCommit) < 7 || len(r.SourceFingerprint) != 16 || r.CPUModel == "" || r.UnameSRM == "" {
+		return errors.New("linux_arm64 missing provenance or hardware identity fields")
+	}
+	if r.PreBenchCPUBusyPct >= 5.0 || r.PreBenchCPUBusyPct < 0 {
+		return fmt.Errorf("linux_arm64 pre_bench_cpu_busy_pct %.2f outside [0, 5.0)", r.PreBenchCPUBusyPct)
+	}
+	if r.TestVerification.TotalFailures != 0 || r.TestVerification.ProfilesVerified < 1 || len(r.TestVerification.Runs) != r.TestVerification.ProfilesVerified {
+		return fmt.Errorf("linux_arm64 invalid test verification summary: failures=%d profiles=%d",
+			r.TestVerification.TotalFailures, r.TestVerification.ProfilesVerified)
+	}
+	if r.GoExperimentSIMDCompiles && !r.GoExperimentSIMDSuitesPass {
+		return errors.New("linux_arm64 compiled GOEXPERIMENT=simd but did not pass GOEXPERIMENT=simd test suites")
+	}
+	if r.MILPCorpus.ParityMismatches != 0 || r.AssignCorpus.ParityMismatches != 0 {
+		return fmt.Errorf("linux_arm64 parity mismatches: milp=%d assign=%d", r.MILPCorpus.ParityMismatches, r.AssignCorpus.ParityMismatches)
+	}
+	if err := validateTargetSiliconMILPMap("arm64.milp.default", cases, r.MILPCorpus.Default); err != nil {
+		return err
+	}
+	if err := validateTargetSiliconAssignMap("arm64.assign.default", assignCases, r.AssignCorpus.Default); err != nil {
+		return err
+	}
+	return nil
+}
+
+func summarizeTargetSubset[C any](
+	items []C,
+	filter func(C) bool,
+	trialsOf func(C) (sc, v2, v4, ar []float64),
+) (nFams, nTrials int, scSum, v2Sum, v4Sum, armSum, gmScV4, loScV4, hiScV4, gmV2V4, loV2V4, hiV2V4 float64) {
+	var famScV4, famV2V4 []float64
+	for _, item := range items {
+		if !filter(item) {
+			continue
+		}
+		nFams++
+		sc, v2, v4, ar := trialsOf(item)
+		n := min(min(len(sc), len(v2)), min(len(v4), len(ar)))
+		nTrials += n
+		for k := range n {
+			scSum += sc[k]
+			v2Sum += v2[k]
+			v4Sum += v4[k]
+			armSum += ar[k]
+		}
+		if fgm, _, _, _ := pairedRatio(sc[:n], v4[:n]); !math.IsNaN(fgm) {
+			famScV4 = append(famScV4, fgm)
+		}
+		if fgm2, _, _, _ := pairedRatio(v2[:n], v4[:n]); !math.IsNaN(fgm2) {
+			famV2V4 = append(famV2V4, fgm2)
+		}
+	}
+	gmScV4, loScV4, hiScV4 = familyClusteredRatio(famScV4)
+	gmV2V4, loV2V4, hiV2V4 = familyClusteredRatio(famV2V4)
+	return
+}
+
+func formatKernelNS(ns float64) string {
+	if ns < 10.0 {
+		return fmt.Sprintf("%.2f", ns)
+	}
+	if ns < 100.0 {
+		return fmt.Sprintf("%.1f", ns)
+	}
+	return fmt.Sprintf("%.0f", ns)
+}
+
+func renderTargetSiliconSummary(b *bytes.Buffer, cases []CorpusCase, assignCases []AssignCorpusCase, ts *TargetSiliconBundle) error {
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, ts); err != nil {
+		return err
+	}
+	a := &ts.AMD64
+	r := &ts.ARM64
+	shortCommitA := a.GitCommit[:min(7, len(a.GitCommit))]
+	shortCommitR := r.GitCommit[:min(7, len(r.GitCommit))]
+
+	fmt.Fprintf(b,
+		"- **Native `linux/amd64` AVX-512 host (`bench/results/target_silicon/amd64_avx512.json`)**: GCE `%s` (`%s`, `%s`, `%s`, `%d` vCPUs, `%s`, pinned CPU `%s`, pre-benchmark host load `%.2f%%`), `%d` `avx512*` ISA flags (`avx512f`, `avx512dq`, `avx512bw`, `avx512vl`, `avx512_vbmi2`, `avx512_vpopcntdq`), `simd.HardwareSIMDTier() == %q`, `simd.ActiveSIMDTier() == %q`, fingerprint `%s` (commit `%s`), Go `%s` / `%s`. Passed `%d/%d` test configurations (`0` failures across `.`, `./internal/simd`, `./assign`, and `./format` for default `GOAMD64=v1` and `GOEXPERIMENT=simd` `GOAMD64=v1`, `v3`, `v4` across `GOBLIN_SIMD_MAX_TIER={scalar,avx2,avx512}`, including explicit `TestFormalTrack5D_SIMDParityAndEdgeAudit`, `TestFormalTrack5E_LiveSIMDDifferential`, `TestFormalTrack5E_ZeroAllocContracts`, `TestFormalTrack5E_HardwareNaNParity`, and `TestTwoSumTwoProdFMASafety`).\n",
+		a.MachineType, a.OSImageFamily, a.BootDiskType, a.CPUModel, a.VCPUs, a.UnameSRM, a.CPUAffinity, a.PreBenchCPUBusyPct,
+		len(a.AVX512Flags), a.HardwareSIMDTier, a.ActiveSIMDTier, a.SourceFingerprint, shortCommitA, a.DefaultGoVersion, a.SIMDGoVersion,
+		a.TestVerification.ProfilesVerified, a.TestVerification.ProfilesVerified,
+	)
+
+	armSIMDNote := "default scalar build verified"
+	if r.GoExperimentSIMDCompiles && r.GoExperimentSIMDSuitesPass {
+		armSIMDNote = fmt.Sprintf("both default (`%s`) and `GOEXPERIMENT=simd` (`%s`) compile and pass all suites cleanly on `linux/arm64`, dispatching `!amd64` 4-way unrolled scalar kernels (`HardwareSIMDTier() == %q`, `ActiveSIMDTier() == %q`)",
+			r.DefaultGoVersion, r.SIMDGoVersion, r.HardwareSIMDTier, r.ActiveSIMDTier)
+	}
+	fmt.Fprintf(b,
+		"- **Native `linux/arm64` host (`bench/results/target_silicon/linux_arm64.json`)**: GCE `%s` (`%s`, `%s`, `%s`, `%d` vCPUs, `%s`, `GOARM64=%s`, pinned CPU `%s`, pre-benchmark host load `%.2f%%`), fingerprint `%s` (commit `%s`), `%d/%d` test configurations passed (`0` failures across `.`, `./internal/simd`, `./assign`, and `./format`, including hardware FMA non-contraction in `TestTwoSumTwoProdFMASafety` and Track 5D/5E IEEE-754 parity; %s).\n\n",
+		r.MachineType, r.OSImageFamily, r.BootDiskType, r.CPUModel, r.VCPUs, r.UnameSRM, r.GOARM64, r.CPUAffinity, r.PreBenchCPUBusyPct,
+		r.SourceFingerprint, shortCommitR, r.TestVerification.ProfilesVerified, r.TestVerification.ProfilesVerified, armSIMDNote,
+	)
+
+	type kernelKey struct {
+		name string
+		size int
+	}
+	byKey := make(map[kernelKey]TargetSiliconKernelEntry, len(a.KernelABBA.Entries))
+	for _, ke := range a.KernelABBA.Entries {
+		byKey[kernelKey{ke.Kernel, ke.Size}] = ke
+	}
+	selectedKernels := []kernelKey{
+		{"AllAbsLE64", 64}, {"AllAbsLE64", 1024},
+		{"MinNoNaN64", 64}, {"MinNoNaN64", 1024},
+		{"InitReducedRow64", 64}, {"InitReducedRow64", 1024},
+		{"Min2ReducedRow64", 128}, {"Min2ReducedRow64", 1024},
+		{"RelaxRow64", 64}, {"RelaxRow64", 1024},
+		{"Dot64", 256}, {"Dot64", 2048},
+		{"Axpy64", 256}, {"Axpy64", 2048},
+		{"SelectDualLeaveRow64", 256}, {"SelectDualLeaveRow64", 2048},
+		{"ScanDualRatioCand64", 1024}, {"ScanDualRatioCand64", 8192},
+	}
+
+	b.WriteString("#### Emerald Rapids 6-Round Interleaved AB/BA Vector Kernel Crossover (`simd.test`, CPU 1)\n\n")
+	b.WriteString("| Kernel | $N$ | Scalar Med (ns/op) | AVX2 Med (ns/op) | AVX-512 Med (ns/op) | Paired `Scalar / AVX2` [95% CI] | Paired `Scalar / AVX-512` [95% CI] | Paired `AVX2 / AVX-512` [95% CI] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, sk := range selectedKernels {
+		ke, ok := byKey[sk]
+		if !ok {
+			return fmt.Errorf("target-silicon kernel table missing %s N=%d", sk.name, sk.size)
+		}
+		scMed, _, _ := medianMinMax(ke.ScalarRoundsNS)
+		v2Med, _, _ := medianMinMax(ke.AVX2RoundsNS)
+		v4Med, _, _ := medianMinMax(ke.AVX512RoundsNS)
+		gm12, lo12, hi12, _ := pairedRatio(ke.ScalarRoundsNS, ke.AVX2RoundsNS)
+		gm14, lo14, hi14, _ := pairedRatio(ke.ScalarRoundsNS, ke.AVX512RoundsNS)
+		gm24, lo24, hi24, _ := pairedRatio(ke.AVX2RoundsNS, ke.AVX512RoundsNS)
+		fmt.Fprintf(b, "| `%s` | %d | %s | %s | %s | %.2fx [%.2fx-%.2fx] | **%.2fx** [%.2fx-%.2fx] | %.2fx [%.2fx-%.2fx] |\n",
+			sk.name, sk.size,
+			formatKernelNS(scMed), formatKernelNS(v2Med), formatKernelNS(v4Med),
+			gm12, lo12, hi12,
+			gm14, lo14, hi14,
+			gm24, lo24, hi24)
+	}
+
+	b.WriteString("\n#### Target-Silicon End-to-End LP/MILP and LSAP Corpus Summary (`goblin-bench`, CPU 1)\n\n")
+	b.WriteString("| Workload Subset | Families (Trials) | `n4` Scalar Solve Sum (ms) | `n4` AVX2 Solve Sum (ms) | `n4` AVX-512 Solve Sum (ms) | `n4` Equal-Family `Scalar / AVX-512` [95% CI] | `n4` Equal-Family `AVX2 / AVX-512` [95% CI] | `arm64` Default Solve Sum (ms) | Parity |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+
+	milpRows := []subsetSpec[CorpusCase]{
+		{"LP/MILP Tier 2+3 non-planted (solver-dominated)", func(c CorpusCase) bool {
+			return c.Tier != "tier1_canonical" && !isPlantedMAD(c.ID)
+		}},
+		{"LP/MILP All 31 synthetic families", func(_ CorpusCase) bool { return true }},
+	}
+	for _, mr := range milpRows {
+		nF, nT, scS, v2S, v4S, armS, gmSV4, loSV4, hiSV4, gm24, lo24, hi24 := summarizeTargetSubset(
+			cases, mr.filter,
+			func(c CorpusCase) (sc, v2, v4, ar []float64) {
+				return a.MILPCorpus.DefaultScalar[c.ID].TSolveTrialsMS,
+					a.MILPCorpus.SIMDAVX2[c.ID].TSolveTrialsMS,
+					a.MILPCorpus.SIMDAVX512[c.ID].TSolveTrialsMS,
+					r.MILPCorpus.Default[c.ID].TSolveTrialsMS
+			},
+		)
+		fmt.Fprintf(b, "| %s | %d (%d) | %.1f | %.1f | %.1f | **%.2fx** [%.2fx-%.2fx] | %.2fx [%.2fx-%.2fx] | %.1f | `OK` |\n",
+			mr.label, nF, nT, scS, v2S, v4S, gmSV4, loSV4, hiSV4, gm24, lo24, hi24, armS)
+	}
+
+	assignRows := []subsetSpec[AssignCorpusCase]{
+		{"LSAP Tier 1: Micro/Small (`N <= 32`)", func(c AssignCorpusCase) bool { return c.Tier == "tier1_small" }},
+		{"LSAP Tier 2: Medium (`64 <= N <= 256`)", func(c AssignCorpusCase) bool { return c.Tier == "tier2_medium" }},
+		{"LSAP Tier 3: Large (`500 <= N <= 2000`)", func(c AssignCorpusCase) bool { return c.Tier == "tier3_large" }},
+		{"**LSAP All 22 synthetic families**", func(_ AssignCorpusCase) bool { return true }},
+	}
+	for _, ar := range assignRows {
+		nF, nT, scS, v2S, v4S, armS, gmSV4, loSV4, hiSV4, gm24, lo24, hi24 := summarizeTargetSubset(
+			assignCases, ar.filter,
+			func(c AssignCorpusCase) (sc, v2, v4, arm []float64) {
+				return a.AssignCorpus.DefaultScalar[c.ID].TSolveTrialsMS,
+					a.AssignCorpus.SIMDAVX2[c.ID].TSolveTrialsMS,
+					a.AssignCorpus.SIMDAVX512[c.ID].TSolveTrialsMS,
+					r.AssignCorpus.Default[c.ID].TSolveTrialsMS
+			},
+		)
+		fmt.Fprintf(b, "| %s | %d (%d) | %s | %s | %s | **%.2fx** [%.2fx-%.2fx] | %.2fx [%.2fx-%.2fx] | %s | `OK` |\n",
+			ar.label, nF, nT,
+			formatAssignMS(scS), formatAssignMS(v2S), formatAssignMS(v4S),
+			gmSV4, loSV4, hiSV4, gm24, lo24, hi24,
+			formatAssignMS(armS))
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -421,9 +422,14 @@ func TestFormalTrack5E_HardwareNaNParity(t *testing.T) {
 
 	const (
 		qNaNPayloadBits uint64 = 0x7ff8000000000123
-		indefNaNBits    uint64 = 0xfff8000000000000
 		sentinelNaNBits uint64 = 0x7ff8000000000001
 	)
+	// x86-64 SUBSD/VSUBPD emits negative real-indefinite qNaN (0xfff8...) on (+Inf)-(+Inf),
+	// whereas AArch64/RISC-V FSUB emits positive canonical qNaN (0x7ff8...).
+	indefNaNBits := uint64(0xfff8000000000000)
+	if runtime.GOARCH == "arm64" || runtime.GOARCH == "riscv64" {
+		indefNaNBits = 0x7ff8000000000000
+	}
 	posInf := math.Inf(1)
 	qNaNPayload := math.Float64frombits(qNaNPayloadBits)
 

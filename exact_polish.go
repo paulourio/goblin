@@ -593,8 +593,17 @@ func buildExactSolverSnapshot(stop exactStop, s *LPSolver) (*exactSolverSnapshot
 		if math.IsNaN(loF) || math.IsNaN(hiF) || math.IsInf(loF, 1) || math.IsInf(hiF, -1) || loF > hiF {
 			return nil, false
 		}
+		eo := p.exactOrig
+		// Preserve exact non-dyadic rational bounds only when the working bound matches
+		// p's un-tightened bound; dynamically fixed bounds (SetStructuralBounds) and
+		// compile-time rounded integer bounds must match the solver's working float64 value.
+		useOrigFixed := loF == hiF && j < len(p.varLB) && j < len(p.varUB) &&
+			p.varLB[j] == p.varUB[j] && loF == p.varLB[j]
+		allowExact := loF != hiF || useOrigFixed
 		if !math.IsInf(loF, -1) {
-			if eo := p.exactOrig; eo != nil && j < len(eo.varLBRat) && eo.varLBRat[j] != nil && j < len(p.varLB) && loF == p.varLB[j] {
+			if allowExact && eo != nil && j < len(eo.varLBRat) && eo.varLBRat[j] != nil &&
+				j < len(p.varLB) && loF == p.varLB[j] &&
+				(p.varCat[j] == Continuous || eo.varLBRat[j].IsInt()) {
 				snap.lb[j] = new(big.Rat).Set(eo.varLBRat[j])
 			} else {
 				lr, okL := exactRatFromFloat(loF)
@@ -605,7 +614,9 @@ func buildExactSolverSnapshot(stop exactStop, s *LPSolver) (*exactSolverSnapshot
 			}
 		}
 		if !math.IsInf(hiF, 1) {
-			if eo := p.exactOrig; eo != nil && j < len(eo.varUBRat) && eo.varUBRat[j] != nil && j < len(p.varUB) && hiF == p.varUB[j] {
+			if allowExact && eo != nil && j < len(eo.varUBRat) && eo.varUBRat[j] != nil &&
+				j < len(p.varUB) && hiF == p.varUB[j] &&
+				(p.varCat[j] == Continuous || eo.varUBRat[j].IsInt()) {
 				snap.ub[j] = new(big.Rat).Set(eo.varUBRat[j])
 			} else {
 				ur, okU := exactRatFromFloat(hiF)
@@ -614,6 +625,9 @@ func buildExactSolverSnapshot(stop exactStop, s *LPSolver) (*exactSolverSnapshot
 				}
 				snap.ub[j] = ur
 			}
+		}
+		if snap.lb[j] != nil && snap.ub[j] != nil && snap.lb[j].Cmp(snap.ub[j]) > 0 {
+			return nil, false
 		}
 
 		if exactCRows != nil {

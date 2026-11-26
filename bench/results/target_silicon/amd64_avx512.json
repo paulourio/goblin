@@ -1,0 +1,7751 @@
+{
+  "schema_version": 1,
+  "platform_id": "linux_amd64_avx512",
+  "machine_type": "n4-standard-4",
+  "os_image_family": "debian-12",
+  "boot_disk_type": "hyperdisk-balanced",
+  "goos": "linux",
+  "goarch": "amd64",
+  "uname_srm": "Linux 6.1.0-56-cloud-amd64 x86_64",
+  "cpu_model": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.10GHz",
+  "vcpus": 4,
+  "cores_per_socket": 2,
+  "threads_per_core": 2,
+  "lscpu_summary": {
+    "Architecture": "x86_64",
+    "Byte Order": "Little Endian",
+    "CPU family": "6",
+    "CPU op-mode(s)": "32-bit, 64-bit",
+    "CPU(s)": "4",
+    "Core(s) per socket": "2",
+    "L1d cache": "96 KiB (2 instances)",
+    "L1i cache": "64 KiB (2 instances)",
+    "L2 cache": "4 MiB (2 instances)",
+    "L3 cache": "260 MiB (1 instance)",
+    "Model": "207",
+    "Model name": "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.10GHz",
+    "NUMA node(s)": "1",
+    "On-line CPU(s) list": "0-3",
+    "Socket(s)": "1",
+    "Stepping": "2",
+    "Thread(s) per core": "2",
+    "Vendor ID": "GenuineIntel"
+  },
+  "avx512_flags": [
+    "avx512_bf16",
+    "avx512_bitalg",
+    "avx512_fp16",
+    "avx512_vbmi2",
+    "avx512_vnni",
+    "avx512_vpopcntdq",
+    "avx512bw",
+    "avx512cd",
+    "avx512dq",
+    "avx512f",
+    "avx512ifma",
+    "avx512vbmi",
+    "avx512vl"
+  ],
+  "hardware_simd_tier": "avx512",
+  "active_simd_tier": "avx512",
+  "git_commit": "e8e555d75547739838f16e72cb3e16a5c628106f",
+  "source_fingerprint": "379bd473ec8716c8",
+  "default_go_version": "go1.27.3-X:nodwarf5",
+  "simd_go_version": "go1.27.3-X:simd",
+  "cpu_affinity": "1",
+  "pre_test_cpu_busy_pct": 0.0,
+  "pre_bench_cpu_busy_pct": 0.12,
+  "measured_at": "2026-11-26T05:11:18Z",
+  "test_verification": {
+    "profiles_verified": 10,
+    "goamd64_levels": [
+      "v1",
+      "v3",
+      "v4"
+    ],
+    "simd_max_tiers": [
+      "scalar",
+      "avx2",
+      "avx512"
+    ],
+    "packages": [
+      ".",
+      "./internal/simd",
+      "./assign",
+      "./format"
+    ],
+    "explicit_formal_and_fma_tests": [
+      "TestFormalTrack5D_SIMDParityAndEdgeAudit",
+      "TestFormalTrack5E_HardwareNaNParity",
+      "TestFormalTrack5E_LiveSIMDDifferential",
+      "TestFormalTrack5E_ZeroAllocContracts",
+      "TestTwoSumTwoProdFMASafety"
+    ],
+    "total_failures": 0,
+    "runs": [
+      {
+        "profile": "default_v1",
+        "arch_level": "v1",
+        "simd_enabled": false,
+        "simd_max_tier": "auto",
+        "active_simd_tier": "scalar",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 50
+      },
+      {
+        "profile": "simd_v1_scalar",
+        "arch_level": "v1",
+        "simd_enabled": true,
+        "simd_max_tier": "scalar",
+        "active_simd_tier": "scalar",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 50
+      },
+      {
+        "profile": "simd_v1_avx2",
+        "arch_level": "v1",
+        "simd_enabled": true,
+        "simd_max_tier": "avx2",
+        "active_simd_tier": "avx2",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 49
+      },
+      {
+        "profile": "simd_v1_avx512",
+        "arch_level": "v1",
+        "simd_enabled": true,
+        "simd_max_tier": "avx512",
+        "active_simd_tier": "avx512",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 49
+      },
+      {
+        "profile": "simd_v3_scalar",
+        "arch_level": "v3",
+        "simd_enabled": true,
+        "simd_max_tier": "scalar",
+        "active_simd_tier": "scalar",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 57
+      },
+      {
+        "profile": "simd_v3_avx2",
+        "arch_level": "v3",
+        "simd_enabled": true,
+        "simd_max_tier": "avx2",
+        "active_simd_tier": "avx2",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 55
+      },
+      {
+        "profile": "simd_v3_avx512",
+        "arch_level": "v3",
+        "simd_enabled": true,
+        "simd_max_tier": "avx512",
+        "active_simd_tier": "avx512",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 55
+      },
+      {
+        "profile": "simd_v4_scalar",
+        "arch_level": "v4",
+        "simd_enabled": true,
+        "simd_max_tier": "scalar",
+        "active_simd_tier": "scalar",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 56
+      },
+      {
+        "profile": "simd_v4_avx2",
+        "arch_level": "v4",
+        "simd_enabled": true,
+        "simd_max_tier": "avx2",
+        "active_simd_tier": "avx2",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 55
+      },
+      {
+        "profile": "simd_v4_avx512",
+        "arch_level": "v4",
+        "simd_enabled": true,
+        "simd_max_tier": "avx512",
+        "active_simd_tier": "avx512",
+        "packages_passed": 4,
+        "explicit_tests_passed": 5,
+        "elapsed_sec": 56
+      }
+    ]
+  },
+  "kernel_abba": {
+    "rounds": 6,
+    "order_odd": [
+      "scalar",
+      "avx2",
+      "avx512"
+    ],
+    "order_even": [
+      "avx512",
+      "avx2",
+      "scalar"
+    ],
+    "entries": [
+      {
+        "kernel": "AllAbsLE64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          11.92,
+          12.1,
+          11.98,
+          12.06,
+          12.1,
+          12.07
+        ],
+        "avx2_rounds_ns": [
+          12.0,
+          12.07,
+          12.07,
+          12.16,
+          12.18,
+          12.06
+        ],
+        "avx512_rounds_ns": [
+          12.08,
+          11.95,
+          12.13,
+          12.01,
+          12.08,
+          12.09
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          23.21,
+          23.26,
+          23.23,
+          23.21,
+          23.2,
+          23.26
+        ],
+        "avx2_rounds_ns": [
+          9.599,
+          9.474,
+          9.784,
+          9.843,
+          9.677,
+          9.586
+        ],
+        "avx512_rounds_ns": [
+          9.84,
+          9.511,
+          9.688,
+          9.495,
+          9.503,
+          9.751
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          45.43,
+          45.37,
+          45.44,
+          45.34,
+          45.38,
+          45.39
+        ],
+        "avx2_rounds_ns": [
+          11.91,
+          11.86,
+          12.58,
+          12.22,
+          12.07,
+          11.87
+        ],
+        "avx512_rounds_ns": [
+          9.652,
+          9.704,
+          9.679,
+          9.5,
+          9.383,
+          9.401
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          89.91,
+          89.74,
+          92.67,
+          89.86,
+          90.41,
+          89.69
+        ],
+        "avx2_rounds_ns": [
+          18.0,
+          17.74,
+          18.19,
+          18.17,
+          17.91,
+          18.28
+        ],
+        "avx512_rounds_ns": [
+          12.76,
+          12.88,
+          12.9,
+          12.95,
+          12.67,
+          12.92
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          179.1,
+          178.6,
+          179.4,
+          178.5,
+          179.1,
+          178.6
+        ],
+        "avx2_rounds_ns": [
+          35.12,
+          30.82,
+          34.88,
+          35.77,
+          36.11,
+          34.6
+        ],
+        "avx512_rounds_ns": [
+          21.65,
+          21.58,
+          21.92,
+          21.67,
+          21.63,
+          21.82
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          363.7,
+          361.8,
+          362.1,
+          361.6,
+          361.2,
+          361.9
+        ],
+        "avx2_rounds_ns": [
+          54.72,
+          54.81,
+          54.58,
+          54.88,
+          55.25,
+          55.02
+        ],
+        "avx512_rounds_ns": [
+          40.05,
+          39.88,
+          39.93,
+          39.97,
+          39.98,
+          40.16
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          725.1,
+          718.0,
+          719.6,
+          720.2,
+          718.2,
+          716.7
+        ],
+        "avx2_rounds_ns": [
+          103.2,
+          102.6,
+          102.8,
+          102.9,
+          102.9,
+          103.4
+        ],
+        "avx512_rounds_ns": [
+          76.07,
+          76.68,
+          76.42,
+          75.92,
+          76.12,
+          76.11
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          1427.0,
+          1428.0,
+          1429.0,
+          1435.0,
+          1430.0,
+          1428.0
+        ],
+        "avx2_rounds_ns": [
+          214.0,
+          214.9,
+          213.7,
+          214.1,
+          213.8,
+          214.6
+        ],
+        "avx512_rounds_ns": [
+          149.3,
+          147.9,
+          148.0,
+          147.7,
+          148.0,
+          147.9
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          2874.0,
+          2856.0,
+          2862.0,
+          2851.0,
+          2850.0,
+          2853.0
+        ],
+        "avx2_rounds_ns": [
+          414.2,
+          414.1,
+          413.4,
+          415.1,
+          415.1,
+          415.4
+        ],
+        "avx512_rounds_ns": [
+          293.8,
+          292.6,
+          293.3,
+          296.5,
+          293.8,
+          293.3
+        ]
+      },
+      {
+        "kernel": "AllAbsLE64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          5702.0,
+          5702.0,
+          5713.0,
+          5755.0,
+          5710.0,
+          5701.0
+        ],
+        "avx2_rounds_ns": [
+          1022.0,
+          1023.0,
+          1025.0,
+          1028.0,
+          1022.0,
+          1023.0
+        ],
+        "avx512_rounds_ns": [
+          666.0,
+          662.8,
+          666.1,
+          664.5,
+          667.3,
+          663.3
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          10.9,
+          10.62,
+          10.83,
+          10.69,
+          10.5,
+          10.62
+        ],
+        "avx2_rounds_ns": [
+          11.12,
+          11.29,
+          10.94,
+          10.69,
+          10.58,
+          10.62
+        ],
+        "avx512_rounds_ns": [
+          10.9,
+          11.61,
+          10.57,
+          10.78,
+          10.69,
+          11.23
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          15.03,
+          15.16,
+          15.17,
+          14.84,
+          14.88,
+          15.06
+        ],
+        "avx2_rounds_ns": [
+          15.08,
+          15.11,
+          15.44,
+          15.49,
+          15.15,
+          15.15
+        ],
+        "avx512_rounds_ns": [
+          15.2,
+          15.23,
+          15.35,
+          15.29,
+          15.57,
+          15.12
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          27.92,
+          27.77,
+          27.9,
+          27.77,
+          28.52,
+          27.85
+        ],
+        "avx2_rounds_ns": [
+          18.38,
+          18.13,
+          17.92,
+          17.82,
+          18.26,
+          18.14
+        ],
+        "avx512_rounds_ns": [
+          16.44,
+          16.27,
+          16.48,
+          16.38,
+          16.08,
+          16.6
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          53.98,
+          53.94,
+          56.06,
+          53.84,
+          53.91,
+          53.81
+        ],
+        "avx2_rounds_ns": [
+          25.8,
+          26.0,
+          25.87,
+          25.99,
+          25.76,
+          26.17
+        ],
+        "avx512_rounds_ns": [
+          19.85,
+          19.65,
+          19.57,
+          19.94,
+          20.15,
+          20.23
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          106.0,
+          106.5,
+          106.1,
+          106.4,
+          106.7,
+          105.7
+        ],
+        "avx2_rounds_ns": [
+          49.35,
+          49.9,
+          49.19,
+          49.37,
+          49.42,
+          49.26
+        ],
+        "avx512_rounds_ns": [
+          26.83,
+          26.28,
+          26.25,
+          26.38,
+          26.61,
+          26.99
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          209.7,
+          210.4,
+          210.5,
+          209.4,
+          209.2,
+          210.7
+        ],
+        "avx2_rounds_ns": [
+          107.4,
+          95.96,
+          97.59,
+          106.9,
+          98.48,
+          104.8
+        ],
+        "avx512_rounds_ns": [
+          49.43,
+          48.84,
+          49.64,
+          48.61,
+          49.03,
+          49.08
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          418.6,
+          419.0,
+          418.1,
+          419.0,
+          421.1,
+          416.9
+        ],
+        "avx2_rounds_ns": [
+          206.2,
+          206.3,
+          206.2,
+          206.5,
+          207.7,
+          206.3
+        ],
+        "avx512_rounds_ns": [
+          91.7,
+          91.11,
+          94.05,
+          91.43,
+          91.04,
+          92.77
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          843.8,
+          846.8,
+          847.3,
+          844.1,
+          844.3,
+          845.6
+        ],
+        "avx2_rounds_ns": [
+          439.2,
+          439.9,
+          439.3,
+          440.4,
+          439.5,
+          438.8
+        ],
+        "avx512_rounds_ns": [
+          189.2,
+          196.6,
+          189.5,
+          189.4,
+          187.3,
+          189.0
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          1724.0,
+          1702.0,
+          1701.0,
+          1701.0,
+          1700.0,
+          1698.0
+        ],
+        "avx2_rounds_ns": [
+          888.3,
+          886.5,
+          887.2,
+          885.9,
+          886.0,
+          892.2
+        ],
+        "avx512_rounds_ns": [
+          375.8,
+          375.5,
+          382.6,
+          379.4,
+          379.8,
+          375.7
+        ]
+      },
+      {
+        "kernel": "MinNoNaN64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          3378.0,
+          3387.0,
+          3388.0,
+          3423.0,
+          3386.0,
+          3419.0
+        ],
+        "avx2_rounds_ns": [
+          1787.0,
+          1793.0,
+          1799.0,
+          1789.0,
+          1786.0,
+          1787.0
+        ],
+        "avx512_rounds_ns": [
+          823.7,
+          823.1,
+          820.8,
+          820.3,
+          832.5,
+          823.2
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          14.64,
+          14.65,
+          14.66,
+          14.64,
+          15.28,
+          14.67
+        ],
+        "avx2_rounds_ns": [
+          15.48,
+          15.49,
+          15.47,
+          15.49,
+          15.79,
+          15.55
+        ],
+        "avx512_rounds_ns": [
+          15.41,
+          15.39,
+          15.46,
+          15.46,
+          15.44,
+          15.41
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          27.9,
+          27.95,
+          27.95,
+          27.91,
+          27.78,
+          27.93
+        ],
+        "avx2_rounds_ns": [
+          13.95,
+          14.01,
+          13.87,
+          13.98,
+          13.96,
+          13.85
+        ],
+        "avx512_rounds_ns": [
+          13.85,
+          13.98,
+          13.81,
+          13.61,
+          13.61,
+          13.84
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          60.0,
+          58.64,
+          58.69,
+          58.67,
+          58.62,
+          58.67
+        ],
+        "avx2_rounds_ns": [
+          20.67,
+          20.72,
+          20.6,
+          20.68,
+          20.64,
+          20.59
+        ],
+        "avx512_rounds_ns": [
+          17.92,
+          18.1,
+          17.9,
+          18.01,
+          17.98,
+          17.94
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          125.5,
+          124.9,
+          125.9,
+          125.7,
+          125.7,
+          125.0
+        ],
+        "avx2_rounds_ns": [
+          34.0,
+          34.01,
+          33.87,
+          33.81,
+          34.09,
+          33.76
+        ],
+        "avx512_rounds_ns": [
+          26.08,
+          26.04,
+          26.06,
+          26.21,
+          26.27,
+          26.33
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          266.2,
+          265.8,
+          266.0,
+          265.2,
+          265.3,
+          266.3
+        ],
+        "avx2_rounds_ns": [
+          61.81,
+          61.75,
+          61.52,
+          61.86,
+          61.87,
+          61.81
+        ],
+        "avx512_rounds_ns": [
+          41.08,
+          40.91,
+          40.95,
+          40.91,
+          41.03,
+          40.95
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          546.6,
+          545.6,
+          548.4,
+          545.3,
+          544.6,
+          544.8
+        ],
+        "avx2_rounds_ns": [
+          118.2,
+          118.5,
+          118.0,
+          118.2,
+          117.9,
+          117.9
+        ],
+        "avx512_rounds_ns": [
+          71.54,
+          71.73,
+          71.79,
+          71.35,
+          71.96,
+          71.51
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          1111.0,
+          1111.0,
+          1114.0,
+          1111.0,
+          1112.0,
+          1110.0
+        ],
+        "avx2_rounds_ns": [
+          233.0,
+          233.8,
+          233.6,
+          234.3,
+          234.9,
+          233.0
+        ],
+        "avx512_rounds_ns": [
+          130.7,
+          130.3,
+          131.2,
+          130.8,
+          131.0,
+          131.2
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          2233.0,
+          2237.0,
+          2234.0,
+          2240.0,
+          2232.0,
+          2242.0
+        ],
+        "avx2_rounds_ns": [
+          481.0,
+          481.7,
+          484.8,
+          482.2,
+          481.9,
+          481.6
+        ],
+        "avx512_rounds_ns": [
+          251.8,
+          252.8,
+          253.6,
+          253.0,
+          257.2,
+          251.9
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          4492.0,
+          4480.0,
+          4488.0,
+          4509.0,
+          4472.0,
+          4489.0
+        ],
+        "avx2_rounds_ns": [
+          1070.0,
+          1073.0,
+          1068.0,
+          1065.0,
+          1068.0,
+          1068.0
+        ],
+        "avx512_rounds_ns": [
+          1069.0,
+          1064.0,
+          1067.0,
+          1065.0,
+          1075.0,
+          1072.0
+        ]
+      },
+      {
+        "kernel": "InitReducedRow64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          8957.0,
+          9002.0,
+          8996.0,
+          8981.0,
+          8976.0,
+          8967.0
+        ],
+        "avx2_rounds_ns": [
+          2124.0,
+          2119.0,
+          2131.0,
+          2109.0,
+          2116.0,
+          2110.0
+        ],
+        "avx512_rounds_ns": [
+          2113.0,
+          2112.0,
+          2116.0,
+          2129.0,
+          2114.0,
+          2120.0
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          16.44,
+          16.24,
+          16.16,
+          16.33,
+          16.22,
+          16.2
+        ],
+        "avx2_rounds_ns": [
+          16.48,
+          16.37,
+          16.83,
+          16.4,
+          16.8,
+          16.68
+        ],
+        "avx512_rounds_ns": [
+          16.58,
+          17.39,
+          16.54,
+          16.5,
+          16.71,
+          16.83
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          23.14,
+          23.3,
+          22.71,
+          22.7,
+          22.63,
+          22.92
+        ],
+        "avx2_rounds_ns": [
+          23.14,
+          22.99,
+          23.34,
+          23.1,
+          22.99,
+          23.21
+        ],
+        "avx512_rounds_ns": [
+          23.34,
+          23.48,
+          23.19,
+          23.22,
+          23.09,
+          23.46
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          36.88,
+          37.03,
+          37.08,
+          37.67,
+          36.52,
+          36.93
+        ],
+        "avx2_rounds_ns": [
+          37.39,
+          37.06,
+          36.94,
+          36.97,
+          37.16,
+          37.5
+        ],
+        "avx512_rounds_ns": [
+          36.84,
+          37.15,
+          37.11,
+          36.97,
+          37.38,
+          37.39
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          67.39,
+          66.94,
+          67.52,
+          67.45,
+          67.68,
+          67.04
+        ],
+        "avx2_rounds_ns": [
+          68.4,
+          68.8,
+          68.14,
+          67.56,
+          69.15,
+          68.04
+        ],
+        "avx512_rounds_ns": [
+          51.23,
+          50.71,
+          50.67,
+          50.87,
+          50.74,
+          51.28
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          116.5,
+          117.5,
+          116.3,
+          117.0,
+          117.2,
+          116.9
+        ],
+        "avx2_rounds_ns": [
+          72.08,
+          71.3,
+          71.99,
+          71.68,
+          72.07,
+          72.05
+        ],
+        "avx512_rounds_ns": [
+          52.44,
+          52.82,
+          53.64,
+          52.64,
+          52.64,
+          53.37
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          248.8,
+          247.0,
+          249.6,
+          251.0,
+          252.5,
+          247.7
+        ],
+        "avx2_rounds_ns": [
+          155.5,
+          155.6,
+          155.8,
+          156.3,
+          155.9,
+          155.9
+        ],
+        "avx512_rounds_ns": [
+          114.8,
+          115.3,
+          115.1,
+          114.0,
+          115.4,
+          115.1
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          435.2,
+          441.5,
+          434.1,
+          436.5,
+          432.9,
+          434.3
+        ],
+        "avx2_rounds_ns": [
+          179.7,
+          180.0,
+          180.9,
+          181.7,
+          180.5,
+          179.8
+        ],
+        "avx512_rounds_ns": [
+          119.2,
+          119.5,
+          118.1,
+          118.5,
+          118.2,
+          117.7
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          876.4,
+          883.5,
+          882.5,
+          883.5,
+          879.1,
+          880.1
+        ],
+        "avx2_rounds_ns": [
+          330.4,
+          330.8,
+          332.5,
+          331.0,
+          333.4,
+          337.9
+        ],
+        "avx512_rounds_ns": [
+          214.4,
+          214.3,
+          213.8,
+          213.6,
+          215.9,
+          213.8
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          1732.0,
+          1742.0,
+          1738.0,
+          1766.0,
+          1732.0,
+          1728.0
+        ],
+        "avx2_rounds_ns": [
+          765.3,
+          767.6,
+          760.4,
+          762.9,
+          762.1,
+          761.4
+        ],
+        "avx512_rounds_ns": [
+          532.7,
+          529.7,
+          531.7,
+          531.3,
+          532.8,
+          530.9
+        ]
+      },
+      {
+        "kernel": "Min2ReducedRow64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          3543.0,
+          3492.0,
+          3511.0,
+          3498.0,
+          3499.0,
+          3479.0
+        ],
+        "avx2_rounds_ns": [
+          1640.0,
+          1599.0,
+          1598.0,
+          1591.0,
+          1600.0,
+          1592.0
+        ],
+        "avx512_rounds_ns": [
+          1071.0,
+          1071.0,
+          1069.0,
+          1080.0,
+          1074.0,
+          1075.0
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          14.91,
+          14.68,
+          14.85,
+          14.84,
+          14.82,
+          14.92
+        ],
+        "avx2_rounds_ns": [
+          14.32,
+          14.28,
+          14.39,
+          14.39,
+          14.36,
+          14.32
+        ],
+        "avx512_rounds_ns": [
+          14.27,
+          14.32,
+          14.41,
+          14.4,
+          14.31,
+          14.3
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          23.2,
+          23.18,
+          23.19,
+          23.11,
+          23.19,
+          23.27
+        ],
+        "avx2_rounds_ns": [
+          21.31,
+          21.31,
+          21.27,
+          21.32,
+          21.28,
+          21.25
+        ],
+        "avx512_rounds_ns": [
+          21.18,
+          21.23,
+          21.12,
+          21.18,
+          21.16,
+          21.19
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          39.85,
+          39.92,
+          39.8,
+          39.9,
+          40.13,
+          39.85
+        ],
+        "avx2_rounds_ns": [
+          37.09,
+          37.22,
+          37.83,
+          37.18,
+          37.01,
+          37.19
+        ],
+        "avx512_rounds_ns": [
+          17.49,
+          17.4,
+          17.51,
+          17.65,
+          17.53,
+          17.54
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          76.28,
+          73.51,
+          73.4,
+          73.15,
+          73.29,
+          73.63
+        ],
+        "avx2_rounds_ns": [
+          69.92,
+          71.67,
+          69.46,
+          71.05,
+          70.5,
+          70.27
+        ],
+        "avx512_rounds_ns": [
+          29.32,
+          29.2,
+          29.32,
+          29.38,
+          29.33,
+          29.39
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          140.8,
+          140.4,
+          140.3,
+          140.4,
+          146.7,
+          140.9
+        ],
+        "avx2_rounds_ns": [
+          132.6,
+          132.9,
+          132.2,
+          133.1,
+          133.0,
+          132.5
+        ],
+        "avx512_rounds_ns": [
+          52.6,
+          52.59,
+          52.6,
+          52.45,
+          52.61,
+          52.85
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          280.0,
+          280.5,
+          283.1,
+          280.7,
+          280.9,
+          279.8
+        ],
+        "avx2_rounds_ns": [
+          257.8,
+          257.4,
+          257.2,
+          257.3,
+          257.5,
+          258.2
+        ],
+        "avx512_rounds_ns": [
+          96.96,
+          96.87,
+          96.99,
+          96.52,
+          97.52,
+          97.06
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          550.7,
+          557.3,
+          551.8,
+          549.0,
+          549.1,
+          548.9
+        ],
+        "avx2_rounds_ns": [
+          512.6,
+          517.0,
+          514.0,
+          516.4,
+          515.3,
+          514.8
+        ],
+        "avx512_rounds_ns": [
+          189.7,
+          191.5,
+          192.9,
+          189.7,
+          190.3,
+          191.8
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          1088.0,
+          1101.0,
+          1090.0,
+          1085.0,
+          1084.0,
+          1102.0
+        ],
+        "avx2_rounds_ns": [
+          1141.0,
+          1124.0,
+          1147.0,
+          1127.0,
+          1145.0,
+          1129.0
+        ],
+        "avx512_rounds_ns": [
+          391.1,
+          394.0,
+          403.4,
+          395.2,
+          396.1,
+          391.3
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          2190.0,
+          2157.0,
+          2206.0,
+          2189.0,
+          2245.0,
+          2193.0
+        ],
+        "avx2_rounds_ns": [
+          2354.0,
+          2347.0,
+          2350.0,
+          2372.0,
+          2344.0,
+          2341.0
+        ],
+        "avx512_rounds_ns": [
+          945.7,
+          942.1,
+          942.5,
+          949.3,
+          945.8,
+          946.7
+        ]
+      },
+      {
+        "kernel": "RelaxRow64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          4576.0,
+          4564.0,
+          4576.0,
+          4603.0,
+          4614.0,
+          4595.0
+        ],
+        "avx2_rounds_ns": [
+          4600.0,
+          4584.0,
+          4580.0,
+          4549.0,
+          4575.0,
+          4580.0
+        ],
+        "avx512_rounds_ns": [
+          1909.0,
+          1871.0,
+          1892.0,
+          1885.0,
+          1888.0,
+          1882.0
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          7.918,
+          8.037,
+          8.07,
+          7.974,
+          7.978,
+          7.83
+        ],
+        "avx2_rounds_ns": [
+          8.374,
+          8.602,
+          8.261,
+          8.347,
+          8.158,
+          8.264
+        ],
+        "avx512_rounds_ns": [
+          8.269,
+          8.361,
+          8.36,
+          8.197,
+          8.307,
+          8.479
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          11.28,
+          11.29,
+          11.32,
+          11.25,
+          11.35,
+          11.24
+        ],
+        "avx2_rounds_ns": [
+          8.369,
+          8.316,
+          8.447,
+          8.176,
+          8.37,
+          8.287
+        ],
+        "avx512_rounds_ns": [
+          8.417,
+          8.449,
+          8.371,
+          8.399,
+          8.534,
+          8.915
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          20.22,
+          20.16,
+          20.18,
+          20.19,
+          20.25,
+          20.16
+        ],
+        "avx2_rounds_ns": [
+          11.85,
+          11.84,
+          11.84,
+          11.8,
+          11.86,
+          11.82
+        ],
+        "avx512_rounds_ns": [
+          12.18,
+          12.23,
+          12.15,
+          12.17,
+          12.17,
+          12.16
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          37.96,
+          37.9,
+          37.97,
+          37.83,
+          37.85,
+          37.8
+        ],
+        "avx2_rounds_ns": [
+          19.48,
+          19.63,
+          19.48,
+          19.43,
+          19.59,
+          19.51
+        ],
+        "avx512_rounds_ns": [
+          19.98,
+          19.77,
+          19.78,
+          19.84,
+          19.87,
+          19.85
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          74.0,
+          74.16,
+          74.42,
+          74.17,
+          74.31,
+          73.85
+        ],
+        "avx2_rounds_ns": [
+          34.81,
+          35.03,
+          34.73,
+          34.84,
+          34.94,
+          34.82
+        ],
+        "avx512_rounds_ns": [
+          35.16,
+          35.19,
+          35.18,
+          35.15,
+          35.45,
+          35.29
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          148.7,
+          147.4,
+          147.1,
+          147.9,
+          147.3,
+          147.1
+        ],
+        "avx2_rounds_ns": [
+          65.31,
+          66.12,
+          65.53,
+          65.43,
+          65.67,
+          65.52
+        ],
+        "avx512_rounds_ns": [
+          65.66,
+          65.67,
+          66.1,
+          65.6,
+          65.8,
+          66.09
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          293.0,
+          293.0,
+          293.3,
+          293.7,
+          293.8,
+          291.9
+        ],
+        "avx2_rounds_ns": [
+          126.5,
+          126.6,
+          126.5,
+          126.7,
+          126.8,
+          128.5
+        ],
+        "avx512_rounds_ns": [
+          126.7,
+          127.1,
+          127.0,
+          126.7,
+          127.2,
+          127.1
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          581.3,
+          580.9,
+          582.9,
+          590.6,
+          582.0,
+          584.0
+        ],
+        "avx2_rounds_ns": [
+          249.5,
+          249.1,
+          249.7,
+          249.4,
+          249.4,
+          252.6
+        ],
+        "avx512_rounds_ns": [
+          141.2,
+          137.6,
+          138.0,
+          137.8,
+          139.7,
+          138.5
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          1496.0,
+          1479.0,
+          1479.0,
+          1475.0,
+          1477.0,
+          1479.0
+        ],
+        "avx2_rounds_ns": [
+          568.5,
+          567.3,
+          567.8,
+          567.1,
+          567.4,
+          568.9
+        ],
+        "avx512_rounds_ns": [
+          473.4,
+          471.1,
+          472.8,
+          473.1,
+          475.0,
+          472.3
+        ]
+      },
+      {
+        "kernel": "Dot64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          3164.0,
+          3158.0,
+          3165.0,
+          3164.0,
+          3152.0,
+          3138.0
+        ],
+        "avx2_rounds_ns": [
+          1142.0,
+          1136.0,
+          1144.0,
+          1133.0,
+          1133.0,
+          1130.0
+        ],
+        "avx512_rounds_ns": [
+          942.6,
+          943.2,
+          940.7,
+          948.5,
+          942.5,
+          940.3
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          13.37,
+          13.35,
+          13.36,
+          13.34,
+          13.22,
+          13.22
+        ],
+        "avx2_rounds_ns": [
+          12.28,
+          12.77,
+          12.66,
+          12.22,
+          12.36,
+          12.65
+        ],
+        "avx512_rounds_ns": [
+          12.21,
+          12.16,
+          12.12,
+          12.18,
+          12.14,
+          12.91
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          16.07,
+          15.55,
+          15.86,
+          15.93,
+          15.84,
+          15.9
+        ],
+        "avx2_rounds_ns": [
+          11.79,
+          12.6,
+          12.05,
+          11.96,
+          12.12,
+          12.01
+        ],
+        "avx512_rounds_ns": [
+          11.76,
+          12.24,
+          11.74,
+          11.84,
+          12.2,
+          12.82
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          26.05,
+          25.94,
+          26.01,
+          26.02,
+          26.0,
+          25.99
+        ],
+        "avx2_rounds_ns": [
+          14.18,
+          14.72,
+          14.28,
+          14.05,
+          14.35,
+          14.37
+        ],
+        "avx512_rounds_ns": [
+          14.2,
+          14.76,
+          14.69,
+          14.44,
+          14.37,
+          14.73
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          48.39,
+          48.29,
+          48.78,
+          48.44,
+          48.26,
+          48.24
+        ],
+        "avx2_rounds_ns": [
+          22.29,
+          22.33,
+          21.76,
+          21.49,
+          22.41,
+          21.81
+        ],
+        "avx512_rounds_ns": [
+          21.86,
+          22.16,
+          21.97,
+          22.0,
+          21.94,
+          22.02
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          92.38,
+          92.59,
+          92.19,
+          92.03,
+          91.99,
+          91.96
+        ],
+        "avx2_rounds_ns": [
+          44.27,
+          37.11,
+          40.06,
+          37.91,
+          37.72,
+          37.74
+        ],
+        "avx512_rounds_ns": [
+          40.03,
+          38.14,
+          37.2,
+          42.78,
+          39.47,
+          37.4
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          180.4,
+          180.5,
+          179.5,
+          179.3,
+          179.8,
+          180.3
+        ],
+        "avx2_rounds_ns": [
+          71.72,
+          68.78,
+          76.08,
+          77.11,
+          68.53,
+          67.53
+        ],
+        "avx512_rounds_ns": [
+          68.04,
+          68.5,
+          67.54,
+          67.03,
+          69.59,
+          68.73
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          360.9,
+          361.3,
+          361.7,
+          360.8,
+          361.2,
+          360.6
+        ],
+        "avx2_rounds_ns": [
+          129.8,
+          130.8,
+          130.9,
+          127.7,
+          127.2,
+          130.4
+        ],
+        "avx512_rounds_ns": [
+          128.8,
+          129.2,
+          128.1,
+          129.7,
+          130.5,
+          129.3
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          712.4,
+          714.0,
+          715.1,
+          720.8,
+          713.6,
+          714.1
+        ],
+        "avx2_rounds_ns": [
+          259.1,
+          258.8,
+          259.7,
+          262.6,
+          258.5,
+          259.6
+        ],
+        "avx512_rounds_ns": [
+          152.5,
+          152.6,
+          152.0,
+          151.3,
+          153.9,
+          147.9
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          1887.0,
+          1909.0,
+          1886.0,
+          1883.0,
+          1881.0,
+          1888.0
+        ],
+        "avx2_rounds_ns": [
+          784.1,
+          788.0,
+          782.3,
+          785.1,
+          787.9,
+          785.2
+        ],
+        "avx512_rounds_ns": [
+          822.9,
+          811.7,
+          814.3,
+          812.4,
+          821.8,
+          807.9
+        ]
+      },
+      {
+        "kernel": "Axpy64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          4030.0,
+          4059.0,
+          4033.0,
+          4078.0,
+          4035.0,
+          4034.0
+        ],
+        "avx2_rounds_ns": [
+          1752.0,
+          1747.0,
+          1757.0,
+          1743.0,
+          1747.0,
+          1745.0
+        ],
+        "avx512_rounds_ns": [
+          1750.0,
+          1748.0,
+          1754.0,
+          1769.0,
+          1747.0,
+          1772.0
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 16,
+        "scalar_rounds_ns": [
+          39.7,
+          38.91,
+          39.07,
+          39.91,
+          39.23,
+          40.6
+        ],
+        "avx2_rounds_ns": [
+          43.74,
+          42.24,
+          43.48,
+          42.81,
+          43.57,
+          42.77
+        ],
+        "avx512_rounds_ns": [
+          43.39,
+          43.26,
+          44.1,
+          43.2,
+          44.74,
+          43.36
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 32,
+        "scalar_rounds_ns": [
+          72.99,
+          75.47,
+          71.59,
+          75.28,
+          73.35,
+          72.45
+        ],
+        "avx2_rounds_ns": [
+          24.9,
+          25.2,
+          25.11,
+          25.21,
+          24.43,
+          25.14
+        ],
+        "avx512_rounds_ns": [
+          25.03,
+          25.01,
+          25.06,
+          24.32,
+          25.01,
+          25.57
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 64,
+        "scalar_rounds_ns": [
+          143.7,
+          140.4,
+          140.6,
+          140.9,
+          140.8,
+          141.5
+        ],
+        "avx2_rounds_ns": [
+          33.12,
+          35.81,
+          33.14,
+          33.57,
+          33.45,
+          33.15
+        ],
+        "avx512_rounds_ns": [
+          33.52,
+          32.94,
+          32.6,
+          33.54,
+          32.89,
+          33.65
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 128,
+        "scalar_rounds_ns": [
+          296.3,
+          285.5,
+          283.4,
+          279.7,
+          284.9,
+          280.4
+        ],
+        "avx2_rounds_ns": [
+          55.53,
+          55.79,
+          56.11,
+          55.81,
+          56.19,
+          55.58
+        ],
+        "avx512_rounds_ns": [
+          55.77,
+          55.95,
+          55.86,
+          55.65,
+          55.96,
+          55.77
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          551.1,
+          554.4,
+          549.3,
+          546.1,
+          551.4,
+          554.9
+        ],
+        "avx2_rounds_ns": [
+          91.91,
+          91.75,
+          92.1,
+          92.56,
+          92.13,
+          92.1
+        ],
+        "avx512_rounds_ns": [
+          93.14,
+          91.86,
+          91.96,
+          92.27,
+          91.94,
+          92.07
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          1078.0,
+          1101.0,
+          1097.0,
+          1103.0,
+          1086.0,
+          1081.0
+        ],
+        "avx2_rounds_ns": [
+          171.3,
+          170.2,
+          169.8,
+          170.1,
+          170.7,
+          170.3
+        ],
+        "avx512_rounds_ns": [
+          170.2,
+          170.9,
+          170.4,
+          169.8,
+          170.5,
+          170.5
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          2198.0,
+          2136.0,
+          2047.0,
+          2109.0,
+          2189.0,
+          1999.0
+        ],
+        "avx2_rounds_ns": [
+          345.7,
+          347.8,
+          348.6,
+          349.7,
+          348.0,
+          350.9
+        ],
+        "avx512_rounds_ns": [
+          345.6,
+          345.9,
+          348.6,
+          346.4,
+          346.2,
+          347.3
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          4089.0,
+          4168.0,
+          4157.0,
+          4148.0,
+          4022.0,
+          4000.0
+        ],
+        "avx2_rounds_ns": [
+          784.4,
+          786.1,
+          780.2,
+          780.7,
+          780.3,
+          779.1
+        ],
+        "avx512_rounds_ns": [
+          513.2,
+          516.0,
+          513.4,
+          514.8,
+          515.5,
+          515.0
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          8781.0,
+          8575.0,
+          8416.0,
+          8686.0,
+          8650.0,
+          8300.0
+        ],
+        "avx2_rounds_ns": [
+          1614.0,
+          1611.0,
+          1603.0,
+          1618.0,
+          1613.0,
+          1618.0
+        ],
+        "avx512_rounds_ns": [
+          1088.0,
+          1090.0,
+          1092.0,
+          1090.0,
+          1090.0,
+          1088.0
+        ]
+      },
+      {
+        "kernel": "SelectDualLeaveRow64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          17131.0,
+          17327.0,
+          16464.0,
+          17113.0,
+          16889.0,
+          17231.0
+        ],
+        "avx2_rounds_ns": [
+          3121.0,
+          3112.0,
+          3143.0,
+          3104.0,
+          3115.0,
+          3104.0
+        ],
+        "avx512_rounds_ns": [
+          2125.0,
+          2113.0,
+          2119.0,
+          2158.0,
+          2142.0,
+          2123.0
+        ]
+      },
+      {
+        "kernel": "ScanDualRatioCand64",
+        "size": 256,
+        "scalar_rounds_ns": [
+          295.0,
+          292.6,
+          294.2,
+          292.0,
+          292.8,
+          289.3
+        ],
+        "avx2_rounds_ns": [
+          149.3,
+          148.9,
+          149.5,
+          149.6,
+          149.2,
+          149.5
+        ],
+        "avx512_rounds_ns": [
+          149.4,
+          150.3,
+          149.8,
+          149.4,
+          149.5,
+          150.2
+        ]
+      },
+      {
+        "kernel": "ScanDualRatioCand64",
+        "size": 512,
+        "scalar_rounds_ns": [
+          579.4,
+          591.2,
+          591.1,
+          590.7,
+          580.9,
+          588.3
+        ],
+        "avx2_rounds_ns": [
+          294.2,
+          291.5,
+          290.9,
+          290.9,
+          291.9,
+          291.6
+        ],
+        "avx512_rounds_ns": [
+          290.6,
+          292.9,
+          294.1,
+          290.7,
+          292.2,
+          292.2
+        ]
+      },
+      {
+        "kernel": "ScanDualRatioCand64",
+        "size": 1024,
+        "scalar_rounds_ns": [
+          1140.0,
+          1173.0,
+          1179.0,
+          1163.0,
+          1152.0,
+          1149.0
+        ],
+        "avx2_rounds_ns": [
+          587.2,
+          589.6,
+          589.1,
+          591.6,
+          590.7,
+          588.3
+        ],
+        "avx512_rounds_ns": [
+          592.4,
+          588.5,
+          587.9,
+          587.2,
+          590.1,
+          588.6
+        ]
+      },
+      {
+        "kernel": "ScanDualRatioCand64",
+        "size": 2048,
+        "scalar_rounds_ns": [
+          2300.0,
+          2299.0,
+          2257.0,
+          2282.0,
+          2309.0,
+          2277.0
+        ],
+        "avx2_rounds_ns": [
+          1180.0,
+          1181.0,
+          1179.0,
+          1176.0,
+          1174.0,
+          1172.0
+        ],
+        "avx512_rounds_ns": [
+          1193.0,
+          1171.0,
+          1174.0,
+          1170.0,
+          1174.0,
+          1173.0
+        ]
+      },
+      {
+        "kernel": "ScanDualRatioCand64",
+        "size": 4096,
+        "scalar_rounds_ns": [
+          4572.0,
+          4596.0,
+          4510.0,
+          4496.0,
+          4463.0,
+          4525.0
+        ],
+        "avx2_rounds_ns": [
+          2436.0,
+          2439.0,
+          2456.0,
+          2446.0,
+          2442.0,
+          2428.0
+        ],
+        "avx512_rounds_ns": [
+          2438.0,
+          2435.0,
+          2442.0,
+          2456.0,
+          2451.0,
+          2439.0
+        ]
+      },
+      {
+        "kernel": "ScanDualRatioCand64",
+        "size": 8192,
+        "scalar_rounds_ns": [
+          9204.0,
+          8974.0,
+          9242.0,
+          9008.0,
+          9137.0,
+          9104.0
+        ],
+        "avx2_rounds_ns": [
+          5094.0,
+          5063.0,
+          5092.0,
+          5111.0,
+          5102.0,
+          5078.0
+        ],
+        "avx512_rounds_ns": [
+          3935.0,
+          3945.0,
+          3950.0,
+          3952.0,
+          3981.0,
+          3935.0
+        ]
+      }
+    ]
+  },
+  "milp_corpus": {
+    "families": 31,
+    "trials": 293,
+    "parity_mismatches": 0,
+    "default_scalar": {
+      "t1_furniture": {
+        "tier": "tier1_canonical",
+        "num_vars": 2,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 1075,
+        "root_lp_obj": 1075,
+        "t_solve_ms": 0.029166,
+        "t_total_ms": 0.035836,
+        "t_solve_trials_ms": [
+          0.007111,
+          0.04866,
+          0.029166,
+          0.025332,
+          0.158919,
+          0.156389,
+          0.035928,
+          0.027115,
+          0.021429,
+          0.135858,
+          0.022679
+        ],
+        "t_total_trials_ms": [
+          0.012031,
+          0.05368,
+          0.035836,
+          0.031104,
+          0.164916,
+          0.1636,
+          0.042477,
+          0.032612,
+          0.026117,
+          0.141718,
+          0.027973
+        ]
+      },
+      "t1_infeasible_mip": {
+        "tier": "tier1_canonical",
+        "num_vars": 2,
+        "num_constraints": 1,
+        "status": "Infeasible",
+        "objective": 0,
+        "root_lp_obj": 1.5,
+        "t_solve_ms": 0.000467,
+        "t_total_ms": 0.00456,
+        "t_solve_trials_ms": [
+          0.000479,
+          0.000498,
+          0.000467,
+          0.000482,
+          0.000471,
+          0.000477,
+          0.000467,
+          0.00046,
+          0.00046,
+          0.000465,
+          0.000454
+        ],
+        "t_total_trials_ms": [
+          0.004672,
+          0.00576,
+          0.00456,
+          0.004716,
+          0.004258,
+          0.004282,
+          0.00492,
+          0.004874,
+          0.004203,
+          0.003705,
+          0.003892
+        ]
+      },
+      "t1_knapsack_12": {
+        "tier": "tier1_canonical",
+        "num_vars": 12,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 513.2388571428571,
+        "root_lp_obj": 578.6452877655678,
+        "t_solve_ms": 0.183394,
+        "t_total_ms": 0.197773,
+        "t_solve_trials_ms": [
+          0.378893,
+          0.067935,
+          0.215207,
+          0.192113,
+          0.124439,
+          0.291058,
+          0.083559,
+          0.183394,
+          0.153901,
+          0.183824,
+          0.030177
+        ],
+        "t_total_trials_ms": [
+          0.392484,
+          0.083442,
+          0.229177,
+          0.207044,
+          0.139228,
+          0.305465,
+          0.09641,
+          0.197773,
+          0.16685,
+          0.198304,
+          0.044014
+        ]
+      },
+      "t1_mad_g2_i4": {
+        "tier": "tier1_canonical",
+        "num_vars": 26,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 2400,
+        "root_lp_obj": 2400,
+        "t_solve_ms": 0.069098,
+        "t_total_ms": 0.107254,
+        "t_solve_trials_ms": [
+          0.096161,
+          0.079563,
+          0.087046,
+          0.073913,
+          0.069098,
+          0.066302,
+          0.066151,
+          0.066383,
+          0.074521,
+          0.065004,
+          0.062763
+        ],
+        "t_total_trials_ms": [
+          0.150595,
+          0.116894,
+          0.138914,
+          0.112938,
+          0.107254,
+          0.10358,
+          0.102503,
+          0.102309,
+          0.116002,
+          0.104697,
+          0.098263
+        ]
+      },
+      "t1_mad_rand_g2_i4": {
+        "tier": "tier1_canonical",
+        "num_vars": 26,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 4601,
+        "root_lp_obj": 4257,
+        "t_solve_ms": 0.876078,
+        "t_total_ms": 0.93763,
+        "t_solve_trials_ms": [
+          0.833033,
+          1.32715,
+          0.217998,
+          0.220327,
+          1.463135,
+          1.503483,
+          0.853087,
+          1.232508,
+          0.647685,
+          0.911154,
+          0.876078
+        ],
+        "t_total_trials_ms": [
+          0.92013,
+          1.415109,
+          0.278065,
+          0.294219,
+          1.543403,
+          1.59802,
+          0.920337,
+          1.29182,
+          0.71065,
+          0.970441,
+          0.93763
+        ]
+      },
+      "t1_mip_float_obj": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 64.95,
+        "root_lp_obj": 58.9,
+        "t_solve_ms": 0.007619,
+        "t_total_ms": 0.013433,
+        "t_solve_trials_ms": [
+          0.00789,
+          0.007662,
+          0.007286,
+          0.008976,
+          0.007578,
+          0.008204,
+          0.007619,
+          0.009622,
+          0.00685,
+          0.005933,
+          0.006318
+        ],
+        "t_total_trials_ms": [
+          0.014028,
+          0.013388,
+          0.013433,
+          0.015068,
+          0.014809,
+          0.014439,
+          0.013192,
+          0.016103,
+          0.01177,
+          0.012096,
+          0.012501
+        ]
+      },
+      "t1_std_lp": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 54,
+        "root_lp_obj": 54,
+        "t_solve_ms": 0.006857,
+        "t_total_ms": 0.017349,
+        "t_solve_trials_ms": [
+          0.008587,
+          0.010835,
+          0.006085,
+          0.006857,
+          0.004764,
+          0.014238,
+          0.010044,
+          0.005888,
+          0.006491,
+          0.00856,
+          0.005938
+        ],
+        "t_total_trials_ms": [
+          0.017833,
+          0.02501,
+          0.016159,
+          0.017349,
+          0.017764,
+          0.022634,
+          0.019696,
+          0.013516,
+          0.015476,
+          0.016992,
+          0.01517
+        ]
+      },
+      "t1_std_lp_max": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 80,
+        "root_lp_obj": 80,
+        "t_solve_ms": 0.006151,
+        "t_total_ms": 0.01751,
+        "t_solve_trials_ms": [
+          0.005149,
+          0.010127,
+          0.004707,
+          0.006151,
+          0.00409,
+          0.011903,
+          0.00821,
+          0.005485,
+          0.007383,
+          0.007197,
+          0.005729
+        ],
+        "t_total_trials_ms": [
+          0.01751,
+          0.022442,
+          0.016585,
+          0.016078,
+          0.011017,
+          0.021503,
+          0.020062,
+          0.016135,
+          0.026034,
+          0.017695,
+          0.01144
+        ]
+      },
+      "t1_std_mip": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 64,
+        "root_lp_obj": 58,
+        "t_solve_ms": 0.008222,
+        "t_total_ms": 0.015149,
+        "t_solve_trials_ms": [
+          0.007645,
+          0.008709,
+          0.007531,
+          0.009746,
+          0.008379,
+          0.010556,
+          0.008222,
+          0.011204,
+          0.007214,
+          0.006155,
+          0.00742
+        ],
+        "t_total_trials_ms": [
+          0.022599,
+          0.015149,
+          0.013503,
+          0.016164,
+          0.014152,
+          0.016464,
+          0.014953,
+          0.016289,
+          0.012597,
+          0.011142,
+          0.026686
+        ]
+      },
+      "t1_whiskas": {
+        "tier": "tier1_canonical",
+        "num_vars": 6,
+        "num_constraints": 5,
+        "status": "Optimal",
+        "objective": 0.52,
+        "root_lp_obj": 0.52,
+        "t_solve_ms": 0.00988,
+        "t_total_ms": 0.020723,
+        "t_solve_trials_ms": [
+          0.008367,
+          0.014677,
+          0.015292,
+          0.010197,
+          0.011437,
+          0.009477,
+          0.00988,
+          0.011466,
+          0.009138,
+          0.007882,
+          0.007385
+        ],
+        "t_total_trials_ms": [
+          0.018266,
+          0.024837,
+          0.030324,
+          0.019416,
+          0.020723,
+          0.022589,
+          0.024537,
+          0.02187,
+          0.019685,
+          0.017155,
+          0.016919
+        ]
+      },
+      "t2_binpack_44": {
+        "tier": "tier2_p90",
+        "num_vars": 44,
+        "num_constraints": 14,
+        "status": "Optimal",
+        "objective": 30.319,
+        "root_lp_obj": 29.2978,
+        "t_solve_ms": 1.761733,
+        "t_total_ms": 1.798421,
+        "t_solve_trials_ms": [
+          0.973521,
+          1.761733,
+          0.831388,
+          1.259554,
+          1.845546,
+          0.992455,
+          4.228707,
+          3.640029,
+          2.340725,
+          5.250534,
+          1.272116
+        ],
+        "t_total_trials_ms": [
+          1.012855,
+          1.798421,
+          0.874436,
+          1.300876,
+          1.881983,
+          1.033277,
+          4.267064,
+          3.687571,
+          2.386187,
+          5.297829,
+          1.314141
+        ]
+      },
+      "t2_cflp_36": {
+        "tier": "tier2_p90",
+        "num_vars": 36,
+        "num_constraints": 11,
+        "status": "Optimal",
+        "objective": 801.171,
+        "root_lp_obj": 781.966,
+        "t_solve_ms": 0.304688,
+        "t_total_ms": 0.369909,
+        "t_solve_trials_ms": [
+          0.141028,
+          0.259621,
+          0.263385,
+          0.506276,
+          0.647801,
+          0.895327,
+          0.304688,
+          0.446405,
+          0.071035,
+          0.288288,
+          0.789324
+        ],
+        "t_total_trials_ms": [
+          0.174494,
+          0.300938,
+          0.297358,
+          0.652806,
+          0.695781,
+          0.944643,
+          0.369909,
+          0.492336,
+          0.114558,
+          0.326515,
+          0.848714
+        ]
+      },
+      "t2_cflp_49": {
+        "tier": "tier2_p90",
+        "num_vars": 49,
+        "num_constraints": 13,
+        "status": "Optimal",
+        "objective": 909.021,
+        "root_lp_obj": 827.297,
+        "t_solve_ms": 0.613225,
+        "t_total_ms": 0.656066,
+        "t_solve_trials_ms": [
+          0.629608,
+          0.383212,
+          0.535834,
+          0.902694,
+          0.388259,
+          0.685851,
+          0.594926,
+          1.266369,
+          0.572805,
+          0.613225,
+          0.83928
+        ],
+        "t_total_trials_ms": [
+          0.684864,
+          0.468926,
+          0.60253,
+          0.99292,
+          0.474979,
+          0.753668,
+          0.650273,
+          1.357293,
+          0.621527,
+          0.656066,
+          0.882997
+        ]
+      },
+      "t2_gap_45": {
+        "tier": "tier2_p90",
+        "num_vars": 45,
+        "num_constraints": 13,
+        "status": "Optimal",
+        "objective": 195.18,
+        "root_lp_obj": 178.0448,
+        "t_solve_ms": 1.504023,
+        "t_total_ms": 1.555501,
+        "t_solve_trials_ms": [
+          0.462934,
+          0.756758,
+          2.14333,
+          2.977487,
+          0.296807,
+          0.748721,
+          8.26069,
+          1.504023,
+          12.668128,
+          0.747467,
+          1.912095
+        ],
+        "t_total_trials_ms": [
+          0.50014,
+          0.798373,
+          2.231194,
+          3.017957,
+          0.339777,
+          0.828373,
+          8.30625,
+          1.555501,
+          12.711133,
+          0.790507,
+          1.951315
+        ]
+      },
+      "t2_lotsizing_48": {
+        "tier": "tier2_p90",
+        "num_vars": 48,
+        "num_constraints": 32,
+        "status": "Optimal",
+        "objective": 2245.808,
+        "root_lp_obj": 2052.33736,
+        "t_solve_ms": 6.204759,
+        "t_total_ms": 6.264287,
+        "t_solve_trials_ms": [
+          4.740085,
+          6.204759,
+          4.219928,
+          12.905702,
+          9.796128,
+          29.759321,
+          4.44028,
+          8.576755,
+          3.492992,
+          16.840053,
+          4.019306
+        ],
+        "t_total_trials_ms": [
+          4.79452,
+          6.264287,
+          4.27828,
+          12.960997,
+          9.920898,
+          29.814945,
+          4.491497,
+          8.627721,
+          3.546234,
+          16.890082,
+          4.079067
+        ]
+      },
+      "t2_mad_g2_i8": {
+        "tier": "tier2_p90",
+        "num_vars": 34,
+        "num_constraints": 38,
+        "status": "Optimal",
+        "objective": 2400,
+        "root_lp_obj": 2400,
+        "t_solve_ms": 0.232693,
+        "t_total_ms": 0.298874,
+        "t_solve_trials_ms": [
+          0.236348,
+          0.252385,
+          0.232675,
+          0.239039,
+          0.238577,
+          0.232693,
+          0.222109,
+          0.229938,
+          0.224775,
+          0.23321,
+          0.223864
+        ],
+        "t_total_trials_ms": [
+          0.298874,
+          0.351102,
+          0.316979,
+          0.306216,
+          0.304847,
+          0.308298,
+          0.28902,
+          0.291356,
+          0.286264,
+          0.294905,
+          0.28287
+        ]
+      },
+      "t2_mad_g3_i9": {
+        "tier": "tier2_p90",
+        "num_vars": 54,
+        "num_constraints": 54,
+        "status": "Optimal",
+        "objective": 4800,
+        "root_lp_obj": 4800,
+        "t_solve_ms": 0.265524,
+        "t_total_ms": 0.472276,
+        "t_solve_trials_ms": [
+          0.411976,
+          0.312216,
+          0.265524,
+          0.248277,
+          0.265653,
+          0.262297,
+          0.240241,
+          0.375241,
+          0.331287,
+          0.236061,
+          0.21268
+        ],
+        "t_total_trials_ms": [
+          0.607181,
+          0.502785,
+          0.43462,
+          0.451107,
+          0.472276,
+          0.481587,
+          0.475541,
+          0.588512,
+          0.42142,
+          0.335087,
+          0.318192
+        ]
+      },
+      "t2_mad_g4_i12": {
+        "tier": "tier2_p90",
+        "num_vars": 84,
+        "num_constraints": 72,
+        "status": "Optimal",
+        "objective": 8000,
+        "root_lp_obj": 7999.999999999997,
+        "t_solve_ms": 0.515045,
+        "t_total_ms": 0.651879,
+        "t_solve_trials_ms": [
+          0.485758,
+          0.515045,
+          0.506151,
+          0.528805,
+          0.610193,
+          0.508792,
+          0.510913,
+          0.523419,
+          0.530152,
+          0.528209,
+          0.501275
+        ],
+        "t_total_trials_ms": [
+          0.614343,
+          0.650154,
+          0.666987,
+          0.678742,
+          0.748011,
+          0.646776,
+          0.638344,
+          0.651879,
+          0.659842,
+          0.657087,
+          0.628111
+        ]
+      },
+      "t2_mad_rand_g2_i8": {
+        "tier": "tier2_p90",
+        "num_vars": 34,
+        "num_constraints": 38,
+        "status": "Optimal",
+        "objective": 5975,
+        "root_lp_obj": 5894,
+        "t_solve_ms": 5.457995,
+        "t_total_ms": 5.597575,
+        "t_solve_trials_ms": [
+          8.795892,
+          5.457995,
+          0.927418,
+          4.631877,
+          5.392698,
+          19.038102,
+          7.961925,
+          3.418722,
+          6.84922,
+          3.143798,
+          16.644565
+        ],
+        "t_total_trials_ms": [
+          8.868391,
+          5.597575,
+          1.001215,
+          4.697676,
+          5.495828,
+          19.109071,
+          8.057158,
+          3.486049,
+          6.924341,
+          3.210104,
+          16.726495
+        ]
+      },
+      "t2_mad_rand_g3_i9": {
+        "tier": "tier2_p90",
+        "num_vars": 54,
+        "num_constraints": 54,
+        "status": "Optimal",
+        "objective": 7720,
+        "root_lp_obj": 6060,
+        "t_solve_ms": 29.538368,
+        "t_total_ms": 29.696006,
+        "t_solve_trials_ms": [
+          36.617661,
+          157.180036,
+          46.324705,
+          15.118748,
+          22.250356,
+          64.325439,
+          29.538368,
+          47.830696,
+          2.630413,
+          10.866557,
+          21.715249
+        ],
+        "t_total_trials_ms": [
+          36.726495,
+          157.276698,
+          46.441554,
+          15.222398,
+          22.358272,
+          64.433601,
+          29.696006,
+          47.947693,
+          2.75618,
+          10.978265,
+          21.830734
+        ]
+      },
+      "t2_mkp_30": {
+        "tier": "tier2_p90",
+        "num_vars": 30,
+        "num_constraints": 6,
+        "status": "Optimal",
+        "objective": 1917.2355454545454,
+        "root_lp_obj": 1966.9239391458352,
+        "t_solve_ms": 4.152281,
+        "t_total_ms": 4.183465,
+        "t_solve_trials_ms": [
+          1.577819,
+          8.860837,
+          4.513364,
+          1.609255,
+          4.152281,
+          3.494583,
+          1.925479,
+          1.695618,
+          12.602557,
+          13.802918,
+          5.177736
+        ],
+        "t_total_trials_ms": [
+          1.613956,
+          8.898526,
+          4.549322,
+          1.644784,
+          4.183465,
+          3.52834,
+          1.970874,
+          1.728728,
+          12.633732,
+          13.838443,
+          5.214116
+        ]
+      },
+      "t2_mkp_50": {
+        "tier": "tier2_p90",
+        "num_vars": 50,
+        "num_constraints": 8,
+        "status": "Optimal",
+        "objective": 2620.00522065986,
+        "root_lp_obj": 2648.3687203038785,
+        "t_solve_ms": 8.79401,
+        "t_total_ms": 8.853946,
+        "t_solve_trials_ms": [
+          0.627911,
+          13.380606,
+          11.375324,
+          5.020722,
+          2.713115,
+          7.069941,
+          5.0164,
+          9.402808,
+          8.79401,
+          42.739752,
+          31.751141
+        ],
+        "t_total_trials_ms": [
+          0.685999,
+          13.429292,
+          11.43989,
+          5.080103,
+          2.869408,
+          7.161091,
+          5.129783,
+          9.473658,
+          8.853946,
+          42.794135,
+          31.812866
+        ]
+      },
+      "t2_setcover_50": {
+        "tier": "tier2_p90",
+        "num_vars": 50,
+        "num_constraints": 20,
+        "status": "Optimal",
+        "objective": 58.096,
+        "root_lp_obj": 56.8425,
+        "t_solve_ms": 0.316864,
+        "t_total_ms": 0.384923,
+        "t_solve_trials_ms": [
+          0.686394,
+          1.527966,
+          0.316864,
+          5.910932,
+          0.079626,
+          0.254265,
+          0.066733,
+          0.318413,
+          0.188229,
+          0.064886,
+          0.415578
+        ],
+        "t_total_trials_ms": [
+          0.865682,
+          1.633722,
+          0.438717,
+          6.014647,
+          0.151433,
+          0.313934,
+          0.130803,
+          0.384923,
+          0.250452,
+          0.121633,
+          0.471564
+        ]
+      },
+      "t3_cflp_300": {
+        "tier": "tier3_large",
+        "num_vars": 300,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 2187.298,
+        "root_lp_obj": 2081.527896551724,
+        "t_solve_ms": 10.852638,
+        "t_total_ms": 11.036196,
+        "t_solve_trials_ms": [
+          7.881271,
+          10.852638,
+          15.745978,
+          32.54128,
+          6.471838
+        ],
+        "t_total_trials_ms": [
+          8.401377,
+          11.036196,
+          15.927464,
+          32.72893,
+          6.65343
+        ]
+      },
+      "t3_lotsizing_504": {
+        "tier": "tier3_large",
+        "num_vars": 504,
+        "num_constraints": 336,
+        "status": "Optimal",
+        "objective": 13120.441,
+        "root_lp_obj": 10518.9912,
+        "t_solve_ms": 140.405928,
+        "t_total_ms": 141.139443,
+        "t_solve_trials_ms": [
+          33.414741,
+          45.832308,
+          140.405928,
+          184.362016,
+          209.512734
+        ],
+        "t_total_trials_ms": [
+          33.801668,
+          46.244638,
+          141.139443,
+          184.873057,
+          209.899499
+        ]
+      },
+      "t3_mad_g10_i100": {
+        "tier": "tier3_large",
+        "num_vars": 1090,
+        "num_constraints": 250,
+        "status": "Optimal",
+        "objective": 88000,
+        "root_lp_obj": 88000,
+        "t_solve_ms": 13.701168,
+        "t_total_ms": 16.334415,
+        "t_solve_trials_ms": [
+          14.591979,
+          96.033705,
+          10.198193,
+          5.942786,
+          13.701168
+        ],
+        "t_total_trials_ms": [
+          16.334415,
+          97.696867,
+          11.879769,
+          8.221319,
+          16.872839
+        ]
+      },
+      "t3_mad_g4_i1000": {
+        "tier": "tier3_large",
+        "num_vars": 4036,
+        "num_constraints": 1060,
+        "status": "Optimal",
+        "objective": 208000,
+        "root_lp_obj": 208000,
+        "t_solve_ms": 51.535124,
+        "t_total_ms": 61.50994,
+        "t_solve_trials_ms": [
+          51.535124,
+          113.271831,
+          62.267852,
+          49.575937,
+          48.765912
+        ],
+        "t_total_trials_ms": [
+          58.538446,
+          120.144971,
+          69.633034,
+          61.50994,
+          55.735919
+        ]
+      },
+      "t3_mad_g5_i20": {
+        "tier": "tier3_large",
+        "num_vars": 145,
+        "num_constraints": 95,
+        "status": "Optimal",
+        "objective": 12000,
+        "root_lp_obj": 12000,
+        "t_solve_ms": 0.767003,
+        "t_total_ms": 1.024278,
+        "t_solve_trials_ms": [
+          0.760725,
+          0.798854,
+          0.767003,
+          0.796749,
+          0.742921
+        ],
+        "t_total_trials_ms": [
+          1.024278,
+          1.034149,
+          1.009865,
+          1.032223,
+          0.975995
+        ]
+      },
+      "t3_mad_g6_i30": {
+        "tier": "tier3_large",
+        "num_vars": 234,
+        "num_constraints": 120,
+        "status": "Optimal",
+        "objective": 16800,
+        "root_lp_obj": 16800,
+        "t_solve_ms": 1.42158,
+        "t_total_ms": 1.858207,
+        "t_solve_trials_ms": [
+          1.563514,
+          1.037437,
+          2.579332,
+          1.057156,
+          1.42158
+        ],
+        "t_total_trials_ms": [
+          2.00779,
+          1.396838,
+          2.943049,
+          1.475884,
+          1.858207
+        ]
+      },
+      "t3_mkp_200": {
+        "tier": "tier3_large",
+        "num_vars": 200,
+        "num_constraints": 8,
+        "status": "Optimal",
+        "objective": 12906.801443001443,
+        "root_lp_obj": 12955.460004661,
+        "t_solve_ms": 40.230941,
+        "t_total_ms": 40.366459,
+        "t_solve_trials_ms": [
+          65.56289,
+          35.732887,
+          40.230941,
+          58.994236,
+          6.77365
+        ],
+        "t_total_trials_ms": [
+          65.738107,
+          35.895009,
+          40.366459,
+          59.349273,
+          6.934611
+        ]
+      },
+      "t3_sched_1000": {
+        "tier": "tier3_large",
+        "num_vars": 1000,
+        "num_constraints": 100,
+        "status": "Optimal",
+        "objective": 46818.28354678308,
+        "root_lp_obj": 46971.0946011988,
+        "t_solve_ms": 13.26829,
+        "t_total_ms": 13.871628,
+        "t_solve_trials_ms": [
+          33.739523,
+          20.763556,
+          13.26829,
+          8.326008,
+          12.520837
+        ],
+        "t_total_trials_ms": [
+          34.259918,
+          21.30047,
+          13.871628,
+          8.867748,
+          13.048639
+        ]
+      }
+    },
+    "simd_avx2": {
+      "t1_furniture": {
+        "tier": "tier1_canonical",
+        "num_vars": 2,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 1075,
+        "root_lp_obj": 1075,
+        "t_solve_ms": 0.030983,
+        "t_total_ms": 0.04234,
+        "t_solve_trials_ms": [
+          0.009595,
+          0.055517,
+          0.030967,
+          0.030983,
+          0.164793,
+          0.175912,
+          0.03426,
+          0.026047,
+          0.023731,
+          0.152414,
+          0.026932
+        ],
+        "t_total_trials_ms": [
+          0.022317,
+          0.070618,
+          0.041783,
+          0.04234,
+          0.173724,
+          0.186472,
+          0.046571,
+          0.03938,
+          0.031625,
+          0.163721,
+          0.03949
+        ]
+      },
+      "t1_infeasible_mip": {
+        "tier": "tier1_canonical",
+        "num_vars": 2,
+        "num_constraints": 1,
+        "status": "Infeasible",
+        "objective": 0,
+        "root_lp_obj": 1.5,
+        "t_solve_ms": 0.000509,
+        "t_total_ms": 0.005368,
+        "t_solve_trials_ms": [
+          0.000755,
+          0.000624,
+          0.000596,
+          0.000631,
+          0.000493,
+          0.000524,
+          0.000493,
+          0.000504,
+          0.000509,
+          0.000494,
+          0.0005
+        ],
+        "t_total_trials_ms": [
+          0.005999,
+          0.005368,
+          0.006186,
+          0.010002,
+          0.005985,
+          0.004957,
+          0.004989,
+          0.005525,
+          0.004659,
+          0.004379,
+          0.004626
+        ]
+      },
+      "t1_knapsack_12": {
+        "tier": "tier1_canonical",
+        "num_vars": 12,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 513.2388571428571,
+        "root_lp_obj": 578.6452877655678,
+        "t_solve_ms": 0.234784,
+        "t_total_ms": 0.267485,
+        "t_solve_trials_ms": [
+          0.451645,
+          0.099246,
+          0.261323,
+          0.237862,
+          0.153394,
+          0.365622,
+          0.101691,
+          0.234784,
+          1.307593,
+          0.19827,
+          0.035215
+        ],
+        "t_total_trials_ms": [
+          0.486524,
+          0.124747,
+          0.285949,
+          0.267485,
+          0.186319,
+          0.391818,
+          0.124677,
+          0.286824,
+          1.335283,
+          0.225828,
+          0.062542
+        ]
+      },
+      "t1_mad_g2_i4": {
+        "tier": "tier1_canonical",
+        "num_vars": 26,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 2400,
+        "root_lp_obj": 2400,
+        "t_solve_ms": 0.07043,
+        "t_total_ms": 0.111429,
+        "t_solve_trials_ms": [
+          0.09097,
+          0.075043,
+          0.072585,
+          0.067064,
+          0.067621,
+          0.07043,
+          0.072482,
+          0.064451,
+          0.078479,
+          0.066033,
+          0.066978
+        ],
+        "t_total_trials_ms": [
+          0.151302,
+          0.140258,
+          0.113539,
+          0.107474,
+          0.111429,
+          0.10966,
+          0.122131,
+          0.104491,
+          0.12181,
+          0.106035,
+          0.105668
+        ]
+      },
+      "t1_mad_rand_g2_i4": {
+        "tier": "tier1_canonical",
+        "num_vars": 26,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 4601,
+        "root_lp_obj": 4257,
+        "t_solve_ms": 0.826558,
+        "t_total_ms": 0.884171,
+        "t_solve_trials_ms": [
+          0.746648,
+          1.271423,
+          0.201528,
+          0.209337,
+          1.36015,
+          1.510485,
+          0.77124,
+          1.096615,
+          0.542836,
+          0.837501,
+          0.826558
+        ],
+        "t_total_trials_ms": [
+          0.797923,
+          1.317902,
+          0.254394,
+          0.254305,
+          1.40801,
+          1.569159,
+          0.842992,
+          1.148169,
+          0.594786,
+          0.886575,
+          0.884171
+        ]
+      },
+      "t1_mip_float_obj": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 64.95,
+        "root_lp_obj": 58.9,
+        "t_solve_ms": 0.009506,
+        "t_total_ms": 0.018099,
+        "t_solve_trials_ms": [
+          0.007827,
+          0.010726,
+          0.01414,
+          0.009945,
+          0.007408,
+          0.017545,
+          0.009506,
+          0.011558,
+          0.007687,
+          0.005949,
+          0.008227
+        ],
+        "t_total_trials_ms": [
+          0.021552,
+          0.020892,
+          0.026899,
+          0.018099,
+          0.017615,
+          0.028075,
+          0.016829,
+          0.023958,
+          0.016125,
+          0.015981,
+          0.016684
+        ]
+      },
+      "t1_std_lp": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 54,
+        "root_lp_obj": 54,
+        "t_solve_ms": 0.006362,
+        "t_total_ms": 0.012847,
+        "t_solve_trials_ms": [
+          0.005246,
+          0.007771,
+          0.006362,
+          0.005572,
+          0.004843,
+          0.013731,
+          0.007197,
+          0.006461,
+          0.006058,
+          0.007425,
+          0.005715
+        ],
+        "t_total_trials_ms": [
+          0.013146,
+          0.019022,
+          0.012692,
+          0.011956,
+          0.011458,
+          0.019374,
+          0.014323,
+          0.012385,
+          0.012847,
+          0.013053,
+          0.01245
+        ]
+      },
+      "t1_std_lp_max": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 80,
+        "root_lp_obj": 80,
+        "t_solve_ms": 0.005365,
+        "t_total_ms": 0.012833,
+        "t_solve_trials_ms": [
+          0.003818,
+          0.006828,
+          0.004925,
+          0.005135,
+          0.004252,
+          0.011432,
+          0.006702,
+          0.005268,
+          0.005969,
+          0.005631,
+          0.005365
+        ],
+        "t_total_trials_ms": [
+          0.009253,
+          0.01585,
+          0.012515,
+          0.010891,
+          0.010738,
+          0.019928,
+          0.017153,
+          0.013649,
+          0.018353,
+          0.012833,
+          0.011623
+        ]
+      },
+      "t1_std_mip": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 64,
+        "root_lp_obj": 58,
+        "t_solve_ms": 0.008755,
+        "t_total_ms": 0.015354,
+        "t_solve_trials_ms": [
+          0.013246,
+          0.009118,
+          0.00757,
+          0.012048,
+          0.008755,
+          0.008762,
+          0.008168,
+          0.011536,
+          0.007071,
+          0.006186,
+          0.006127
+        ],
+        "t_total_trials_ms": [
+          0.023557,
+          0.0157,
+          0.013317,
+          0.018245,
+          0.014703,
+          0.015354,
+          0.015131,
+          0.017191,
+          0.012728,
+          0.012205,
+          0.016838
+        ]
+      },
+      "t1_whiskas": {
+        "tier": "tier1_canonical",
+        "num_vars": 6,
+        "num_constraints": 5,
+        "status": "Optimal",
+        "objective": 0.52,
+        "root_lp_obj": 0.52,
+        "t_solve_ms": 0.010867,
+        "t_total_ms": 0.024165,
+        "t_solve_trials_ms": [
+          0.008978,
+          0.018355,
+          0.014217,
+          0.011106,
+          0.010867,
+          0.00995,
+          0.009685,
+          0.011103,
+          0.018458,
+          0.007443,
+          0.008339
+        ],
+        "t_total_trials_ms": [
+          0.023389,
+          0.035189,
+          0.035704,
+          0.024009,
+          0.022546,
+          0.026163,
+          0.035664,
+          0.024165,
+          0.032161,
+          0.023691,
+          0.021335
+        ]
+      },
+      "t2_binpack_44": {
+        "tier": "tier2_p90",
+        "num_vars": 44,
+        "num_constraints": 14,
+        "status": "Optimal",
+        "objective": 30.319,
+        "root_lp_obj": 29.2978,
+        "t_solve_ms": 1.785073,
+        "t_total_ms": 1.83298,
+        "t_solve_trials_ms": [
+          2.445455,
+          1.78156,
+          0.88188,
+          1.254006,
+          1.785073,
+          1.066396,
+          4.129137,
+          3.544598,
+          2.278715,
+          5.214165,
+          1.315932
+        ],
+        "t_total_trials_ms": [
+          2.52844,
+          1.827647,
+          0.922331,
+          1.29974,
+          1.83298,
+          1.109425,
+          4.172086,
+          3.590257,
+          2.323157,
+          5.254743,
+          1.359138
+        ]
+      },
+      "t2_cflp_36": {
+        "tier": "tier2_p90",
+        "num_vars": 36,
+        "num_constraints": 11,
+        "status": "Optimal",
+        "objective": 801.171,
+        "root_lp_obj": 781.966,
+        "t_solve_ms": 0.294837,
+        "t_total_ms": 0.331195,
+        "t_solve_trials_ms": [
+          0.152432,
+          0.259274,
+          0.286097,
+          0.387558,
+          0.487764,
+          0.807496,
+          0.294837,
+          0.394567,
+          0.059144,
+          0.252616,
+          0.72239
+        ],
+        "t_total_trials_ms": [
+          0.18507,
+          0.29316,
+          0.323309,
+          0.434394,
+          0.523994,
+          0.852197,
+          0.331195,
+          0.438422,
+          0.095952,
+          0.291057,
+          0.757988
+        ]
+      },
+      "t2_cflp_49": {
+        "tier": "tier2_p90",
+        "num_vars": 49,
+        "num_constraints": 13,
+        "status": "Optimal",
+        "objective": 909.021,
+        "root_lp_obj": 827.297,
+        "t_solve_ms": 0.558174,
+        "t_total_ms": 0.601917,
+        "t_solve_trials_ms": [
+          0.554761,
+          0.317017,
+          0.456807,
+          0.899268,
+          0.326111,
+          0.574047,
+          0.471498,
+          0.78248,
+          0.558174,
+          0.627643,
+          0.805891
+        ],
+        "t_total_trials_ms": [
+          0.601387,
+          0.364765,
+          0.501682,
+          0.945091,
+          0.375432,
+          0.619045,
+          0.515262,
+          0.825115,
+          0.601917,
+          0.670842,
+          0.852805
+        ]
+      },
+      "t2_gap_45": {
+        "tier": "tier2_p90",
+        "num_vars": 45,
+        "num_constraints": 13,
+        "status": "Optimal",
+        "objective": 195.18,
+        "root_lp_obj": 178.0448,
+        "t_solve_ms": 1.525562,
+        "t_total_ms": 1.580599,
+        "t_solve_trials_ms": [
+          0.780255,
+          1.02448,
+          2.88782,
+          3.126231,
+          0.303335,
+          0.755495,
+          8.331596,
+          1.525562,
+          12.599502,
+          0.742738,
+          1.986063
+        ],
+        "t_total_trials_ms": [
+          0.877039,
+          1.16174,
+          3.015823,
+          3.172671,
+          0.356277,
+          0.793885,
+          8.376675,
+          1.580599,
+          12.651038,
+          0.7969,
+          2.030179
+        ]
+      },
+      "t2_lotsizing_48": {
+        "tier": "tier2_p90",
+        "num_vars": 48,
+        "num_constraints": 32,
+        "status": "Optimal",
+        "objective": 2245.808,
+        "root_lp_obj": 2052.33736,
+        "t_solve_ms": 6.243995,
+        "t_total_ms": 6.298426,
+        "t_solve_trials_ms": [
+          4.69653,
+          6.243995,
+          4.232239,
+          11.896665,
+          8.431769,
+          31.445063,
+          4.434617,
+          8.457925,
+          3.455253,
+          16.60228,
+          3.999262
+        ],
+        "t_total_trials_ms": [
+          4.749387,
+          6.298426,
+          4.288479,
+          11.953029,
+          8.487261,
+          31.572809,
+          4.496226,
+          8.508375,
+          3.506443,
+          16.6515,
+          4.05357
+        ]
+      },
+      "t2_mad_g2_i8": {
+        "tier": "tier2_p90",
+        "num_vars": 34,
+        "num_constraints": 38,
+        "status": "Optimal",
+        "objective": 2400,
+        "root_lp_obj": 2400,
+        "t_solve_ms": 0.234075,
+        "t_total_ms": 0.299399,
+        "t_solve_trials_ms": [
+          0.234075,
+          0.220124,
+          0.208043,
+          0.237271,
+          0.241243,
+          0.246327,
+          0.246491,
+          0.25443,
+          0.223809,
+          0.224689,
+          0.231776
+        ],
+        "t_total_trials_ms": [
+          0.295698,
+          0.284569,
+          0.266228,
+          0.29865,
+          0.300699,
+          0.327855,
+          0.331916,
+          0.33317,
+          0.299399,
+          0.300363,
+          0.295604
+        ]
+      },
+      "t2_mad_g3_i9": {
+        "tier": "tier2_p90",
+        "num_vars": 54,
+        "num_constraints": 54,
+        "status": "Optimal",
+        "objective": 4800,
+        "root_lp_obj": 4800,
+        "t_solve_ms": 0.276631,
+        "t_total_ms": 0.496081,
+        "t_solve_trials_ms": [
+          0.442836,
+          0.276631,
+          0.298554,
+          0.336196,
+          0.258808,
+          0.249922,
+          0.224786,
+          0.790866,
+          0.365393,
+          0.228678,
+          0.247238
+        ],
+        "t_total_trials_ms": [
+          0.633039,
+          0.496081,
+          0.514891,
+          0.548444,
+          0.502656,
+          0.488678,
+          0.439017,
+          0.966973,
+          0.475147,
+          0.323071,
+          0.350664
+        ]
+      },
+      "t2_mad_g4_i12": {
+        "tier": "tier2_p90",
+        "num_vars": 84,
+        "num_constraints": 72,
+        "status": "Optimal",
+        "objective": 8000,
+        "root_lp_obj": 7999.999999999997,
+        "t_solve_ms": 0.508239,
+        "t_total_ms": 0.643476,
+        "t_solve_trials_ms": [
+          0.497132,
+          0.551061,
+          0.511853,
+          0.509439,
+          0.528824,
+          0.495865,
+          0.508239,
+          0.548695,
+          0.497507,
+          0.481538,
+          0.48058
+        ],
+        "t_total_trials_ms": [
+          0.636176,
+          0.709075,
+          0.686617,
+          0.668958,
+          0.678433,
+          0.636726,
+          0.643476,
+          0.677548,
+          0.628623,
+          0.617312,
+          0.609558
+        ]
+      },
+      "t2_mad_rand_g2_i8": {
+        "tier": "tier2_p90",
+        "num_vars": 34,
+        "num_constraints": 38,
+        "status": "Optimal",
+        "objective": 5975,
+        "root_lp_obj": 5894,
+        "t_solve_ms": 5.123038,
+        "t_total_ms": 5.197372,
+        "t_solve_trials_ms": [
+          10.08907,
+          3.848301,
+          0.886689,
+          4.6426,
+          5.123038,
+          19.056835,
+          7.857504,
+          3.366802,
+          6.818482,
+          3.218462,
+          17.437278
+        ],
+        "t_total_trials_ms": [
+          10.335422,
+          3.950494,
+          0.962578,
+          4.755863,
+          5.197372,
+          19.124765,
+          7.93704,
+          3.446887,
+          6.889259,
+          3.285188,
+          17.50727
+        ]
+      },
+      "t2_mad_rand_g3_i9": {
+        "tier": "tier2_p90",
+        "num_vars": 54,
+        "num_constraints": 54,
+        "status": "Optimal",
+        "objective": 7720,
+        "root_lp_obj": 6060,
+        "t_solve_ms": 29.723077,
+        "t_total_ms": 29.897782,
+        "t_solve_trials_ms": [
+          36.607475,
+          157.087545,
+          46.342971,
+          15.298497,
+          22.119675,
+          63.983522,
+          29.723077,
+          47.734637,
+          2.620979,
+          10.884728,
+          21.92758
+        ],
+        "t_total_trials_ms": [
+          36.717326,
+          157.204483,
+          46.51429,
+          15.429511,
+          22.239424,
+          64.099723,
+          29.897782,
+          47.844336,
+          2.734831,
+          10.988018,
+          22.041482
+        ]
+      },
+      "t2_mkp_30": {
+        "tier": "tier2_p90",
+        "num_vars": 30,
+        "num_constraints": 6,
+        "status": "Optimal",
+        "objective": 1917.2355454545454,
+        "root_lp_obj": 1966.9239391458352,
+        "t_solve_ms": 4.74602,
+        "t_total_ms": 4.785579,
+        "t_solve_trials_ms": [
+          1.563028,
+          8.87751,
+          4.74602,
+          1.672903,
+          4.64607,
+          4.921089,
+          1.939118,
+          1.678656,
+          12.840645,
+          14.029688,
+          5.208231
+        ],
+        "t_total_trials_ms": [
+          1.614433,
+          8.912051,
+          4.785579,
+          1.71077,
+          4.682247,
+          4.987837,
+          1.980482,
+          1.71359,
+          12.873763,
+          14.076877,
+          5.246761
+        ]
+      },
+      "t2_mkp_50": {
+        "tier": "tier2_p90",
+        "num_vars": 50,
+        "num_constraints": 8,
+        "status": "Optimal",
+        "objective": 2620.00522065986,
+        "root_lp_obj": 2648.3687203038785,
+        "t_solve_ms": 8.961537,
+        "t_total_ms": 9.021628,
+        "t_solve_trials_ms": [
+          0.714929,
+          13.733553,
+          11.873249,
+          4.815025,
+          2.725845,
+          6.777225,
+          3.758717,
+          9.581259,
+          8.961537,
+          43.746909,
+          34.466676
+        ],
+        "t_total_trials_ms": [
+          0.776156,
+          13.801806,
+          11.940462,
+          4.886601,
+          2.783197,
+          6.841279,
+          3.820357,
+          9.649642,
+          9.021628,
+          43.807616,
+          34.540508
+        ]
+      },
+      "t2_setcover_50": {
+        "tier": "tier2_p90",
+        "num_vars": 50,
+        "num_constraints": 20,
+        "status": "Optimal",
+        "objective": 58.096,
+        "root_lp_obj": 56.8425,
+        "t_solve_ms": 0.295949,
+        "t_total_ms": 0.399709,
+        "t_solve_trials_ms": [
+          0.61692,
+          1.733428,
+          0.295949,
+          5.013101,
+          0.078124,
+          0.289495,
+          0.074659,
+          0.330728,
+          0.185492,
+          0.061827,
+          0.416075
+        ],
+        "t_total_trials_ms": [
+          0.766194,
+          1.939119,
+          0.514418,
+          5.174898,
+          0.149502,
+          0.354058,
+          0.1434,
+          0.399709,
+          0.247327,
+          0.117339,
+          0.480196
+        ]
+      },
+      "t3_cflp_300": {
+        "tier": "tier3_large",
+        "num_vars": 300,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 2187.298,
+        "root_lp_obj": 2081.527896551724,
+        "t_solve_ms": 12.733339,
+        "t_total_ms": 12.922667,
+        "t_solve_trials_ms": [
+          6.270621,
+          12.733339,
+          15.476589,
+          29.486242,
+          6.640483
+        ],
+        "t_total_trials_ms": [
+          6.468644,
+          12.922667,
+          16.033442,
+          29.679469,
+          6.869516
+        ]
+      },
+      "t3_lotsizing_504": {
+        "tier": "tier3_large",
+        "num_vars": 504,
+        "num_constraints": 336,
+        "status": "Optimal",
+        "objective": 13120.441,
+        "root_lp_obj": 10518.9912,
+        "t_solve_ms": 140.858244,
+        "t_total_ms": 141.649873,
+        "t_solve_trials_ms": [
+          33.088196,
+          47.016836,
+          140.858244,
+          179.99764,
+          215.239966
+        ],
+        "t_total_trials_ms": [
+          33.487832,
+          47.416445,
+          141.649873,
+          180.525434,
+          215.666484
+        ]
+      },
+      "t3_mad_g10_i100": {
+        "tier": "tier3_large",
+        "num_vars": 1090,
+        "num_constraints": 250,
+        "status": "Optimal",
+        "objective": 88000,
+        "root_lp_obj": 88000,
+        "t_solve_ms": 12.852038,
+        "t_total_ms": 14.518249,
+        "t_solve_trials_ms": [
+          12.852038,
+          98.132551,
+          10.703477,
+          6.380937,
+          13.846136
+        ],
+        "t_total_trials_ms": [
+          14.518249,
+          100.091668,
+          12.77032,
+          9.352395,
+          18.343432
+        ]
+      },
+      "t3_mad_g4_i1000": {
+        "tier": "tier3_large",
+        "num_vars": 4036,
+        "num_constraints": 1060,
+        "status": "Optimal",
+        "objective": 208000,
+        "root_lp_obj": 208000,
+        "t_solve_ms": 51.458143,
+        "t_total_ms": 58.99466,
+        "t_solve_trials_ms": [
+          51.458143,
+          121.033677,
+          57.899859,
+          45.667806,
+          44.611301
+        ],
+        "t_total_trials_ms": [
+          58.99466,
+          128.226316,
+          65.458652,
+          57.012824,
+          51.66107
+        ]
+      },
+      "t3_mad_g5_i20": {
+        "tier": "tier3_large",
+        "num_vars": 145,
+        "num_constraints": 95,
+        "status": "Optimal",
+        "objective": 12000,
+        "root_lp_obj": 12000,
+        "t_solve_ms": 0.756341,
+        "t_total_ms": 0.997695,
+        "t_solve_trials_ms": [
+          0.74725,
+          0.756341,
+          1.090956,
+          1.968161,
+          0.741265
+        ],
+        "t_total_trials_ms": [
+          0.974907,
+          0.994669,
+          1.32238,
+          2.556501,
+          0.997695
+        ]
+      },
+      "t3_mad_g6_i30": {
+        "tier": "tier3_large",
+        "num_vars": 234,
+        "num_constraints": 120,
+        "status": "Optimal",
+        "objective": 16800,
+        "root_lp_obj": 16800,
+        "t_solve_ms": 1.407744,
+        "t_total_ms": 2.001297,
+        "t_solve_trials_ms": [
+          1.440887,
+          1.022904,
+          3.62625,
+          1.218995,
+          1.407744
+        ],
+        "t_total_trials_ms": [
+          1.828695,
+          1.443692,
+          4.022593,
+          2.001297,
+          2.137201
+        ]
+      },
+      "t3_mkp_200": {
+        "tier": "tier3_large",
+        "num_vars": 200,
+        "num_constraints": 8,
+        "status": "Optimal",
+        "objective": 12906.801443001443,
+        "root_lp_obj": 12955.460004661,
+        "t_solve_ms": 38.293561,
+        "t_total_ms": 38.470584,
+        "t_solve_trials_ms": [
+          62.543833,
+          36.322493,
+          38.293561,
+          56.574174,
+          8.769301
+        ],
+        "t_total_trials_ms": [
+          62.965338,
+          36.494143,
+          38.470584,
+          56.722188,
+          8.923838
+        ]
+      },
+      "t3_sched_1000": {
+        "tier": "tier3_large",
+        "num_vars": 1000,
+        "num_constraints": 100,
+        "status": "Optimal",
+        "objective": 46818.28354678308,
+        "root_lp_obj": 46971.0946011988,
+        "t_solve_ms": 13.426138,
+        "t_total_ms": 14.071799,
+        "t_solve_trials_ms": [
+          34.33828,
+          22.179278,
+          13.426138,
+          8.330664,
+          11.046757
+        ],
+        "t_total_trials_ms": [
+          34.900668,
+          22.850106,
+          14.071799,
+          8.906697,
+          11.648708
+        ]
+      }
+    },
+    "simd_avx512": {
+      "t1_furniture": {
+        "tier": "tier1_canonical",
+        "num_vars": 2,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 1075,
+        "root_lp_obj": 1075,
+        "t_solve_ms": 0.029977,
+        "t_total_ms": 0.037323,
+        "t_solve_trials_ms": [
+          0.007476,
+          0.04897,
+          0.029977,
+          0.026908,
+          0.160862,
+          0.202157,
+          0.032214,
+          0.02471,
+          0.022885,
+          0.14726,
+          0.025039
+        ],
+        "t_total_trials_ms": [
+          0.012482,
+          0.054536,
+          0.037113,
+          0.033176,
+          0.166836,
+          0.20912,
+          0.041691,
+          0.031324,
+          0.028333,
+          0.153522,
+          0.037323
+        ]
+      },
+      "t1_infeasible_mip": {
+        "tier": "tier1_canonical",
+        "num_vars": 2,
+        "num_constraints": 1,
+        "status": "Infeasible",
+        "objective": 0,
+        "root_lp_obj": 1.5,
+        "t_solve_ms": 0.000502,
+        "t_total_ms": 0.00446,
+        "t_solve_trials_ms": [
+          0.000676,
+          0.000525,
+          0.000801,
+          0.000582,
+          0.000445,
+          0.000448,
+          0.00058,
+          0.000502,
+          0.000456,
+          0.000458,
+          0.000465
+        ],
+        "t_total_trials_ms": [
+          0.00436,
+          0.006434,
+          0.004551,
+          0.004218,
+          0.00431,
+          0.004406,
+          0.005572,
+          0.004934,
+          0.00471,
+          0.00446,
+          0.003981
+        ]
+      },
+      "t1_knapsack_12": {
+        "tier": "tier1_canonical",
+        "num_vars": 12,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 513.2388571428571,
+        "root_lp_obj": 578.6452877655678,
+        "t_solve_ms": 0.187673,
+        "t_total_ms": 0.202366,
+        "t_solve_trials_ms": [
+          0.35589,
+          0.074666,
+          0.216602,
+          0.188315,
+          0.127914,
+          0.292842,
+          0.090218,
+          0.187673,
+          0.1523,
+          0.216545,
+          0.033503
+        ],
+        "t_total_trials_ms": [
+          0.377252,
+          0.089028,
+          0.233523,
+          0.202461,
+          0.142134,
+          0.306726,
+          0.103194,
+          0.202366,
+          0.166937,
+          0.228727,
+          0.056699
+        ]
+      },
+      "t1_mad_g2_i4": {
+        "tier": "tier1_canonical",
+        "num_vars": 26,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 2400,
+        "root_lp_obj": 2400,
+        "t_solve_ms": 0.068244,
+        "t_total_ms": 0.108107,
+        "t_solve_trials_ms": [
+          0.082718,
+          0.078426,
+          0.074074,
+          0.065343,
+          0.069615,
+          0.064655,
+          0.064343,
+          0.064253,
+          0.068244,
+          0.069297,
+          0.063145
+        ],
+        "t_total_trials_ms": [
+          0.138949,
+          0.118023,
+          0.117193,
+          0.103652,
+          0.108107,
+          0.101779,
+          0.103807,
+          0.101582,
+          0.117798,
+          0.108488,
+          0.102138
+        ]
+      },
+      "t1_mad_rand_g2_i4": {
+        "tier": "tier1_canonical",
+        "num_vars": 26,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 4601,
+        "root_lp_obj": 4257,
+        "t_solve_ms": 0.849925,
+        "t_total_ms": 0.902796,
+        "t_solve_trials_ms": [
+          0.849925,
+          1.261802,
+          0.193373,
+          0.215947,
+          1.31592,
+          1.446015,
+          0.783093,
+          1.12057,
+          0.601799,
+          0.867759,
+          0.825867
+        ],
+        "t_total_trials_ms": [
+          0.902796,
+          1.313484,
+          0.255022,
+          0.261014,
+          1.359387,
+          1.495677,
+          0.833936,
+          1.177859,
+          0.652586,
+          0.915307,
+          0.882827
+        ]
+      },
+      "t1_mip_float_obj": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 64.95,
+        "root_lp_obj": 58.9,
+        "t_solve_ms": 0.007526,
+        "t_total_ms": 0.013238,
+        "t_solve_trials_ms": [
+          0.007604,
+          0.007526,
+          0.00753,
+          0.008833,
+          0.007716,
+          0.007282,
+          0.007263,
+          0.009817,
+          0.006999,
+          0.006533,
+          0.006805
+        ],
+        "t_total_trials_ms": [
+          0.013238,
+          0.013339,
+          0.013089,
+          0.01464,
+          0.016233,
+          0.013629,
+          0.012208,
+          0.015793,
+          0.012236,
+          0.012937,
+          0.01294
+        ]
+      },
+      "t1_std_lp": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 54,
+        "root_lp_obj": 54,
+        "t_solve_ms": 0.005879,
+        "t_total_ms": 0.012041,
+        "t_solve_trials_ms": [
+          0.00488,
+          0.006965,
+          0.005879,
+          0.00582,
+          0.004889,
+          0.012686,
+          0.006913,
+          0.006015,
+          0.005097,
+          0.00692,
+          0.005797
+        ],
+        "t_total_trials_ms": [
+          0.011022,
+          0.017558,
+          0.012041,
+          0.012053,
+          0.011059,
+          0.018598,
+          0.012837,
+          0.011287,
+          0.010831,
+          0.011884,
+          0.016675
+        ]
+      },
+      "t1_std_lp_max": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 80,
+        "root_lp_obj": 80,
+        "t_solve_ms": 0.005267,
+        "t_total_ms": 0.011469,
+        "t_solve_trials_ms": [
+          0.003798,
+          0.00601,
+          0.004516,
+          0.005078,
+          0.004182,
+          0.010685,
+          0.005795,
+          0.005269,
+          0.004869,
+          0.005267,
+          0.005965
+        ],
+        "t_total_trials_ms": [
+          0.009168,
+          0.012485,
+          0.010742,
+          0.010552,
+          0.009683,
+          0.016494,
+          0.011469,
+          0.010957,
+          0.012883,
+          0.012905,
+          0.011713
+        ]
+      },
+      "t1_std_mip": {
+        "tier": "tier1_canonical",
+        "num_vars": 3,
+        "num_constraints": 3,
+        "status": "Optimal",
+        "objective": 64,
+        "root_lp_obj": 58,
+        "t_solve_ms": 0.00818,
+        "t_total_ms": 0.014808,
+        "t_solve_trials_ms": [
+          0.007205,
+          0.009137,
+          0.00759,
+          0.010623,
+          0.009365,
+          0.009125,
+          0.00818,
+          0.012245,
+          0.007043,
+          0.006572,
+          0.00628
+        ],
+        "t_total_trials_ms": [
+          0.014985,
+          0.016745,
+          0.013095,
+          0.016119,
+          0.017875,
+          0.014808,
+          0.014506,
+          0.016913,
+          0.012101,
+          0.012728,
+          0.014564
+        ]
+      },
+      "t1_whiskas": {
+        "tier": "tier1_canonical",
+        "num_vars": 6,
+        "num_constraints": 5,
+        "status": "Optimal",
+        "objective": 0.52,
+        "root_lp_obj": 0.52,
+        "t_solve_ms": 0.009269,
+        "t_total_ms": 0.018855,
+        "t_solve_trials_ms": [
+          0.008073,
+          0.015154,
+          0.014345,
+          0.009645,
+          0.011476,
+          0.008963,
+          0.008451,
+          0.010737,
+          0.009269,
+          0.007667,
+          0.007758
+        ],
+        "t_total_trials_ms": [
+          0.018206,
+          0.024669,
+          0.026865,
+          0.018279,
+          0.020626,
+          0.018304,
+          0.019736,
+          0.020127,
+          0.018855,
+          0.017177,
+          0.017348
+        ]
+      },
+      "t2_binpack_44": {
+        "tier": "tier2_p90",
+        "num_vars": 44,
+        "num_constraints": 14,
+        "status": "Optimal",
+        "objective": 30.319,
+        "root_lp_obj": 29.2978,
+        "t_solve_ms": 1.762653,
+        "t_total_ms": 1.801099,
+        "t_solve_trials_ms": [
+          0.953937,
+          1.762653,
+          0.815954,
+          1.349459,
+          2.159057,
+          1.299686,
+          4.96862,
+          4.447827,
+          2.379363,
+          5.164651,
+          1.305076
+        ],
+        "t_total_trials_ms": [
+          0.993176,
+          1.801099,
+          0.856858,
+          1.395918,
+          2.327886,
+          1.424013,
+          5.091218,
+          4.563471,
+          2.429548,
+          5.209302,
+          1.349986
+        ]
+      },
+      "t2_cflp_36": {
+        "tier": "tier2_p90",
+        "num_vars": 36,
+        "num_constraints": 11,
+        "status": "Optimal",
+        "objective": 801.171,
+        "root_lp_obj": 781.966,
+        "t_solve_ms": 0.279776,
+        "t_total_ms": 0.3141,
+        "t_solve_trials_ms": [
+          0.144002,
+          0.26316,
+          0.279776,
+          0.376353,
+          0.549415,
+          0.803581,
+          0.248197,
+          0.387595,
+          0.060325,
+          0.251807,
+          0.655334
+        ],
+        "t_total_trials_ms": [
+          0.180677,
+          0.299914,
+          0.3141,
+          0.413596,
+          0.58646,
+          0.840284,
+          0.285933,
+          0.422916,
+          0.095336,
+          0.283917,
+          0.688484
+        ]
+      },
+      "t2_cflp_49": {
+        "tier": "tier2_p90",
+        "num_vars": 49,
+        "num_constraints": 13,
+        "status": "Optimal",
+        "objective": 909.021,
+        "root_lp_obj": 827.297,
+        "t_solve_ms": 0.617708,
+        "t_total_ms": 0.702557,
+        "t_solve_trials_ms": [
+          0.56306,
+          0.299256,
+          0.571784,
+          1.015181,
+          0.398175,
+          0.633028,
+          0.544433,
+          0.910486,
+          0.617708,
+          0.763526,
+          1.821075
+        ],
+        "t_total_trials_ms": [
+          0.60858,
+          0.343544,
+          0.613357,
+          1.131358,
+          0.508806,
+          0.716512,
+          0.6019,
+          0.988074,
+          0.702557,
+          0.858464,
+          1.906412
+        ]
+      },
+      "t2_gap_45": {
+        "tier": "tier2_p90",
+        "num_vars": 45,
+        "num_constraints": 13,
+        "status": "Optimal",
+        "objective": 195.18,
+        "root_lp_obj": 178.0448,
+        "t_solve_ms": 1.488976,
+        "t_total_ms": 1.620145,
+        "t_solve_trials_ms": [
+          0.50721,
+          0.821613,
+          2.136578,
+          2.987854,
+          0.287177,
+          0.784526,
+          8.143711,
+          1.488976,
+          12.564866,
+          0.741484,
+          1.98483
+        ],
+        "t_total_trials_ms": [
+          0.545235,
+          0.881809,
+          2.17388,
+          3.032528,
+          0.329768,
+          0.824321,
+          8.183488,
+          1.620145,
+          12.608194,
+          0.802463,
+          2.026946
+        ]
+      },
+      "t2_lotsizing_48": {
+        "tier": "tier2_p90",
+        "num_vars": 48,
+        "num_constraints": 32,
+        "status": "Optimal",
+        "objective": 2245.808,
+        "root_lp_obj": 2052.33736,
+        "t_solve_ms": 6.236515,
+        "t_total_ms": 6.29078,
+        "t_solve_trials_ms": [
+          4.728045,
+          6.236515,
+          4.172563,
+          11.665424,
+          7.948923,
+          32.286067,
+          4.467941,
+          8.507444,
+          3.438449,
+          16.701795,
+          3.979109
+        ],
+        "t_total_trials_ms": [
+          4.782366,
+          6.29078,
+          4.226848,
+          11.719566,
+          8.004721,
+          32.338944,
+          4.523892,
+          8.562018,
+          3.493756,
+          16.752017,
+          4.037444
+        ]
+      },
+      "t2_mad_g2_i8": {
+        "tier": "tier2_p90",
+        "num_vars": 34,
+        "num_constraints": 38,
+        "status": "Optimal",
+        "objective": 2400,
+        "root_lp_obj": 2400,
+        "t_solve_ms": 0.245905,
+        "t_total_ms": 0.320402,
+        "t_solve_trials_ms": [
+          0.249431,
+          0.245905,
+          0.243302,
+          0.248234,
+          0.248207,
+          0.226463,
+          0.236548,
+          0.255705,
+          0.248094,
+          0.24011,
+          0.241278
+        ],
+        "t_total_trials_ms": [
+          0.317804,
+          0.340443,
+          0.324769,
+          0.345223,
+          0.319053,
+          0.328686,
+          0.299722,
+          0.37016,
+          0.320402,
+          0.313977,
+          0.30367
+        ]
+      },
+      "t2_mad_g3_i9": {
+        "tier": "tier2_p90",
+        "num_vars": 54,
+        "num_constraints": 54,
+        "status": "Optimal",
+        "objective": 4800,
+        "root_lp_obj": 4800,
+        "t_solve_ms": 0.297635,
+        "t_total_ms": 0.500604,
+        "t_solve_trials_ms": [
+          0.469484,
+          0.255212,
+          0.297635,
+          0.300154,
+          0.307342,
+          0.286317,
+          0.250736,
+          0.383139,
+          0.401257,
+          0.289318,
+          0.291679
+        ],
+        "t_total_trials_ms": [
+          0.677921,
+          0.437911,
+          0.503646,
+          0.500604,
+          0.498348,
+          0.45349,
+          0.420857,
+          0.558324,
+          0.617917,
+          0.492124,
+          0.567275
+        ]
+      },
+      "t2_mad_g4_i12": {
+        "tier": "tier2_p90",
+        "num_vars": 84,
+        "num_constraints": 72,
+        "status": "Optimal",
+        "objective": 8000,
+        "root_lp_obj": 7999.999999999997,
+        "t_solve_ms": 0.503091,
+        "t_total_ms": 0.651808,
+        "t_solve_trials_ms": [
+          0.50135,
+          0.547589,
+          0.507515,
+          0.492462,
+          0.543495,
+          0.497132,
+          0.544908,
+          0.537882,
+          0.501104,
+          0.494057,
+          0.503091
+        ],
+        "t_total_trials_ms": [
+          0.639907,
+          0.676316,
+          0.648271,
+          0.629061,
+          0.697496,
+          0.666999,
+          0.691105,
+          0.690546,
+          0.651808,
+          0.633872,
+          0.636643
+        ]
+      },
+      "t2_mad_rand_g2_i8": {
+        "tier": "tier2_p90",
+        "num_vars": 34,
+        "num_constraints": 38,
+        "status": "Optimal",
+        "objective": 5975,
+        "root_lp_obj": 5894,
+        "t_solve_ms": 5.684003,
+        "t_total_ms": 5.849193,
+        "t_solve_trials_ms": [
+          8.995699,
+          4.140264,
+          1.023931,
+          5.684003,
+          5.222947,
+          19.195007,
+          7.909301,
+          3.394539,
+          6.890084,
+          3.2492,
+          16.712732
+        ],
+        "t_total_trials_ms": [
+          9.078907,
+          4.316303,
+          1.189391,
+          5.849193,
+          5.302887,
+          19.269135,
+          7.990845,
+          3.465185,
+          6.962117,
+          3.327357,
+          16.795985
+        ]
+      },
+      "t2_mad_rand_g3_i9": {
+        "tier": "tier2_p90",
+        "num_vars": 54,
+        "num_constraints": 54,
+        "status": "Optimal",
+        "objective": 7720,
+        "root_lp_obj": 6060,
+        "t_solve_ms": 29.684858,
+        "t_total_ms": 29.850207,
+        "t_solve_trials_ms": [
+          36.768345,
+          157.29622,
+          47.309243,
+          15.219663,
+          22.201431,
+          64.705765,
+          29.684858,
+          48.447749,
+          2.661393,
+          11.031834,
+          21.83074
+        ],
+        "t_total_trials_ms": [
+          36.913528,
+          157.407937,
+          47.47219,
+          15.353117,
+          22.317251,
+          64.812564,
+          29.850207,
+          48.55394,
+          2.775186,
+          11.133001,
+          21.95179
+        ]
+      },
+      "t2_mkp_30": {
+        "tier": "tier2_p90",
+        "num_vars": 30,
+        "num_constraints": 6,
+        "status": "Optimal",
+        "objective": 1917.2355454545454,
+        "root_lp_obj": 1966.9239391458352,
+        "t_solve_ms": 4.273867,
+        "t_total_ms": 4.312025,
+        "t_solve_trials_ms": [
+          1.545868,
+          8.954911,
+          4.630771,
+          1.658882,
+          4.273867,
+          3.466098,
+          1.932107,
+          1.737496,
+          12.937575,
+          14.535377,
+          6.849714
+        ],
+        "t_total_trials_ms": [
+          1.580927,
+          8.995736,
+          4.668574,
+          1.705561,
+          4.312025,
+          3.503119,
+          1.975049,
+          1.773538,
+          12.971304,
+          14.657175,
+          6.899297
+        ]
+      },
+      "t2_mkp_50": {
+        "tier": "tier2_p90",
+        "num_vars": 50,
+        "num_constraints": 8,
+        "status": "Optimal",
+        "objective": 2620.00522065986,
+        "root_lp_obj": 2648.3687203038785,
+        "t_solve_ms": 8.863795,
+        "t_total_ms": 8.925783,
+        "t_solve_trials_ms": [
+          0.59072,
+          13.470369,
+          11.498916,
+          4.733436,
+          2.558787,
+          6.73929,
+          3.649568,
+          9.570494,
+          8.863795,
+          43.349792,
+          34.422231
+        ],
+        "t_total_trials_ms": [
+          0.645046,
+          13.531881,
+          11.559745,
+          4.799013,
+          2.643667,
+          6.793017,
+          3.727314,
+          9.627914,
+          8.925783,
+          43.415309,
+          34.541259
+        ]
+      },
+      "t2_setcover_50": {
+        "tier": "tier2_p90",
+        "num_vars": 50,
+        "num_constraints": 20,
+        "status": "Optimal",
+        "objective": 58.096,
+        "root_lp_obj": 56.8425,
+        "t_solve_ms": 0.324032,
+        "t_total_ms": 0.386203,
+        "t_solve_trials_ms": [
+          0.582761,
+          1.684601,
+          0.326016,
+          5.325264,
+          0.084273,
+          0.247652,
+          0.067583,
+          0.324032,
+          0.210684,
+          0.06487,
+          0.423059
+        ],
+        "t_total_trials_ms": [
+          0.719032,
+          1.791731,
+          0.445119,
+          5.468492,
+          0.160677,
+          0.306315,
+          0.138353,
+          0.386203,
+          0.292537,
+          0.127141,
+          0.490187
+        ]
+      },
+      "t3_cflp_300": {
+        "tier": "tier3_large",
+        "num_vars": 300,
+        "num_constraints": 34,
+        "status": "Optimal",
+        "objective": 2187.298,
+        "root_lp_obj": 2081.527896551724,
+        "t_solve_ms": 10.706514,
+        "t_total_ms": 10.908039,
+        "t_solve_trials_ms": [
+          6.240458,
+          10.706514,
+          16.138482,
+          30.776195,
+          6.495492
+        ],
+        "t_total_trials_ms": [
+          6.435782,
+          10.908039,
+          16.330922,
+          31.210394,
+          6.694829
+        ]
+      },
+      "t3_lotsizing_504": {
+        "tier": "tier3_large",
+        "num_vars": 504,
+        "num_constraints": 336,
+        "status": "Optimal",
+        "objective": 13120.441,
+        "root_lp_obj": 10518.9912,
+        "t_solve_ms": 140.91496,
+        "t_total_ms": 141.313335,
+        "t_solve_trials_ms": [
+          34.328755,
+          46.721928,
+          140.91496,
+          182.573232,
+          211.783488
+        ],
+        "t_total_trials_ms": [
+          34.760703,
+          47.106385,
+          141.313335,
+          183.004021,
+          212.215204
+        ]
+      },
+      "t3_mad_g10_i100": {
+        "tier": "tier3_large",
+        "num_vars": 1090,
+        "num_constraints": 250,
+        "status": "Optimal",
+        "objective": 88000,
+        "root_lp_obj": 88000,
+        "t_solve_ms": 13.994412,
+        "t_total_ms": 16.85722,
+        "t_solve_trials_ms": [
+          13.994412,
+          99.231206,
+          10.223704,
+          5.849899,
+          14.435609
+        ],
+        "t_total_trials_ms": [
+          16.85722,
+          101.047617,
+          11.874882,
+          8.207958,
+          16.91375
+        ]
+      },
+      "t3_mad_g4_i1000": {
+        "tier": "tier3_large",
+        "num_vars": 4036,
+        "num_constraints": 1060,
+        "status": "Optimal",
+        "objective": 208000,
+        "root_lp_obj": 208000,
+        "t_solve_ms": 47.514628,
+        "t_total_ms": 55.571367,
+        "t_solve_trials_ms": [
+          47.514628,
+          111.000303,
+          71.693972,
+          47.41156,
+          44.028691
+        ],
+        "t_total_trials_ms": [
+          54.900732,
+          118.283573,
+          79.117286,
+          55.571367,
+          51.585273
+        ]
+      },
+      "t3_mad_g5_i20": {
+        "tier": "tier3_large",
+        "num_vars": 145,
+        "num_constraints": 95,
+        "status": "Optimal",
+        "objective": 12000,
+        "root_lp_obj": 12000,
+        "t_solve_ms": 0.752802,
+        "t_total_ms": 1.038311,
+        "t_solve_trials_ms": [
+          0.763531,
+          0.748146,
+          0.734623,
+          0.809407,
+          0.752802
+        ],
+        "t_total_trials_ms": [
+          1.038311,
+          1.126182,
+          0.975099,
+          1.107353,
+          1.019041
+        ]
+      },
+      "t3_mad_g6_i30": {
+        "tier": "tier3_large",
+        "num_vars": 234,
+        "num_constraints": 120,
+        "status": "Optimal",
+        "objective": 16800,
+        "root_lp_obj": 16800,
+        "t_solve_ms": 1.418649,
+        "t_total_ms": 1.848386,
+        "t_solve_trials_ms": [
+          1.496069,
+          1.099022,
+          2.568784,
+          1.063903,
+          1.418649
+        ],
+        "t_total_trials_ms": [
+          1.97835,
+          1.526237,
+          3.00187,
+          1.483099,
+          1.848386
+        ]
+      },
+      "t3_mkp_200": {
+        "tier": "tier3_large",
+        "num_vars": 200,
+        "num_constraints": 8,
+        "status": "Optimal",
+        "objective": 12906.801443001443,
+        "root_lp_obj": 12955.460004661,
+        "t_solve_ms": 39.91103,
+        "t_total_ms": 40.305908,
+        "t_solve_trials_ms": [
+          63.108467,
+          34.594317,
+          39.91103,
+          56.215018,
+          7.181835
+        ],
+        "t_total_trials_ms": [
+          63.252437,
+          34.765887,
+          40.305908,
+          56.374235,
+          7.492184
+        ]
+      },
+      "t3_sched_1000": {
+        "tier": "tier3_large",
+        "num_vars": 1000,
+        "num_constraints": 100,
+        "status": "Optimal",
+        "objective": 46818.28354678308,
+        "root_lp_obj": 46971.0946011988,
+        "t_solve_ms": 14.44614,
+        "t_total_ms": 15.022972,
+        "t_solve_trials_ms": [
+          37.518298,
+          18.214439,
+          14.44614,
+          8.990371,
+          10.394225
+        ],
+        "t_total_trials_ms": [
+          38.080334,
+          18.813779,
+          15.022972,
+          9.845549,
+          11.008371
+        ]
+      }
+    }
+  },
+  "assign_corpus": {
+    "families": 22,
+    "trials": 200,
+    "parity_mismatches": 0,
+    "default_scalar": {
+      "a1_canon_4x4": {
+        "tier": "tier1_small",
+        "rows": 4,
+        "cols": 4,
+        "family": "canonical",
+        "objective": 275,
+        "t_solve_ms": 0.001053,
+        "t_total_ms": 0.001247,
+        "t_solve_trials_ms": [
+          0.001053,
+          0.001381,
+          0.001094,
+          0.001191,
+          0.001012,
+          0.002257,
+          0.000922,
+          0.000779,
+          0.00109,
+          0.000905,
+          0.000574
+        ],
+        "t_total_trials_ms": [
+          0.001172,
+          0.00161,
+          0.00129,
+          0.001361,
+          0.001247,
+          0.002442,
+          0.00107,
+          0.000932,
+          0.00872,
+          0.001078,
+          0.00072
+        ]
+      },
+      "a1_sparse_24x24": {
+        "tier": "tier1_small",
+        "rows": 24,
+        "cols": 24,
+        "family": "sparse",
+        "objective": 2261,
+        "t_solve_ms": 0.010476,
+        "t_total_ms": 0.017653,
+        "t_solve_trials_ms": [
+          0.004724,
+          0.013027,
+          0.012413,
+          0.01193,
+          0.010476,
+          0.010439,
+          0.011212,
+          0.009733,
+          0.020729,
+          0.01016,
+          0.009942
+        ],
+        "t_total_trials_ms": [
+          0.007337,
+          0.019859,
+          0.019364,
+          0.024287,
+          0.017223,
+          0.017191,
+          0.017653,
+          0.016164,
+          0.027371,
+          0.020746,
+          0.016147
+        ]
+      },
+      "a1_tall_32x16": {
+        "tier": "tier1_small",
+        "rows": 32,
+        "cols": 16,
+        "family": "tall",
+        "objective": 2840.65234375,
+        "t_solve_ms": 0.006566,
+        "t_total_ms": 0.007819,
+        "t_solve_trials_ms": [
+          0.003264,
+          0.007253,
+          0.006292,
+          0.006566,
+          0.007972,
+          0.009204,
+          0.007144,
+          0.006892,
+          0.005248,
+          0.005793,
+          0.006013
+        ],
+        "t_total_trials_ms": [
+          0.004764,
+          0.008497,
+          0.007798,
+          0.007819,
+          0.009445,
+          0.010429,
+          0.00861,
+          0.00812,
+          0.00672,
+          0.00701,
+          0.007478
+        ]
+      },
+      "a1_ties_20x20": {
+        "tier": "tier1_small",
+        "rows": 20,
+        "cols": 20,
+        "family": "integer_ties",
+        "objective": 4,
+        "t_solve_ms": 0.006143,
+        "t_total_ms": 0.007666,
+        "t_solve_trials_ms": [
+          0.002574,
+          0.005965,
+          0.00617,
+          0.006588,
+          0.007637,
+          0.005667,
+          0.00619,
+          0.005589,
+          0.005925,
+          0.006143,
+          0.012033
+        ],
+        "t_total_trials_ms": [
+          0.004069,
+          0.007458,
+          0.007666,
+          0.018311,
+          0.009176,
+          0.00716,
+          0.00769,
+          0.007086,
+          0.007821,
+          0.007636,
+          0.013527
+        ]
+      },
+      "a1_unif_10x10": {
+        "tier": "tier1_small",
+        "rows": 10,
+        "cols": 10,
+        "family": "uniform",
+        "objective": 18107.9306640625,
+        "t_solve_ms": 0.00287,
+        "t_total_ms": 0.003284,
+        "t_solve_trials_ms": [
+          0.001199,
+          0.003683,
+          0.00276,
+          0.00287,
+          0.002955,
+          0.002691,
+          0.002496,
+          0.002406,
+          0.003084,
+          0.003025,
+          0.003135
+        ],
+        "t_total_trials_ms": [
+          0.001858,
+          0.004095,
+          0.003076,
+          0.003199,
+          0.003284,
+          0.00391,
+          0.002861,
+          0.002718,
+          0.003405,
+          0.003653,
+          0.003454
+        ]
+      },
+      "a1_wide_16x32": {
+        "tier": "tier1_small",
+        "rows": 16,
+        "cols": 32,
+        "family": "wide",
+        "objective": 5044.6572265625,
+        "t_solve_ms": 0.006182,
+        "t_total_ms": 0.007414,
+        "t_solve_trials_ms": [
+          0.002671,
+          0.00647,
+          0.006245,
+          0.005579,
+          0.0045,
+          0.006948,
+          0.006837,
+          0.006461,
+          0.005667,
+          0.005901,
+          0.006182
+        ],
+        "t_total_trials_ms": [
+          0.003958,
+          0.008157,
+          0.007512,
+          0.007296,
+          0.005733,
+          0.008459,
+          0.008105,
+          0.007946,
+          0.006915,
+          0.007374,
+          0.007414
+        ]
+      },
+      "a2_geom_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "geometric",
+        "objective": 610058.9289550781,
+        "t_solve_ms": 0.250322,
+        "t_total_ms": 0.263994,
+        "t_solve_trials_ms": [
+          0.158131,
+          0.250322,
+          0.232327,
+          0.465566,
+          0.304504,
+          0.211882,
+          0.197179,
+          0.280583,
+          0.281363,
+          0.183342,
+          0.315495
+        ],
+        "t_total_trials_ms": [
+          0.168184,
+          0.263994,
+          0.24367,
+          0.478097,
+          0.316236,
+          0.224482,
+          0.212228,
+          0.355842,
+          0.292606,
+          0.195595,
+          0.327908
+        ]
+      },
+      "a2_max_128x128": {
+        "tier": "tier2_medium",
+        "rows": 128,
+        "cols": 128,
+        "family": "maximize",
+        "objective": 1233885.4111328125,
+        "t_solve_ms": 0.141029,
+        "t_total_ms": 0.187653,
+        "t_solve_trials_ms": [
+          0.153861,
+          0.157557,
+          0.13995,
+          0.121512,
+          0.136626,
+          0.159196,
+          0.115707,
+          0.13128,
+          0.153082,
+          0.142268,
+          0.141029
+        ],
+        "t_total_trials_ms": [
+          0.257601,
+          0.211754,
+          0.182414,
+          0.163652,
+          0.189622,
+          0.202553,
+          0.15618,
+          0.171386,
+          0.193764,
+          0.187653,
+          0.181086
+        ]
+      },
+      "a2_rank1_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "rank1",
+        "objective": 20173201.46875,
+        "t_solve_ms": 0.102595,
+        "t_total_ms": 0.128934,
+        "t_solve_trials_ms": [
+          0.070297,
+          0.075584,
+          0.085302,
+          0.102595,
+          0.094894,
+          0.106687,
+          0.11995,
+          0.116758,
+          0.110708,
+          0.109323,
+          0.097442
+        ],
+        "t_total_trials_ms": [
+          0.096703,
+          0.101673,
+          0.111863,
+          0.128934,
+          0.125627,
+          0.138285,
+          0.151336,
+          0.154017,
+          0.148408,
+          0.190391,
+          0.12706
+        ]
+      },
+      "a2_tall_200x80": {
+        "tier": "tier2_medium",
+        "rows": 200,
+        "cols": 80,
+        "family": "tall",
+        "objective": 4329.4775390625,
+        "t_solve_ms": 0.067522,
+        "t_total_ms": 0.114821,
+        "t_solve_trials_ms": [
+          0.047148,
+          0.07272,
+          0.065251,
+          0.066622,
+          0.075734,
+          0.067522,
+          0.068267,
+          0.065596,
+          0.110735,
+          0.080128,
+          0.062277
+        ],
+        "t_total_trials_ms": [
+          0.117031,
+          0.114821,
+          0.105443,
+          0.1069,
+          0.116281,
+          0.10793,
+          0.118542,
+          0.105119,
+          0.164409,
+          0.158896,
+          0.107299
+        ]
+      },
+      "a2_ties_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "integer_ties",
+        "objective": 1,
+        "t_solve_ms": 0.081147,
+        "t_total_ms": 0.116724,
+        "t_solve_trials_ms": [
+          0.062924,
+          0.072767,
+          0.081147,
+          0.081603,
+          0.087616,
+          0.068352,
+          0.084108,
+          0.081955,
+          0.076056,
+          0.074222,
+          0.082468
+        ],
+        "t_total_trials_ms": [
+          0.09805,
+          0.107812,
+          0.116402,
+          0.116724,
+          0.122719,
+          0.103493,
+          0.119204,
+          0.117044,
+          0.472522,
+          0.109707,
+          0.140082
+        ]
+      },
+      "a2_unif_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "uniform",
+        "objective": 15794.03125,
+        "t_solve_ms": 0.090445,
+        "t_total_ms": 0.114242,
+        "t_solve_trials_ms": [
+          0.080284,
+          0.093037,
+          0.090065,
+          0.074365,
+          0.090445,
+          0.105822,
+          0.088301,
+          0.092567,
+          0.078882,
+          0.091918,
+          0.095305
+        ],
+        "t_total_trials_ms": [
+          0.102641,
+          0.115352,
+          0.112216,
+          0.096685,
+          0.114675,
+          0.127636,
+          0.110112,
+          0.114421,
+          0.100805,
+          0.114242,
+          0.117424
+        ]
+      },
+      "a2_unif_256x256": {
+        "tier": "tier2_medium",
+        "rows": 256,
+        "cols": 256,
+        "family": "uniform",
+        "objective": 14858.734375,
+        "t_solve_ms": 0.55232,
+        "t_total_ms": 0.75998,
+        "t_solve_trials_ms": [
+          0.459522,
+          0.55232,
+          0.57895,
+          0.489492,
+          0.621831,
+          0.591779,
+          0.668542,
+          0.44824,
+          0.499072,
+          0.548798,
+          0.770899
+        ],
+        "t_total_trials_ms": [
+          0.640959,
+          0.72544,
+          0.854249,
+          0.780673,
+          0.793435,
+          0.755368,
+          0.840474,
+          0.651829,
+          0.75998,
+          0.728445,
+          0.930058
+        ]
+      },
+      "a2_unif_64x64": {
+        "tier": "tier2_medium",
+        "rows": 64,
+        "cols": 64,
+        "family": "uniform",
+        "objective": 16825.5546875,
+        "t_solve_ms": 0.049236,
+        "t_total_ms": 0.059507,
+        "t_solve_trials_ms": [
+          0.025709,
+          0.050318,
+          0.040779,
+          0.03277,
+          0.044745,
+          0.049236,
+          0.071869,
+          0.030207,
+          0.053405,
+          0.058969,
+          0.053327
+        ],
+        "t_total_trials_ms": [
+          0.036931,
+          0.060653,
+          0.051566,
+          0.04305,
+          0.055101,
+          0.059507,
+          0.082382,
+          0.040333,
+          0.063712,
+          0.069304,
+          0.063751
+        ]
+      },
+      "a2_wide_80x200": {
+        "tier": "tier2_medium",
+        "rows": 80,
+        "cols": 200,
+        "family": "wide",
+        "objective": 3410.9248046875,
+        "t_solve_ms": 0.060779,
+        "t_total_ms": 0.111341,
+        "t_solve_trials_ms": [
+          0.037184,
+          0.064238,
+          0.065275,
+          0.059034,
+          0.109013,
+          0.063162,
+          0.060779,
+          0.058703,
+          0.060328,
+          0.05888,
+          0.061202
+        ],
+        "t_total_trials_ms": [
+          0.085064,
+          0.111341,
+          0.108815,
+          0.103042,
+          0.164236,
+          0.144315,
+          0.106488,
+          0.142503,
+          0.118286,
+          0.184133,
+          0.109475
+        ]
+      },
+      "a3_geom_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "geometric",
+        "objective": 1396753.6934814453,
+        "t_solve_ms": 8.912849,
+        "t_total_ms": 9.31197,
+        "t_solve_trials_ms": [
+          10.948913,
+          7.699762,
+          15.455999,
+          6.070879,
+          8.912849
+        ],
+        "t_total_trials_ms": [
+          11.334351,
+          8.701278,
+          15.8441,
+          6.964944,
+          9.31197
+        ]
+      },
+      "a3_tall_1000x250": {
+        "tier": "tier3_large",
+        "rows": 1000,
+        "cols": 250,
+        "family": "tall",
+        "objective": 2394.365234375,
+        "t_solve_ms": 0.80906,
+        "t_total_ms": 1.748855,
+        "t_solve_trials_ms": [
+          0.907152,
+          0.785975,
+          0.80906,
+          0.75041,
+          0.818749
+        ],
+        "t_total_trials_ms": [
+          2.194138,
+          1.748855,
+          1.917188,
+          1.507748,
+          1.449296
+        ]
+      },
+      "a3_ties_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "integer_ties",
+        "objective": 0,
+        "t_solve_ms": 1.525588,
+        "t_total_ms": 2.517012,
+        "t_solve_trials_ms": [
+          1.450222,
+          1.525588,
+          1.545583,
+          1.683917,
+          1.485143
+        ],
+        "t_total_trials_ms": [
+          2.517012,
+          2.478116,
+          2.599961,
+          2.639495,
+          2.427738
+        ]
+      },
+      "a3_unif_1000x1000": {
+        "tier": "tier3_large",
+        "rows": 1000,
+        "cols": 1000,
+        "family": "uniform",
+        "objective": 16203.234375,
+        "t_solve_ms": 10.171928,
+        "t_total_ms": 13.546738,
+        "t_solve_trials_ms": [
+          10.171928,
+          10.2702,
+          10.74906,
+          9.778209,
+          10.008724
+        ],
+        "t_total_trials_ms": [
+          12.839361,
+          12.867049,
+          14.320695,
+          14.153237,
+          13.546738
+        ]
+      },
+      "a3_unif_2000x2000": {
+        "tier": "tier3_large",
+        "rows": 2000,
+        "cols": 2000,
+        "family": "uniform",
+        "objective": 16450.51953125,
+        "t_solve_ms": 48.782962,
+        "t_total_ms": 61.831372,
+        "t_solve_trials_ms": [
+          56.618201,
+          48.782962,
+          42.320977,
+          49.79035,
+          37.95053
+        ],
+        "t_total_trials_ms": [
+          70.611092,
+          63.922621,
+          56.448481,
+          61.831372,
+          50.95086
+        ]
+      },
+      "a3_unif_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "uniform",
+        "objective": 16720.21875,
+        "t_solve_ms": 2.147979,
+        "t_total_ms": 2.961536,
+        "t_solve_trials_ms": [
+          2.633963,
+          2.386941,
+          2.008704,
+          2.147979,
+          2.016628
+        ],
+        "t_total_trials_ms": [
+          3.382132,
+          3.024058,
+          2.659855,
+          2.961536,
+          2.748619
+        ]
+      },
+      "a3_wide_250x1000": {
+        "tier": "tier3_large",
+        "rows": 250,
+        "cols": 1000,
+        "family": "wide",
+        "objective": 2515.0654296875,
+        "t_solve_ms": 0.588292,
+        "t_total_ms": 1.295172,
+        "t_solve_trials_ms": [
+          0.567721,
+          0.608602,
+          0.573828,
+          0.612355,
+          0.588292
+        ],
+        "t_total_trials_ms": [
+          1.295172,
+          1.245984,
+          1.299849,
+          1.229756,
+          1.30068
+        ]
+      }
+    },
+    "simd_avx2": {
+      "a1_canon_4x4": {
+        "tier": "tier1_small",
+        "rows": 4,
+        "cols": 4,
+        "family": "canonical",
+        "objective": 275,
+        "t_solve_ms": 0.000849,
+        "t_total_ms": 0.001058,
+        "t_solve_trials_ms": [
+          0.000905,
+          0.002261,
+          0.000749,
+          0.000955,
+          0.000636,
+          0.000944,
+          0.000807,
+          0.000696,
+          0.000849,
+          0.000871,
+          0.00057
+        ],
+        "t_total_trials_ms": [
+          0.001081,
+          0.002622,
+          0.000921,
+          0.001103,
+          0.000782,
+          0.001134,
+          0.000961,
+          0.000847,
+          0.005999,
+          0.001058,
+          0.000721
+        ]
+      },
+      "a1_sparse_24x24": {
+        "tier": "tier1_small",
+        "rows": 24,
+        "cols": 24,
+        "family": "sparse",
+        "objective": 2261,
+        "t_solve_ms": 0.011354,
+        "t_total_ms": 0.018474,
+        "t_solve_trials_ms": [
+          0.00508,
+          0.013083,
+          0.013774,
+          0.012554,
+          0.010794,
+          0.011354,
+          0.011711,
+          0.009977,
+          0.019223,
+          0.010378,
+          0.01044
+        ],
+        "t_total_trials_ms": [
+          0.007885,
+          0.020268,
+          0.020394,
+          0.024953,
+          0.017806,
+          0.018659,
+          0.018474,
+          0.016651,
+          0.026311,
+          0.017015,
+          0.017252
+        ]
+      },
+      "a1_tall_32x16": {
+        "tier": "tier1_small",
+        "rows": 32,
+        "cols": 16,
+        "family": "tall",
+        "objective": 2840.65234375,
+        "t_solve_ms": 0.006856,
+        "t_total_ms": 0.008431,
+        "t_solve_trials_ms": [
+          0.002648,
+          0.009003,
+          0.007793,
+          0.008092,
+          0.008841,
+          0.010488,
+          0.006856,
+          0.006573,
+          0.005547,
+          0.005271,
+          0.005081
+        ],
+        "t_total_trials_ms": [
+          0.004244,
+          0.024325,
+          0.010593,
+          0.010219,
+          0.012783,
+          0.011975,
+          0.008431,
+          0.007838,
+          0.007009,
+          0.00652,
+          0.006617
+        ]
+      },
+      "a1_ties_20x20": {
+        "tier": "tier1_small",
+        "rows": 20,
+        "cols": 20,
+        "family": "integer_ties",
+        "objective": 4,
+        "t_solve_ms": 0.006397,
+        "t_total_ms": 0.00839,
+        "t_solve_trials_ms": [
+          0.003003,
+          0.006397,
+          0.007311,
+          0.006796,
+          0.007515,
+          0.005589,
+          0.00619,
+          0.006742,
+          0.006031,
+          0.00611,
+          0.007859
+        ],
+        "t_total_trials_ms": [
+          0.007686,
+          0.009578,
+          0.00878,
+          0.018878,
+          0.009072,
+          0.007156,
+          0.007705,
+          0.00839,
+          0.007991,
+          0.007608,
+          0.009352
+        ]
+      },
+      "a1_unif_10x10": {
+        "tier": "tier1_small",
+        "rows": 10,
+        "cols": 10,
+        "family": "uniform",
+        "objective": 18107.9306640625,
+        "t_solve_ms": 0.002949,
+        "t_total_ms": 0.003305,
+        "t_solve_trials_ms": [
+          0.001397,
+          0.004037,
+          0.002876,
+          0.002839,
+          0.002949,
+          0.00416,
+          0.002613,
+          0.002468,
+          0.003211,
+          0.004601,
+          0.00432
+        ],
+        "t_total_trials_ms": [
+          0.001905,
+          0.004408,
+          0.003224,
+          0.003197,
+          0.003305,
+          0.007029,
+          0.003087,
+          0.00281,
+          0.00354,
+          0.006677,
+          0.004675
+        ]
+      },
+      "a1_wide_16x32": {
+        "tier": "tier1_small",
+        "rows": 16,
+        "cols": 32,
+        "family": "wide",
+        "objective": 5044.6572265625,
+        "t_solve_ms": 0.006042,
+        "t_total_ms": 0.007455,
+        "t_solve_trials_ms": [
+          0.002588,
+          0.006261,
+          0.006108,
+          0.005663,
+          0.00459,
+          0.007604,
+          0.006663,
+          0.006125,
+          0.005537,
+          0.00604,
+          0.006042
+        ],
+        "t_total_trials_ms": [
+          0.003979,
+          0.008371,
+          0.007455,
+          0.00739,
+          0.005929,
+          0.010114,
+          0.007992,
+          0.007755,
+          0.006866,
+          0.007648,
+          0.007374
+        ]
+      },
+      "a2_geom_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "geometric",
+        "objective": 610058.9289550781,
+        "t_solve_ms": 0.165469,
+        "t_total_ms": 0.177466,
+        "t_solve_trials_ms": [
+          0.090453,
+          0.186118,
+          0.137334,
+          0.248876,
+          0.165469,
+          0.127616,
+          0.12232,
+          0.191144,
+          0.167389,
+          0.105689,
+          0.180801
+        ],
+        "t_total_trials_ms": [
+          0.10061,
+          0.200149,
+          0.147719,
+          0.259173,
+          0.174745,
+          0.442775,
+          0.132124,
+          0.263017,
+          0.177466,
+          0.115484,
+          0.190447
+        ]
+      },
+      "a2_max_128x128": {
+        "tier": "tier2_medium",
+        "rows": 128,
+        "cols": 128,
+        "family": "maximize",
+        "objective": 1233885.4111328125,
+        "t_solve_ms": 0.097065,
+        "t_total_ms": 0.141143,
+        "t_solve_trials_ms": [
+          0.089623,
+          0.110697,
+          0.097065,
+          0.095824,
+          0.094101,
+          0.116631,
+          0.086693,
+          0.094201,
+          0.115172,
+          0.100798,
+          0.101276
+        ],
+        "t_total_trials_ms": [
+          0.158579,
+          0.150938,
+          0.137132,
+          0.136822,
+          0.146463,
+          0.157292,
+          0.1268,
+          0.134201,
+          0.173617,
+          0.140538,
+          0.141143
+        ]
+      },
+      "a2_rank1_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "rank1",
+        "objective": 20173201.46875,
+        "t_solve_ms": 0.083152,
+        "t_total_ms": 0.109746,
+        "t_solve_trials_ms": [
+          0.057698,
+          0.064853,
+          0.070102,
+          0.083152,
+          0.069569,
+          0.091971,
+          0.085974,
+          0.100041,
+          0.085024,
+          0.083287,
+          0.082514
+        ],
+        "t_total_trials_ms": [
+          0.088308,
+          0.090392,
+          0.095905,
+          0.113662,
+          0.101194,
+          0.123769,
+          0.120546,
+          0.138075,
+          0.145553,
+          0.109746,
+          0.109097
+        ]
+      },
+      "a2_tall_200x80": {
+        "tier": "tier2_medium",
+        "rows": 200,
+        "cols": 80,
+        "family": "tall",
+        "objective": 4329.4775390625,
+        "t_solve_ms": 0.052885,
+        "t_total_ms": 0.095009,
+        "t_solve_trials_ms": [
+          0.038305,
+          0.057897,
+          0.053528,
+          0.051309,
+          0.061952,
+          0.052885,
+          0.055761,
+          0.049888,
+          0.102414,
+          0.052276,
+          0.048497
+        ],
+        "t_total_trials_ms": [
+          0.090782,
+          0.097402,
+          0.092548,
+          0.094446,
+          0.101553,
+          0.092193,
+          0.095009,
+          0.089179,
+          0.157703,
+          0.126219,
+          0.096482
+        ]
+      },
+      "a2_ties_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "integer_ties",
+        "objective": 1,
+        "t_solve_ms": 0.050901,
+        "t_total_ms": 0.086139,
+        "t_solve_trials_ms": [
+          0.029154,
+          0.043907,
+          0.051648,
+          0.051205,
+          0.053221,
+          0.042289,
+          0.051153,
+          0.050901,
+          0.048344,
+          0.04263,
+          0.052822
+        ],
+        "t_total_trials_ms": [
+          0.064421,
+          0.079033,
+          0.086806,
+          0.086861,
+          0.088333,
+          0.077605,
+          0.086685,
+          0.086139,
+          0.083517,
+          0.077756,
+          0.087962
+        ]
+      },
+      "a2_unif_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "uniform",
+        "objective": 15794.03125,
+        "t_solve_ms": 0.071191,
+        "t_total_ms": 0.09564,
+        "t_solve_trials_ms": [
+          0.056185,
+          0.072223,
+          0.071191,
+          0.05546,
+          0.071789,
+          0.082228,
+          0.065118,
+          0.071589,
+          0.055161,
+          0.07337,
+          0.068917
+        ],
+        "t_total_trials_ms": [
+          0.078071,
+          0.09429,
+          0.097711,
+          0.077754,
+          0.095809,
+          0.104333,
+          0.087293,
+          0.361646,
+          0.077779,
+          0.09564,
+          0.096437
+        ]
+      },
+      "a2_unif_256x256": {
+        "tier": "tier2_medium",
+        "rows": 256,
+        "cols": 256,
+        "family": "uniform",
+        "objective": 14858.734375,
+        "t_solve_ms": 0.363774,
+        "t_total_ms": 0.534287,
+        "t_solve_trials_ms": [
+          0.292668,
+          0.346507,
+          0.363774,
+          0.311404,
+          0.403907,
+          0.392853,
+          0.421884,
+          0.725033,
+          0.324631,
+          0.348958,
+          0.510006
+        ],
+        "t_total_trials_ms": [
+          0.465955,
+          0.50477,
+          0.534287,
+          0.505594,
+          0.66577,
+          0.577221,
+          0.579981,
+          0.8958,
+          0.488579,
+          0.52535,
+          0.672405
+        ]
+      },
+      "a2_unif_64x64": {
+        "tier": "tier2_medium",
+        "rows": 64,
+        "cols": 64,
+        "family": "uniform",
+        "objective": 16825.5546875,
+        "t_solve_ms": 0.039092,
+        "t_total_ms": 0.048641,
+        "t_solve_trials_ms": [
+          0.021892,
+          0.039514,
+          0.033247,
+          0.027318,
+          0.034704,
+          0.039092,
+          0.045535,
+          0.024513,
+          0.039461,
+          0.047869,
+          0.044107
+        ],
+        "t_total_trials_ms": [
+          0.031151,
+          0.048891,
+          0.042551,
+          0.03642,
+          0.044242,
+          0.048641,
+          0.054982,
+          0.033959,
+          0.04881,
+          0.059172,
+          0.053715
+        ]
+      },
+      "a2_wide_80x200": {
+        "tier": "tier2_medium",
+        "rows": 80,
+        "cols": 200,
+        "family": "wide",
+        "objective": 3410.9248046875,
+        "t_solve_ms": 0.051107,
+        "t_total_ms": 0.111045,
+        "t_solve_trials_ms": [
+          0.031113,
+          0.051452,
+          0.064905,
+          0.095478,
+          0.063981,
+          0.051107,
+          0.048026,
+          0.052553,
+          0.048376,
+          0.045906,
+          0.047358
+        ],
+        "t_total_trials_ms": [
+          0.089828,
+          0.096436,
+          0.120819,
+          0.151503,
+          0.111045,
+          0.132725,
+          0.093571,
+          0.137018,
+          0.168951,
+          0.107875,
+          0.104374
+        ]
+      },
+      "a3_geom_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "geometric",
+        "objective": 1396753.6934814453,
+        "t_solve_ms": 3.626815,
+        "t_total_ms": 4.008429,
+        "t_solve_trials_ms": [
+          4.677578,
+          3.31116,
+          6.328405,
+          2.392451,
+          3.626815
+        ],
+        "t_total_trials_ms": [
+          5.053875,
+          3.666037,
+          6.725644,
+          3.29062,
+          4.008429
+        ]
+      },
+      "a3_tall_1000x250": {
+        "tier": "tier3_large",
+        "rows": 1000,
+        "cols": 250,
+        "family": "tall",
+        "objective": 2394.365234375,
+        "t_solve_ms": 0.569291,
+        "t_total_ms": 1.248007,
+        "t_solve_trials_ms": [
+          0.609977,
+          0.488275,
+          0.569291,
+          0.495542,
+          0.574651
+        ],
+        "t_total_trials_ms": [
+          1.510232,
+          1.314682,
+          1.199664,
+          1.248007,
+          1.205255
+        ]
+      },
+      "a3_ties_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "integer_ties",
+        "objective": 0,
+        "t_solve_ms": 0.699575,
+        "t_total_ms": 1.710661,
+        "t_solve_trials_ms": [
+          0.577118,
+          0.699575,
+          0.699963,
+          0.714576,
+          0.651328
+        ],
+        "t_total_trials_ms": [
+          1.636882,
+          1.649755,
+          1.905622,
+          2.43429,
+          1.710661
+        ]
+      },
+      "a3_unif_1000x1000": {
+        "tier": "tier3_large",
+        "rows": 1000,
+        "cols": 1000,
+        "family": "uniform",
+        "objective": 16203.234375,
+        "t_solve_ms": 6.278198,
+        "t_total_ms": 9.97276,
+        "t_solve_trials_ms": [
+          6.237889,
+          7.333616,
+          6.778696,
+          5.476345,
+          6.278198
+        ],
+        "t_total_trials_ms": [
+          9.001509,
+          10.510559,
+          11.685745,
+          8.537371,
+          9.97276
+        ]
+      },
+      "a3_unif_2000x2000": {
+        "tier": "tier3_large",
+        "rows": 2000,
+        "cols": 2000,
+        "family": "uniform",
+        "objective": 16450.51953125,
+        "t_solve_ms": 33.046381,
+        "t_total_ms": 45.253729,
+        "t_solve_trials_ms": [
+          39.890128,
+          33.363098,
+          26.581937,
+          33.046381,
+          24.843742
+        ],
+        "t_total_trials_ms": [
+          53.794416,
+          47.958707,
+          39.251015,
+          45.253729,
+          36.890931
+        ]
+      },
+      "a3_unif_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "uniform",
+        "objective": 16720.21875,
+        "t_solve_ms": 1.318702,
+        "t_total_ms": 1.961281,
+        "t_solve_trials_ms": [
+          1.640152,
+          1.335777,
+          1.157731,
+          1.318702,
+          1.277921
+        ],
+        "t_total_trials_ms": [
+          2.375499,
+          1.961281,
+          1.890407,
+          1.945893,
+          2.010477
+        ]
+      },
+      "a3_wide_250x1000": {
+        "tier": "tier3_large",
+        "rows": 250,
+        "cols": 1000,
+        "family": "wide",
+        "objective": 2515.0654296875,
+        "t_solve_ms": 0.358501,
+        "t_total_ms": 1.054914,
+        "t_solve_trials_ms": [
+          0.331071,
+          0.396895,
+          0.331792,
+          0.387168,
+          0.358501
+        ],
+        "t_total_trials_ms": [
+          1.05951,
+          1.016496,
+          1.054914,
+          1.014287,
+          1.080439
+        ]
+      }
+    },
+    "simd_avx512": {
+      "a1_canon_4x4": {
+        "tier": "tier1_small",
+        "rows": 4,
+        "cols": 4,
+        "family": "canonical",
+        "objective": 275,
+        "t_solve_ms": 0.000857,
+        "t_total_ms": 0.00107,
+        "t_solve_trials_ms": [
+          0.000749,
+          0.001094,
+          0.000898,
+          0.000974,
+          0.000709,
+          0.000977,
+          0.000857,
+          0.000772,
+          0.000836,
+          0.00095,
+          0.000543
+        ],
+        "t_total_trials_ms": [
+          0.000869,
+          0.001296,
+          0.00107,
+          0.001128,
+          0.00086,
+          0.001192,
+          0.001011,
+          0.000926,
+          0.004732,
+          0.00116,
+          0.000684
+        ]
+      },
+      "a1_sparse_24x24": {
+        "tier": "tier1_small",
+        "rows": 24,
+        "cols": 24,
+        "family": "sparse",
+        "objective": 2261,
+        "t_solve_ms": 0.010981,
+        "t_total_ms": 0.017781,
+        "t_solve_trials_ms": [
+          0.005209,
+          0.013379,
+          0.012817,
+          0.012087,
+          0.010508,
+          0.010981,
+          0.01193,
+          0.009802,
+          0.017504,
+          0.010179,
+          0.010692
+        ],
+        "t_total_trials_ms": [
+          0.007839,
+          0.037391,
+          0.019589,
+          0.021246,
+          0.017452,
+          0.017781,
+          0.018546,
+          0.016305,
+          0.02447,
+          0.016922,
+          0.017311
+        ]
+      },
+      "a1_tall_32x16": {
+        "tier": "tier1_small",
+        "rows": 32,
+        "cols": 16,
+        "family": "tall",
+        "objective": 2840.65234375,
+        "t_solve_ms": 0.005506,
+        "t_total_ms": 0.0068,
+        "t_solve_trials_ms": [
+          0.002773,
+          0.006403,
+          0.005297,
+          0.005506,
+          0.006725,
+          0.005857,
+          0.006619,
+          0.006192,
+          0.004503,
+          0.004791,
+          0.004895
+        ],
+        "t_total_trials_ms": [
+          0.004359,
+          0.007631,
+          0.0068,
+          0.006727,
+          0.00822,
+          0.007083,
+          0.009079,
+          0.007477,
+          0.006166,
+          0.006017,
+          0.006393
+        ]
+      },
+      "a1_ties_20x20": {
+        "tier": "tier1_small",
+        "rows": 20,
+        "cols": 20,
+        "family": "integer_ties",
+        "objective": 4,
+        "t_solve_ms": 0.006334,
+        "t_total_ms": 0.009367,
+        "t_solve_trials_ms": [
+          0.002909,
+          0.006334,
+          0.006131,
+          0.006534,
+          0.00777,
+          0.00579,
+          0.006369,
+          0.005666,
+          0.006064,
+          0.006336,
+          0.009821
+        ],
+        "t_total_trials_ms": [
+          0.007118,
+          0.009393,
+          0.007611,
+          0.012027,
+          0.011025,
+          0.008948,
+          0.00923,
+          0.007138,
+          0.009503,
+          0.009367,
+          0.012726
+        ]
+      },
+      "a1_unif_10x10": {
+        "tier": "tier1_small",
+        "rows": 10,
+        "cols": 10,
+        "family": "uniform",
+        "objective": 18107.9306640625,
+        "t_solve_ms": 0.002663,
+        "t_total_ms": 0.003272,
+        "t_solve_trials_ms": [
+          0.00137,
+          0.00374,
+          0.002609,
+          0.002625,
+          0.002768,
+          0.002663,
+          0.002348,
+          0.002454,
+          0.003052,
+          0.003165,
+          0.003038
+        ],
+        "t_total_trials_ms": [
+          0.003272,
+          0.004105,
+          0.002941,
+          0.00294,
+          0.00311,
+          0.004845,
+          0.002676,
+          0.002792,
+          0.003372,
+          0.005024,
+          0.003367
+        ]
+      },
+      "a1_wide_16x32": {
+        "tier": "tier1_small",
+        "rows": 16,
+        "cols": 32,
+        "family": "wide",
+        "objective": 5044.6572265625,
+        "t_solve_ms": 0.005495,
+        "t_total_ms": 0.008517,
+        "t_solve_trials_ms": [
+          0.002661,
+          0.007232,
+          0.005845,
+          0.005389,
+          0.004547,
+          0.006606,
+          0.006384,
+          0.006779,
+          0.004894,
+          0.005343,
+          0.005495
+        ],
+        "t_total_trials_ms": [
+          0.005303,
+          0.01028,
+          0.009245,
+          0.008517,
+          0.007353,
+          0.009651,
+          0.009167,
+          0.009854,
+          0.007495,
+          0.007475,
+          0.006745
+        ]
+      },
+      "a2_geom_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "geometric",
+        "objective": 610058.9289550781,
+        "t_solve_ms": 0.16054,
+        "t_total_ms": 0.170518,
+        "t_solve_trials_ms": [
+          0.099938,
+          0.16054,
+          0.151121,
+          0.274861,
+          0.194014,
+          0.133733,
+          0.131115,
+          0.203977,
+          0.192555,
+          0.114555,
+          0.204629
+        ],
+        "t_total_trials_ms": [
+          0.10984,
+          0.170518,
+          0.160844,
+          0.286605,
+          0.203424,
+          0.142919,
+          0.141094,
+          0.271531,
+          0.48789,
+          0.124467,
+          0.216817
+        ]
+      },
+      "a2_max_128x128": {
+        "tier": "tier2_medium",
+        "rows": 128,
+        "cols": 128,
+        "family": "maximize",
+        "objective": 1233885.4111328125,
+        "t_solve_ms": 0.096945,
+        "t_total_ms": 0.140547,
+        "t_solve_trials_ms": [
+          0.124169,
+          0.109079,
+          0.097879,
+          0.085791,
+          0.091553,
+          0.116905,
+          0.080341,
+          0.091958,
+          0.109416,
+          0.096945,
+          0.095324
+        ],
+        "t_total_trials_ms": [
+          0.172222,
+          0.151362,
+          0.140547,
+          0.127579,
+          0.143395,
+          0.161893,
+          0.120409,
+          0.131985,
+          0.149308,
+          0.136857,
+          0.135201
+        ]
+      },
+      "a2_rank1_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "rank1",
+        "objective": 20173201.46875,
+        "t_solve_ms": 0.082513,
+        "t_total_ms": 0.110284,
+        "t_solve_trials_ms": [
+          0.058539,
+          0.070701,
+          0.071445,
+          0.082628,
+          0.070899,
+          0.09331,
+          0.085149,
+          0.097806,
+          0.099437,
+          0.082513,
+          0.080229
+        ],
+        "t_total_trials_ms": [
+          0.08285,
+          0.097386,
+          0.097362,
+          0.108484,
+          0.100506,
+          0.121968,
+          0.11248,
+          0.131304,
+          0.142023,
+          0.137674,
+          0.110284
+        ]
+      },
+      "a2_tall_200x80": {
+        "tier": "tier2_medium",
+        "rows": 200,
+        "cols": 80,
+        "family": "tall",
+        "objective": 4329.4775390625,
+        "t_solve_ms": 0.048795,
+        "t_total_ms": 0.092043,
+        "t_solve_trials_ms": [
+          0.026892,
+          0.052947,
+          0.046016,
+          0.057267,
+          0.053052,
+          0.049923,
+          0.048024,
+          0.046846,
+          0.089579,
+          0.048795,
+          0.042908
+        ],
+        "t_total_trials_ms": [
+          0.094011,
+          0.092717,
+          0.085283,
+          0.096172,
+          0.092043,
+          0.089147,
+          0.086943,
+          0.085901,
+          0.146327,
+          0.130822,
+          0.088333
+        ]
+      },
+      "a2_ties_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "integer_ties",
+        "objective": 1,
+        "t_solve_ms": 0.049187,
+        "t_total_ms": 0.084928,
+        "t_solve_trials_ms": [
+          0.028936,
+          0.043046,
+          0.049829,
+          0.050308,
+          0.051775,
+          0.040059,
+          0.05636,
+          0.049187,
+          0.046701,
+          0.039271,
+          0.050787
+        ],
+        "t_total_trials_ms": [
+          0.069096,
+          0.078098,
+          0.084928,
+          0.085796,
+          0.08701,
+          0.075022,
+          0.093789,
+          0.084923,
+          0.101465,
+          0.074925,
+          0.086161
+        ]
+      },
+      "a2_unif_100x100": {
+        "tier": "tier2_medium",
+        "rows": 100,
+        "cols": 100,
+        "family": "uniform",
+        "objective": 15794.03125,
+        "t_solve_ms": 0.072558,
+        "t_total_ms": 0.094577,
+        "t_solve_trials_ms": [
+          0.055349,
+          0.084516,
+          0.072558,
+          0.057192,
+          0.072678,
+          0.086969,
+          0.06704,
+          0.070851,
+          0.05575,
+          0.075391,
+          0.076835
+        ],
+        "t_total_trials_ms": [
+          0.077028,
+          0.106341,
+          0.101804,
+          0.079127,
+          0.094577,
+          0.112394,
+          0.088802,
+          0.09255,
+          0.077643,
+          0.097326,
+          0.373406
+        ]
+      },
+      "a2_unif_256x256": {
+        "tier": "tier2_medium",
+        "rows": 256,
+        "cols": 256,
+        "family": "uniform",
+        "objective": 14858.734375,
+        "t_solve_ms": 0.331686,
+        "t_total_ms": 0.524159,
+        "t_solve_trials_ms": [
+          0.261172,
+          0.320979,
+          0.352739,
+          0.288224,
+          0.357714,
+          0.370947,
+          0.383252,
+          0.315897,
+          0.29748,
+          0.331686,
+          0.461992
+        ],
+        "t_total_trials_ms": [
+          0.444883,
+          0.480587,
+          0.524159,
+          0.500517,
+          0.635764,
+          0.545453,
+          0.54957,
+          0.492916,
+          0.59284,
+          0.500902,
+          0.619794
+        ]
+      },
+      "a2_unif_64x64": {
+        "tier": "tier2_medium",
+        "rows": 64,
+        "cols": 64,
+        "family": "uniform",
+        "objective": 16825.5546875,
+        "t_solve_ms": 0.039132,
+        "t_total_ms": 0.049182,
+        "t_solve_trials_ms": [
+          0.018867,
+          0.039132,
+          0.03068,
+          0.025146,
+          0.033004,
+          0.060291,
+          0.044775,
+          0.021832,
+          0.039833,
+          0.050251,
+          0.043614
+        ],
+        "t_total_trials_ms": [
+          0.02896,
+          0.049182,
+          0.04127,
+          0.035501,
+          0.043132,
+          0.070534,
+          0.055224,
+          0.031916,
+          0.049948,
+          0.060313,
+          0.053713
+        ]
+      },
+      "a2_wide_80x200": {
+        "tier": "tier2_medium",
+        "rows": 80,
+        "cols": 200,
+        "family": "wide",
+        "objective": 3410.9248046875,
+        "t_solve_ms": 0.04444,
+        "t_total_ms": 0.087506,
+        "t_solve_trials_ms": [
+          0.023714,
+          0.046529,
+          0.05224,
+          0.043321,
+          0.093335,
+          0.046861,
+          0.044541,
+          0.043522,
+          0.04444,
+          0.044139,
+          0.044418
+        ],
+        "t_total_trials_ms": [
+          0.063372,
+          0.086359,
+          0.091517,
+          0.082873,
+          0.14373,
+          0.1214,
+          0.084063,
+          0.129097,
+          0.084015,
+          0.160893,
+          0.087506
+        ]
+      },
+      "a3_geom_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "geometric",
+        "objective": 1396753.6934814453,
+        "t_solve_ms": 3.448406,
+        "t_total_ms": 3.849256,
+        "t_solve_trials_ms": [
+          4.865192,
+          3.015852,
+          6.361679,
+          2.377847,
+          3.448406
+        ],
+        "t_total_trials_ms": [
+          5.244543,
+          3.529481,
+          6.726741,
+          2.725638,
+          3.849256
+        ]
+      },
+      "a3_tall_1000x250": {
+        "tier": "tier3_large",
+        "rows": 1000,
+        "cols": 250,
+        "family": "tall",
+        "objective": 2394.365234375,
+        "t_solve_ms": 0.51338,
+        "t_total_ms": 1.162479,
+        "t_solve_trials_ms": [
+          0.56229,
+          0.45612,
+          0.527217,
+          0.428858,
+          0.51338
+        ],
+        "t_total_trials_ms": [
+          1.85392,
+          1.515272,
+          1.158769,
+          1.162479,
+          1.138428
+        ]
+      },
+      "a3_ties_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "integer_ties",
+        "objective": 0,
+        "t_solve_ms": 0.623008,
+        "t_total_ms": 1.642858,
+        "t_solve_trials_ms": [
+          0.522995,
+          0.632176,
+          0.639902,
+          0.623008,
+          0.586456
+        ],
+        "t_total_trials_ms": [
+          1.59933,
+          1.69416,
+          1.726951,
+          1.576564,
+          1.642858
+        ]
+      },
+      "a3_unif_1000x1000": {
+        "tier": "tier3_large",
+        "rows": 1000,
+        "cols": 1000,
+        "family": "uniform",
+        "objective": 16203.234375,
+        "t_solve_ms": 5.219942,
+        "t_total_ms": 8.226855,
+        "t_solve_trials_ms": [
+          5.659099,
+          5.951037,
+          5.219942,
+          4.615568,
+          5.190487
+        ],
+        "t_total_trials_ms": [
+          8.858177,
+          9.897352,
+          7.700863,
+          7.118017,
+          8.226855
+        ]
+      },
+      "a3_unif_2000x2000": {
+        "tier": "tier3_large",
+        "rows": 2000,
+        "cols": 2000,
+        "family": "uniform",
+        "objective": 16450.51953125,
+        "t_solve_ms": 23.084284,
+        "t_total_ms": 35.343562,
+        "t_solve_trials_ms": [
+          27.906999,
+          24.053567,
+          19.417318,
+          23.084284,
+          18.144323
+        ],
+        "t_total_trials_ms": [
+          41.885362,
+          38.513126,
+          31.452884,
+          35.343562,
+          28.54522
+        ]
+      },
+      "a3_unif_500x500": {
+        "tier": "tier3_large",
+        "rows": 500,
+        "cols": 500,
+        "family": "uniform",
+        "objective": 16720.21875,
+        "t_solve_ms": 1.140777,
+        "t_total_ms": 2.095571,
+        "t_solve_trials_ms": [
+          1.457101,
+          1.243086,
+          1.04548,
+          1.140777,
+          1.08996
+        ],
+        "t_total_trials_ms": [
+          2.175734,
+          1.875579,
+          1.77463,
+          2.269939,
+          2.095571
+        ]
+      },
+      "a3_wide_250x1000": {
+        "tier": "tier3_large",
+        "rows": 250,
+        "cols": 1000,
+        "family": "wide",
+        "objective": 2515.0654296875,
+        "t_solve_ms": 0.276287,
+        "t_total_ms": 1.001013,
+        "t_solve_trials_ms": [
+          0.24786,
+          0.466645,
+          0.25442,
+          0.323516,
+          0.276287
+        ],
+        "t_total_trials_ms": [
+          0.976082,
+          1.087423,
+          1.01368,
+          0.95748,
+          1.001013
+        ]
+      }
+    }
+  }
+}

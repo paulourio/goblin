@@ -603,17 +603,94 @@ def helperWithString : String := "-- theorem notAComment"
 		t.Fatalf("unexpected kernel/lock counts: kernel=(%d+%d=%d) locks=%d",
 			inv.LeanGoblinKernel, inv.LeanAppsKernel, inv.LeanTotalKernel, inv.AxiomLocks)
 	}
-	if len(inv.ProdCertFiles) != 5 || inv.ProdCertLOC != 18475 {
+	if len(inv.ProdCertFiles) != 5 || inv.ProdCertLOC != 18489 {
 		t.Fatalf("unexpected prod cert files=%d loc=%d", len(inv.ProdCertFiles), inv.ProdCertLOC)
 	}
 	if len(inv.FormalTestFiles) != 21 || inv.TotalGoTestFiles != 30 {
 		t.Fatalf("unexpected Go test file counts: formal=%d total=%d", len(inv.FormalTestFiles), inv.TotalGoTestFiles)
 	}
-	if inv.DefaultFuzzCount != 37 || inv.CBCFuzzCount != 8 || inv.TotalFuzzCount != 45 || inv.TSVActiveRowCount != 45 {
+	if inv.DefaultFuzzCount != 40 || inv.CBCFuzzCount != 8 || inv.TotalFuzzCount != 48 || inv.TSVActiveRowCount != 48 {
 		t.Fatalf("unexpected Fuzz counts: default=%d cbc=%d total=%d tsv=%d",
 			inv.DefaultFuzzCount, inv.CBCFuzzCount, inv.TotalFuzzCount, inv.TSVActiveRowCount)
 	}
 	if err := SyncFormalDocs("..", true); err != nil {
 		t.Fatalf("SyncFormalDocs: %v", err)
+	}
+}
+
+func TestTargetSiliconDocgenAndNegativeControls(t *testing.T) {
+	t.Parallel()
+
+	cases := BuildCorpus()
+	assignCases := AssignCorpusSpecs()
+
+	tsDir := filepath.Join("results", "target_silicon")
+	ts, err := LoadTargetSiliconBundle(tsDir)
+	if err != nil {
+		t.Fatalf("LoadTargetSiliconBundle: %v", err)
+	}
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, ts); err != nil {
+		t.Fatalf("ValidateTargetSiliconTelemetry: %v", err)
+	}
+
+	tb, err := LoadTelemetryBundle(
+		"results/python_baseline.json",
+		"results/goblin_scalar.json",
+		"results/goblin_simd.json",
+	)
+	if err != nil {
+		t.Fatalf("LoadTelemetryBundle: %v", err)
+	}
+	rendered, err := RenderBlock("TARGET_SILICON_SUMMARY", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(TARGET_SILICON_SUMMARY): %v", err)
+	}
+	for _, want := range []string{
+		"Native `linux/amd64` AVX-512 host",
+		"Native `linux/arm64` host",
+		"`simd.HardwareSIMDTier() == \"avx512\"`",
+		"Emerald Rapids 6-Round Interleaved AB/BA Vector Kernel Crossover",
+		"Target-Silicon End-to-End LP/MILP and LSAP Corpus Summary",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("TARGET_SILICON_SUMMARY missing %q:\n%s", want, rendered)
+		}
+	}
+
+	// Future solver commits must not fail ValidateTargetSiliconTelemetry when SourceFingerprint advances.
+	cloneTS := func() *TargetSiliconBundle {
+		cp := *ts
+		return &cp
+	}
+	tsHistorical := cloneTS()
+	tsHistorical.AMD64.SourceFingerprint = "0123456789abcdef"
+	tsHistorical.ARM64.SourceFingerprint = "0123456789abcdef"
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, tsHistorical); err != nil {
+		t.Fatalf("expected historical target-silicon fingerprint to remain valid without GCE re-run, got: %v", err)
+	}
+
+	// Negative controls on ValidateTargetSiliconTelemetry.
+	badTier := cloneTS()
+	badTier.AMD64.HardwareSIMDTier = "avx2"
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, badTier); err == nil {
+		t.Fatal("expected error when amd64_avx512 HardwareSIMDTier != avx512")
+	}
+
+	badBusy := cloneTS()
+	badBusy.AMD64.PreBenchCPUBusyPct = 7.5
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, badBusy); err == nil {
+		t.Fatal("expected error when pre_bench_cpu_busy_pct >= 5.0")
+	}
+
+	badParity := cloneTS()
+	badParity.ARM64.AssignCorpus.ParityMismatches = 1
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, badParity); err == nil {
+		t.Fatal("expected error on non-zero arm64 LSAP parity_mismatches")
+	}
+
+	badKernel := cloneTS()
+	badKernel.AMD64.KernelABBA.Entries = nil
+	if err := ValidateTargetSiliconTelemetry(cases, assignCases, badKernel); err == nil {
+		t.Fatal("expected error when kernel_abba entries are empty")
 	}
 }

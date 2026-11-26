@@ -5860,9 +5860,21 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 		dTol = s.effDualTol
 	}
 	useDevex := !bland && s.devexActive
+	n := s.mat.numVars
 	costSlice := ws.cost[:tot]
 	status := ws.status[:tot]
 	djSlice := ws.dj[:tot]
+	slackNoise := -1.0
+	phase2NoiseTol := func(k int) float64 {
+		tol := s.colDualNoiseTol(k, costSlice)
+		if k >= n {
+			if slackNoise < 0 {
+				slackNoise = 128.0 * unitRoundoff64 * s.maxAbsWorkingDual()
+			}
+			tol = max(tol, slackNoise)
+		}
+		return tol
+	}
 
 	if useDevex {
 		if len(ws.devexWeight) < tot || len(ws.devexRef) < tot {
@@ -5890,7 +5902,7 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 					if enterVar != -1 && vv <= bestScore*w {
 						continue
 					}
-					if !phase1 && viol <= s.colDualNoiseTol(k, costSlice) {
+					if !phase1 && viol <= phase2NoiseTol(k) {
 						continue
 					}
 					bestScore = vv / w
@@ -5898,7 +5910,7 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 					enterDir = dir
 					continue
 				}
-				if !phase1 && viol <= s.colDualNoiseTol(k, costSlice) {
+				if !phase1 && viol <= phase2NoiseTol(k) {
 					continue
 				}
 				largeScale = true
@@ -5917,7 +5929,7 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 			if enterVar != -1 && score <= bestScore {
 				continue
 			}
-			if !phase1 && viol <= s.colDualNoiseTol(k, costSlice) {
+			if !phase1 && viol <= phase2NoiseTol(k) {
 				continue
 			}
 			bestScore = score
@@ -5938,7 +5950,7 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 			if !ok || viol <= bestViolation {
 				continue
 			}
-			if !phase1 && viol <= s.colDualNoiseTol(k, costSlice) {
+			if !phase1 && viol <= phase2NoiseTol(k) {
 				continue
 			}
 			if bland {
@@ -6002,15 +6014,7 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 	}
 
 	if enterVar == -1 && !phase1 {
-		n := s.mat.numVars
 		bestGain := 10.0 * primalTol
-		slackNoise := -1.0
-		slackBTRANNoise := func() float64 {
-			if slackNoise < 0 {
-				slackNoise = 128.0 * unitRoundoff64 * s.maxAbsWorkingDual()
-			}
-			return slackNoise
-		}
 		for k := range tot {
 			st := ws.status[k]
 			if st != statusAtLower && st != statusAtUpper {
@@ -6041,7 +6045,7 @@ func (s *LPSolver) pricePrimalEnter(phase1, bland bool) (enterVar int, enterDir 
 				if !spOK {
 					continue
 				}
-				noise = max(s.colDualNoiseTol(k, costSlice), slackBTRANNoise())
+				noise = phase2NoiseTol(k)
 			}
 			if span > 0 {
 				if gain := viol * span; gain > bestGain && viol > noise {
@@ -8341,6 +8345,7 @@ func (s *LPSolver) dualResidualsEval(
 	gapTol := max(1e-4, 1e-5*max(1.0, math.Abs(objMin)))
 	compGap := 0.0
 	status := ws.status[:ws.totVar]
+	statusN := status[:n]
 	if len(primal) >= n {
 		primal = primal[:n]
 	}
@@ -8374,28 +8379,74 @@ func (s *LPSolver) dualResidualsEval(
 
 	for i := range m {
 		yiSum, yiRem, d2Abs := rowDualAt(i)
-		if yiSum == 0 && yiRem == 0 {
-			continue
-		}
 		isBase := i < baseM
 		sense := LessEqual
 		if isBase {
 			sense = rowSense[i]
 		}
 		slackBasic := status[n+i] == statusBasic
-		needSignCheck := (sense == LessEqual && yiSum > 0) || (sense == GreaterEqual && yiSum < 0)
-		strictSign := !slackBasic && hasInfStruct && needSignCheck && s.slackCanMoveUnbounded(i, sense == LessEqual)
 		d1Abs := 0.0
 		if dy1Min != nil {
 			d1Abs = math.Abs(dy1Min[i])
 		}
-		rowNoise := combineDualNoiseTol(
-			math.Abs(yiRem),
-			d2Abs*0x1p-32,
-			(math.Abs(yMin[i])+d1Abs)*0x1p-32,
-			maxBasisDualRel,
-			4.0,
-		)
+		rowNoise := 0.0
+		if yiSum != 0 || yiRem != 0 {
+			rowNoise = combineDualNoiseTol(
+				math.Abs(yiRem),
+				d2Abs*0x1p-32,
+				(math.Abs(yMin[i])+d1Abs)*0x1p-32,
+				maxBasisDualRel,
+				4.0,
+			)
+		}
+		if isBase && hasCachedRowRes {
+			res := rowRes[i]
+			viol := 0.0
+			needInc := false
+			if sense != LessEqual && res < 0 {
+				viol = -res
+				needInc = true
+			} else if sense != GreaterEqual && res > 0 {
+				viol = res
+			}
+			if viol > 0 {
+				rowL1 := evalRowActiveL1(p, i, primal)
+				effViol := viol - 16.0*unitRoundoff64*rowL1
+				if effViol > 0 {
+					rate := 0.0
+					if needInc && yiSum > rowNoise {
+						rate = yiSum - rowNoise
+					} else if !needInc && yiSum < -rowNoise {
+						rate = -yiSum - rowNoise
+					}
+					if slackBasic {
+						st, en := rowPtr[i], rowPtr[i+1]
+						if mr, ok := rowDualShiftRepairRate(
+							p.colIdx[st:en], p.rowVal[st:en],
+							statusN, primal, unscaledLB, unscaledUB,
+							djOrig, djErr, dy2Sc, yDotSc, maxBasisDualRel, needInc,
+						); ok {
+							rate += mr
+						}
+					}
+					if rate > 0 {
+						gapAdd := rate * effViol
+						if math.IsNaN(gapAdd) || math.IsInf(gapAdd, 0) {
+							return false
+						}
+						compGap += gapAdd
+						if compGap > gapTol {
+							return false
+						}
+					}
+				}
+			}
+		}
+		if yiSum == 0 && yiRem == 0 {
+			continue
+		}
+		needSignCheck := (sense == LessEqual && yiSum > 0) || (sense == GreaterEqual && yiSum < 0)
+		strictSign := !slackBasic && hasInfStruct && needSignCheck && s.slackCanMoveUnbounded(i, sense == LessEqual)
 		rowSignTol := signTol
 		if strictSign {
 			if strictUnrefined {
@@ -8477,7 +8528,6 @@ func (s *LPSolver) dualResidualsEval(
 		}
 	}
 
-	statusN := status[:n]
 	scaledGap := func(mag, hi, lo float64) float64 {
 		rem := hi - lo
 		if math.IsInf(rem, 1) {
@@ -8610,9 +8660,9 @@ func (s *LPSolver) primalResidualsWithinTol(primal []float64) bool {
 				return false
 			}
 		} else if (!math.IsInf(p.rowLB[i], -1) && res < 0) || (!math.IsInf(p.rowUB[i], 1) && res > 0) {
-			domMaxA := rowDomainMaxAbsAtMost1(p.colIdx[st:en], p.rowVal[st:en], unscaledLB, unscaledUB)
-			if domMaxA < 1.0 {
-				domTol := max(verifyFeasTol*domMaxA, 1e-8*evalRowActiveL1(p, i, primal))
+			domScale := rowDomainScaleAtMost1(p.colIdx[st:en], p.rowVal[st:en], unscaledLB, unscaledUB, rhs)
+			if domScale < 1.0 {
+				domTol := max(verifyFeasTol*domScale, 1e-8*evalRowActiveL1(p, i, primal))
 				if math.Abs(res) > domTol {
 					return false
 				}
@@ -8643,8 +8693,165 @@ func (s *LPSolver) primalResidualsWithinTol(primal []float64) bool {
 	return true
 }
 
+// rowDomainScaleAtMost1 returns min(1.0, rowDomainMaxAbs, rowDomainActScale) for a base row.
+// It tightens the residual tolerance when matrix coefficients are below 1.0 or when all finite
+// variable domains and the RHS have activity magnitude below 1.0.
+func rowDomainScaleAtMost1(cols []int, vals, lb, ub []float64, rhs float64) float64 {
+	domMaxA := rowDomainMaxAbsAtMost1(cols, vals, lb, ub)
+	domAct := math.Abs(rhs)
+	if isNonFinite(domAct) || domAct >= domMaxA {
+		return domMaxA
+	}
+	hasPos := domAct > 0
+	for k, col := range cols {
+		av := math.Abs(vals[k])
+		if av == 0 {
+			continue
+		}
+		l, u := lb[col], ub[col]
+		var term float64
+		if math.IsInf(l, 0) || math.IsInf(u, 0) {
+			term = av
+		} else {
+			mag := max(math.Abs(l), math.Abs(u))
+			if mag == 0 {
+				continue
+			}
+			hasPos = true
+			term = av * mag
+		}
+		if term > domAct {
+			domAct = term
+			if domAct >= domMaxA {
+				return domMaxA
+			}
+		}
+	}
+	if !hasPos {
+		return domMaxA
+	}
+	if domAct <= 0 {
+		return math.SmallestNonzeroFloat64
+	}
+	return domAct
+}
+
+// rowDualShiftRepairRate returns a dual-feasible lower bound on the marginal objective cost per
+// unit of row residual required to repair a violated base row whose slack is basic. It returns
+// (0, false) if any column can repair the residual at zero or noise-level reduced cost, or if no
+// column can move in the repair direction.
+func rowDualShiftRepairRate(
+	cols []int, vals []float64,
+	status []varBasisStatus, primal, lb, ub []float64,
+	djOrig, djErr, dy2Sc, yDotSc []float64,
+	maxBasisDualRel float64, needInc bool,
+) (float64, bool) {
+	minRate := math.Inf(1)
+	found := false
+	for k, col := range cols {
+		a := vals[k]
+		if a == 0 {
+			continue
+		}
+		st := status[col]
+		if st == statusFixed {
+			continue
+		}
+		wantUp := (needInc && a > 0) || (!needInc && a < 0)
+		if wantUp {
+			if st == statusAtUpper || (!math.IsInf(ub[col], 1) && primal[col] >= ub[col]) {
+				continue
+			}
+		} else {
+			if st == statusAtLower || (!math.IsInf(lb[col], -1) && primal[col] <= lb[col]) {
+				continue
+			}
+		}
+		found = true
+		if st == statusBasic || st == statusSuperBasic {
+			return 0, false
+		}
+		noise := combineDualNoiseTol(djErr[col], dy2Sc[col], yDotSc[col], maxBasisDualRel, 4.0)
+		var effDJ float64
+		if wantUp {
+			effDJ = djOrig[col] - noise
+		} else {
+			effDJ = -djOrig[col] - noise
+		}
+		if effDJ <= 0 {
+			return 0, false
+		}
+		rate := effDJ / math.Abs(a)
+		if rate < minRate {
+			minRate = rate
+		}
+	}
+	if !found || math.IsInf(minRate, 1) || math.IsNaN(minRate) || minRate <= 0 {
+		return 0, false
+	}
+	return minRate, true
+}
+
+// rowSlackRepairRateUnscaled estimates the marginal objective cost per unit of row residual
+// on a basic-slack violated row directly from current workspace reduced costs.
+func (s *LPSolver) rowSlackRepairRateUnscaled(cols []int, vals []float64, primal, lb, ub []float64, needInc bool) (float64, bool) {
+	ws := s.ws
+	if !s.dualValid || len(ws.dj) < len(primal) || len(ws.status) < len(primal) {
+		return 0, false
+	}
+	minRate := math.Inf(1)
+	found := false
+	for k, col := range cols {
+		a := vals[k]
+		if a == 0 {
+			continue
+		}
+		st := ws.status[col]
+		if st == statusFixed {
+			continue
+		}
+		wantUp := (needInc && a > 0) || (!needInc && a < 0)
+		if wantUp {
+			if st == statusAtUpper || (!math.IsInf(ub[col], 1) && primal[col] >= ub[col]) {
+				continue
+			}
+		} else {
+			if st == statusAtLower || (!math.IsInf(lb[col], -1) && primal[col] <= lb[col]) {
+				continue
+			}
+		}
+		found = true
+		if st == statusBasic || st == statusSuperBasic {
+			return 0, false
+		}
+		dj := ws.dj[col]
+		if s.scaled {
+			dj *= s.objScale * s.invColScale[col]
+		}
+		if isNonFinite(dj) {
+			return 0, false
+		}
+		effDJ := dj
+		if !wantUp {
+			effDJ = -dj
+		}
+		if effDJ <= 0 {
+			return 0, false
+		}
+		rate := effDJ / math.Abs(a)
+		if rate < minRate {
+			minRate = rate
+		}
+	}
+	if !found || math.IsInf(minRate, 1) || math.IsNaN(minRate) || minRate <= 0 {
+		return 0, false
+	}
+	return minRate, true
+}
+
 // tryTightenDomainSlackTols inspects violated base rows whose active domain norm is below 1.0
-// and lowers s.slackTol on those rows so basic slacks cannot mask domain-scale infeasibilities.
+// or whose basic-slack residual induces a dual objective error above gapTol, and lowers
+// s.slackTol on those rows so basic slacks cannot mask domain-scale or high-cost violations.
 func (s *LPSolver) tryTightenDomainSlackTols() ([]float64, bool) {
 	p := s.prob
 	ws := s.ws
@@ -8658,6 +8865,7 @@ func (s *LPSolver) tryTightenDomainSlackTols() ([]float64, bool) {
 		unscaledLB, unscaledUB = s.origLB, s.origUB
 	}
 	primal := make([]float64, n)
+	objMin := 0.0
 	for j := range n {
 		v := ws.x[j]
 		if s.scaled {
@@ -8670,6 +8878,11 @@ func (s *LPSolver) tryTightenDomainSlackTols() ([]float64, bool) {
 			v = unscaledLB[j]
 		}
 		primal[j] = v
+		objMin += p.objMin[j] * v
+	}
+	gapTol := max(1e-4, 1e-5*max(1.0, math.Abs(objMin)))
+	if isNonFinite(gapTol) {
+		gapTol = 1e-4
 	}
 
 	var origSlack []float64
@@ -8688,32 +8901,49 @@ func (s *LPSolver) tryTightenDomainSlackTols() ([]float64, bool) {
 			continue
 		}
 		viol := 0.0
+		needInc := false
 		if !math.IsInf(p.rowLB[i], -1) && res < 0 {
-			viol = max(viol, -res)
+			viol = -res
+			needInc = true
 		}
-		if !math.IsInf(p.rowUB[i], 1) && res > 0 {
-			viol = max(viol, res)
+		if !math.IsInf(p.rowUB[i], 1) && res > 0 && res > viol {
+			viol = res
+			needInc = false
 		}
 		if viol == 0 {
 			continue
 		}
-		domMaxA := rowDomainMaxAbsAtMost1(cols, vals, unscaledLB, unscaledUB)
-		if domMaxA >= 1.0 {
-			continue
-		}
 		rowL1 := evalRowActiveL1(p, i, primal)
-		domTol := max(verifyFeasTol*domMaxA, 1e-8*rowL1)
-		if viol <= domTol {
-			continue
-		}
 		rs := s.rowScaleOf(i)
-		wantTol := max(primalTol*rs*domMaxA, 16.0*unitRoundoff64*rs*rowL1)
-		if wantTol <= 0 || isNonFinite(wantTol) {
-			wantTol = math.SmallestNonzeroFloat64
-		}
+		minFloor := 16.0 * unitRoundoff64 * rs * rowL1
 		curTol := primalTol
 		if i < len(s.slackTol) {
 			curTol = s.slackTol[i]
+		}
+		wantTol := curTol
+		domScale := rowDomainScaleAtMost1(cols, vals, unscaledLB, unscaledUB, rhs)
+		if domScale < 1.0 {
+			domTol := max(verifyFeasTol*domScale, 1e-8*rowL1)
+			if viol > domTol {
+				cand := max(primalTol*rs*domScale, minFloor)
+				if cand < wantTol {
+					wantTol = cand
+				}
+			}
+		}
+		if n+i < len(ws.status) && ws.status[n+i] == statusBasic {
+			effViol := viol - 16.0*unitRoundoff64*rowL1
+			if effViol > 0 {
+				if rate, ok := s.rowSlackRepairRateUnscaled(cols, vals, primal, unscaledLB, unscaledUB, needInc); ok && rate*effViol > 0.5*gapTol {
+					cand := max((0.01*gapTol/rate)*rs, minFloor)
+					if cand < wantTol {
+						wantTol = cand
+					}
+				}
+			}
+		}
+		if wantTol <= 0 || isNonFinite(wantTol) {
+			wantTol = math.SmallestNonzeroFloat64
 		}
 		if wantTol >= curTol {
 			continue

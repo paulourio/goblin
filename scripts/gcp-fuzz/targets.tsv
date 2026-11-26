@@ -44,3 +44,6 @@
 42	/app/bin/format_cbc.test	/app/work/format	FuzzWriteMPSCBCParity	heavy	8
 43	/app/bin/goblin_cbc.test	/app/work	FuzzGeneralLPAndMILPCBC	heavy	8
 44	/app/bin/goblin_cbc.test	/app/work	FuzzCBCLPSolverIncremental	heavy	8
+45	/app/bin/goblin.test	/app/work	FuzzExactRatAndPuLPJSONVIPR	heavy	16
+46	/app/bin/goblin.test	/app/work	FuzzPrimalDevexAndIncrementalDuals	heavy	16
+47	/app/bin/goblin.test	/app/work	FuzzRelaxCutDynamismAndRootCuts	heavy	16

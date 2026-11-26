@@ -1635,6 +1635,34 @@ func ExactProblemRatsForTest(p *CompiledProblem) (
 	return objConst, cloneRatSlice(objVec), rowRHS, rowCols, rowVals, hasInexactOrig, true
 }
 
+// ExactVarBoundsRatsForTest returns exact rational lower and upper variable bounds for p,
+// preserving exactOrig non-dyadic bounds when present; nil entries denote infinite bounds.
+func ExactVarBoundsRatsForTest(p *CompiledProblem) (lb, ub []*big.Rat, ok bool) {
+	if p == nil {
+		return nil, nil, false
+	}
+	n := p.numVars
+	lb = make([]*big.Rat, n)
+	ub = make([]*big.Rat, n)
+	for j := range n {
+		hasLB, lr, okL := exactVarLBRat(p, j)
+		if !okL {
+			return nil, nil, false
+		}
+		if hasLB {
+			lb[j] = new(big.Rat).Set(lr)
+		}
+		hasUB, ur, okU := exactVarUBRat(p, j)
+		if !okU {
+			return nil, nil, false
+		}
+		if hasUB {
+			ub[j] = new(big.Rat).Set(ur)
+		}
+	}
+	return lb, ub, true
+}
+
 // ExactPolishBasisSolutionForTest exports exactPolishBasisSolutionStop to package goblin_test.
 func ExactPolishBasisSolutionForTest(ctx context.Context, s *LPSolver) (ExactLPSolution, bool) {
 	return exactPolishBasisSolutionStop(exactStopFromCtx(ctx), s)
