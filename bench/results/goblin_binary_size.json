@@ -16,8 +16,7 @@
     "vipr_bytes": 0,
     "cert_syms": 17,
     "cert_bytes": 21698,
-    "git_commit": "1ba2236d5b5ba160c2f4ba70990b6799b866b2a4",
-    "git_dirty": true,
+    "git_commit": "69bc7898a2e3f299552b742f6bce22deb3f724c0",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -25,7 +24,7 @@
     "goamd64": "v1",
     "source_fingerprint": "907d83c35a5be855",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-26T02:58:07Z"
+    "measured_at": "2026-11-26T03:04:01Z"
   },
   "assign_default": {
     "id": "assign_default",
@@ -44,8 +43,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "1ba2236d5b5ba160c2f4ba70990b6799b866b2a4",
-    "git_dirty": true,
+    "git_commit": "69bc7898a2e3f299552b742f6bce22deb3f724c0",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -53,7 +51,7 @@
     "goamd64": "v1",
     "source_fingerprint": "907d83c35a5be855",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-26T02:58:07Z"
+    "measured_at": "2026-11-26T03:04:01Z"
   },
   "goblin_certified_vipr": {
     "id": "goblin_certified_vipr",
@@ -72,8 +70,7 @@
     "vipr_bytes": 341173,
     "cert_syms": 14,
     "cert_bytes": 53947,
-    "git_commit": "1ba2236d5b5ba160c2f4ba70990b6799b866b2a4",
-    "git_dirty": true,
+    "git_commit": "69bc7898a2e3f299552b742f6bce22deb3f724c0",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -81,7 +78,7 @@
     "goamd64": "v1",
     "source_fingerprint": "907d83c35a5be855",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-26T02:58:07Z"
+    "measured_at": "2026-11-26T03:04:01Z"
   },
   "goblin_default": {
     "id": "goblin_default",
@@ -100,8 +97,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "1ba2236d5b5ba160c2f4ba70990b6799b866b2a4",
-    "git_dirty": true,
+    "git_commit": "69bc7898a2e3f299552b742f6bce22deb3f724c0",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -109,6 +105,6 @@
     "goamd64": "v1",
     "source_fingerprint": "907d83c35a5be855",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-26T02:58:07Z"
+    "measured_at": "2026-11-26T03:04:01Z"
   }
 }
