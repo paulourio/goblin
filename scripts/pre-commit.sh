@@ -113,19 +113,8 @@ start_bounded_job() {
 
 # Wait for all queued background jobs and dump logs for any failures.
 wait_jobs() {
-    local idx
-    for idx in "${!JOB_PIDS[@]}"; do
-        if [ "${JOB_DONE[$idx]:-0}" -eq 1 ]; then
-            continue
-        fi
-        local pid="${JOB_PIDS[$idx]}"
-        local rc=0
-        if wait "${pid}"; then
-            rc=0
-        else
-            rc=$?
-        fi
-        finish_job_pid "${pid}" "${rc}"
+    while [ "${#ACTIVE_PIDS[@]}" -gt 0 ]; do
+        wait_one_active_job
     done
     local failed="${BATCH_FAILED}"
     ACTIVE_PIDS=()
@@ -404,36 +393,73 @@ fi
 
 # 5. Bounded Go Test Suite Gate (Race, Formal, SIMD, CGO_ENABLED=0, Default, and opt-in CBC)
 step5_cpus="$(detect_cpu_count)"
-step5_budget=$(( step5_cpus * 3 / 4 ))
-if [ "${step5_budget}" -lt 1 ]; then
-    step5_budget=1
+step5_total_jobs=4
+if [ "${HAS_CBC}" -eq 1 ]; then
+    step5_total_jobs=$(( step5_total_jobs + 2 ))
 fi
-step5_max_jobs=2
-if [ "${step5_budget}" -lt 2 ]; then
+if [ "${HAS_LAKE}" -eq 1 ]; then
+    step5_total_jobs=$(( step5_total_jobs + 1 ))
+fi
+
+if [ "${step5_cpus}" -ge 8 ]; then
+    step5_budget=$(( step5_cpus - 2 ))
+else
+    step5_budget=$(( step5_cpus * 3 / 4 ))
+    if [ "${step5_budget}" -lt 1 ]; then
+        step5_budget=1
+    fi
+fi
+
+step5_max_jobs=$(( step5_budget / 3 ))
+if [ "${step5_max_jobs}" -lt 1 ]; then
     step5_max_jobs=1
 fi
+if [ "${step5_max_jobs}" -gt "${step5_total_jobs}" ]; then
+    step5_max_jobs="${step5_total_jobs}"
+fi
+
 step5_per_job_procs=$(( step5_budget / step5_max_jobs ))
 if [ "${step5_per_job_procs}" -lt 1 ]; then
     step5_per_job_procs=1
 fi
-if [[ "${GOMAXPROCS:-}" =~ ^[0-9]+$ ]] && [ "${GOMAXPROCS}" -ge 1 ] && [ "${GOMAXPROCS}" -lt "${step5_per_job_procs}" ]; then
-    step5_per_job_procs="${GOMAXPROCS}"
+step5_race_procs="${step5_per_job_procs}"
+step5_std_procs="${step5_per_job_procs}"
+# When all suites fit in a single wave on many-core hosts, shift extra GOMAXPROCS to the slower -race suites.
+step5_race_jobs=1
+if [ "${HAS_CBC}" -eq 1 ]; then
+    step5_race_jobs=2
+fi
+step5_std_jobs=$(( step5_total_jobs - step5_race_jobs ))
+if [ "${step5_max_jobs}" -eq "${step5_total_jobs}" ] && [ "${step5_std_jobs}" -gt 0 ] && [ "${step5_budget}" -ge $(( step5_total_jobs * 3 + step5_race_jobs * 2 )) ]; then
+    step5_std_procs=$(( step5_budget / (step5_std_jobs + step5_race_jobs * 2) ))
+    if [ "${step5_std_procs}" -lt 2 ]; then
+        step5_std_procs=2
+    fi
+    step5_race_procs=$(( (step5_budget - step5_std_procs * step5_std_jobs) / step5_race_jobs ))
+fi
+if [[ "${GOMAXPROCS:-}" =~ ^[0-9]+$ ]] && [ "${GOMAXPROCS}" -ge 1 ]; then
+    if [ "${GOMAXPROCS}" -lt "${step5_race_procs}" ]; then
+        step5_race_procs="${GOMAXPROCS}"
+    fi
+    if [ "${GOMAXPROCS}" -lt "${step5_std_procs}" ]; then
+        step5_std_procs="${GOMAXPROCS}"
+    fi
 fi
 
-log_step "5/5 Running Go test suites (max_jobs=${step5_max_jobs}, -p 1, GOMAXPROCS=${step5_per_job_procs}/${step5_cpus})..."
-start_bounded_job "${step5_max_jobs}" "test-race-short" run_with_procs "${step5_per_job_procs}" go test -p 1 -race -short ./...
+log_step "5/5 Running Go test suites (max_jobs=${step5_max_jobs}, race=${step5_race_procs}p, std=${step5_std_procs}p, budget=${step5_budget}/${step5_cpus})..."
+start_bounded_job "${step5_max_jobs}" "test-race-short" run_with_procs "${step5_race_procs}" go test -p "${step5_race_procs}" -race -short ./...
 if [ "${HAS_CBC}" -eq 1 ]; then
-    start_bounded_job "${step5_max_jobs}" "test-race-cbc-short" run_with_procs "${step5_per_job_procs}" go test -p 1 -race -tags=cbc -short ./...
+    start_bounded_job "${step5_max_jobs}" "test-race-cbc-short" run_with_procs "${step5_race_procs}" go test -p "${step5_race_procs}" -race -tags=cbc -short ./...
 fi
 if [ "${HAS_LAKE}" -eq 1 ]; then
-    start_bounded_job "${step5_max_jobs}" "test-formal-short" run_with_procs "${step5_per_job_procs}" run_formal_short -p 1
+    start_bounded_job "${step5_max_jobs}" "test-formal-short" run_with_procs "${step5_std_procs}" run_formal_short -p "${step5_std_procs}"
 fi
-start_bounded_job "${step5_max_jobs}" "test-simd" run_with_procs "${step5_per_job_procs}" env GOEXPERIMENT=simd go test -p 1 ./...
+start_bounded_job "${step5_max_jobs}" "test-simd" run_with_procs "${step5_std_procs}" env GOEXPERIMENT=simd go test -p "${step5_std_procs}" ./...
 if [ "${HAS_CBC}" -eq 1 ]; then
-    start_bounded_job "${step5_max_jobs}" "test-cbc" run_with_procs "${step5_per_job_procs}" go test -p 1 -tags=cbc ./...
+    start_bounded_job "${step5_max_jobs}" "test-cbc" run_with_procs "${step5_std_procs}" go test -p "${step5_std_procs}" -tags=cbc ./...
 fi
-start_bounded_job "${step5_max_jobs}" "test-cgo0" run_with_procs "${step5_per_job_procs}" env CGO_ENABLED=0 go test -p 1 ./...
-start_bounded_job "${step5_max_jobs}" "test-default" run_with_procs "${step5_per_job_procs}" go test -p 1 ./...
+start_bounded_job "${step5_max_jobs}" "test-cgo0" run_with_procs "${step5_std_procs}" env CGO_ENABLED=0 go test -p "${step5_std_procs}" ./...
+start_bounded_job "${step5_max_jobs}" "test-default" run_with_procs "${step5_std_procs}" go test -p "${step5_std_procs}" ./...
 
 wait_jobs
 
