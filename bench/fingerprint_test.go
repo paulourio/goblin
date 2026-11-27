@@ -27,6 +27,7 @@ func TestSourceFingerprintScope(t *testing.T) {
 	write("cbc_bridge.cpp", "int goblin_bridge(void) { return 0; }\n")
 	write("solver_test.go", "package goblin\n")
 	write("assign/solver.go", "package assign\n")
+	write("mad/solver.go", "package mad\n")
 	write("format/mps.go", "package format\n")
 	write("internal/simd/k.go", "package simd\n")
 	write("bench/corpus.go", "package bench\n")
@@ -44,7 +45,7 @@ func TestSourceFingerprintScope(t *testing.T) {
 	}
 	base := fp()
 
-	for _, rel := range []string{"solver_test.go", "bench/docgen.go", "bench/difftest_cbc.py", "cmd/other/main.go", "testdata/public/afiro.json"} {
+	for _, rel := range []string{"solver_test.go", "mad/mad_test.go", "mad/certified_test.go", "bench/docgen.go", "bench/difftest_cbc.py", "cmd/other/main.go", "testdata/public/afiro.json"} {
 		write(rel, "package x // edited\n")
 		if got := fp(); got != base {
 			t.Fatalf("editing %s changed the fingerprint", rel)
@@ -55,12 +56,14 @@ func TestSourceFingerprintScope(t *testing.T) {
 		"cbc_bridge.h",
 		"cbc_bridge.cpp",
 		"assign/solver.go",
+		"mad/solver.go",
 		"format/mps.go",
 		"internal/simd/k.go",
 		"bench/corpus.go",
 		"bench/python_baseline.py",
 		"testdata/corpus/t1.json",
 		"testdata/assign_corpus/manifest.json",
+		"testdata/mad_corpus/manifest.json",
 		"cmd/goblin-bench/main.go",
 		"go.mod",
 	} {

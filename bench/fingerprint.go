@@ -21,12 +21,14 @@ var fingerprintInputs = []struct {
 }{
 	{dir: ".", recursive: false},
 	{dir: "assign", recursive: false},
+	{dir: "mad", recursive: false},
 	{dir: "format", recursive: false},
 	{dir: "internal", recursive: true},
 	{dir: "bench", recursive: false},
 	{dir: filepath.Join("cmd", "goblin-bench"), recursive: false},
 	{dir: filepath.Join("testdata", "corpus"), recursive: true, optional: true},
 	{dir: filepath.Join("testdata", "assign_corpus"), recursive: false, optional: true},
+	{dir: filepath.Join("testdata", "mad_corpus"), recursive: false, optional: true},
 }
 
 // fingerprintExcluded lists files that render documents or run standalone fuzz/diff checks
@@ -45,7 +47,8 @@ func isFingerprintSource(rel string) bool {
 	if strings.HasPrefix(rel, filepath.Join("testdata", "corpus")+string(filepath.Separator)) {
 		return strings.HasSuffix(rel, ".json") || strings.HasSuffix(rel, ".jsonl")
 	}
-	if rel == filepath.Join("testdata", "assign_corpus", "manifest.json") {
+	if rel == filepath.Join("testdata", "assign_corpus", "manifest.json") ||
+		rel == filepath.Join("testdata", "mad_corpus", "manifest.json") {
 		return true
 	}
 	if strings.HasSuffix(rel, ".go") {
@@ -59,9 +62,9 @@ func isFingerprintSource(rel string) bool {
 
 // SourceFingerprint returns a SHA-256 digest (first 16 hex digits) over go.mod, every
 // non-test Go, C/C++ bridge, or Python baseline harness file, and every benchmark corpus
-// payload in testdata/corpus and testdata/assign_corpus, relative to root. All Go and
-// Python benchmark harnesses store this digest in every telemetry entry, and the
-// documentation gate rejects telemetry whose fingerprint differs from the current tree.
+// payload in testdata/corpus, testdata/assign_corpus, and testdata/mad_corpus, relative to
+// root. All Go and Python benchmark harnesses store this digest in every telemetry entry, and
+// the documentation gate rejects telemetry whose fingerprint differs from the current tree.
 func SourceFingerprint(root string) (string, error) {
 	files := []string{"go.mod"}
 	for _, in := range fingerprintInputs {

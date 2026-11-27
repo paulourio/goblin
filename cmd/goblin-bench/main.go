@@ -27,6 +27,7 @@ import (
 	"github.com/paulourio/goblin/bench"
 	"github.com/paulourio/goblin/format"
 	"github.com/paulourio/goblin/internal/simd"
+	"github.com/paulourio/goblin/mad"
 )
 
 const (
@@ -594,11 +595,343 @@ func runAssignBenchSuite(scipyRefPath, outPath, pairedScalarOut string, noSIMD b
 	writeJSONReport(outPath, results, "assign benchmark ")
 }
 
+type madMILPAcc struct {
+	times          []time.Duration
+	statuses       []string
+	canonSet       bool
+	canonRes       gb.Result
+	canonNumVars   int
+	optimalCount   int
+	timeLimitCount int
+}
+
+func (a *madMILPAcc) record(trialIdx int, dt time.Duration, res gb.Result, numVars int) {
+	a.times = append(a.times, dt)
+	a.statuses = append(a.statuses, res.Status.String())
+	switch res.Status {
+	case gb.StatusOptimal:
+		a.optimalCount++
+	case gb.StatusTimeLimit:
+		a.timeLimitCount++
+	}
+	if trialIdx == 0 && !a.canonSet {
+		a.canonSet = true
+		a.canonRes = res
+		a.canonNumVars = numVars
+	}
+}
+
+func (a *madMILPAcc) metrics() bench.MADMILPMetrics {
+	meanMS, sdMS := meanSDDurationMS(a.times)
+	hasInc := len(a.canonRes.Values) == a.canonNumVars
+	var objPtr *float64
+	if hasInc && !math.IsNaN(a.canonRes.Objective) && !math.IsInf(a.canonRes.Objective, 0) {
+		v := a.canonRes.Objective
+		objPtr = &v
+	} else {
+		hasInc = false
+	}
+	hasBB := !math.IsNaN(a.canonRes.BestBound) && !math.IsInf(a.canonRes.BestBound, 0)
+	bb := 0.0
+	if hasBB {
+		bb = a.canonRes.BestBound
+	}
+	return bench.MADMILPMetrics{
+		Status:         a.canonRes.Status.String(),
+		TrialStatuses:  a.statuses,
+		HasIncumbent:   hasInc,
+		HasBestBound:   hasBB,
+		Objective:      objPtr,
+		BestBound:      bb,
+		Nodes:          a.canonRes.Nodes,
+		Iterations:     a.canonRes.Iterations,
+		TimeMS:         medianDurationMS(a.times),
+		MeanMS:         meanMS,
+		SDMS:           sdMS,
+		TrialsMS:       durationsMS(a.times),
+		OptimalCount:   a.optimalCount,
+		TimeLimitCount: a.timeLimitCount,
+	}
+}
+
+func solveAndCheckMADMILP(
+	ctx context.Context,
+	id string,
+	trialIdx int,
+	prob mad.Problem,
+	optObj float64,
+	backendLabel string,
+	solveOpts ...gb.Option,
+) (time.Duration, gb.Result, int) {
+	m, _, buildErr := gb.BuildMADModel(prob)
+	if buildErr != nil {
+		panic(fmt.Sprintf("%s trial %d BuildMADModel(%s) failed: %v", id, trialIdx, backendLabel, buildErr))
+	}
+	t0 := time.Now()
+	res, sErr := m.Solve(ctx, solveOpts...)
+	dt := time.Since(t0)
+	if sErr != nil {
+		panic(fmt.Sprintf("%s trial %d MILP(%s) failed: %v", id, trialIdx, backendLabel, sErr))
+	}
+	if res.Status != gb.StatusOptimal && res.Status != gb.StatusTimeLimit {
+		panic(fmt.Sprintf("%s trial %d MILP(%s) status=%v, want Optimal or TimeLimit", id, trialIdx, backendLabel, res.Status))
+	}
+	milpTol := parityObjectiveTol * max(1.0, math.Abs(optObj))
+	bbFinite := !math.IsNaN(res.BestBound) && !math.IsInf(res.BestBound, 0)
+	if bbFinite && res.BestBound > optObj+milpTol {
+		panic(fmt.Sprintf("%s trial %d MILP(%s) BestBound %.6f > exact %.6f", id, trialIdx, backendLabel, res.BestBound, optObj))
+	}
+	hasInc := len(res.Values) == m.NumVars()
+	if hasInc {
+		if res.Objective < optObj-milpTol {
+			panic(fmt.Sprintf("%s trial %d MILP(%s) incumbent %.6f < exact %.6f", id, trialIdx, backendLabel, res.Objective, optObj))
+		}
+		if bbFinite && res.BestBound > res.Objective+milpTol {
+			panic(fmt.Sprintf("%s trial %d MILP(%s) BestBound %.6f > incumbent %.6f", id, trialIdx, backendLabel, res.BestBound, res.Objective))
+		}
+	}
+	if res.Status == gb.StatusOptimal {
+		if !hasInc {
+			panic(fmt.Sprintf("%s trial %d MILP(%s) Optimal without full incumbent", id, trialIdx, backendLabel))
+		}
+		rel := math.Abs(res.Objective-optObj) / max(1.0, math.Abs(optObj))
+		if rel > parityObjectiveTol {
+			panic(fmt.Sprintf("%s trial %d MILP(%s) Optimal obj=%.6f != exact %.6f (rel=%.2e)", id, trialIdx, backendLabel, res.Objective, optObj, rel))
+		}
+	}
+	return dt, res, m.NumVars()
+}
+
+func runMADBenchSuite(outPath string, defaultTrials int, noSIMD bool) {
+	if defaultTrials <= 0 {
+		fmt.Fprintf(os.Stderr, "-trials must be positive (got %d)\n", defaultTrials)
+		os.Exit(1)
+	}
+	ctx := context.Background()
+	prov, err := collectRunProvenance(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	if prov.gitDirty && outPath != "" {
+		fmt.Fprintf(os.Stderr, "warning: working tree is dirty; telemetry will be marked git_dirty=true\n")
+	}
+
+	madCases := bench.MADCorpusSpecs()
+	cbcAvail := gb.CBCAvailable()
+	simdActive := simd.UsingHardwareSIMDWith(noSIMD)
+
+	for range 3 {
+		for _, warmID := range []string{"pmad_base_g10_i2", "mad_comb_rand_g2_i4"} {
+			for _, mc := range madCases {
+				if mc.ID != warmID {
+					continue
+				}
+				prob := bench.GenerateMADProblem(mc, 0)
+				_, _ = gb.SolveMAD(ctx, prob)
+				_, _ = gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADDP))
+				_, _ = gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADBruteForce))
+				if m, _, bErr := gb.BuildMADModel(prob); bErr == nil {
+					_, _ = m.Solve(ctx, gb.WithPureGo(), gb.WithMaxNodes(0), gb.WithTimeLimit(cpTimeoutMS*time.Millisecond))
+				}
+				if cbcAvail {
+					if m, _, bErr := gb.BuildMADModel(prob); bErr == nil {
+						_, _ = m.Solve(ctx, gb.WithCBC(), gb.WithTimeLimit(cpTimeoutMS*time.Millisecond))
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Printf("=== GOBLIN ISOLATED MAD COMBINATORIAL BENCHMARK SUITE (CBC=%v, SIMD=%v, GOAMD64=%s) ===\n",
+		cbcAvail, simdActive, prov.goAMD64)
+	fmt.Printf("CPU: %s\n\n", prov.cpuModel)
+	fmt.Printf("%-22s | %7s | %8s | %8s | %8s | %12s | %12s | %7s\n",
+		"Problem ID", "GxIxT", "AutoMed", "DPMed", "BFMed", "MILP-Go(250ms)", "MILP-CBC(250ms)", "Parity")
+	fmt.Println(strings.Repeat("-", tableRuleWidth))
+
+	results := make(map[string]bench.MADBenchResult, len(madCases))
+	milpTimeout := cpTimeoutMS * time.Millisecond
+
+	for _, mc := range madCases {
+		nTrials, warmup := tierTrialCounts(mc.Tier, defaultTrials)
+		if mc.Trials > 0 && defaultTrials == defaultTrialsCount {
+			nTrials = mc.Trials
+		}
+		prob0 := bench.GenerateMADProblem(mc, 0)
+		dfsStates, dpStates, dpWork := bench.MADPlanMetrics(prob0)
+		runBF := dfsStates <= mad.MaxDFSStates
+
+		autoTimes := make([]time.Duration, 0, nTrials)
+		dpTimes := make([]time.Duration, 0, nTrials)
+		var bfTimes []time.Duration
+		if runBF {
+			bfTimes = make([]time.Duration, 0, nTrials)
+		}
+		trialObjs := make([]float64, 0, nTrials)
+		var autoStrategy string
+		parityOK := true
+		var milpGoAcc, milpCBCAcc madMILPAcc
+
+		for i := range warmup + nTrials {
+			trialIdx := 0
+			if i >= warmup {
+				trialIdx = i - warmup
+			}
+			prob := bench.GenerateMADProblem(mc, trialIdx)
+
+			t0 := time.Now()
+			autoRes, aErr := gb.SolveMAD(ctx, prob)
+			dAuto := time.Since(t0)
+			if aErr != nil || autoRes.Status != gb.MADStatusOptimal {
+				panic(fmt.Sprintf("%s trial %d MADAuto failed: status=%v err=%v", mc.ID, trialIdx, autoRes.Status, aErr))
+			}
+
+			t1 := time.Now()
+			dpRes, dpErr := gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADDP))
+			dDP := time.Since(t1)
+			if dpErr != nil || dpRes.Status != gb.MADStatusOptimal {
+				panic(fmt.Sprintf("%s trial %d MADDP failed: status=%v err=%v", mc.ID, trialIdx, dpRes.Status, dpErr))
+			}
+			if math.Abs(autoRes.Objective-dpRes.Objective)/max(1.0, math.Abs(dpRes.Objective)) > assignParityObjTol {
+				panic(fmt.Sprintf("%s trial %d MADAuto %.12g != MADDP %.12g", mc.ID, trialIdx, autoRes.Objective, dpRes.Objective))
+			}
+
+			var dBF time.Duration
+			if runBF {
+				t2 := time.Now()
+				bfRes, bfErr := gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADBruteForce))
+				dBF = time.Since(t2)
+				if bfErr != nil || bfRes.Status != gb.MADStatusOptimal {
+					panic(fmt.Sprintf("%s trial %d MADBruteForce failed: status=%v err=%v", mc.ID, trialIdx, bfRes.Status, bfErr))
+				}
+				if math.Abs(bfRes.Objective-dpRes.Objective)/max(1.0, math.Abs(dpRes.Objective)) > assignParityObjTol {
+					panic(fmt.Sprintf("%s trial %d MADBruteForce %.12g != MADDP %.12g", mc.ID, trialIdx, bfRes.Objective, dpRes.Objective))
+				}
+			}
+
+			if mc.ID == "pmad_base_g10_i2" && trialIdx == 0 && math.Abs(dpRes.Objective-24137.0) > assignParityObjTol {
+				panic(fmt.Sprintf("pmad_base_g10_i2 trial 0 obj=%.12g, want 24137", dpRes.Objective))
+			}
+
+			dGo, resGo, nVarsGo := solveAndCheckMADMILP(
+				ctx, mc.ID, trialIdx, prob, dpRes.Objective, "go",
+				gb.WithPureGo(), gb.WithMaxNodes(0), gb.WithTimeLimit(milpTimeout),
+			)
+
+			var dCBC time.Duration
+			var resCBC gb.Result
+			var nVarsCBC int
+			if cbcAvail {
+				dCBC, resCBC, nVarsCBC = solveAndCheckMADMILP(
+					ctx, mc.ID, trialIdx, prob, dpRes.Objective, "cbc",
+					gb.WithCBC(), gb.WithTimeLimit(milpTimeout),
+				)
+			}
+
+			if i >= warmup {
+				if trialIdx == 0 {
+					autoStrategy = autoRes.Strategy.String()
+				}
+				autoTimes = append(autoTimes, dAuto)
+				dpTimes = append(dpTimes, dDP)
+				if runBF {
+					bfTimes = append(bfTimes, dBF)
+				}
+				trialObjs = append(trialObjs, dpRes.Objective)
+				milpGoAcc.record(trialIdx, dGo, resGo, nVarsGo)
+				if cbcAvail {
+					milpCBCAcc.record(trialIdx, dCBC, resCBC, nVarsCBC)
+				}
+			}
+		}
+
+		autoMean, autoSD := meanSDDurationMS(autoTimes)
+		dpMean, dpSD := meanSDDurationMS(dpTimes)
+		var bfMed, bfMean, bfSD float64
+		var bfTrialsMS []float64
+		bfStr := "skip"
+		if runBF {
+			bfMed = medianDurationMS(bfTimes)
+			bfMean, bfSD = meanSDDurationMS(bfTimes)
+			bfTrialsMS = durationsMS(bfTimes)
+			bfStr = fmt.Sprintf("%.3fms", bfMed)
+		}
+
+		goMetrics := milpGoAcc.metrics()
+		var cbcMetricsPtr *bench.MADMILPMetrics
+		cbcStr := "n/a"
+		if cbcAvail {
+			m := milpCBCAcc.metrics()
+			cbcMetricsPtr = &m
+			cbcStr = fmt.Sprintf("%.1f(%d/%d)", m.TimeMS, m.OptimalCount, nTrials)
+		}
+		goStr := fmt.Sprintf("%.1f(%d/%d)", goMetrics.TimeMS, goMetrics.OptimalCount, nTrials)
+
+		results[mc.ID] = bench.MADBenchResult{
+			ID:                 mc.ID,
+			Tier:               mc.Tier,
+			Family:             mc.Family,
+			Groups:             mc.Groups,
+			Items:              mc.Items,
+			Periods:            mc.Periods,
+			HasBaselines:       mc.HasBaselines,
+			HasDesignated:      mc.HasDesignated,
+			Step:               mc.Step,
+			Lambda:             mc.Lambda,
+			RoundWeight:        mc.RoundWeight,
+			Trials:             nTrials,
+			DFSStates:          dfsStates,
+			DPStates:           dpStates,
+			DPWork:             dpWork,
+			BruteForceRan:      runBF,
+			CBCAvailable:       cbcAvail,
+			SIMDEnabled:        simdActive,
+			SIMDTier:           simd.ActiveSIMDTierWith(noSIMD),
+			CPUModel:           prov.cpuModel,
+			GOAMD64:            prov.goAMD64,
+			Objective:          trialObjs[0],
+			TrialObjectives:    trialObjs,
+			ParityOK:           parityOK,
+			AutoStrategy:       autoStrategy,
+			AutoTimeMS:         medianDurationMS(autoTimes),
+			AutoMeanMS:         autoMean,
+			AutoSDMS:           autoSD,
+			AutoTrialsMS:       durationsMS(autoTimes),
+			DPTimeMS:           medianDurationMS(dpTimes),
+			DPMeanMS:           dpMean,
+			DPSDMS:             dpSD,
+			DPTrialsMS:         durationsMS(dpTimes),
+			BruteForceTimeMS:   bfMed,
+			BruteForceMeanMS:   bfMean,
+			BruteForceSDMS:     bfSD,
+			BruteForceTrialsMS: bfTrialsMS,
+			MILPGo:             goMetrics,
+			MILPCBC:            cbcMetricsPtr,
+			GitCommit:          prov.gitCommit,
+			GitDirty:           prov.gitDirty,
+			GoVersion:          prov.goVersion,
+			SourceFingerprint:  prov.fingerprint,
+			CPUAffinity:        prov.cpuAffinity,
+			UnameRelease:       prov.kernelRel,
+			MeasuredAt:         prov.measuredAt,
+		}
+
+		fmt.Printf("%-22s | %2dx%2dx%d | %7.3fms | %7.3fms | %8s | %14s | %15s | %7s\n",
+			mc.ID, mc.Groups, mc.Items, mc.Periods,
+			medianDurationMS(autoTimes), medianDurationMS(dpTimes), bfStr,
+			goStr, cbcStr, "OK")
+	}
+
+	writeJSONReport(outPath, results, "MAD combinatorial benchmark ")
+}
+
 func main() {
 	corpusDir := flag.String("corpus", "testdata/corpus", "Directory for JSON benchmark corpus")
 	genCorpus := flag.Bool("generate-corpus", false, "Generate deterministic 3-tier JSON corpus")
 	printFP := flag.Bool("print-fingerprint", false, "Print canonical source and corpus SHA-256 fingerprint")
 	assignFlag := flag.Bool("assign", false, "Run Linear Sum Assignment (LSAP) benchmark suite")
+	madFlag := flag.Bool("mad", false, "Run isolated MAD combinatorial vs. MILP benchmark suite")
 	binSizeFlag := flag.Bool("binary-size", false, "Measure production binary sizes and linker DCE invariants")
 	pyRefPath := flag.String("python-ref", "bench/results/python_baseline.json", "Path to Python baseline JSON")
 	scipyRefPath := flag.String("scipy-ref", "bench/results/scipy_assign_baseline.json", "Path to SciPy LSAP baseline JSON")
@@ -643,13 +976,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "failed to write assign corpus manifest: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Generated %d MILP benchmark families in %s and %d LSAP families in %s\n",
-			len(cases), *corpusDir, len(assignCases), assignDir)
+		madDir := filepath.Join(filepath.Dir(*corpusDir), "mad_corpus")
+		madCases, err := bench.WriteMADCorpusManifest(madDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write mad corpus manifest: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated %d MILP benchmark families in %s, %d LSAP families in %s, and %d MAD combinatorial families in %s\n",
+			len(cases), *corpusDir, len(assignCases), assignDir, len(madCases), madDir)
 		return
 	}
 
 	if *assignFlag {
 		runAssignBenchSuite(*scipyRefPath, *outPath, *pairedScalarOut, *noSIMD, *trials)
+		return
+	}
+
+	if *madFlag {
+		runMADBenchSuite(*outPath, *trials, *noSIMD)
 		return
 	}
 
@@ -1229,7 +1573,7 @@ func printMILPBenchRow(
 var (
 	reNMLine  = regexp.MustCompile(`^\s*(?:[0-9a-fA-F]+\s+)?([0-9]+)\s+([A-Za-z?])\s+(.+)$`)
 	reVIPRSym = regexp.MustCompile(`(VIPR|vipr)`)
-	reCertSym = regexp.MustCompile(`(solveCertified|finalizeCertifiedSolve|verifyCertified|VerifyVIPRTrace|verifyMiniVIPR|certPresolve|certEvalProofStep|certifyLinearSum|certifySolveInto|certifyAssign|dyadic2304|dyadicFromFloat|bellmanFordResidual|extractHallWitness|defaultAssignCertHooks|setCertifiedTrue|setRootCertifiedTrue)`)
+	reCertSym = regexp.MustCompile(`(solveCertified|finalizeCertifiedSolve|verifyCertified|VerifyVIPRTrace|verifyMiniVIPR|certPresolve|certEvalProofStep|certifyLinearSum|certifySolveInto|certifyAssign|dyadic2304|dyadicFromFloat|bellmanFordResidual|extractHallWitness|defaultAssignCertHooks|setCertifiedTrue|setRootCertifiedTrue|certifyMAD|defaultMADCertHooks|setMADCertifiedTrue|setMADCertifiedFalse|EvaluateAssignmentDyadic|evalGroupExactDyadic)`)
 )
 
 type binSizeProfileSpec struct {
@@ -1295,6 +1639,86 @@ func main() {
 	cInd := make([]int, 2)
 	obj, errInto := as.SolveInto(ctx, 2, 2, []float64{1, 2, 3, 1}, as.Minimize, rInd, cInd, ws, as.WithCertified(true))
 	fmt.Println(res.Objective, obj, errInto)
+}
+`,
+		},
+		{
+			id:      "mad_default",
+			label:   "`goblin/mad` default (`mad.Solve`, `StrategyAuto`)",
+			desc:    "Uncertified combinatorial MAD solver (`mad.Solve` with `StrategyAuto`)",
+			wantOut: "24137 <nil>",
+			src: `package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/paulourio/goblin/mad"
+)
+
+func main() {
+	prob := mad.Problem{
+		Baselines: [][]float64{
+			{508, 465, 706, 1213, 704, 238},
+			{1360, 379, 1778, 763, 386, 243},
+			{1428, 1832, 1301, 1388, 1021, 832},
+			{542, 1930, 1721, 1019, 240, 838},
+			{1585, 111, 1967, 886, 880, 781},
+			{1216, 494, 1417, 1804, 300, 1037},
+			{1370, 1761, 314, 637, 457, 244},
+			{1614, 1452, 1244, 736, 1645, 1701},
+			{396, 1810, 656, 659, 1201, 1528},
+			{1009, 210, 447, 1748, 1746, 655},
+		},
+		Items: [][]float64{
+			{149, 566, 1479, 128, 1950, 1713},
+			{491, 1179, 1737, 1103, 990, 1847},
+		},
+		Step:        100,
+		RoundWeight: 6,
+	}
+	res, err := mad.Solve(context.Background(), prob)
+	fmt.Println(res.Objective, err)
+}
+`,
+		},
+		{
+			id:      "mad_certified",
+			label:   "`goblin/mad` certified (`+ mad.WithCertified(true)`)",
+			desc:    "Combinatorial MAD solver with fixed-width `uint64`-limb dyadic certification (`mad.WithCertified(true)`)",
+			wantOut: "24137 <nil>",
+			src: `package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/paulourio/goblin/mad"
+)
+
+func main() {
+	prob := mad.Problem{
+		Baselines: [][]float64{
+			{508, 465, 706, 1213, 704, 238},
+			{1360, 379, 1778, 763, 386, 243},
+			{1428, 1832, 1301, 1388, 1021, 832},
+			{542, 1930, 1721, 1019, 240, 838},
+			{1585, 111, 1967, 886, 880, 781},
+			{1216, 494, 1417, 1804, 300, 1037},
+			{1370, 1761, 314, 637, 457, 244},
+			{1614, 1452, 1244, 736, 1645, 1701},
+			{396, 1810, 656, 659, 1201, 1528},
+			{1009, 210, 447, 1748, 1746, 655},
+		},
+		Items: [][]float64{
+			{149, 566, 1479, 128, 1950, 1713},
+			{491, 1179, 1737, 1103, 990, 1847},
+		},
+		Step:        100,
+		RoundWeight: 6,
+	}
+	res, err := mad.Solve(context.Background(), prob, mad.WithCertified(true))
+	fmt.Println(res.Objective, err)
 }
 `,
 		},

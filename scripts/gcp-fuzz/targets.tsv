@@ -48,3 +48,4 @@
 46	/app/bin/goblin.test	/app/work	FuzzPrimalDevexAndIncrementalDuals	heavy	16
 47	/app/bin/goblin.test	/app/work	FuzzRelaxCutDynamismAndRootCuts	heavy	16
 48	/app/bin/goblin.test	/app/work	FuzzPMADStructuralAndOracle	heavy	16
+49	/app/bin/goblin.test	/app/work	FuzzMADCombinatorialVsMILP	heavy	16

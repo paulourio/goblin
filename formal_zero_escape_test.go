@@ -1030,6 +1030,7 @@ func TestFormalNoSilentFuzzBridgeEscapes(t *testing.T) {
 		{relPath: "fuzz_test.go"},
 		{relPath: "mad_fuzz_test.go"},
 		{relPath: "mad_crafted_fuzz_test.go"},
+		{relPath: "mad_comb_fuzz_test.go"},
 		{relPath: "certified_fuzz_test.go"},
 		{relPath: "bab_fuzz_test.go"},
 		{relPath: "struct_fuzz_test.go"},

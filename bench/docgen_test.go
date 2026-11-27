@@ -3,6 +3,7 @@ package bench
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -136,10 +137,29 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 			AssignSIMD: map[string]AssignBenchResult{
 				"a1": {ID: "a1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:simd", SIMDEnabled: true},
 			},
+			MAD: map[string]MADBenchResult{
+				"m1": {ID: "m1", GitCommit: "abc", SourceFingerprint: "fp1", UnameRelease: "6.1", GoVersion: "go1.27.3-X:nodwarf5", SIMDEnabled: false},
+			},
 		}
 	}
 	if _, err := telemetryProvenance(baseBundle()); err != nil {
 		t.Fatalf("valid telemetryProvenance failed: %v", err)
+	}
+
+	bBadMADSIMDVer := baseBundle()
+	mrBadVer := bBadMADSIMDVer.MAD["m1"]
+	mrBadVer.GoVersion = "go1.27.3-X:simd"
+	bBadMADSIMDVer.MAD["m1"] = mrBadVer
+	if _, err := telemetryProvenance(bBadMADSIMDVer); err == nil {
+		t.Fatal("expected error for goblin_mad entry built with -X:simd")
+	}
+
+	bBadMADSIMDFlag := baseBundle()
+	mrBadFlag := bBadMADSIMDFlag.MAD["m1"]
+	mrBadFlag.SIMDEnabled = true
+	bBadMADSIMDFlag.MAD["m1"] = mrBadFlag
+	if _, err := telemetryProvenance(bBadMADSIMDFlag); err == nil {
+		t.Fatal("expected error for goblin_mad entry with simd_enabled=true")
 	}
 
 	bBadScalarVer := baseBundle()
@@ -256,6 +276,36 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
 				SIMDGoVersion:     "go1.27.3-X:simd",
 			},
+			"mad_default": {
+				ID:                "mad_default",
+				Label:             "`goblin/mad` default (`mad.Solve`, `StrategyAuto`)",
+				RawBytes:          2400000,
+				StrippedBytes:     1500000,
+				SIMDRawBytes:      2450000,
+				SIMDStrippedBytes: 1530000,
+				GoblinTextBytes:   85000,
+				GitCommit:         "abc",
+				SourceFingerprint: "fp1",
+				UnameRelease:      "6.1",
+				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
+				SIMDGoVersion:     "go1.27.3-X:simd",
+			},
+			"mad_certified": {
+				ID:                "mad_certified",
+				Label:             "`goblin/mad` certified (`+ mad.WithCertified(true)`)",
+				RawBytes:          2460000,
+				StrippedBytes:     1540000,
+				SIMDRawBytes:      2510000,
+				SIMDStrippedBytes: 1570000,
+				GoblinTextBytes:   109000,
+				CertSyms:          6,
+				CertBytes:         18000,
+				GitCommit:         "abc",
+				SourceFingerprint: "fp1",
+				UnameRelease:      "6.1",
+				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
+				SIMDGoVersion:     "go1.27.3-X:simd",
+			},
 			"goblin_default": {
 				ID:                "goblin_default",
 				Label:             "`goblin` default (`Model.Solve`, `DefaultOptions`)",
@@ -351,6 +401,42 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 	if err := ValidateBinarySizeTelemetry(leakJSON); err == nil {
 		t.Fatal("expected error when goblin_certified_vipr links encoding/json symbols")
 	}
+
+	leakMADDefaultCert := validBinMap()
+	md := leakMADDefaultCert["mad_default"]
+	md.CertSyms = 1
+	md.CertBytes = 100
+	leakMADDefaultCert["mad_default"] = md
+	if err := ValidateBinarySizeTelemetry(leakMADDefaultCert); err == nil {
+		t.Fatal("expected error when mad_default leaks cert symbols")
+	}
+
+	leakMADDefaultBig := validBinMap()
+	mdBig := leakMADDefaultBig["mad_default"]
+	mdBig.MathBigSyms = 1
+	mdBig.MathBigBytes = 100
+	leakMADDefaultBig["mad_default"] = mdBig
+	if err := ValidateBinarySizeTelemetry(leakMADDefaultBig); err == nil {
+		t.Fatal("expected error when mad_default leaks math/big symbols")
+	}
+
+	leakMADCertBig := validBinMap()
+	mcBig := leakMADCertBig["mad_certified"]
+	mcBig.MathBigSyms = 1
+	mcBig.MathBigBytes = 100
+	leakMADCertBig["mad_certified"] = mcBig
+	if err := ValidateBinarySizeTelemetry(leakMADCertBig); err == nil {
+		t.Fatal("expected error when mad_certified links math/big symbols")
+	}
+
+	missingMADCert := validBinMap()
+	mcZero := missingMADCert["mad_certified"]
+	mcZero.CertSyms = 0
+	mcZero.CertBytes = 0
+	missingMADCert["mad_certified"] = mcZero
+	if err := ValidateBinarySizeTelemetry(missingMADCert); err == nil {
+		t.Fatal("expected error when mad_certified has zero cert symbols")
+	}
 }
 
 func TestRenderReadmeSummaryBlocks(t *testing.T) {
@@ -391,6 +477,30 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	}
 	if !strings.Contains(assignTbl, "| Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) |") {
 		t.Fatalf("unexpected assign README header:\n%s", assignTbl)
+	}
+
+	madSolverSummary, err := RenderBlock("README_MAD_SOLVER_SUMMARY_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(README_MAD_SOLVER_SUMMARY_TABLE): %v", err)
+	}
+	if !strings.Contains(madSolverSummary, "| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) |") {
+		t.Fatalf("unexpected README_MAD_SOLVER_SUMMARY_TABLE header:\n%s", madSolverSummary)
+	}
+
+	madCombSummary, err := RenderBlock("MAD_COMBINATORIAL_SUMMARY_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(MAD_COMBINATORIAL_SUMMARY_TABLE): %v", err)
+	}
+	if !strings.Contains(madCombSummary, "| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) |") {
+		t.Fatalf("unexpected MAD_COMBINATORIAL_SUMMARY_TABLE header:\n%s", madCombSummary)
+	}
+
+	madCombPipe, err := RenderBlock("MAD_COMBINATORIAL_PIPELINE_TABLE", tb)
+	if err != nil {
+		t.Fatalf("RenderBlock(MAD_COMBINATORIAL_PIPELINE_TABLE): %v", err)
+	}
+	if !strings.Contains(madCombPipe, "pmad_base_g10_i2") || !strings.Contains(madCombPipe, "24137.0") {
+		t.Fatalf("MAD_COMBINATORIAL_PIPELINE_TABLE missing pmad_base_g10_i2 24137.0:\n%s", madCombPipe)
 	}
 
 	cases := BuildCorpus()
@@ -603,13 +713,13 @@ def helperWithString : String := "-- theorem notAComment"
 		t.Fatalf("unexpected kernel/lock counts: kernel=(%d+%d=%d) locks=%d",
 			inv.LeanGoblinKernel, inv.LeanAppsKernel, inv.LeanTotalKernel, inv.AxiomLocks)
 	}
-	if len(inv.ProdCertFiles) != 5 || inv.ProdCertLOC != 18489 {
+	if len(inv.ProdCertFiles) != 6 || inv.ProdCertLOC != 20349 {
 		t.Fatalf("unexpected prod cert files=%d loc=%d", len(inv.ProdCertFiles), inv.ProdCertLOC)
 	}
-	if len(inv.FormalTestFiles) != 21 || inv.TotalGoTestFiles != 30 {
+	if len(inv.FormalTestFiles) != 21 || inv.TotalGoTestFiles != 31 {
 		t.Fatalf("unexpected Go test file counts: formal=%d total=%d", len(inv.FormalTestFiles), inv.TotalGoTestFiles)
 	}
-	if inv.DefaultFuzzCount != 40 || inv.CBCFuzzCount != 8 || inv.TotalFuzzCount != 48 || inv.TSVActiveRowCount != 48 {
+	if inv.DefaultFuzzCount != 42 || inv.CBCFuzzCount != 8 || inv.TotalFuzzCount != 50 || inv.TSVActiveRowCount != 50 {
 		t.Fatalf("unexpected Fuzz counts: default=%d cbc=%d total=%d tsv=%d",
 			inv.DefaultFuzzCount, inv.CBCFuzzCount, inv.TotalFuzzCount, inv.TSVActiveRowCount)
 	}
@@ -692,5 +802,209 @@ func TestTargetSiliconDocgenAndNegativeControls(t *testing.T) {
 	badKernel.AMD64.KernelABBA.Entries = nil
 	if err := ValidateTargetSiliconTelemetry(cases, assignCases, badKernel); err == nil {
 		t.Fatal("expected error when kernel_abba entries are empty")
+	}
+}
+
+func TestCheckMADParityAndCorpusValidationNegativeControls(t *testing.T) {
+	t.Parallel()
+
+	ptr := func(v float64) *float64 {
+		return &v
+	}
+	baseEntry := func() MADBenchResult {
+		return MADBenchResult{
+			ID:              "m1",
+			Groups:          2,
+			Items:           4,
+			Periods:         10,
+			Trials:          2,
+			Objective:       100.0,
+			TrialObjectives: []float64{100.0, 120.0},
+			ParityOK:        true,
+			MILPGo: MADMILPMetrics{
+				Status:       "Optimal",
+				HasIncumbent: true,
+				HasBestBound: true,
+				Objective:    ptr(100.0),
+				BestBound:    100.0,
+			},
+			MILPCBC: &MADMILPMetrics{
+				Status:       "TimeLimit",
+				HasIncumbent: true,
+				HasBestBound: true,
+				Objective:    ptr(101.0),
+				BestBound:    95.0,
+			},
+		}
+	}
+
+	// Ensure a valid baseline passes `CheckMADParity` with zero errors.
+	validTB := &TelemetryBundle{MAD: map[string]MADBenchResult{"m1": baseEntry()}}
+	if errs := CheckMADParity(validTB, "m1"); len(errs) != 0 {
+		t.Fatalf("CheckMADParity(valid) = %v, want empty", errs)
+	}
+	if errs := CheckMADParity(validTB, "missing"); len(errs) != 1 || !strings.Contains(errs[0], "missing mad telemetry") {
+		t.Fatalf("CheckMADParity(missing) = %v, want missing mad telemetry", errs)
+	}
+
+	// Test `CheckMADParity` negative controls.
+	tol := parityRelTol * 100.0
+	parityCases := []struct {
+		name   string
+		mutate func(*MADBenchResult)
+		wants  []string
+	}{
+		{
+			name:   "parity_ok_false",
+			mutate: func(r *MADBenchResult) { r.ParityOK = false },
+			wants:  []string{"m1: parity_ok=false"},
+		},
+		{
+			name:   "trial_objectives_length_mismatch",
+			mutate: func(r *MADBenchResult) { r.TrialObjectives = []float64{100.0} },
+			wants:  []string{"m1: trial_objectives count 1 != trials 2"},
+		},
+		{
+			name:   "zero_trials",
+			mutate: func(r *MADBenchResult) { r.Trials = 0; r.TrialObjectives = nil },
+			wants:  []string{"m1: trial_objectives count 0 != trials 0"},
+		},
+		{
+			name:   "objective_trial0_mismatch",
+			mutate: func(r *MADBenchResult) { r.TrialObjectives[0] = 100.1 },
+			wants:  []string{"m1: objective", "!= trial0"},
+		},
+		{
+			name:   "milp_go_infeasible",
+			mutate: func(r *MADBenchResult) { r.MILPGo.Status = "Infeasible" },
+			wants:  []string{`m1/milp_go: unexpected status "Infeasible"`},
+		},
+		{
+			name:   "milp_go_best_bound_above_exact",
+			mutate: func(r *MADBenchResult) { r.MILPGo.BestBound = 100.0 + 2.0*tol },
+			wants:  []string{"m1/milp_go: best_bound", "> exact"},
+		},
+		{
+			name:   "milp_go_incumbent_nil",
+			mutate: func(r *MADBenchResult) { r.MILPGo.Status = "TimeLimit"; r.MILPGo.Objective = nil },
+			wants:  []string{"m1/milp_go: has_incumbent=true with nil objective"},
+		},
+		{
+			name:   "milp_go_incumbent_below_exact",
+			mutate: func(r *MADBenchResult) { r.MILPGo.Status = "TimeLimit"; r.MILPGo.Objective = ptr(100.0 - 2.0*tol) },
+			wants:  []string{"m1/milp_go: incumbent", "< exact"},
+		},
+		{
+			name: "milp_go_best_bound_above_incumbent",
+			mutate: func(r *MADBenchResult) {
+				r.MILPGo.Status = "TimeLimit"
+				r.MILPGo.BestBound = 100.0 + 0.8*tol
+				r.MILPGo.Objective = ptr(100.0 - 0.5*tol)
+			},
+			wants: []string{"m1/milp_go: best_bound", "> incumbent"},
+		},
+		{
+			name:   "milp_go_optimal_wrong_objective",
+			mutate: func(r *MADBenchResult) { r.MILPGo.Objective = ptr(100.5) },
+			wants:  []string{"m1/milp_go: optimal objective"},
+		},
+		{
+			name:   "milp_go_optimal_no_incumbent",
+			mutate: func(r *MADBenchResult) { r.MILPGo.HasIncumbent = false; r.MILPGo.Objective = nil },
+			wants:  []string{"m1/milp_go: Optimal status without incumbent"},
+		},
+		{
+			name:   "milp_cbc_best_bound_above_exact",
+			mutate: func(r *MADBenchResult) { r.MILPCBC.BestBound = 100.0 + 2.0*tol },
+			wants:  []string{"m1/milp_cbc: best_bound", "> exact"},
+		},
+		{
+			name: "milp_cbc_best_bound_above_incumbent",
+			mutate: func(r *MADBenchResult) {
+				r.MILPCBC.BestBound = 100.0 + 0.8*tol
+				r.MILPCBC.Objective = ptr(100.0 - 0.5*tol)
+			},
+			wants: []string{"m1/milp_cbc: best_bound", "> incumbent"},
+		},
+	}
+
+	for _, tc := range parityCases {
+		entry := baseEntry()
+		tc.mutate(&entry)
+		tb := &TelemetryBundle{MAD: map[string]MADBenchResult{"m1": entry}}
+		errs := CheckMADParity(tb, "m1")
+		joined := strings.Join(errs, "; ")
+		for _, want := range tc.wants {
+			if len(errs) == 0 || !strings.Contains(joined, want) {
+				t.Fatalf("%s: CheckMADParity() = %v, want substring %q", tc.name, errs, want)
+			}
+		}
+	}
+
+	// Test `ValidateTelemetryAgainstCorpus` MAD negative controls.
+	baseTB, err := LoadTelemetryBundle(
+		"results/python_baseline.json",
+		"results/goblin_scalar.json",
+		"results/goblin_simd.json",
+	)
+	if err != nil {
+		t.Fatalf("LoadTelemetryBundle: %v", err)
+	}
+	if err := ValidateTelemetryAgainstCorpus("../testdata/corpus", baseTB); err != nil {
+		t.Fatalf("ValidateTelemetryAgainstCorpus(baseline): %v", err)
+	}
+
+	cloneBundleWithMAD := func(mut func(map[string]MADBenchResult)) *TelemetryBundle {
+		cp := *baseTB
+		cp.MAD = maps.Clone(baseTB.MAD)
+		mut(cp.MAD)
+		return &cp
+	}
+
+	corpusCases := []struct {
+		name string
+		mut  func(map[string]MADBenchResult)
+		want string
+	}{
+		{
+			name: "missing_mad_entry_len_mismatch",
+			mut:  func(m map[string]MADBenchResult) { delete(m, "pmad_base_g10_i2") },
+			want: "mad telemetry has",
+		},
+		{
+			name: "missing_mad_id_same_len",
+			mut: func(m map[string]MADBenchResult) {
+				v := m["pmad_base_g10_i2"]
+				delete(m, "pmad_base_g10_i2")
+				m["unknown_mad_family"] = v
+			},
+			want: "missing \"pmad_base_g10_i2\" in mad telemetry",
+		},
+		{
+			name: "mad_dimension_mismatch",
+			mut: func(m map[string]MADBenchResult) {
+				v := m["pmad_base_g10_i2"]
+				v.Items++
+				m["pmad_base_g10_i2"] = v
+			},
+			want: "mad telemetry dimension mismatch",
+		},
+		{
+			name: "mad_parity_failure_propagated",
+			mut: func(m map[string]MADBenchResult) {
+				v := m["pmad_base_g10_i2"]
+				v.MILPGo.BestBound = v.Objective + 1.0
+				m["pmad_base_g10_i2"] = v
+			},
+			want: "parity check failed",
+		},
+	}
+
+	for _, tc := range corpusCases {
+		tb := cloneBundleWithMAD(tc.mut)
+		err := ValidateTelemetryAgainstCorpus("../testdata/corpus", tb)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: ValidateTelemetryAgainstCorpus() = %v, want substring %q", tc.name, err, tc.want)
+		}
 	}
 }

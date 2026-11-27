@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
 
 	gb "github.com/paulourio/goblin"
+	"github.com/paulourio/goblin/bench"
 )
 
 func TestDurationStatsAndBackendParsing(t *testing.T) {
@@ -50,5 +52,33 @@ func TestMeasureRootLPRelaxationVerifiesStatus(t *testing.T) {
 	}
 	if lpRes.Status != gb.StatusOptimal || math.Abs(lpRes.Objective-5.0) > 1e-9 {
 		t.Fatalf("measureRootLPRelaxation = (%v, %v), want Optimal 5.0", lpRes.Status, lpRes.Objective)
+	}
+}
+
+func TestBinSizeProfilesAndMADMILPCheck(t *testing.T) {
+	specs := binSizeProfiles()
+	if len(specs) != len(bench.CanonicalBinarySizeIDs) {
+		t.Fatalf("len(binSizeProfiles()) = %d, want %d", len(specs), len(bench.CanonicalBinarySizeIDs))
+	}
+	for i, sp := range specs {
+		if sp.id != bench.CanonicalBinarySizeIDs[i] {
+			t.Fatalf("binSizeProfiles()[%d].id = %q, want %q", i, sp.id, bench.CanonicalBinarySizeIDs[i])
+		}
+	}
+
+	mc := bench.MADCorpusSpecs()[0]
+	prob := bench.GenerateMADProblem(mc, 0)
+	dt, res, nVars := solveAndCheckMADMILP(
+		context.Background(), mc.ID, 0, prob, 24137.0, "go",
+		gb.WithPureGo(), gb.WithMaxNodes(0), gb.WithTimeLimit(250*time.Millisecond),
+	)
+	if dt < 0 || nVars <= 0 {
+		t.Fatalf("unexpected dt=%v nVars=%d", dt, nVars)
+	}
+	var acc madMILPAcc
+	acc.record(0, dt, res, nVars)
+	m := acc.metrics()
+	if m.Status == "" || !m.HasBestBound {
+		t.Fatalf("unexpected madMILPAcc metrics: %+v", m)
 	}
 }

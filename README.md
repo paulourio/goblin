@@ -3,8 +3,8 @@
 The `goblin` module is a pure-Go solver for Linear Programming (LP), Mixed-Integer Linear Programming (MILP), and Linear Sum Assignment Problems (LSAP). It runs inside your Go process with zero `cgo` dependencies, no Python runtime, and no external solver binaries. You can build algebraic models in Go, stream Python `PuLP` JSON payloads directly into memory, or export standard MPS files.
 
 - **Pure Go by default**: Compiles cleanly with `CGO_ENABLED=0` and reuses pooled memory workspaces across solves. No subprocess launches or temporary files sit between your application and the solver.
-- **Two focused packages**: General LP and MILP modeling lives in the root package (`gb`), while dense and sparse bipartite assignment matrices run directly through [`goblin/assign`](assign/assign.go).
-- **Opt-in exact checking**: Passing `gb.WithCertified(true)`, `gb.WithCertifiedWitness`, or `assign.WithCertified(true)` checks results in-process using pure-Go exact `*big.Rat` and `dyadic2304` checkers before returning (Lean is never invoked at runtime; those pure-Go checkers carry no formal proof of their Go code and are validated offline against Lean 4 CLI checkers). Unused certification code disappears completely at link time.
+- **Three focused packages**: General LP and MILP modeling lives in the root package (`gb`), dense and sparse bipartite assignment matrices run directly through [`goblin/assign`](assign/assign.go), and separable group-item L1/MAD allocation runs through [`goblin/mad`](mad/mad.go) (`gb.SolveMAD`).
+- **Opt-in exact checking**: Passing `gb.WithCertified(true)`, `gb.WithCertifiedWitness`, `assign.WithCertified(true)`, or `gb.WithMADCertified(true)` (`mad.WithCertified(true)`) checks results in-process using pure-Go exact `*big.Rat`, `dyadic2304`, and fixed-width `uint64`-limb dyadic checkers before returning (Lean is never invoked at runtime; those pure-Go checkers carry no formal proof of their Go code and are validated offline against Lean 4 CLI checkers or `*big.Rat` differential tests). Unused certification code disappears completely at link time.
 - **Optional COIN-OR CBC backend**: Need to compare against or delegate to C++ COIN-OR CBC/CLP? Build with `-tags cbc` and pass `gb.WithCBC()` to invoke CBC in process.
 
 ---
@@ -103,6 +103,40 @@ func main() {
 
 For contiguous slices and zero-allocation loops, call `assign.LinearSumFlat` or `assign.SolveInto`. Full details appear in [Linear Sum Assignment API](docs/modeling-and-formats.md#5-linear-sum-assignment-api-goblinassign).
 
+### Combinatorial MAD Allocation
+
+Import `github.com/paulourio/goblin` as `gb` and call `gb.SolveMAD` to solve group-item L1/MAD allocation with optional baseline weights and rounding penalties via exact subset bitmask DP or incremental DFS (falling back to tightened MILP above combinatorial caps):
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	gb "github.com/paulourio/goblin"
+)
+
+func main() {
+	prob := gb.MADProblem{
+		Groups: 2,
+		Items: [][]float64{
+			{100, 120, 110, 130, 105, 115},
+			{200, 180, 210, 190, 205, 195},
+		},
+		Step:        100,
+		RoundWeight: 1,
+	}
+	res, err := gb.SolveMAD(context.Background(), prob, gb.WithMADCertified(true))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("strategy=%v objective=%.0f assign=%v\n", res.Strategy, res.Objective, res.Assignment)
+}
+```
+
+Full formulation rules, DP/DFS bounds, and dyadic certification details appear in [Combinatorial MAD Allocation API](docs/modeling-and-formats.md#6-combinatorial-mad-allocation-api-goblinmad).
+
 ---
 
 ## Performance
@@ -114,17 +148,17 @@ Every table below renders automatically from canonical JSON telemetry in `bench/
 Keep two corpus properties in mind when reading LP and MILP speedups against the Python `PuLP + cbc` subprocess baseline. First, 10 Tier 1 micro-models are dominated by Python's CBC subprocess startup cost. Second, 8 of the 31 synthetic families are planted-gap MAD models with a zero root LP gap by construction that close without branching. The bold `Tier 2+3 non-planted MILPs` row excludes both groups to isolate solver-dominated branching workloads, while Section 9 of [Benchmark Methodology and Corpus Results](docs/benchmarks.md#9-pure-go-vs-in-process-c-cbc-performance-analysis) compares pure-Go directly against in-process `BackendCBC`. Columns report cumulative end-to-end wall time (`JSON -> solution`) summed across all randomized trials in each subset alongside equal-family geometric-mean speedup (`Python / Go`).
 
 <!-- BEGIN GENERATED:README_CBC_HEADLINE -->
-Across the 14 solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **12.30x** [7.33x-20.61x] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **4.74x** [3.15x-7.14x] total (**4.98x** [3.21x-7.75x] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.
+Across the 14 solver-dominated Tier 2+3 non-planted MILP families, pure-Go `BackendGo` achieves a **12.23x** [7.20x-20.79x] equal-family geometric-mean total speedup against the Python `PuLP + cbc` subprocess baseline and **4.62x** [3.10x-6.89x] total (**4.86x** [3.16x-7.49x] solve) against in-process C++ `BackendCBC`; Python MPS serialization and process spawn account for the difference between those two ratios.
 <!-- END GENERATED:README_CBC_HEADLINE -->
 
 <!-- BEGIN GENERATED:README_MILP_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | Python Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Micro-models (`N <= 26`, spawn-dominated) | 10 (110) | 8.4 | 985.1 | **387.88x** [168.21x-894.43x] | 590.94x [30.60x-2598.92x] |
-| Tier 2: Medium MILPs (`30 <= N <= 84`) | 13 (143) | 522.6 | 4169.2 | **18.54x** [11.47x-29.96x] | 22.23x [1.33x-143.31x] |
-| Tier 3: Large MILPs (`145 <= N <= 4036`) | 8 (40) | 851.5 | 6015.5 | **9.91x** [4.63x-21.18x] | 9.35x [1.05x-72.32x] |
-| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | 1064.1 | 6623.4 | **12.30x** [7.33x-20.61x] | 12.07x [1.33x-143.31x] |
-| All 31 synthetic families | 31 (293) | 1382.5 | 11169.8 | **42.06x** [21.49x-82.28x] | 38.45x [1.05x-2598.92x] |
+| Tier 1: Micro-models (`N <= 26`, spawn-dominated) | 10 (110) | 10.6 | 1129.5 | **330.40x** [147.30x-741.11x] | 535.29x [30.76x-1224.21x] |
+| Tier 2: Medium MILPs (`30 <= N <= 84`) | 13 (143) | 571.2 | 4506.1 | **18.74x** [11.40x-30.83x] | 22.01x [1.33x-163.35x] |
+| Tier 3: Large MILPs (`145 <= N <= 4036`) | 8 (40) | 906.6 | 6446.5 | **9.65x** [4.61x-20.18x] | 9.46x [1.04x-69.88x] |
+| **Tier 2+3 non-planted MILPs (solver-dominated)** | 14 (130) | 1147.1 | 7056.0 | **12.23x** [7.20x-20.79x] | 12.47x [1.33x-163.35x] |
+| All 31 synthetic families | 31 (293) | 1488.4 | 12082.2 | **39.85x** [20.87x-76.09x] | 41.18x [1.04x-1224.21x] |
 <!-- END GENERATED:README_MILP_SUMMARY_TABLE -->
 
 Full provenance, per-family breakdowns across all 31 families, solver-core checkpoints, and pure-Go vs. in-process C++ CBC analysis live in [Benchmark Methodology and Corpus Results](docs/benchmarks.md).
@@ -136,20 +170,36 @@ The synthetic Mean Absolute Deviation (`MAD`) family assigns $I$ items across $G
 <!-- BEGIN GENERATED:README_MAD_SUMMARY_TABLE -->
 | Problem | $G \times I$ | Trials | Go (ms) | Python (ms) | Speedup |
 | :--- | :---: | ---: | ---: | ---: | ---: |
-| `t1_mad_g2_i4` | $2 \times 4$ | 11 | 0.06 | 8.59 | **137.0x** |
-| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | 0.49 | 32.18 | **64.4x** |
-| `t2_mad_g2_i8` | $2 \times 8$ | 11 | 0.22 | 8.55 | **39.6x** |
-| `t2_mad_g3_i9` | $3 \times 9$ | 11 | 0.17 | 9.31 | **52.4x** |
-| `t2_mad_g4_i12` | $4 \times 12$ | 11 | 0.42 | 10.78 | **25.6x** |
-| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | 3.74 | 45.03 | **9.1x** |
-| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | 16.49 | 158.88 | **7.1x** |
-| `t3_mad_g5_i20` | $5 \times 20$ | 5 | 0.55 | 16.87 | **29.9x** |
-| `t3_mad_g6_i30` | $6 \times 30$ | 5 | 0.98 | 17.04 | **17.1x** |
-| `t3_mad_g10_i100` | $10 \times 100$ | 5 | 8.04 | 62.34 | **5.8x** |
-| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | 34.15 | 353.73 | **9.9x** |
+| `t1_mad_g2_i4` | $2 \times 4$ | 11 | 0.13 | 9.75 | **77.9x** |
+| `t1_mad_rand_g2_i4` | $2 \times 4$ | 11 | 0.55 | 35.23 | **60.5x** |
+| `t2_mad_g2_i8` | $2 \times 8$ | 11 | 0.18 | 9.80 | **53.5x** |
+| `t2_mad_g3_i9` | $3 \times 9$ | 11 | 0.24 | 10.46 | **38.0x** |
+| `t2_mad_g4_i12` | $4 \times 12$ | 11 | 0.40 | 11.48 | **29.0x** |
+| `t2_mad_rand_g2_i8` | $2 \times 8$ | 11 | 3.53 | 49.50 | **9.1x** |
+| `t2_mad_rand_g3_i9` | $3 \times 9$ | 11 | 19.51 | 174.66 | **6.9x** |
+| `t3_mad_g5_i20` | $5 \times 20$ | 5 | 0.77 | 19.11 | **25.6x** |
+| `t3_mad_g6_i30` | $6 \times 30$ | 5 | 1.08 | 19.09 | **17.3x** |
+| `t3_mad_g10_i100` | $10 \times 100$ | 5 | 8.90 | 67.87 | **5.9x** |
+| `t3_mad_g4_i1000` | $4 \times 1000$ | 5 | 36.57 | 388.80 | **10.3x** |
 <!-- END GENERATED:README_MAD_SUMMARY_TABLE -->
 
 **Note on SIMD**: Experimental `GOEXPERIMENT=simd` builds deliver little overall speedup on MAD and other sparse LP/MILP workloads because scalar matrix factorization dominates runtime. Full dispersion (`Mean ± SD`), prep/solve splits, checkpoint progression, and paired scalar-vs-SIMD benchmarks appear in [MAD Benchmarks](docs/benchmarks.md#3-mad-group-item-allocation-formulation) and [Default Build vs. `GOEXPERIMENT=simd`](docs/benchmarks.md#5-default-build-vs-goexperimentsimd).
+
+#### Combinatorial MAD Solver (`goblin/mad` vs. MILP)
+
+Calling `gb.SolveMAD` exploits additive group separability via subset bitmask DP (`StrategyDP`) and symmetry-broken DFS (`StrategyBruteForce`), delegating to tightened `BuildMADModel` MILP only beyond `MaxDPItems = 14`. The isolated 13-family suite (`131` trials across PMAD baselines and random-weight controls) compares `MADAuto` and `MADDP` against 250 ms-capped `BackendGo` and `BackendCBC` MILP solves:
+
+<!-- BEGIN GENERATED:README_MAD_SOLVER_SUMMARY_TABLE -->
+| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | MILP Go 250 ms Sum (ms) | MILP CBC 250 ms Sum (ms) | Equal-Family `MILP Go / Auto` [95% CI] |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| PMAD base (`G = 10, I = 2`) | 1 (11) | 0.0229 | 0.0099 | 16.5 (8/11 opt) | 71.6 (11/11 opt) | **1201.9x** |
+| PMAD small & medium (`I <= 10`) | 6 (66) | 9.016 | 8.912 | 1500.7 (8/66 opt) | 1172.5 (26/66 opt) | **460.7x** [75.6x-2809.4x] |
+| PMAD large (`I = 12`) | 2 (10) | 61.413 | 61.469 | 500.3 (0/10 opt) | 510.7 (0/10 opt) | **8.6x** [0.1x-849.2x] |
+| Random-weight MAD controls (`I <= 12`) | 4 (44) | 0.419 | 0.404 | 271.9 (38/44 opt) | 374.4 (34/44 opt) | **171.6x** [46.8x-629.4x] |
+| **All 13 combinatorial MAD families** | 13 (131) | 70.871 | 70.795 | 2289.4 (54/131 opt) | 2129.1 (71/131 opt) | **198.5x** [62.1x-634.3x] |
+<!-- END GENERATED:README_MAD_SOLVER_SUMMARY_TABLE -->
+
+Full per-family combinatorial and MILP breakdowns appear in [Combinatorial MAD Benchmarks](docs/benchmarks.md#11-combinatorial-group-item-allocation-benchmarks-goblinmad-vs-algebraic-milp).
 
 ### Linear Sum Assignment
 
@@ -158,10 +208,10 @@ The `goblin/assign` corpus compares in-memory pure-Go execution directly against
 <!-- BEGIN GENERATED:README_ASSIGN_SUMMARY_TABLE -->
 | Workload | Families (Trials) | Go Sum (ms) | SciPy Sum (ms) | Speedup (GeoMean [95% CI]) | Per-Instance Median [Min-Max] |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| Tier 1: Small (`N <= 32`) | 6 (66) | 0.253 | 0.307 | **1.21x** [0.93x-1.58x] | 1.37x [0.09x-2.38x] |
-| Tier 2: Medium (`64 <= N <= 256`) | 9 (99) | 8.715 | 31.126 | **2.95x** [1.86x-4.70x] | 2.51x [1.17x-15.44x] |
-| Tier 3: Large (`500 <= N <= 2000`) | 7 (35) | 201.623 | 882.783 | **2.89x** [1.84x-4.53x] | 2.49x [1.50x-6.33x] |
-| **All 22 synthetic LSAP families** | 22 (200) | 210.592 | 914.215 | **2.30x** [1.75x-3.03x] | 2.03x [0.09x-15.44x] |
+| Tier 1: Small (`N <= 32`) | 6 (66) | 0.230 | 0.331 | **1.43x** [1.23x-1.67x] | 1.46x [0.79x-2.63x] |
+| Tier 2: Medium (`64 <= N <= 256`) | 9 (99) | 9.507 | 33.838 | **2.92x** [1.81x-4.70x] | 2.51x [1.07x-15.72x] |
+| Tier 3: Large (`500 <= N <= 2000`) | 7 (35) | 228.003 | 960.618 | **2.79x** [1.83x-4.25x] | 2.48x [1.51x-5.73x] |
+| **All 22 synthetic LSAP families** | 22 (200) | 237.740 | 994.786 | **2.37x** [1.85x-3.03x] | 2.01x [0.79x-15.72x] |
 <!-- END GENERATED:README_ASSIGN_SUMMARY_TABLE -->
 
 Unlike sparse MILPs, dense assignment matrices benefit substantially from AVX2 and AVX-512 vectorization under `GOEXPERIMENT=simd`. Per-family results, square vs. rectangular splits, and scalar-vs-SIMD tables live in [Linear Sum Assignment Benchmarks](docs/benchmarks.md#71-aggregate-lsap-workload-summary) and [LSAP SIMD Analysis](docs/benchmarks.md#73-lsap-scalar-vs-goexperimentsimd).
@@ -174,7 +224,7 @@ Optimization solvers balance numerical speed against mathematical certainty. The
 
 ### Default Solver Guarantees
 
-- **Verified parity**: Automated tests check status, objective, and feasibility parity across 31 synthetic LP/MILP families (293 trials, including 8 planted-gap MAD families and 10 spawn-dominated micro-models) against Python `PuLP + cbc` subprocess execution and in-process `BackendCBC`, 14 held-out Netlib LPs and 6 MIPLIB 3.0 MIPs solved to optimality plus a 25-node cuts/heuristics-off dual-bound check on `coinor_capplan1` (`21` fixtures in [`testdata/public/manifest.json`](testdata/public/manifest.json)), and 22 synthetic LSAP families (200 trials) against SciPy, complemented by differential fuzzing against CBC and SciPy.
+- **Verified parity**: Automated tests check status, objective, and feasibility parity across 31 synthetic LP/MILP families (293 trials, including 8 planted-gap MAD families and 10 spawn-dominated micro-models) against Python `PuLP + cbc` subprocess execution and in-process `BackendCBC`, 14 held-out Netlib LPs and 6 MIPLIB 3.0 MIPs solved to optimality plus a 25-node cuts/heuristics-off dual-bound check on `coinor_capplan1` (`21` fixtures in [`testdata/public/manifest.json`](testdata/public/manifest.json)), 22 synthetic LSAP families (200 trials) against SciPy, and 13 combinatorial MAD families (`131` trials in [`testdata/mad_corpus/manifest.json`](testdata/mad_corpus/manifest.json)) across `StrategyAuto`, `StrategyDP`, `StrategyBruteForce`, and 250 ms-capped `BuildMADModel` MILP solves, complemented by differential fuzzing against CBC and SciPy.
 - **Default float semantics**: Default uncertified mode (`WithCertified(false)` without `WithVIPRTrace`) evaluates all constraints uniformly using compiled IEEE-754 `float64(RHS - Expr.Constant)` and solver tolerances, without compile-time sub-unit pure-integer RHS tightening or exact-dyadic equality rejection, preserving parity with `PuLP`/`CBC`, `format.WriteMPS`, and `format.ToPuLPJSON`.
 - **Fail-safe resource limits**: Stopping early on `WithTimeLimit`, `WithMaxNodes`, or `WithMaxIter` returns a valid global `BestBound` once the root LP solves, alongside the best feasible solution (incumbent) found; pre-root or unestablished limit exits return `-Inf` (`Minimize`) or `+Inf` (`Maximize`) in `BestBound`. Unresolved nodes never vanish silently.
 
@@ -182,18 +232,18 @@ Optimization solvers balance numerical speed against mathematical certainty. The
 
 - **Exact rational witness vs. `float64` projection**: Passing `gb.WithCertified(true)` proves optimality and bounds over exact rationals $\mathbb{Q}$, and callers needing unrounded `*big.Rat` witnesses can pass `gb.WithCertifiedWitness`. Meanwhile, `Result.Values` (for continuous variables), `Duals`, `ReducedCosts`, and `Objective` hold those exact rationals rounded to nearest `float64` ($\le 0.5\text{ ULP}$; integer coordinates are exact, `BestBound` is rounded outward via `floor` for `Minimize` or `ceil` for `Maximize`, and `assign` `Result.U`/`V` are floored finite `float64` duals so $U_i + V_j \le C_{ij}$ holds over $\mathbb{Q}$). Rounded continuous `float64` `Result.Values` alone can show up to `0.5`-ULP constraint residuals when re-evaluated in `float64` even when the internal exact witness satisfies the model with zero violation.
 - **Exact binary-dyadic semantics and deterministic fallback budgets**: Exact binary-dyadic $\mathbb{Q}$ semantics (including pure-integer fractional RHS tightening via `floor`/`ceil`, raw unmerged duplicate terms, exact `RHS - Expr.Constant`, and exact-$\mathbb{Q}$ equality checks) activate under `WithCertified(true)` or `WithVIPRTrace`. Non-dyadic decimal equalities (such as `-7.2*x1 - 4.1*x2 = -1` or `miplib_flugpl` row `ANZ3`) can therefore be feasible within default float tolerances yet infeasible in exact $\mathbb{Q}$. Calling `VerifyVIPRTrace` bounds fallback anchor and unboundedness checks with deterministic `100,000` LP-iteration and `5,000` B&B-node budgets instead of a wall-clock timeout. If an exact witness cannot be built or checked, the solver clears unsafe outputs and returns `ErrCertificationFailed`.
-- **Unproved pure-Go runtime checkers (FlashProve boundary)**: The pure-Go runtime verifiers (`certified.go`, `exact_polish.go`, `vipr_trace.go`, `assign/certified.go`) carry no formal proof of their Go code and are validated instead by differential testing and negative controls against the standalone Lean 4 CLI checkers (including lossy `exactOrig` models via `ExactProblemRatsForTest`).
+- **Unproved pure-Go runtime checkers (FlashProve boundary)**: The pure-Go runtime verifiers (`certified.go`, `exact_polish.go`, `vipr_trace.go`, `assign/certified.go`, `mad/certified.go`) carry no formal proof of their Go code and are validated instead by differential testing and negative controls against the standalone Lean 4 CLI checkers (including lossy `exactOrig` models via `ExactProblemRatsForTest`) and `*big.Rat` reference tests.
 - **Zero binary tax when unused**: Functional option hooks keep checking, proof tracing, and JSON formatting decoupled from the default solve path. Go's linker strips all certification and proof-tracing symbols out of binaries that do not call those options (see [Production Binary Footprint](docs/benchmarks.md#8-production-binary-footprint-and-linker-dead-code-elimination)).
 
 ### Lean 4 Proofs and Honest Scope Boundaries
 
 <!-- BEGIN GENERATED:README_FORMAL_SUMMARY -->
-An isolated offline Lean 4 workspace ([`formal/`](formal/lakefile.toml), pinned to `v4.36.0` with `batteries` `v4.36.0` as `lintDriver`) with zero `sorry` or custom axioms proves soundness for the standalone CLI certificate checkers, abstract algebraic presolve and cutting-plane models, and compiled `arm64`/`amd64` zero-allocation kernels across `24` Lean files (`53,872` LOC: `1,325` authored `theorem` and `lemma` declarations with `1,324` in `GoblinFormal` plus `1` in `Apps/LsapCheck.lean`, `5,876` kernel `TheoremInfo` declarations including compiler-synthesized helper, equation, and splitter lemmas, and `220` `#print axioms` locks), paired with `5` pure-Go certification files (`18,489` LOC), `30` formal and certified Go test files (`34,044` LOC), and `48` `Fuzz*` targets (`40` default-build and `8` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](scripts/gcp-fuzz/targets.tsv)). Hosted CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs Go test matrices, codegen invariants, and Lean verification (`lake build --wfail && lake lint` plus Track 5 ELF checks), [`scripts/pre-commit.sh`](scripts/pre-commit.sh) runs those checks locally (emitting a warning and skipping Lean if `lake` is absent unless `GOBLIN_STRICT_GATES=1`), [`scripts/verify_formal.sh`](scripts/verify_formal.sh) runs full formal suites and all `40` default-build `^Fuzz` seed corpora, and plain `go test ./...` skips Lean subprocess checks.
+An isolated offline Lean 4 workspace ([`formal/`](formal/lakefile.toml), pinned to `v4.36.0` with `batteries` `v4.36.0` as `lintDriver`) with zero `sorry` or custom axioms proves soundness for the standalone CLI certificate checkers, abstract algebraic presolve and cutting-plane models, and compiled `arm64`/`amd64` zero-allocation kernels across `24` Lean files (`53,872` LOC: `1,325` authored `theorem` and `lemma` declarations with `1,324` in `GoblinFormal` plus `1` in `Apps/LsapCheck.lean`, `5,876` kernel `TheoremInfo` declarations including compiler-synthesized helper, equation, and splitter lemmas, and `220` `#print axioms` locks), paired with `6` pure-Go certification files (`20,349` LOC), `31` formal and certified Go test files (`34,861` LOC), and `50` `Fuzz*` targets (`42` default-build and `8` `-tags=cbc`, matching [`scripts/gcp-fuzz/targets.tsv`](scripts/gcp-fuzz/targets.tsv)). Hosted CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs Go test matrices, codegen invariants, and Lean verification (`lake build --wfail && lake lint` plus Track 5 ELF checks), [`scripts/pre-commit.sh`](scripts/pre-commit.sh) runs those checks locally (emitting a warning and skipping Lean if `lake` is absent unless `GOBLIN_STRICT_GATES=1`), [`scripts/verify_formal.sh`](scripts/verify_formal.sh) runs full formal suites and all `42` default-build `^Fuzz` seed corpora, and plain `go test ./...` skips Lean subprocess checks.
 <!-- END GENERATED:README_FORMAL_SUMMARY -->
 
 Several parts of the system stay outside formal proof scope by design:
 
-- **Unproved Go runtime and solver code**: Default uncertified solves execute floating-point Go code without source-to-Lean lifting, and runtime `WithCertified(true)` runs unproved pure-Go rational checkers (`certified.go`, `exact_polish.go`, `vipr_trace.go`, `assign/certified.go`) rather than Lean executables.
+- **Unproved Go runtime and solver code**: Default uncertified solves execute floating-point Go code without source-to-Lean lifting, and runtime `WithCertified(true)` runs unproved pure-Go rational and dyadic checkers (`certified.go`, `exact_polish.go`, `vipr_trace.go`, `assign/certified.go`, `mad/certified.go`) rather than Lean executables.
 - **Abstract standalone Lean models**: Track 2 rules, Track 3B `postsolveLPDual`, and Track 4 `BabState` formalize abstract standalone Lean models with no mechanical link to imperative `presolve.go`, `cuts.go`, or `bab.go`.
 - **Out-of-scope internals**: Sparse Markowitz `LU` factorization, Forrest-Tomlin updates, simplex termination, parallel search (`WithWorkers > 1`), the Go runtime and garbage collector, and the optional C++ CBC backend are not formally proven.
 - **Track 5 binary proof boundaries**: Machine-code checks run against hand-authored Lean ARM64 and x86-64 ISA decoders/operational models (trusted computing base). The `14` ARM64 routines (`7` standalone `-gcflags=-l` builds of functions inlined in production, while primary CBC/SciPy benchmarks run on `amd64` and point-in-time AVX-512 plus `linux/arm64` target-silicon snapshots live in `bench/results/target_silicon/`) and `6` `GOEXPERIMENT=simd` `amd64` AVX kernels add assurance only for uncertified solves; for certified results they add no extra soundness assurance because post-solve exact rational checking makes kernel bugs irrelevant. The `BoundsGuardsHold` hypothesis assumes panic-free runtime comparisons by hypothesis (syntactic CFG guard mediation: every edge to `runtime.panicBounds` traverses a `CMP` plus conditional branch, not value-level bounds safety; only the `4` zero-`panicBounds` ARM64 leaves prove unconditional unreachability). Zero-GC checks direct call targets up to the first external `BL` against the trusted `18`-symbol `allowedZeroGCSyms` allow-list without verifying those callees. Track 5E AVX2/AVX-512 cross-ISA proofs for `allAbsLE64` and `initReducedRow64` cover the `n % 8 == 0` vector body (outer Go wrappers handle scalar tails and `-0.0 -> +0.0` normalization, while `minNoNaN64` covers its scalar tail inline).
@@ -218,9 +268,9 @@ Full configuration flags and backend semantics are documented in [Solver Setting
 | Guide | Contents |
 | :--- | :--- |
 | [Architecture Overview](docs/index.md) | Module layers, dual CSR/CSC sparse matrix layout, and pooled workspaces. |
-| [Modeling API and Formats](docs/modeling-and-formats.md) | Variables, expressions, solver options, `PuLP` JSON streaming, MPS export, and `goblin/assign`. |
+| [Modeling API and Formats](docs/modeling-and-formats.md) | Variables, expressions, solver options, `PuLP` JSON streaming, MPS export, `goblin/assign`, and `goblin/mad`. |
 | [Solver Internals](docs/solver-internals.md) | Sparse Markowitz LU, dual/primal simplex, presolve, cuts, heuristics, rejected designs, and known limits. |
-| [Benchmarks and Telemetry](docs/benchmarks.md) | Hardware provenance, all 31 MILP and 22 LSAP families, SIMD tables, Go vs. CBC analysis, binary size, and reproduction commands. |
+| [Benchmarks and Telemetry](docs/benchmarks.md) | Hardware provenance, all 31 MILP, 22 LSAP, and 13 combinatorial MAD families, SIMD tables, Go vs. CBC analysis, binary size, and reproduction commands. |
 | [Formal Verification](docs/formal-verification.md) | Five-track Lean 4 proof suite, trust boundaries, formal fuzzing, soundness bug ledger, and verification protocol. |
 
 ---
@@ -242,6 +292,6 @@ Hosted CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs Go linti
 
 ## License
 
-The `goblin` module and its pure-Go default build (`BackendGo`, `goblin/assign`, `goblin/format`) are licensed under the [MIT License](LICENSE).
+The `goblin` module and its pure-Go default build (`BackendGo`, `goblin/assign`, `goblin/mad`, `goblin/format`) are licensed under the [MIT License](LICENSE).
 
 Optional vendored COIN-OR sources under `third_party/` (`Cbc`, `Cgl`, `Clp`, `CoinUtils`, and `Osi`, pinned in [`third_party/VERSIONS`](third_party/VERSIONS) and excluded from standard `go get` downloads via `third_party/go.mod`) and adapted COIN-OR fixtures in [`cbc_ported_test.go`](cbc_ported_test.go) are licensed under the Eclipse Public License 2.0 (`EPL-2.0`; see `third_party/*/LICENSE`). When distributing binaries compiled with `-tags cbc` that link those libraries, recipients may obtain the corresponding COIN-OR source code from `third_party/` in `https://github.com/paulourio/goblin` (or from `https://github.com/coin-or`) under `EPL-2.0` Section 3.

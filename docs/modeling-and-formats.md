@@ -105,3 +105,42 @@ The [`goblin/assign`](../assign/assign.go) subpackage (and root aliases [`Linear
 - [`assign.LinearSumFlat(ctx context.Context, rows, cols int, cost []float64, sense Sense, opts ...Option)`](../assign/assign.go): solves a contiguous row-major slice (`cost[i*cols + j]`).
 - [`assign.SolveInto(ctx context.Context, rows, cols int, cost []float64, sense Sense, rowInd, colInd []int, ws *Workspace, opts ...Option)`](../assign/assign.go): zero-allocation hot-loop entry point writing matches directly into caller slices over a pooled [`assign.Workspace`](../assign/workspace.go) (`AcquireWorkspace` / `ReleaseWorkspace`). When `ctx` is canceled or its deadline expires, the solver returns `ctx.Err()`.
 - **Forbidden Edges, Certified Mode, and Errors**: under `Minimize`, entries set to `+Inf` (`-Inf` under `Maximize`) mark forbidden pairs $(i, j)$ that cannot be selected. Passing `assign.WithCertified(true)` runs pure-Go checking in-process over exact 2304-bit dyadic rationals (`dyadic2304`, without invoking Lean at runtime; `assign/certified.go` carries no formal proof of its Go code and is validated differentially against Lean 4 `lsap-check` under `GOBLIN_FORMAL=1`) to confirm global optimality or build and check a bipartite Hall subset on `ErrInfeasible`. Under `assign.WithCertified(true)`, `Result.Objective` holds the nearest `float64` ($\le 0.5\text{ ULP}$) to the exact dyadic sum, while `Result.U` and `Result.V` hold finite `float64` dual potentials floored when necessary so $U_i + V_j \le C_{ij}$ holds over $\mathbb{Q}$. Any failure returns `assign.ErrCertificationFailed` while preserving `0` allocations on `SolveInto` and `0` linked checker bytes when unreferenced. The solver returns [`ErrInvalidDimensions`](../assign/assign.go) on negative or mismatched slice dimensions, [`ErrInvalidCost`](../assign/assign.go) on `NaN` or unbounded `-Inf` (`+Inf` under `Maximize`) entries, and [`ErrInfeasible`](../assign/assign.go) when no finite matching of size $k = \min(m, n)$ exists.
+
+---
+
+## 6. Combinatorial MAD Allocation API (`goblin/mad`)
+
+The [`goblin/mad`](../mad/mad.go) subpackage and root integration ([`mad_alias.go`](../mad_alias.go)) solve group-item L1/MAD allocation problems (`MADProblem` / `mad.Problem`) directly by exploiting additive separability across groups, with zero imports of `math/big`, `encoding/json`, or MILP internals inside `mad/`.
+
+- **Problem specification and transposition**: `MADProblem` specifies `Groups`, optional `Baselines` ($G \times T$), item matrix `Items` ($I \times T$, produced from $T \times I$ matrices via `mad.TransposePeriodWeights`), rounding `Step`, `RoundWeight`, `AllowZeroStep`, and optional bijective `DesignatedItems` (pinned into distinct groups); `mad.ValidateProblem` checks dimensions, finiteness, and scale bounds (`ErrInvalidProblem`).
+- **Entry points and strategies**: [`SolveMAD(ctx context.Context, prob MADProblem, opts ...MADOption)`](../mad_alias.go) (or `mad.Solve`) returns `MADResult` (`Assignment`, `Levels`, `Steps`, `Objective`, `BestBound`, `SolveTime`, `Strategy`, `Status`), canonicalizing zero-weight or zero-step outputs with `0` sentinel `Steps`, while `MADStrategy` selects `MADAuto` (`StrategyAuto`), `MADBruteForce` (`StrategyBruteForce`), `MADDP` (`StrategyDP`), or `MADMILP` (`StrategyMILP`), respecting a-priori caps `MaxDPItems = 14`, `MaxDPCeiling = 20`, `MaxDPWork = 64_000_000`, `MaxDPBytes = 32 << 20`, and `MaxDFSStates = 250_000` (`ErrCombinatorialLimit` when no fallback hook is installed).
+- **Tightened MILP fallback and options**: `BuildMADModel` constructs the tightened algebraic `*Model` with outward step bounds and substitutes $m_g = \text{Step} \cdot n_g$ when `RoundWeight >= T`. Functional options `WithMADStrategy`, `WithMADBackend`, `WithMADTimeLimit`, `WithMADMaxNodes`, `WithMADMaxIter`, `WithMADRelGapTol`, `WithMADAbsGapTol`, `WithMADCertified`, and `WithMADOptions` forward explicit tolerances (`RelGapTolSet`, `AbsGapTolSet`, `MaxNodesSet`, `MaxIterSet`) only when explicitly set, polish MILP solutions through the exact oracle, and retain `GreedyIncumbent` on limit exits without incumbents.
+- **Double-double oracle and fixed-width dyadic certification**: `EvaluateAssignment` uses exact `twoSum`/`twoProd` (`math.FMA`) evaluation and weighted-median step selection. Passing `WithMADCertified(true)` (`mad.WithCertified(true)`) activates exact fixed-width `uint64`-limb dyadic min-plus DP verification (`EvaluateAssignmentDyadic`, zero `math/big` imports), failing closed with `ErrCertificationFailed` on witness rejection or missing certified fallback hooks.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	gb "github.com/paulourio/goblin"
+)
+
+func main() {
+	prob := gb.MADProblem{
+		Groups: 2,
+		Items: [][]float64{
+			{149, 566, 1479, 128, 1950, 1713},
+			{491, 1179, 1737, 1103, 990, 1847},
+		},
+		Step:        100,
+		RoundWeight: 6,
+	}
+	res, err := gb.SolveMAD(context.Background(), prob, gb.WithMADCertified(true))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("obj=%.0f assign=%v steps=%v\n", res.Objective, res.Assignment, res.Steps)
+}
+```

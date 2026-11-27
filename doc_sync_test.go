@@ -95,7 +95,7 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 // live AST declarations across the repository so stale symbol names fail CI immediately.
 func TestDocBacktickIdentifiersResolve(t *testing.T) {
 	t.Parallel()
-	dirs := []string{".", "assign", "format", "bench", filepath.Join("internal", "simd")}
+	dirs := []string{".", "assign", "mad", "format", "bench", filepath.Join("internal", "simd")}
 	declared := map[string]bool{
 		// External Go stdlib / archsimd / Python PuLP / COIN-OR C++ names referenced in prose:
 		"Pool":                 true,
@@ -373,6 +373,35 @@ func TestTargetSiliconHygieneGate(t *testing.T) {
 	for _, ps := range poisonSamples {
 		if err := bench.ValidateTargetSiliconHygiene(ps.name, ps.input, ps.allow); err == nil {
 			t.Fatalf("expected ValidateTargetSiliconHygiene to reject synthetic %s sample", ps.name)
+		}
+	}
+}
+
+// TestMADSubpackageZeroMILPDeps verifies that the transitive dependency closure of ./mad
+// excludes the root MILP solver, internal packages, math/big, and encoding/json packages.
+func TestMADSubpackageZeroMILPDeps(t *testing.T) {
+	t.Parallel()
+
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "./mad")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list -deps ./mad failed: %v\n%s", err, out)
+	}
+
+	const rootPkg = "github.com/paulourio/gob" + "lin"
+	for raw := range strings.SplitSeq(string(out), "\n") {
+		pkg := strings.TrimSpace(raw)
+		if pkg == "" {
+			continue
+		}
+		if pkg == rootPkg || (strings.HasPrefix(pkg, rootPkg+"/") && pkg != rootPkg+"/mad") {
+			t.Fatalf("./mad transitive dependency closure contains forbidden package %q", pkg)
+		}
+		if pkg == "math/big" || strings.HasPrefix(pkg, "math/big/") {
+			t.Fatalf("./mad transitive dependency closure contains forbidden package %q", pkg)
+		}
+		if pkg == "encoding/json" || strings.HasPrefix(pkg, "encoding/json/") {
+			t.Fatalf("./mad transitive dependency closure contains forbidden package %q", pkg)
 		}
 	}
 }
