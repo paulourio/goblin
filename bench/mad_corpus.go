@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"slices"
 
 	gb "github.com/paulourio/goblin"
+	"github.com/paulourio/goblin/format"
 	"github.com/paulourio/goblin/internal/mad"
 )
 
@@ -735,6 +737,45 @@ func WriteMADCorpusManifest(dir string) ([]MADCorpusCase, error) {
 	rawJSON = append(rawJSON, '\n')
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), rawJSON, 0o644); err != nil {
 		return nil, err
+	}
+	return cases, nil
+}
+
+// WriteMADCorpusTrialJSONL exports every trial of all 13 combinatorial MAD families as compact
+// PuLP JSONL (<dir>/<id>.jsonl) alongside manifest.json so external harnesses (such as
+// bench/python_mad_baseline.py) benchmark the exact algebraic BuildMADModel formulations.
+func WriteMADCorpusTrialJSONL(dir string) ([]MADCorpusCase, error) {
+	cases, err := WriteMADCorpusManifest(dir)
+	if err != nil {
+		return nil, err
+	}
+	var lineBuf bytes.Buffer
+	for _, mc := range cases {
+		outPath := filepath.Join(dir, mc.ID+".jsonl")
+		f, err := os.Create(outPath)
+		if err != nil {
+			return nil, err
+		}
+		for k := range mc.Trials {
+			prob := GenerateMADProblem(mc, k)
+			m, err := BuildMADModel(prob)
+			if err != nil {
+				_ = f.Close()
+				return nil, fmt.Errorf("%s trial %d BuildMADModel: %w", mc.ID, k, err)
+			}
+			lineBuf.Reset()
+			if err := format.ToPuLPJSONCompact(m.Compile(), &lineBuf); err != nil {
+				_ = f.Close()
+				return nil, fmt.Errorf("%s trial %d ToPuLPJSONCompact: %w", mc.ID, k, err)
+			}
+			if _, err := f.Write(lineBuf.Bytes()); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
 	}
 	return cases, nil
 }

@@ -943,6 +943,7 @@ func main() {
 	printFP := flag.Bool("print-fingerprint", false, "Print canonical source and corpus SHA-256 fingerprint")
 	assignFlag := flag.Bool("assign", false, "Run Linear Sum Assignment (LSAP) benchmark suite")
 	madFlag := flag.Bool("mad", false, "Run isolated MAD combinatorial vs. MILP benchmark suite")
+	exportMADDir := flag.String("export-mad-dir", "", "Export combinatorial MAD trial models as PuLP JSONL into directory")
 	binSizeFlag := flag.Bool("binary-size", false, "Measure production binary sizes and linker DCE invariants")
 	pyRefPath := flag.String("python-ref", "bench/results/python_baseline.json", "Path to Python baseline JSON")
 	scipyRefPath := flag.String("scipy-ref", "bench/results/scipy_assign_baseline.json", "Path to SciPy LSAP baseline JSON")
@@ -1000,6 +1001,16 @@ func main() {
 
 	if *assignFlag {
 		runAssignBenchSuite(*scipyRefPath, *outPath, *pairedScalarOut, *noSIMD, *trials)
+		return
+	}
+
+	if *exportMADDir != "" {
+		madCases, err := bench.WriteMADCorpusTrialJSONL(*exportMADDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to export MAD trial JSONL: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Exported %d combinatorial MAD families to %s\n", len(madCases), *exportMADDir)
 		return
 	}
 

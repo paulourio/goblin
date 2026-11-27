@@ -417,7 +417,7 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderBlock(README_MAD_SOLVER_SUMMARY_TABLE): %v", err)
 	}
-	if !strings.Contains(madSolverSummary, "| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | DFS Med Sum (ms) |") {
+	if !strings.Contains(madSolverSummary, "| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | DFS Med Sum (ms) | MILP Go 250 ms (ms) | In-Process CBC 250 ms (ms) | Python PuLP+CBC 250 ms (ms) |") {
 		t.Fatalf("unexpected README_MAD_SOLVER_SUMMARY_TABLE header:\n%s", madSolverSummary)
 	}
 	if !strings.Contains(madSolverSummary, "skip (>250k)") || !strings.Contains(madSolverSummary, "(7/13)") {
@@ -428,7 +428,8 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderBlock(MAD_COMBINATORIAL_SUMMARY_TABLE): %v", err)
 	}
-	if !strings.Contains(madCombSummary, "| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | DFS Trial (Med) Sum (ms) |") {
+	if !strings.Contains(madCombSummary, "| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | DFS Trial (Med) Sum (ms) |") ||
+		!strings.Contains(madCombSummary, "| Python PuLP+CBC Trial (Med) Sum (ms) [Opt] |") {
 		t.Fatalf("unexpected MAD_COMBINATORIAL_SUMMARY_TABLE header:\n%s", madCombSummary)
 	}
 	if !strings.Contains(madCombSummary, "skip (>250k)") || !strings.Contains(madCombSummary, "[7/13]") {
@@ -878,6 +879,68 @@ func TestCheckMADParityAndCorpusValidationNegativeControls(t *testing.T) {
 			if len(errs) == 0 || !strings.Contains(joined, want) {
 				t.Fatalf("%s: CheckMADParity() = %v, want substring %q", tc.name, errs, want)
 			}
+		}
+	}
+
+	// Test `CheckMADParity` Python PuLP+CBC MAD negative controls.
+	basePyEntry := func() PythonMADBaselineEntry {
+		return PythonMADBaselineEntry{
+			ID:              "m1",
+			Groups:          2,
+			Items:           4,
+			Periods:         10,
+			Trials:          2,
+			Status:          "Optimal",
+			TrialStatuses:   []string{"Optimal", "TimeLimit"},
+			HasIncumbent:    true,
+			Objective:       ptr(100.0),
+			TrialObjectives: []*float64{ptr(100.0), ptr(125.0)},
+			OptimalCount:    1,
+			TimeLimitCount:  1,
+		}
+	}
+	pyTB := &TelemetryBundle{
+		MAD:       map[string]MADBenchResult{"m1": baseEntry()},
+		PythonMAD: map[string]PythonMADBaselineEntry{"m1": basePyEntry()},
+	}
+	if errs := CheckMADParity(pyTB, "m1"); len(errs) != 0 {
+		t.Fatalf("CheckMADParity(valid python_mad) = %v, want empty", errs)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*PythonMADBaselineEntry)
+		want   string
+	}{
+		{
+			name:   "python_mad_bad_status",
+			mutate: func(p *PythonMADBaselineEntry) { p.Status = "Infeasible" },
+			want:   `m1/python_mad: unexpected status "Infeasible"`,
+		},
+		{
+			name:   "python_mad_incumbent_below_exact",
+			mutate: func(p *PythonMADBaselineEntry) { p.Status = "TimeLimit"; p.Objective = ptr(100.0 - 2.0*tol) },
+			want:   "m1/python_mad: incumbent",
+		},
+		{
+			name:   "python_mad_optimal_wrong_obj",
+			mutate: func(p *PythonMADBaselineEntry) { p.Objective = ptr(101.0) },
+			want:   "m1/python_mad: optimal objective",
+		},
+		{
+			name:   "python_mad_trial_incumbent_below_exact",
+			mutate: func(p *PythonMADBaselineEntry) { p.TrialObjectives[1] = ptr(119.0) },
+			want:   "m1/python_mad: trial 1 incumbent",
+		},
+	} {
+		pyE := basePyEntry()
+		tc.mutate(&pyE)
+		tb := &TelemetryBundle{
+			MAD:       map[string]MADBenchResult{"m1": baseEntry()},
+			PythonMAD: map[string]PythonMADBaselineEntry{"m1": pyE},
+		}
+		errs := CheckMADParity(tb, "m1")
+		if joined := strings.Join(errs, "; "); !strings.Contains(joined, tc.want) {
+			t.Fatalf("%s: CheckMADParity() = %v, want substring %q", tc.name, errs, tc.want)
 		}
 	}
 

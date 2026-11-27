@@ -91,4 +91,28 @@ func TestMADCorpusSpecsAndTrial0Base(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tmpDir, "manifest.json")); err != nil {
 		t.Fatalf("manifest.json missing: %v", err)
 	}
+
+	jsonlDir := filepath.Join(t.TempDir(), "mad_jsonl")
+	exported, err := WriteMADCorpusTrialJSONL(jsonlDir)
+	if err != nil {
+		t.Fatalf("WriteMADCorpusTrialJSONL: %v", err)
+	}
+	if len(exported) != 13 {
+		t.Fatalf("exported cases = %d, want 13", len(exported))
+	}
+	for _, mc := range exported {
+		raw, rErr := os.ReadFile(filepath.Join(jsonlDir, mc.ID+".jsonl"))
+		if rErr != nil {
+			t.Fatalf("read %s.jsonl: %v", mc.ID, rErr)
+		}
+		lines := 0
+		for _, b := range raw {
+			if b == '\n' {
+				lines++
+			}
+		}
+		if lines != mc.Trials {
+			t.Fatalf("%s.jsonl has %d lines, want %d", mc.ID, lines, mc.Trials)
+		}
+	}
 }

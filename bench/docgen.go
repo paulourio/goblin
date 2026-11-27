@@ -58,6 +58,45 @@ type PythonBaselineEntry struct {
 	MeasuredAt            string             `json:"measured_at,omitempty"`
 }
 
+// PythonMADBaselineEntry matches the JSON output produced by bench/python_mad_baseline.py.
+type PythonMADBaselineEntry struct {
+	ID                string     `json:"id"`
+	Tier              string     `json:"tier"`
+	Family            string     `json:"family"`
+	Groups            int        `json:"groups"`
+	Items             int        `json:"items"`
+	Periods           int        `json:"periods"`
+	Trials            int        `json:"trials"`
+	TimeLimitMS       int        `json:"time_limit_ms"`
+	NumVars           int        `json:"num_vars"`
+	NumConstraints    int        `json:"num_constraints"`
+	Status            string     `json:"status"`
+	TrialStatuses     []string   `json:"trial_statuses,omitempty"`
+	HasIncumbent      bool       `json:"has_incumbent"`
+	Objective         *float64   `json:"objective"`
+	TrialObjectives   []*float64 `json:"trial_objectives,omitempty"`
+	OptimalCount      int        `json:"optimal_count"`
+	TimeLimitCount    int        `json:"time_limit_count"`
+	PuLPVersion       string     `json:"pulp_version"`
+	CBCPath           string     `json:"cbc_path"`
+	CBCVersion        string     `json:"cbc_version"`
+	CBCSha256         string     `json:"cbc_sha256,omitempty"`
+	CPUAffinity       string     `json:"cpu_affinity,omitempty"`
+	GitCommit         string     `json:"git_commit,omitempty"`
+	GitDirty          bool       `json:"git_dirty,omitzero"`
+	SourceFingerprint string     `json:"source_fingerprint,omitempty"`
+	UnameRelease      string     `json:"uname_release,omitempty"`
+	MeasuredAt        string     `json:"measured_at,omitempty"`
+	TParseMedianMS    float64    `json:"t_parse_median_ms"`
+	TBuildMedianMS    float64    `json:"t_build_median_ms"`
+	TSolveMedianMS    float64    `json:"t_solve_median_ms"`
+	TSolveTrialsMS    []float64  `json:"t_solve_trials_ms,omitempty"`
+	TTotalMedianMS    float64    `json:"t_total_median_ms"`
+	TTotalMeanMS      float64    `json:"t_total_mean_ms"`
+	TTotalSDMS        float64    `json:"t_total_sd_ms"`
+	TTotalTrialsMS    []float64  `json:"t_total_trials_ms,omitempty"`
+}
+
 // CheckpointMetrics captures Solver-Core timings and counts for one solver setup.
 type CheckpointMetrics struct {
 	Status     string  `json:"status"`
@@ -223,13 +262,14 @@ type TelemetryBundle struct {
 	AssignSIMD   map[string]AssignBenchResult
 	BinarySize   map[string]BinarySizeEntry
 	MAD          map[string]MADBenchResult
+	PythonMAD    map[string]PythonMADBaselineEntry
 }
 
 // LoadTelemetryBundle reads the Python, pure-Go scalar, and pure-Go SIMD telemetry files plus the
 // in-process CBC backend telemetry (goblin_cbc.json), the LSAP telemetry files
 // (scipy_assign_baseline.json, goblin_assign_scalar.json, goblin_assign_simd.json), the
 // binary-size and linker-DCE telemetry (goblin_binary_size.json), and the isolated combinatorial
-// MAD telemetry (goblin_mad.json) stored next to the scalar file.
+// MAD telemetry (goblin_mad.json and python_mad_baseline.json) stored next to the scalar file.
 func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle, error) {
 	var pyMap map[string]PythonBaselineEntry
 	if err := readJSON(pyPath, &pyMap); err != nil {
@@ -269,6 +309,10 @@ func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle,
 	if err := readJSON(filepath.Join(resultsDir, "goblin_mad.json"), &madMap); err != nil {
 		return nil, fmt.Errorf("mad telemetry: %w", err)
 	}
+	var pyMADMap map[string]PythonMADBaselineEntry
+	if err := readJSON(filepath.Join(resultsDir, "python_mad_baseline.json"), &pyMADMap); err != nil {
+		return nil, fmt.Errorf("python mad baseline: %w", err)
+	}
 	return &TelemetryBundle{
 		Python:       pyMap,
 		Goblin:       goblinMap,
@@ -279,6 +323,7 @@ func LoadTelemetryBundle(pyPath, scalarPath, simdPath string) (*TelemetryBundle,
 		AssignSIMD:   assignSIMDMap,
 		BinarySize:   binSizeMap,
 		MAD:          madMap,
+		PythonMAD:    pyMADMap,
 	}, nil
 }
 
@@ -354,7 +399,7 @@ func ValidateBinarySizeTelemetry(binMap map[string]BinarySizeEntry) error {
 
 // ValidateTelemetryAgainstCorpus verifies that every problem in BuildCorpus(), AssignCorpusSpecs(),
 // and MADCorpusSpecs() exists in testdata/ and in all telemetry maps with matching dimensions,
-// that all nine telemetry files carry uniform provenance and linker-DCE invariants, and that every
+// that all ten telemetry files carry uniform provenance and linker-DCE invariants, and that every
 // goblin build agrees with its reference on status, canonical objective, and per-trial objectives.
 func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error {
 	cases := BuildCorpus()
@@ -458,6 +503,9 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 	if len(tb.MAD) != len(madCases) {
 		return fmt.Errorf("mad telemetry has %d entries, mad corpus has %d", len(tb.MAD), len(madCases))
 	}
+	if len(tb.PythonMAD) != len(madCases) {
+		return fmt.Errorf("python mad telemetry has %d entries, mad corpus has %d", len(tb.PythonMAD), len(madCases))
+	}
 	for _, mc := range madCases {
 		mr, ok := tb.MAD[mc.ID]
 		if !ok {
@@ -466,6 +514,14 @@ func ValidateTelemetryAgainstCorpus(corpusDir string, tb *TelemetryBundle) error
 		if mr.Groups != mc.Groups || mr.Items != mc.Items || mr.Periods != mc.Periods || mr.Trials != mc.Trials {
 			return fmt.Errorf("mad telemetry dimension mismatch for %q: got (%d,%d,%d,trials=%d), want (%d,%d,%d,trials=%d)",
 				mc.ID, mr.Groups, mr.Items, mr.Periods, mr.Trials, mc.Groups, mc.Items, mc.Periods, mc.Trials)
+		}
+		pyMR, ok := tb.PythonMAD[mc.ID]
+		if !ok {
+			return fmt.Errorf("missing %q in python mad telemetry", mc.ID)
+		}
+		if pyMR.Groups != mc.Groups || pyMR.Items != mc.Items || pyMR.Periods != mc.Periods || pyMR.Trials != mc.Trials {
+			return fmt.Errorf("python mad telemetry dimension mismatch for %q: got (%d,%d,%d,trials=%d), want (%d,%d,%d,trials=%d)",
+				mc.ID, pyMR.Groups, pyMR.Items, pyMR.Periods, pyMR.Trials, mc.Groups, mc.Items, mc.Periods, mc.Trials)
 		}
 		mismatches = append(mismatches, CheckMADParity(tb, mc.ID)...)
 	}
@@ -529,6 +585,48 @@ func CheckMADParity(tb *TelemetryBundle, id string) []string {
 	}
 	checkMILP("milp_go", &mr.MILPGo)
 	checkMILP("milp_cbc", mr.MILPCBC)
+	if len(tb.PythonMAD) > 0 {
+		py, ok := tb.PythonMAD[id]
+		if !ok {
+			out = append(out, id+"/python_mad: missing python mad telemetry")
+		} else {
+			if py.Status != "Optimal" && py.Status != "TimeLimit" {
+				out = append(out, fmt.Sprintf("%s/python_mad: unexpected status %q", id, py.Status))
+			}
+			tol := parityRelTol * max(1.0, math.Abs(mr.Objective))
+			if py.HasIncumbent {
+				if py.Objective == nil {
+					out = append(out, id+"/python_mad: has_incumbent=true with nil objective")
+				} else {
+					if *py.Objective < mr.Objective-tol {
+						out = append(out, fmt.Sprintf("%s/python_mad: incumbent %.8g < exact %.8g", id, *py.Objective, mr.Objective))
+					}
+					if py.Status == "Optimal" && relDiff(*py.Objective, mr.Objective) > parityRelTol {
+						out = append(out, fmt.Sprintf("%s/python_mad: optimal objective %.8g != exact %.8g", id, *py.Objective, mr.Objective))
+					}
+				}
+			} else if py.Status == "Optimal" {
+				out = append(out, id+"/python_mad: Optimal status without incumbent")
+			}
+			for k, st := range py.TrialStatuses {
+				if st != "Optimal" && st != "TimeLimit" {
+					out = append(out, fmt.Sprintf("%s/python_mad: trial %d unexpected status %q", id, k, st))
+				}
+				if k >= len(mr.TrialObjectives) || k >= len(py.TrialObjectives) || py.TrialObjectives[k] == nil {
+					continue
+				}
+				wantObj := mr.TrialObjectives[k]
+				gotObj := *py.TrialObjectives[k]
+				trialTol := parityRelTol * max(1.0, math.Abs(wantObj))
+				if gotObj < wantObj-trialTol {
+					out = append(out, fmt.Sprintf("%s/python_mad: trial %d incumbent %.8g < exact %.8g", id, k, gotObj, wantObj))
+				}
+				if st == "Optimal" && relDiff(gotObj, wantObj) > parityRelTol {
+					out = append(out, fmt.Sprintf("%s/python_mad: trial %d optimal objective %.8g != exact %.8g", id, k, gotObj, wantObj))
+				}
+			}
+		}
+	}
 	return out
 }
 
@@ -834,6 +932,11 @@ func telemetryProvenance(tb *TelemetryBundle) (provenance, error) {
 			return pv, err
 		}
 		if err := checkGoBuild("goblin_mad", id, mr.GoVersion, mr.SIMDEnabled, false, false); err != nil {
+			return pv, err
+		}
+	}
+	for id, py := range tb.PythonMAD {
+		if err := checkRec("python_mad_baseline", id, py.GitCommit, py.SourceFingerprint, py.UnameRelease, py.CPUAffinity, py.GitDirty, false); err != nil {
 			return pv, err
 		}
 	}
@@ -1637,18 +1740,26 @@ type madCombSummaryStats struct {
 	milpCBCMedSum float64
 	milpCBCOpt    int
 	hasCBC        bool
+	pySum         float64
+	pyMedSum      float64
+	pyOpt         int
+	hasPy         bool
 	famGoGM       float64
 	famGoLo       float64
 	famGoHi       float64
 	famCBCGM      float64
 	famCBCLo      float64
 	famCBCHi      float64
+	famPyGM       float64
+	famPyLo       float64
+	famPyHi       float64
 }
 
 func summarizeMADCombSubset(madCases []MADCorpusCase, filter func(MADCorpusCase) bool, tb *TelemetryBundle) madCombSummaryStats {
 	var st madCombSummaryStats
-	var famGoGMs, famCBCGMs []float64
+	var famGoGMs, famCBCGMs, famPyGMs []float64
 	hasCBCAll := true
+	hasPyAll := true
 	for _, mc := range madCases {
 		if !filter(mc) {
 			continue
@@ -1698,11 +1809,29 @@ func summarizeMADCombSubset(madCases []MADCorpusCase, filter func(MADCorpusCase)
 		} else {
 			hasCBCAll = false
 		}
+		if py, pyOK := tb.PythonMAD[mc.ID]; pyOK {
+			st.pyMedSum += py.TTotalMedianMS
+			st.pyOpt += py.OptimalCount
+			for _, v := range py.TTotalTrialsMS {
+				st.pySum += v
+			}
+			if pgm, _, _, n := pairedRatio(py.TTotalTrialsMS, mr.AutoTrialsMS); n > 0 && !math.IsNaN(pgm) {
+				famPyGMs = append(famPyGMs, pgm)
+			} else if mr.AutoTimeMS > 0 {
+				famPyGMs = append(famPyGMs, py.TTotalMedianMS/mr.AutoTimeMS)
+			}
+		} else {
+			hasPyAll = false
+		}
 	}
 	st.hasCBC = st.nFams > 0 && hasCBCAll
+	st.hasPy = st.nFams > 0 && hasPyAll
 	st.famGoGM, st.famGoLo, st.famGoHi = familyClusteredRatio(famGoGMs)
 	if st.hasCBC {
 		st.famCBCGM, st.famCBCLo, st.famCBCHi = familyClusteredRatio(famCBCGMs)
+	}
+	if st.hasPy {
+		st.famPyGM, st.famPyLo, st.famPyHi = familyClusteredRatio(famPyGMs)
 	}
 	return st
 }
@@ -1738,27 +1867,34 @@ func formatMADDFSSumCell(st madCombSummaryStats) string {
 }
 
 func renderReadmeMADSolverSummaryTable(b *bytes.Buffer, madCases []MADCorpusCase, tb *TelemetryBundle) {
-	b.WriteString("| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | DFS Med Sum (ms) | MILP Go 250 ms Sum (ms) | MILP CBC 250 ms Sum (ms) | Equal-Family `MILP Go / Auto` [95% CI] |\n")
-	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	b.WriteString("| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | DFS Med Sum (ms) | MILP Go 250 ms (ms) | In-Process CBC 250 ms (ms) | Python PuLP+CBC 250 ms (ms) | Equal-Family `Python / Auto` [95% CI] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range madCombSubsetSpecs() {
 		st := summarizeMADCombSubset(madCases, grp.filter, tb)
 		cbcCell := "n/a"
 		if st.hasCBC {
 			cbcCell = fmt.Sprintf("%.1f (%d/%d opt)", st.milpCBCMedSum, st.milpCBCOpt, st.nInst)
 		}
-		fmt.Fprintf(b, "| %s | %d (%d) | %s | %s | %s | %.1f (%d/%d opt) | %s | %s |\n",
+		pyCell := "n/a"
+		pyRatioCell := "n/a"
+		if st.hasPy {
+			pyCell = fmt.Sprintf("%.1f (%d/%d opt)", st.pyMedSum, st.pyOpt, st.nInst)
+			pyRatioCell = formatMADRatioCI(st.famPyGM, st.famPyLo, st.famPyHi, st.nFams)
+		}
+		fmt.Fprintf(b, "| %s | %d (%d) | %s | %s | %s | %.1f (%d/%d opt) | %s | %s | %s |\n",
 			grp.label, st.nFams, st.nInst,
 			formatAssignMS(st.autoMedSum), formatAssignMS(st.dpMedSum),
 			formatMADDFSMedCell(st),
 			st.milpGoMedSum, st.milpGoOpt, st.nInst,
 			cbcCell,
-			formatMADRatioCI(st.famGoGM, st.famGoLo, st.famGoHi, st.nFams))
+			pyCell,
+			pyRatioCell)
 	}
 }
 
 func renderMADCombinatorialSummaryTable(b *bytes.Buffer, madCases []MADCorpusCase, tb *TelemetryBundle) {
-	b.WriteString("| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | DFS Trial (Med) Sum (ms) | MILP Go Trial (Med) Sum (ms) [Opt] | MILP CBC Trial (Med) Sum (ms) [Opt] | Equal-Family `MILP Go / Auto` [95% CI] | Equal-Family `MILP CBC / Auto` [95% CI] |\n")
-	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	b.WriteString("| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | DFS Trial (Med) Sum (ms) | MILP Go Trial (Med) Sum (ms) [Opt] | In-Process CBC Trial (Med) Sum (ms) [Opt] | Python PuLP+CBC Trial (Med) Sum (ms) [Opt] | Equal-Family `MILP Go / Auto` [95% CI] | Equal-Family `CBC / Auto` [95% CI] | Equal-Family `Python / Auto` [95% CI] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range madCombSubsetSpecs() {
 		st := summarizeMADCombSubset(madCases, grp.filter, tb)
 		cbcSumCell := "n/a"
@@ -1767,15 +1903,23 @@ func renderMADCombinatorialSummaryTable(b *bytes.Buffer, madCases []MADCorpusCas
 			cbcSumCell = fmt.Sprintf("%.1f (%.1f) [%d/%d]", st.milpCBCSum, st.milpCBCMedSum, st.milpCBCOpt, st.nInst)
 			cbcRatioCell = formatMADRatioCI(st.famCBCGM, st.famCBCLo, st.famCBCHi, st.nFams)
 		}
-		fmt.Fprintf(b, "| %s | %d (%d) | %s (%s) | %s (%s) | %s | %.1f (%.1f) [%d/%d] | %s | %s | %s |\n",
+		pySumCell := "n/a"
+		pyRatioCell := "n/a"
+		if st.hasPy {
+			pySumCell = fmt.Sprintf("%.1f (%.1f) [%d/%d]", st.pySum, st.pyMedSum, st.pyOpt, st.nInst)
+			pyRatioCell = formatMADRatioCI(st.famPyGM, st.famPyLo, st.famPyHi, st.nFams)
+		}
+		fmt.Fprintf(b, "| %s | %d (%d) | %s (%s) | %s (%s) | %s | %.1f (%.1f) [%d/%d] | %s | %s | %s | %s | %s |\n",
 			grp.label, st.nFams, st.nInst,
 			formatAssignMS(st.autoSum), formatAssignMS(st.autoMedSum),
 			formatAssignMS(st.dpSum), formatAssignMS(st.dpMedSum),
 			formatMADDFSSumCell(st),
 			st.milpGoSum, st.milpGoMedSum, st.milpGoOpt, st.nInst,
 			cbcSumCell,
+			pySumCell,
 			formatMADRatioCI(st.famGoGM, st.famGoLo, st.famGoHi, st.nFams),
-			cbcRatioCell)
+			cbcRatioCell,
+			pyRatioCell)
 	}
 }
 
@@ -1799,9 +1943,22 @@ func formatMADMILPCell(m *MADMILPMetrics, trials int) string {
 	return fmt.Sprintf("%.2f (%d/%d opt)", m.TimeMS, m.OptimalCount, trials)
 }
 
+func formatMADPythonCell(py *PythonMADBaselineEntry) string {
+	if py == nil {
+		return "n/a"
+	}
+	if py.OptimalCount == py.Trials {
+		return fmt.Sprintf("%.2f (`Optimal`)", py.TTotalMedianMS)
+	}
+	if py.OptimalCount == 0 {
+		return fmt.Sprintf("%.2f (`TimeLimit`)", py.TTotalMedianMS)
+	}
+	return fmt.Sprintf("%.2f (%d/%d opt)", py.TTotalMedianMS, py.OptimalCount, py.Trials)
+}
+
 func renderMADCombinatorialPipelineTable(b *bytes.Buffer, madCases []MADCorpusCase, tb *TelemetryBundle) {
-	b.WriteString("| Problem ID | $G \\times I \\times T$ | $\\lambda$ | Auto Strategy | Auto Med (ms) | DP Med (ms) | DFS Med (ms) | MILP Go 250 ms | MILP CBC 250 ms | Trial 0 Obj | Parity |\n")
-	b.WriteString("| :--- | :---: | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
+	b.WriteString("| Problem ID | $G \\times I \\times T$ | $\\lambda$ | Auto Strategy | Auto Med (ms) | DP Med (ms) | DFS Med (ms) | MILP Go 250 ms | In-Process CBC 250 ms | Python PuLP+CBC 250 ms | Trial 0 Obj | Parity |\n")
+	b.WriteString("| :--- | :---: | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |\n")
 	for _, mc := range madCases {
 		mr, ok := tb.MAD[mc.ID]
 		if !ok {
@@ -1811,7 +1968,11 @@ func renderMADCombinatorialPipelineTable(b *bytes.Buffer, madCases []MADCorpusCa
 		if mr.BruteForceRan {
 			dfsCell = formatAssignMS(mr.BruteForceTimeMS)
 		}
-		fmt.Fprintf(b, "| `%s` | $%d \\times %d \\times %d$ | %.2f | `%s` | %s | %s | %s | %s | %s | %.1f | %s |\n",
+		var pyPtr *PythonMADBaselineEntry
+		if py, pyOK := tb.PythonMAD[mc.ID]; pyOK {
+			pyPtr = &py
+		}
+		fmt.Fprintf(b, "| `%s` | $%d \\times %d \\times %d$ | %.2f | `%s` | %s | %s | %s | %s | %s | %s | %.1f | %s |\n",
 			mc.ID, mc.Groups, mc.Items, mc.Periods, mc.Lambda,
 			mr.AutoStrategy,
 			formatAssignMS(mr.AutoTimeMS),
@@ -1819,6 +1980,7 @@ func renderMADCombinatorialPipelineTable(b *bytes.Buffer, madCases []MADCorpusCa
 			dfsCell,
 			formatMADMILPCell(&mr.MILPGo, mr.Trials),
 			formatMADMILPCell(mr.MILPCBC, mr.Trials),
+			formatMADPythonCell(pyPtr),
 			mr.Objective,
 			madParityCell(tb, mc.ID))
 	}
@@ -2392,7 +2554,7 @@ Standalone ` + "`CGO_ENABLED=0`" + ` binaries compiled across the four canonical
 
 ## 8. Combinatorial Group-Item Allocation (Automatic ` + "`Model.Solve`" + ` Dispatch vs. Pure Branch-and-Cut)
 
-The 13-family combinatorial MAD corpus (` + "`testdata/mad_corpus/manifest.json`" + `; 131 randomized trials across the ` + "`pmad_base_g10_i2`" + ` base instance with exact Trial-0 optimum ` + "`24137`" + `, 8 PMAD families across $G \in \{6, 10, 20\}$, $I \in \{4..12\}$, and $\lambda \in \{0.25, 1.0\}$, plus 4 random-weight controls) evaluates default ` + "`Model.Solve`" + ` (automatic algebraic MAD detection routed to ` + "`internal/mad`" + `, alongside internal ` + "`StrategyDP`" + ` and ` + "`StrategyBruteForce`" + ` breakdowns when DFS states are at most ` + "`250,000`" + `) against 250 ms-capped pure Branch-and-Cut (` + "`WithCombinatorialSearch(false)`" + ` on ` + "`BackendGo`" + `, and ` + "`BackendCBC`" + `) with ` + "`1e-9`" + ` combinatorial parity and ` + "`[BestBound, Incumbent]`" + ` containment.
+The 13-family combinatorial MAD corpus (` + "`testdata/mad_corpus/manifest.json`" + `; 131 randomized trials across the ` + "`pmad_base_g10_i2`" + ` base instance with exact Trial-0 optimum ` + "`24137`" + `, 8 PMAD families across $G \in \{6, 10, 20\}$, $I \in \{4..12\}$, and $\lambda \in \{0.25, 1.0\}$, plus 4 random-weight controls) evaluates default ` + "`Model.Solve`" + ` (automatic algebraic MAD detection routed to ` + "`internal/mad`" + `, alongside internal ` + "`StrategyDP`" + ` and ` + "`StrategyBruteForce`" + ` breakdowns when DFS states are at most ` + "`250,000`" + `) against 250 ms-capped pure Branch-and-Cut (` + "`WithCombinatorialSearch(false)`" + ` on ` + "`BackendGo`" + `, in-process ` + "`BackendCBC`" + `, and Python ` + "`PuLP + CBC`" + ` subprocess execution) with ` + "`1e-9`" + ` combinatorial parity and ` + "`[BestBound, Incumbent]`" + ` containment.
 
 ### 8.1 Aggregate Combinatorial MAD Summary
 
