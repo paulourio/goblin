@@ -16,8 +16,7 @@
     "vipr_bytes": 0,
     "cert_syms": 17,
     "cert_bytes": 21698,
-    "git_commit": "e6622a2893bc5c96904a03afa0de07570accacac",
-    "git_dirty": true,
+    "git_commit": "1e3538c047b8cb771a9e55d39d0abff97e2ac84d",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -25,7 +24,7 @@
     "goamd64": "v1",
     "source_fingerprint": "dbe2691169aaaa14",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T11:25:56Z"
+    "measured_at": "2026-11-27T12:30:43Z"
   },
   "assign_default": {
     "id": "assign_default",
@@ -44,8 +43,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "e6622a2893bc5c96904a03afa0de07570accacac",
-    "git_dirty": true,
+    "git_commit": "1e3538c047b8cb771a9e55d39d0abff97e2ac84d",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -53,7 +51,7 @@
     "goamd64": "v1",
     "source_fingerprint": "dbe2691169aaaa14",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T11:25:56Z"
+    "measured_at": "2026-11-27T12:30:43Z"
   },
   "goblin_certified_vipr": {
     "id": "goblin_certified_vipr",
@@ -72,8 +70,7 @@
     "vipr_bytes": 341173,
     "cert_syms": 20,
     "cert_bytes": 77904,
-    "git_commit": "e6622a2893bc5c96904a03afa0de07570accacac",
-    "git_dirty": true,
+    "git_commit": "1e3538c047b8cb771a9e55d39d0abff97e2ac84d",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -81,13 +78,13 @@
     "goamd64": "v1",
     "source_fingerprint": "dbe2691169aaaa14",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T11:25:56Z"
+    "measured_at": "2026-11-27T12:30:43Z"
   },
   "goblin_default": {
     "id": "goblin_default",
     "label": "`goblin` default (`Model.Solve`, `DefaultOptions`)",
     "description": "Uncertified LP/MILP Branch-and-Cut solver (`Model.Solve` with `WithOptions(DefaultOptions())`)",
-    "raw_bytes": 6057324,
+    "raw_bytes": 6057332,
     "stripped_bytes": 3866784,
     "simd_raw_bytes": 5937810,
     "simd_stripped_bytes": 3887264,
@@ -100,8 +97,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "e6622a2893bc5c96904a03afa0de07570accacac",
-    "git_dirty": true,
+    "git_commit": "1e3538c047b8cb771a9e55d39d0abff97e2ac84d",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -109,6 +105,6 @@
     "goamd64": "v1",
     "source_fingerprint": "dbe2691169aaaa14",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T11:25:56Z"
+    "measured_at": "2026-11-27T12:30:43Z"
   }
 }
