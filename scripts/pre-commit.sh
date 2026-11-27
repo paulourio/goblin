@@ -11,6 +11,8 @@ TMP_DIR="$(mktemp -d)"
 declare -a ACTIVE_PIDS=()
 declare -a JOB_NAMES=()
 declare -a JOB_PIDS=()
+declare -a JOB_DONE=()
+BATCH_FAILED=0
 
 cleanup() {
     local pid
@@ -42,29 +44,95 @@ start_job() {
     ACTIVE_PIDS+=("${pid}")
     JOB_NAMES+=("${name}")
     JOB_PIDS+=("${pid}")
+    JOB_DONE+=(0)
+}
+
+# Record completion status for a finished job PID and remove it from ACTIVE_PIDS.
+finish_job_pid() {
+    local done_pid="$1"
+    local rc="$2"
+    local idx
+    for idx in "${!JOB_PIDS[@]}"; do
+        if [ "${JOB_PIDS[$idx]}" = "${done_pid}" ]; then
+            local name="${JOB_NAMES[$idx]}"
+            local log_file="${TMP_DIR}/${name}.log"
+            if [ "${rc}" -eq 0 ]; then
+                printf '  [PASS] %s\n' "${name}"
+            else
+                printf '  [FAIL] %s\n' "${name}" >&2
+                printf '  --- %s output ---\n' "${name}" >&2
+                cat "${log_file}" >&2
+                printf '  --- end %s ---\n' "${name}" >&2
+                BATCH_FAILED=1
+            fi
+            JOB_DONE[$idx]=1
+            break
+        fi
+    done
+    local remaining=()
+    local pid
+    for pid in "${ACTIVE_PIDS[@]:-}"; do
+        if [ -n "${pid}" ] && [ "${pid}" != "${done_pid}" ]; then
+            remaining+=("${pid}")
+        fi
+    done
+    ACTIVE_PIDS=(${remaining[@]+"${remaining[@]}"})
+}
+
+# Wait for one active background job to finish and record its result.
+wait_one_active_job() {
+    local done_pid=""
+    local rc=0
+    if [ "${BASH_VERSINFO[0]}" -gt 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then
+        if wait -n -p done_pid "${ACTIVE_PIDS[@]}"; then
+            rc=0
+        else
+            rc=$?
+        fi
+    else
+        done_pid="${ACTIVE_PIDS[0]}"
+        if wait "${done_pid}"; then
+            rc=0
+        else
+            rc=$?
+        fi
+    fi
+    finish_job_pid "${done_pid}" "${rc}"
+}
+
+# Launch a named job once active background jobs drop below max_jobs.
+start_bounded_job() {
+    local max_jobs="$1"
+    local name="$2"
+    shift 2
+    while [ "${#ACTIVE_PIDS[@]}" -ge "${max_jobs}" ]; do
+        wait_one_active_job
+    done
+    start_job "${name}" "$@"
 }
 
 # Wait for all queued background jobs and dump logs for any failures.
 wait_jobs() {
-    local failed=0
     local idx
     for idx in "${!JOB_PIDS[@]}"; do
-        local name="${JOB_NAMES[$idx]}"
-        local pid="${JOB_PIDS[$idx]}"
-        local log_file="${TMP_DIR}/${name}.log"
-        if wait "${pid}"; then
-            printf '  [PASS] %s\n' "${name}"
-        else
-            printf '  [FAIL] %s\n' "${name}" >&2
-            printf '  --- %s output ---\n' "${name}" >&2
-            cat "${log_file}" >&2
-            printf '  --- end %s ---\n' "${name}" >&2
-            failed=1
+        if [ "${JOB_DONE[$idx]:-0}" -eq 1 ]; then
+            continue
         fi
+        local pid="${JOB_PIDS[$idx]}"
+        local rc=0
+        if wait "${pid}"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        finish_job_pid "${pid}" "${rc}"
     done
+    local failed="${BATCH_FAILED}"
     ACTIVE_PIDS=()
     JOB_NAMES=()
     JOB_PIDS=()
+    JOB_DONE=()
+    BATCH_FAILED=0
     if [ "${failed}" -ne 0 ]; then
         fail "One or more parallel pre-commit gates failed."
     fi
@@ -291,7 +359,33 @@ run_lake_build() {
 run_formal_short() {
     (
         unset $(git rev-parse --local-env-vars)
-        env GOBLIN_FORMAL=1 go test -short -run '^TestFormal' . ./assign
+        env GOBLIN_FORMAL=1 go test "$@" -short -run '^TestFormal' . ./assign
+    )
+}
+
+# Detect online CPU count for bounded test scheduling.
+detect_cpu_count() {
+    local n=""
+    if command -v nproc >/dev/null 2>&1; then
+        n="$(nproc 2>/dev/null || true)"
+    elif command -v getconf >/dev/null 2>&1; then
+        n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    elif command -v sysctl >/dev/null 2>&1; then
+        n="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+    fi
+    if [[ ! "${n}" =~ ^[0-9]+$ ]] || [ "${n}" -lt 1 ]; then
+        n=1
+    fi
+    printf '%s\n' "${n}"
+}
+
+# Execute a command or shell function with an explicit GOMAXPROCS cap.
+run_with_procs() {
+    local procs="$1"
+    shift
+    (
+        export GOMAXPROCS="${procs}"
+        "$@"
     )
 }
 
@@ -308,19 +402,38 @@ else
     printf 'WARNING: Lean 4 lake binary not found in PATH or .elan/bin; skipping lake build, Track 5 ELF verification, and GOBLIN_FORMAL=1 oracle tests.\n' >&2
 fi
 
-# 5. Parallel Go Test Suite Gate (Default, SIMD, CGO_ENABLED=0, Race, Formal, and opt-in CBC)
-log_step "5/5 Running Go test suites across all build configurations in parallel..."
-start_job "test-default" go test ./...
-start_job "test-simd" env GOEXPERIMENT=simd go test ./...
-start_job "test-cgo0" env CGO_ENABLED=0 go test ./...
-start_job "test-race-short" go test -race -short ./...
-if [ "${HAS_LAKE}" -eq 1 ]; then
-    start_job "test-formal-short" run_formal_short
+# 5. Bounded Go Test Suite Gate (Race, Formal, SIMD, CGO_ENABLED=0, Default, and opt-in CBC)
+step5_cpus="$(detect_cpu_count)"
+step5_budget=$(( step5_cpus * 3 / 4 ))
+if [ "${step5_budget}" -lt 1 ]; then
+    step5_budget=1
 fi
+step5_max_jobs=2
+if [ "${step5_budget}" -lt 2 ]; then
+    step5_max_jobs=1
+fi
+step5_per_job_procs=$(( step5_budget / step5_max_jobs ))
+if [ "${step5_per_job_procs}" -lt 1 ]; then
+    step5_per_job_procs=1
+fi
+if [[ "${GOMAXPROCS:-}" =~ ^[0-9]+$ ]] && [ "${GOMAXPROCS}" -ge 1 ] && [ "${GOMAXPROCS}" -lt "${step5_per_job_procs}" ]; then
+    step5_per_job_procs="${GOMAXPROCS}"
+fi
+
+log_step "5/5 Running Go test suites (max_jobs=${step5_max_jobs}, -p 1, GOMAXPROCS=${step5_per_job_procs}/${step5_cpus})..."
+start_bounded_job "${step5_max_jobs}" "test-race-short" run_with_procs "${step5_per_job_procs}" go test -p 1 -race -short ./...
 if [ "${HAS_CBC}" -eq 1 ]; then
-    start_job "test-cbc" go test -tags=cbc ./...
-    start_job "test-race-cbc-short" go test -race -tags=cbc -short ./...
+    start_bounded_job "${step5_max_jobs}" "test-race-cbc-short" run_with_procs "${step5_per_job_procs}" go test -p 1 -race -tags=cbc -short ./...
 fi
+if [ "${HAS_LAKE}" -eq 1 ]; then
+    start_bounded_job "${step5_max_jobs}" "test-formal-short" run_with_procs "${step5_per_job_procs}" run_formal_short -p 1
+fi
+start_bounded_job "${step5_max_jobs}" "test-simd" run_with_procs "${step5_per_job_procs}" env GOEXPERIMENT=simd go test -p 1 ./...
+if [ "${HAS_CBC}" -eq 1 ]; then
+    start_bounded_job "${step5_max_jobs}" "test-cbc" run_with_procs "${step5_per_job_procs}" go test -p 1 -tags=cbc ./...
+fi
+start_bounded_job "${step5_max_jobs}" "test-cgo0" run_with_procs "${step5_per_job_procs}" env CGO_ENABLED=0 go test -p 1 ./...
+start_bounded_job "${step5_max_jobs}" "test-default" run_with_procs "${step5_per_job_procs}" go test -p 1 ./...
 
 wait_jobs
 
