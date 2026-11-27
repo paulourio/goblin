@@ -849,3 +849,87 @@ func TestPMADPerturbedSeedsRegression(t *testing.T) {
 		})
 	}
 }
+
+// TestPMADDualSimplexFMACyclingRegression guards against dual simplex cycling
+// on degenerate zero-cost PMAD LPs under FMA (GOAMD64=v3 / arm64), discovered
+// via FuzzPMADStructuralAndOracle seed 4a8e9a9cae07660b.
+//
+// Under Harris two-pass dual ratio testing, wrong-sign or sub-effHarris
+// floating-point reduced-cost noise divided by small pivots can exceed
+// degenStepTol in absolute value; resetting degenStreak/stallStreak on those
+// steps previously prevented dual cost perturbation and Bland's rule from
+// activating, causing the 90-variable root LP to hit the 50,000-iteration limit.
+func TestPMADDualSimplexFMACyclingRegression(t *testing.T) {
+	t.Parallel()
+
+	meta := decodeFuzzPMADSpec(14, '"', '/', '\x17', 0, 0)
+	tag := fmt.Sprintf("pmad_k%d_i%d_t%d_r%d_l%.2g_%d",
+		meta.nGroups, meta.nItems, meta.nPeriods, meta.regime, meta.spec.lambda, uint64(14))
+	m := buildPMADModel(tag, meta.spec)
+	p, err := m.CompileChecked()
+	if err != nil {
+		t.Fatalf("[%s] CompileChecked failed: %v", tag, err)
+	}
+
+	var objs [2]float64
+	for idx, disableSIMD := range []bool{false, true} {
+		mode := "simd"
+		if disableSIMD {
+			mode = "scalar"
+		}
+		lp := gb.NewLPSolver(p, nil)
+		lp.DisableSIMD = disableSIMD
+		lp.MaxIter = max(lp.MaxIter, 50000)
+		res := lp.Solve()
+		lp.Close()
+		if res.Status != gb.StatusOptimal {
+			t.Fatalf("[%s/%s] root LP status=%v (iters=%d vars=%d), want Optimal",
+				tag, mode, res.Status, res.Iterations, p.NumVars())
+		}
+		if res.Iterations >= 2000 {
+			t.Fatalf("[%s/%s] root LP took %d iterations (want < 2000; possible dual cycling)",
+				tag, mode, res.Iterations)
+		}
+		bV, rV, _ := p.MaxViolation(res.Primal, false)
+		if bV > 1e-6 || rV > 1e-6 {
+			t.Fatalf("[%s/%s] root LP primal violation b=%.3e r=%.3e", tag, mode, bV, rV)
+		}
+		evalObj := p.EvaluateObjective(res.Primal)
+		evalTol := 1e-5 * max(1.0, math.Abs(res.Objective))
+		if !hasFiniteBound(evalObj) || math.Abs(evalObj-res.Objective) > evalTol {
+			t.Fatalf("[%s/%s] root LP EvaluateObjective=%.10g != res.Objective=%.10g",
+				tag, mode, evalObj, res.Objective)
+		}
+		objs[idx] = res.Objective
+	}
+	tol := 1e-5 * max(1.0, max(math.Abs(objs[0]), math.Abs(objs[1])))
+	if math.Abs(objs[0]-objs[1]) > tol {
+		t.Fatalf("[%s] root LP simd=%.10g != scalar=%.10g", tag, objs[0], objs[1])
+	}
+
+	resPre := mustSolveCompiled(t, p,
+		gb.WithPureGo(),
+		gb.WithPresolve(true),
+		gb.WithCuts(true),
+		gb.WithHeuristics(true),
+		gb.WithWorkers(1),
+		gb.WithAbsGapTol(meta.totalAbs),
+		gb.WithRelGapTol(meta.spec.relTol),
+		gb.WithMaxNodes(2000),
+		gb.WithTimeLimit(2*time.Second),
+	)
+	hasIncPre := verifyPMADResult(t, tag+"/pre", p, resPre, meta.exactOpt, meta.hasExact, meta.totalAbs, meta.spec.relTol, false, false)
+
+	resNoPre := mustSolveCompiled(t, p,
+		gb.WithPureGo(),
+		gb.WithPresolve(false),
+		gb.WithWorkers(1),
+		gb.WithAbsGapTol(meta.totalAbs),
+		gb.WithRelGapTol(meta.spec.relTol),
+		gb.WithMaxNodes(2000),
+		gb.WithTimeLimit(2*time.Second),
+	)
+	hasIncNoPre := verifyPMADResult(t, tag+"/nopre", p, resNoPre, meta.exactOpt, meta.hasExact, meta.totalAbs, meta.spec.relTol, false, false)
+
+	assertPMADSolvesConsistent(t, tag, "pre", resPre, hasIncPre, "nopre", resNoPre, hasIncNoPre, meta.totalAbs, meta.spec.relTol)
+}

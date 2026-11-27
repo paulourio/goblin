@@ -4892,6 +4892,7 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64, dualFresh, allowPerturb bo
 	stallStreak := 0
 	blandTrigger := max(blandMinTrigger, blandRowMult*m)
 	perturbTrigger := max(128, m)
+	effHarris := min(harrisTol, 0.01*s.effDualTol)
 	activeCost := cost
 	pertActive := false
 	pertUsed := false
@@ -5209,7 +5210,11 @@ func (s *LPSolver) runDualSimplexLoop(cost []float64, dualFresh, allowPerturb bo
 			primalInfeas = s.applyDualBoundFlips(leaveRow, leaveDir)
 		}
 		leaveVar := basis[leaveRow]
-		if math.Abs(dj[enterVar]/tabElem) > degenStepTol {
+		dualTheta := 0.0
+		if status[enterVar] != statusSuperBasic {
+			dualTheta = -leaveDir * (dj[enterVar] / tabElem)
+		}
+		if dualTheta > degenStepTol && math.Abs(dj[enterVar]) > effHarris {
 			degenStreak = 0
 			stallStreak = 0
 		} else {
