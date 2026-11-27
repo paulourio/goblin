@@ -16,8 +16,7 @@
     "vipr_bytes": 0,
     "cert_syms": 17,
     "cert_bytes": 21698,
-    "git_commit": "daa87923d9d36aed42936df0f9f5ffdad63acbf9",
-    "git_dirty": true,
+    "git_commit": "a2bc4d40b277efdcbd17d9195414ae4b25a453c8",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -25,7 +24,7 @@
     "goamd64": "v1",
     "source_fingerprint": "2e436740e97c6e65",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T01:42:11Z"
+    "measured_at": "2026-11-27T02:06:57Z"
   },
   "assign_default": {
     "id": "assign_default",
@@ -44,8 +43,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "daa87923d9d36aed42936df0f9f5ffdad63acbf9",
-    "git_dirty": true,
+    "git_commit": "a2bc4d40b277efdcbd17d9195414ae4b25a453c8",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -53,7 +51,7 @@
     "goamd64": "v1",
     "source_fingerprint": "2e436740e97c6e65",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T01:42:11Z"
+    "measured_at": "2026-11-27T02:06:57Z"
   },
   "goblin_certified_vipr": {
     "id": "goblin_certified_vipr",
@@ -72,8 +70,7 @@
     "vipr_bytes": 341173,
     "cert_syms": 14,
     "cert_bytes": 53947,
-    "git_commit": "daa87923d9d36aed42936df0f9f5ffdad63acbf9",
-    "git_dirty": true,
+    "git_commit": "a2bc4d40b277efdcbd17d9195414ae4b25a453c8",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -81,7 +78,7 @@
     "goamd64": "v1",
     "source_fingerprint": "2e436740e97c6e65",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T01:42:11Z"
+    "measured_at": "2026-11-27T02:06:57Z"
   },
   "goblin_default": {
     "id": "goblin_default",
@@ -100,8 +97,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "daa87923d9d36aed42936df0f9f5ffdad63acbf9",
-    "git_dirty": true,
+    "git_commit": "a2bc4d40b277efdcbd17d9195414ae4b25a453c8",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -109,13 +105,13 @@
     "goamd64": "v1",
     "source_fingerprint": "2e436740e97c6e65",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T01:42:11Z"
+    "measured_at": "2026-11-27T02:06:57Z"
   },
   "mad_certified": {
     "id": "mad_certified",
     "label": "`goblin/mad` certified (`+ mad.WithCertified(true)`)",
     "description": "Combinatorial MAD solver with fixed-width `uint64`-limb dyadic certification (`mad.WithCertified(true)`)",
-    "raw_bytes": 3049717,
+    "raw_bytes": 3049725,
     "stripped_bytes": 1933472,
     "simd_raw_bytes": 2970058,
     "simd_stripped_bytes": 1933472,
@@ -128,8 +124,7 @@
     "vipr_bytes": 0,
     "cert_syms": 5,
     "cert_bytes": 20965,
-    "git_commit": "daa87923d9d36aed42936df0f9f5ffdad63acbf9",
-    "git_dirty": true,
+    "git_commit": "a2bc4d40b277efdcbd17d9195414ae4b25a453c8",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -137,7 +132,7 @@
     "goamd64": "v1",
     "source_fingerprint": "2e436740e97c6e65",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T01:42:11Z"
+    "measured_at": "2026-11-27T02:06:57Z"
   },
   "mad_default": {
     "id": "mad_default",
@@ -156,8 +151,7 @@
     "vipr_bytes": 0,
     "cert_syms": 0,
     "cert_bytes": 0,
-    "git_commit": "daa87923d9d36aed42936df0f9f5ffdad63acbf9",
-    "git_dirty": true,
+    "git_commit": "a2bc4d40b277efdcbd17d9195414ae4b25a453c8",
     "default_go_version": "go1.27.3-X:nodwarf5",
     "simd_go_version": "go1.27.3-X:simd",
     "goos": "linux",
@@ -165,6 +159,6 @@
     "goamd64": "v1",
     "source_fingerprint": "2e436740e97c6e65",
     "uname_release": "6.18.64-gentoo-r1-x86_64",
-    "measured_at": "2026-11-27T01:42:11Z"
+    "measured_at": "2026-11-27T02:06:57Z"
   }
 }
