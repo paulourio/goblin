@@ -26,8 +26,8 @@ import (
 	"github.com/paulourio/goblin/assign"
 	"github.com/paulourio/goblin/bench"
 	"github.com/paulourio/goblin/format"
+	"github.com/paulourio/goblin/internal/mad"
 	"github.com/paulourio/goblin/internal/simd"
-	"github.com/paulourio/goblin/mad"
 )
 
 const (
@@ -663,7 +663,7 @@ func solveAndCheckMADMILP(
 	backendLabel string,
 	solveOpts ...gb.Option,
 ) (time.Duration, gb.Result, int) {
-	m, _, buildErr := gb.BuildMADModel(prob)
+	m, buildErr := bench.BuildMADModel(prob)
 	if buildErr != nil {
 		panic(fmt.Sprintf("%s trial %d BuildMADModel(%s) failed: %v", id, trialIdx, backendLabel, buildErr))
 	}
@@ -728,17 +728,16 @@ func runMADBenchSuite(outPath string, defaultTrials int, noSIMD bool) {
 					continue
 				}
 				prob := bench.GenerateMADProblem(mc, 0)
-				_, _ = gb.SolveMAD(ctx, prob)
-				_, _ = gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADDP))
-				_, _ = gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADBruteForce))
-				if m, _, bErr := gb.BuildMADModel(prob); bErr == nil {
-					_, _ = m.Solve(ctx, gb.WithPureGo(), gb.WithMaxNodes(0), gb.WithTimeLimit(cpTimeoutMS*time.Millisecond))
-				}
-				if cbcAvail {
-					if m, _, bErr := gb.BuildMADModel(prob); bErr == nil {
-						_, _ = m.Solve(ctx, gb.WithCBC(), gb.WithTimeLimit(cpTimeoutMS*time.Millisecond))
+				if m, bErr := bench.BuildMADModel(prob); bErr == nil {
+					cp := m.Compile()
+					_, _ = gb.SolveCompiled(ctx, cp)
+					_, _ = gb.SolveCompiled(ctx, cp, gb.WithPureGo(), gb.WithCombinatorialSearch(false), gb.WithMaxNodes(0), gb.WithTimeLimit(cpTimeoutMS*time.Millisecond))
+					if cbcAvail {
+						_, _ = gb.SolveCompiled(ctx, cp, gb.WithCBC(), gb.WithTimeLimit(cpTimeoutMS*time.Millisecond))
 					}
 				}
+				_, _ = mad.Solve(ctx, prob, mad.WithStrategy(mad.StrategyDP))
+				_, _ = mad.Solve(ctx, prob, mad.WithStrategy(mad.StrategyBruteForce))
 			}
 		}
 	}
@@ -779,30 +778,38 @@ func runMADBenchSuite(outPath string, defaultTrials int, noSIMD bool) {
 				trialIdx = i - warmup
 			}
 			prob := bench.GenerateMADProblem(mc, trialIdx)
+			mComb, bErr := bench.BuildMADModel(prob)
+			if bErr != nil {
+				panic(fmt.Sprintf("%s trial %d BuildMADModel failed: %v", mc.ID, trialIdx, bErr))
+			}
+			cpComb := mComb.Compile()
 
 			t0 := time.Now()
-			autoRes, aErr := gb.SolveMAD(ctx, prob)
+			autoRes, aErr := gb.SolveCompiled(ctx, cpComb)
 			dAuto := time.Since(t0)
-			if aErr != nil || autoRes.Status != gb.MADStatusOptimal {
-				panic(fmt.Sprintf("%s trial %d MADAuto failed: status=%v err=%v", mc.ID, trialIdx, autoRes.Status, aErr))
+			if aErr != nil || autoRes.Status != gb.StatusOptimal {
+				panic(fmt.Sprintf("%s trial %d Model.Solve(Auto) failed: status=%v err=%v", mc.ID, trialIdx, autoRes.Status, aErr))
+			}
+			if len(autoRes.Values) != cpComb.NumVars() {
+				panic(fmt.Sprintf("%s trial %d Model.Solve(Auto) len(Values)=%d, want %d", mc.ID, trialIdx, len(autoRes.Values), cpComb.NumVars()))
 			}
 
 			t1 := time.Now()
-			dpRes, dpErr := gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADDP))
+			dpRes, dpErr := mad.Solve(ctx, prob, mad.WithStrategy(mad.StrategyDP))
 			dDP := time.Since(t1)
-			if dpErr != nil || dpRes.Status != gb.MADStatusOptimal {
+			if dpErr != nil || dpRes.Status != mad.StatusOptimal {
 				panic(fmt.Sprintf("%s trial %d MADDP failed: status=%v err=%v", mc.ID, trialIdx, dpRes.Status, dpErr))
 			}
 			if math.Abs(autoRes.Objective-dpRes.Objective)/max(1.0, math.Abs(dpRes.Objective)) > assignParityObjTol {
-				panic(fmt.Sprintf("%s trial %d MADAuto %.12g != MADDP %.12g", mc.ID, trialIdx, autoRes.Objective, dpRes.Objective))
+				panic(fmt.Sprintf("%s trial %d Model.Solve(Auto) %.12g != MADDP %.12g", mc.ID, trialIdx, autoRes.Objective, dpRes.Objective))
 			}
 
 			var dBF time.Duration
 			if runBF {
 				t2 := time.Now()
-				bfRes, bfErr := gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADBruteForce))
+				bfRes, bfErr := mad.Solve(ctx, prob, mad.WithStrategy(mad.StrategyBruteForce))
 				dBF = time.Since(t2)
-				if bfErr != nil || bfRes.Status != gb.MADStatusOptimal {
+				if bfErr != nil || bfRes.Status != mad.StatusOptimal {
 					panic(fmt.Sprintf("%s trial %d MADBruteForce failed: status=%v err=%v", mc.ID, trialIdx, bfRes.Status, bfErr))
 				}
 				if math.Abs(bfRes.Objective-dpRes.Objective)/max(1.0, math.Abs(dpRes.Objective)) > assignParityObjTol {
@@ -816,7 +823,7 @@ func runMADBenchSuite(outPath string, defaultTrials int, noSIMD bool) {
 
 			dGo, resGo, nVarsGo := solveAndCheckMADMILP(
 				ctx, mc.ID, trialIdx, prob, dpRes.Objective, "go",
-				gb.WithPureGo(), gb.WithMaxNodes(0), gb.WithTimeLimit(milpTimeout),
+				gb.WithPureGo(), gb.WithCombinatorialSearch(false), gb.WithMaxNodes(0), gb.WithTimeLimit(milpTimeout),
 			)
 
 			var dCBC time.Duration
@@ -831,7 +838,11 @@ func runMADBenchSuite(outPath string, defaultTrials int, noSIMD bool) {
 
 			if i >= warmup {
 				if trialIdx == 0 {
-					autoStrategy = autoRes.Strategy.String()
+					madAuto, maErr := mad.Solve(ctx, prob)
+					if maErr != nil || madAuto.Status != mad.StatusOptimal {
+						panic(fmt.Sprintf("%s trial 0 internal mad.Solve(Auto) failed: status=%v err=%v", mc.ID, madAuto.Status, maErr))
+					}
+					autoStrategy = madAuto.Strategy.String()
 				}
 				autoTimes = append(autoTimes, dAuto)
 				dpTimes = append(dpTimes, dDP)
@@ -1245,6 +1256,7 @@ func buildMILPBenchResult(
 	cp4 := runCheckpoint(acc.compiledTrials, cpTrials,
 		gb.WithBackend(backend),
 		gb.WithSIMD(!noSIMD),
+		gb.WithCombinatorialSearch(false),
 		gb.WithPresolve(false),
 		gb.WithCuts(false),
 		gb.WithHeuristics(false),
@@ -1257,6 +1269,7 @@ func buildMILPBenchResult(
 	cp5 := runCheckpoint(acc.compiledTrials, cpTrials,
 		gb.WithBackend(backend),
 		gb.WithSIMD(!noSIMD),
+		gb.WithCombinatorialSearch(false),
 		gb.WithPresolve(true),
 		gb.WithCuts(false),
 		gb.WithHeuristics(false),
@@ -1269,6 +1282,7 @@ func buildMILPBenchResult(
 	cp6 := runCheckpoint(acc.compiledTrials, cpTrials,
 		gb.WithBackend(backend),
 		gb.WithSIMD(!noSIMD),
+		gb.WithCombinatorialSearch(false),
 		gb.WithPresolve(true),
 		gb.WithCuts(true),
 		gb.WithHeuristics(false),
@@ -1348,8 +1362,8 @@ func benchPairedCorpusCase(
 		os.Exit(1)
 	}
 
-	scalarOpts := []gb.Option{gb.WithPureGo(), gb.WithoutSIMD()}
-	simdOpts := []gb.Option{gb.WithPureGo(), gb.WithSIMD(true)}
+	scalarOpts := []gb.Option{gb.WithPureGo(), gb.WithoutSIMD(), gb.WithCombinatorialSearch(false)}
+	simdOpts := []gb.Option{gb.WithPureGo(), gb.WithSIMD(true), gb.WithCombinatorialSearch(false)}
 	scAcc := newMILPTrialAcc(nTrials)
 	smAcc := newMILPTrialAcc(nTrials)
 
@@ -1429,7 +1443,7 @@ func runMILPBenchSuite(cfg milpSuiteConfig) {
 	if backend == gb.BackendCBC {
 		baseOpts = append(baseOpts, gb.WithCBC())
 	} else {
-		baseOpts = append(baseOpts, gb.WithPureGo())
+		baseOpts = append(baseOpts, gb.WithPureGo(), gb.WithCombinatorialSearch(false))
 	}
 	if cfg.noSIMD {
 		baseOpts = append(baseOpts, gb.WithoutSIMD())
@@ -1639,86 +1653,6 @@ func main() {
 	cInd := make([]int, 2)
 	obj, errInto := as.SolveInto(ctx, 2, 2, []float64{1, 2, 3, 1}, as.Minimize, rInd, cInd, ws, as.WithCertified(true))
 	fmt.Println(res.Objective, obj, errInto)
-}
-`,
-		},
-		{
-			id:      "mad_default",
-			label:   "`goblin/mad` default (`mad.Solve`, `StrategyAuto`)",
-			desc:    "Uncertified combinatorial MAD solver (`mad.Solve` with `StrategyAuto`)",
-			wantOut: "24137 <nil>",
-			src: `package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/paulourio/goblin/mad"
-)
-
-func main() {
-	prob := mad.Problem{
-		Baselines: [][]float64{
-			{508, 465, 706, 1213, 704, 238},
-			{1360, 379, 1778, 763, 386, 243},
-			{1428, 1832, 1301, 1388, 1021, 832},
-			{542, 1930, 1721, 1019, 240, 838},
-			{1585, 111, 1967, 886, 880, 781},
-			{1216, 494, 1417, 1804, 300, 1037},
-			{1370, 1761, 314, 637, 457, 244},
-			{1614, 1452, 1244, 736, 1645, 1701},
-			{396, 1810, 656, 659, 1201, 1528},
-			{1009, 210, 447, 1748, 1746, 655},
-		},
-		Items: [][]float64{
-			{149, 566, 1479, 128, 1950, 1713},
-			{491, 1179, 1737, 1103, 990, 1847},
-		},
-		Step:        100,
-		RoundWeight: 6,
-	}
-	res, err := mad.Solve(context.Background(), prob)
-	fmt.Println(res.Objective, err)
-}
-`,
-		},
-		{
-			id:      "mad_certified",
-			label:   "`goblin/mad` certified (`+ mad.WithCertified(true)`)",
-			desc:    "Combinatorial MAD solver with fixed-width `uint64`-limb dyadic certification (`mad.WithCertified(true)`)",
-			wantOut: "24137 <nil>",
-			src: `package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/paulourio/goblin/mad"
-)
-
-func main() {
-	prob := mad.Problem{
-		Baselines: [][]float64{
-			{508, 465, 706, 1213, 704, 238},
-			{1360, 379, 1778, 763, 386, 243},
-			{1428, 1832, 1301, 1388, 1021, 832},
-			{542, 1930, 1721, 1019, 240, 838},
-			{1585, 111, 1967, 886, 880, 781},
-			{1216, 494, 1417, 1804, 300, 1037},
-			{1370, 1761, 314, 637, 457, 244},
-			{1614, 1452, 1244, 736, 1645, 1701},
-			{396, 1810, 656, 659, 1201, 1528},
-			{1009, 210, 447, 1748, 1746, 655},
-		},
-		Items: [][]float64{
-			{149, 566, 1479, 128, 1950, 1713},
-			{491, 1179, 1737, 1103, 990, 1847},
-		},
-		Step:        100,
-		RoundWeight: 6,
-	}
-	res, err := mad.Solve(context.Background(), prob, mad.WithCertified(true))
-	fmt.Println(res.Objective, err)
 }
 `,
 		},

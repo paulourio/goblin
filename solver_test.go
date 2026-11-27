@@ -575,7 +575,7 @@ func TestRandomMADNegativeControls(t *testing.T) {
 	} {
 		m := bench.BuildMADRandom(tc.name, tc.g, tc.i, 6, tc.seed)
 		p := m.Compile()
-		res := mustSolveCompiled(t, p)
+		res := mustSolveCompiled(t, p, gb.WithCombinatorialSearch(false))
 		if res.Status != gb.StatusOptimal {
 			t.Fatalf("[%s] expected Optimal, got %v", tc.name, res.Status)
 		}
@@ -596,7 +596,7 @@ func TestRandomMADNegativeControls(t *testing.T) {
 	// goblin must report StatusNodeLimit (never false StatusOptimal) while returning a valid incumbent.
 	mSym := bench.BuildMADRandom("mad_rand_g4_i12", 4, 12, 6, 7003)
 	pSym := mSym.Compile()
-	resSym := mustSolveCompiled(t, pSym, gb.WithMaxNodes(200))
+	resSym := mustSolveCompiled(t, pSym, gb.WithCombinatorialSearch(false), gb.WithMaxNodes(200))
 	if resSym.Status != gb.StatusNodeLimit {
 		t.Fatalf("[mad_rand_g4_i12] expected StatusNodeLimit at MaxNodes=200, got %v", resSym.Status)
 	}

@@ -21,7 +21,6 @@ var fingerprintInputs = []struct {
 }{
 	{dir: ".", recursive: false},
 	{dir: "assign", recursive: false},
-	{dir: "mad", recursive: false},
 	{dir: "format", recursive: false},
 	{dir: "internal", recursive: true},
 	{dir: "bench", recursive: false},

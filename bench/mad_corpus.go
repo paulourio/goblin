@@ -12,8 +12,10 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 
-	"github.com/paulourio/goblin/mad"
+	gb "github.com/paulourio/goblin"
+	"github.com/paulourio/goblin/internal/mad"
 )
 
 // MADCorpusCase describes one MAD family.
@@ -735,4 +737,193 @@ func WriteMADCorpusManifest(dir string) ([]MADCorpusCase, error) {
 		return nil, err
 	}
 	return cases, nil
+}
+
+// BuildMADModel builds a tightened algebraic *gb.Model corresponding to prob
+// for benchmark and differential testing.
+func BuildMADModel(prob mad.Problem) (*gb.Model, error) {
+	if err := mad.ValidateProblem(prob); err != nil {
+		return nil, err
+	}
+
+	numGroups := prob.Groups
+	var numPeriods int
+	if prob.Baselines != nil {
+		numGroups = len(prob.Baselines)
+		numPeriods = len(prob.Baselines[0])
+	} else {
+		numPeriods = len(prob.Items[0])
+	}
+	numItems := len(prob.Items)
+
+	rounded := prob.Step > 0 && prob.RoundWeight > 0
+	directStep := rounded && prob.RoundWeight >= float64(numPeriods)
+	nMin := 1.0
+	if prob.AllowZeroStep {
+		nMin = 0.0
+	}
+
+	negSum := make([]float64, numPeriods)
+	posSum := make([]float64, numPeriods)
+	for i := range numItems {
+		row := prob.Items[i]
+		for t := range numPeriods {
+			d := row[t]
+			if d < 0 {
+				negSum[t] = math.Nextafter(negSum[t]+d, math.Inf(-1))
+			} else if d > 0 {
+				posSum[t] = math.Nextafter(posSum[t]+d, math.Inf(1))
+			}
+		}
+	}
+
+	m := gb.NewModel("mad", gb.Minimize)
+	xVars := make([][]gb.Var, numGroups)
+	zVars := make([][]gb.Var, numGroups)
+	var mVars, nVars, rVars []gb.Var
+	if rounded {
+		nVars = make([]gb.Var, numGroups)
+		if !directStep {
+			mVars = make([]gb.Var, numGroups)
+			rVars = make([]gb.Var, numGroups)
+		}
+	} else {
+		mVars = make([]gb.Var, numGroups)
+	}
+
+	objTerms := make([]gb.Term, 0, numGroups*(numPeriods+1))
+	yMin := make([]float64, numPeriods)
+	yMax := make([]float64, numPeriods)
+	margin := float64(numItems + 2)
+
+	for g := range numGroups {
+		xVars[g] = make([]gb.Var, numItems)
+		for i := range numItems {
+			xVars[g][i] = m.AddBinaryVar(fmt.Sprintf("x_%02d_%02d", g, i))
+		}
+		zVars[g] = make([]gb.Var, numPeriods)
+		for t := range numPeriods {
+			zVars[g][t] = m.AddContVar(fmt.Sprintf("z_%02d_%02d", g, t), 0, math.Inf(1))
+			objTerms = append(objTerms, zVars[g][t].T(1.0))
+		}
+
+		var maxPeriodY float64
+		for t := range numPeriods {
+			a := 0.0
+			if prob.Baselines != nil {
+				a = prob.Baselines[g][t]
+			}
+			lo := a
+			if negSum[t] != 0 {
+				lo = math.Nextafter(a+negSum[t], math.Inf(-1))
+			}
+			hi := a
+			if posSum[t] != 0 {
+				hi = math.Nextafter(a+posSum[t], math.Inf(1))
+			}
+			yMin[t] = lo
+			yMax[t] = hi
+			if t == 0 || hi > maxPeriodY {
+				maxPeriodY = hi
+			}
+		}
+		slices.Sort(yMin)
+		slices.Sort(yMax)
+		uMinG := yMin[(numPeriods-1)/2]
+		uMaxG := yMax[numPeriods/2]
+
+		if rounded {
+			loDiv := 0.0
+			if uMinG > 0 {
+				loDiv = math.Nextafter(uMinG/prob.Step, math.Inf(-1))
+			}
+			hiDiv := 0.0
+			if uMaxG > 0 {
+				hiDiv = math.Nextafter(uMaxG/prob.Step, math.Inf(1))
+			}
+			nLB := max(nMin, math.Floor(loDiv)-margin)
+			nUB := max(nMin, math.Nextafter(math.Ceil(hiDiv)+margin, math.Inf(1)))
+			nVars[g] = m.AddIntVar(fmt.Sprintf("n_%02d", g), nLB, nUB)
+			if !directStep {
+				mUB := max(0.0, maxPeriodY, math.Nextafter(prob.Step*nUB, math.Inf(1)))
+				mVars[g] = m.AddContVar(fmt.Sprintf("m_%02d", g), 0, mUB)
+				rVars[g] = m.AddContVar(fmt.Sprintf("r_%02d", g), 0, math.Inf(1))
+				objTerms = append(objTerms, rVars[g].T(prob.RoundWeight))
+			}
+		} else {
+			mUB := max(0.0, maxPeriodY)
+			mVars[g] = m.AddContVar(fmt.Sprintf("m_%02d", g), 0, mUB)
+		}
+	}
+	m.SetObjectiveNamed("total_mad", gb.Expr{Terms: objTerms})
+
+	for g := range numGroups {
+		var posLevelTerm, negLevelTerm gb.Term
+		if directStep {
+			posLevelTerm = nVars[g].T(prob.Step)
+			negLevelTerm = nVars[g].T(-prob.Step)
+		} else {
+			posLevelTerm = mVars[g].T(1.0)
+			negLevelTerm = mVars[g].T(-1.0)
+		}
+		for t := range numPeriods {
+			a := 0.0
+			if prob.Baselines != nil {
+				a = prob.Baselines[g][t]
+			}
+			if a == 0 {
+				a = 0
+			}
+			negA := -a
+			if negA == 0 {
+				negA = 0
+			}
+			posTerms := make([]gb.Term, 0, numItems+2)
+			negTerms := make([]gb.Term, 0, numItems+2)
+			posTerms = append(posTerms, zVars[g][t].T(1.0), posLevelTerm)
+			negTerms = append(negTerms, zVars[g][t].T(1.0), negLevelTerm)
+			for i := range numItems {
+				d := prob.Items[i][t]
+				if d != 0 {
+					posTerms = append(posTerms, xVars[g][i].T(-d))
+					negTerms = append(negTerms, xVars[g][i].T(d))
+				}
+			}
+			m.AddConstraint(fmt.Sprintf("dev_pos_%02d_%02d", g, t), gb.Ge(gb.Expr{Terms: posTerms}, a))
+			m.AddConstraint(fmt.Sprintf("dev_neg_%02d_%02d", g, t), gb.Ge(gb.Expr{Terms: negTerms}, negA))
+		}
+
+		if rounded && !directStep {
+			m.AddConstraint(fmt.Sprintf("round_pos_%02d", g), gb.Ge(gb.NewExpr(
+				rVars[g].T(1.0),
+				mVars[g].T(-1.0),
+				nVars[g].T(prob.Step),
+			), 0))
+			m.AddConstraint(fmt.Sprintf("round_neg_%02d", g), gb.Ge(gb.NewExpr(
+				rVars[g].T(1.0),
+				mVars[g].T(1.0),
+				nVars[g].T(-prob.Step),
+			), 0))
+		}
+	}
+
+	for i := range numItems {
+		terms := make([]gb.Term, numGroups)
+		for g := range numGroups {
+			terms[g] = xVars[g][i].T(1.0)
+		}
+		m.AddConstraint(fmt.Sprintf("item_%02d", i), gb.Eq(gb.Expr{Terms: terms}, 1.0))
+	}
+
+	if len(prob.DesignatedItems) > 0 {
+		for g := range numGroups {
+			terms := make([]gb.Term, len(prob.DesignatedItems))
+			for idx, item := range prob.DesignatedItems {
+				terms[idx] = xVars[g][item].T(1.0)
+			}
+			m.AddConstraint(fmt.Sprintf("designated_%02d", g), gb.Eq(gb.Expr{Terms: terms}, 1.0))
+		}
+	}
+
+	return m, nil
 }

@@ -95,7 +95,7 @@ func TestDocumentationAndBenchmarkSync(t *testing.T) {
 // live AST declarations across the repository so stale symbol names fail CI immediately.
 func TestDocBacktickIdentifiersResolve(t *testing.T) {
 	t.Parallel()
-	dirs := []string{".", "assign", "mad", "format", "bench", filepath.Join("internal", "simd")}
+	dirs := []string{".", "assign", "format", "bench", filepath.Join("internal", "mad"), filepath.Join("internal", "simd")}
 	declared := map[string]bool{
 		// External Go stdlib / archsimd / Python PuLP / COIN-OR C++ names referenced in prose:
 		"Pool":                 true,
@@ -377,15 +377,15 @@ func TestTargetSiliconHygieneGate(t *testing.T) {
 	}
 }
 
-// TestMADSubpackageZeroMILPDeps verifies that the transitive dependency closure of ./mad
-// excludes the root MILP solver, internal packages, math/big, and encoding/json packages.
+// TestMADSubpackageZeroMILPDeps verifies that the transitive dependency closure of ./internal/mad
+// excludes the root MILP solver, other internal packages, math/big, and encoding/json packages.
 func TestMADSubpackageZeroMILPDeps(t *testing.T) {
 	t.Parallel()
 
-	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "./mad")
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "./internal/mad")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("go list -deps ./mad failed: %v\n%s", err, out)
+		t.Fatalf("go list -deps ./internal/mad failed: %v\n%s", err, out)
 	}
 
 	const rootPkg = "github.com/paulourio/gob" + "lin"
@@ -394,14 +394,14 @@ func TestMADSubpackageZeroMILPDeps(t *testing.T) {
 		if pkg == "" {
 			continue
 		}
-		if pkg == rootPkg || (strings.HasPrefix(pkg, rootPkg+"/") && pkg != rootPkg+"/mad") {
-			t.Fatalf("./mad transitive dependency closure contains forbidden package %q", pkg)
+		if pkg == rootPkg || (strings.HasPrefix(pkg, rootPkg+"/") && pkg != rootPkg+"/internal/mad") {
+			t.Fatalf("./internal/mad transitive dependency closure contains forbidden package %q", pkg)
 		}
 		if pkg == "math/big" || strings.HasPrefix(pkg, "math/big/") {
-			t.Fatalf("./mad transitive dependency closure contains forbidden package %q", pkg)
+			t.Fatalf("./internal/mad transitive dependency closure contains forbidden package %q", pkg)
 		}
 		if pkg == "encoding/json" || strings.HasPrefix(pkg, "encoding/json/") {
-			t.Fatalf("./mad transitive dependency closure contains forbidden package %q", pkg)
+			t.Fatalf("./internal/mad transitive dependency closure contains forbidden package %q", pkg)
 		}
 	}
 }

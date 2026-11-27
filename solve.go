@@ -89,6 +89,9 @@ type Options struct {
 	EnableCuts bool
 	// EnableHeuristics runs primal heuristics (rounding, diving, root sub-MIP).
 	EnableHeuristics bool
+	// EnableCombinatorialSearch detects separable combinatorial structures (such as L1/MAD
+	// group-item allocation) and solves them via exact DFS or subset bitmask DP before Branch-and-Cut.
+	EnableCombinatorialSearch bool
 	// Certified enables fail-closed exact rational verification on the original problem.
 	// When Certified is true, any gap tolerance not explicitly set defaults to 0.
 	Certified bool
@@ -118,16 +121,17 @@ const (
 // to unlimited and MaxCutPasses to 30 unless explicitly overridden.
 func DefaultOptions() Options {
 	return Options{
-		Backend:              BackendGo,
-		EnablePresolve:       true,
-		EnableCuts:           true,
-		EnableHeuristics:     true,
-		MaxNodes:             defaultMaxNodes,
-		MaxCutPasses:         defaultMaxCutPasses,
-		RelGapTol:            defaultRelGapTol,
-		AbsGapTol:            defaultAbsGapTol,
-		defaultMaxNodesUsed:  true,
-		defaultCutPassesUsed: true,
+		Backend:                   BackendGo,
+		EnablePresolve:            true,
+		EnableCuts:                true,
+		EnableHeuristics:          true,
+		EnableCombinatorialSearch: true,
+		MaxNodes:                  defaultMaxNodes,
+		MaxCutPasses:              defaultMaxCutPasses,
+		RelGapTol:                 defaultRelGapTol,
+		AbsGapTol:                 defaultAbsGapTol,
+		defaultMaxNodesUsed:       true,
+		defaultCutPassesUsed:      true,
 	}
 }
 
@@ -236,6 +240,12 @@ func WithCuts(enabled bool) Option {
 // WithHeuristics enables or disables primal heuristics.
 func WithHeuristics(enabled bool) Option {
 	return func(cfg *Options) { cfg.EnableHeuristics = enabled }
+}
+
+// WithCombinatorialSearch enables or disables exact combinatorial search (DFS / bitmask DP)
+// on detected separable structures such as L1/MAD allocation before Branch-and-Cut.
+func WithCombinatorialSearch(enabled bool) Option {
+	return func(cfg *Options) { cfg.EnableCombinatorialSearch = enabled }
 }
 
 // WithMaxNodes sets the maximum number of branch-and-bound nodes (0 = unlimited).
@@ -532,6 +542,14 @@ func solveCompensatedEngineCore(ctx context.Context, p *CompiledProblem, opt Opt
 			Backend:   backend,
 			Status:    StatusInfeasible,
 			SolveTime: time.Since(start),
+		}
+	}
+	if opt.EnableCombinatorialSearch && p.isMIP && opt.viprTrace == nil && !opt.isSubMIP && !opt.hasCutoff && p.exactOrig == nil {
+		if combRes, handled := trySolveCombinatorialMAD(ctx, p, backend, start, deadline); handled {
+			return combRes
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return Result{}
 		}
 	}
 	baseProb := p

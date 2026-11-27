@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/paulourio/goblin/mad"
+	"github.com/paulourio/goblin/internal/mad"
 )
 
 func buildBenchProblem(numGroups, numItems, numPeriods int, seed uint64, withBaselines bool) mad.Problem {

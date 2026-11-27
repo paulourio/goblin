@@ -388,7 +388,7 @@ stage_and_run_target() {
 
     local pkg_arg="."
     local pkg_rel=""
-    local coverpkg_arg="github.com/paulourio/goblin,github.com/paulourio/goblin/format,github.com/paulourio/goblin/mad"
+    local coverpkg_arg="github.com/paulourio/goblin,github.com/paulourio/goblin/format,github.com/paulourio/goblin/internal/mad"
     if [[ -n "${sub_pkg}" ]]; then
         pkg_arg="./${sub_pkg}"
         pkg_rel="${sub_pkg}/"

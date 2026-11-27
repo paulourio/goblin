@@ -720,7 +720,7 @@ func TestOrbitSymmetryBreaking(t *testing.T) {
 				preRes.Reduced.NumConstraints(), p.NumConstraints())
 		}
 
-		resNoPre := mustSolveCompiled(t, p, gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false))
+		resNoPre := mustSolveCompiled(t, p, gb.WithCombinatorialSearch(false), gb.WithPresolve(false), gb.WithCuts(false), gb.WithHeuristics(false))
 		if resNoPre.Status != gb.StatusOptimal {
 			t.Fatalf("no-presolve baseline status=%v, want Optimal", resNoPre.Status)
 		}
@@ -728,7 +728,7 @@ func TestOrbitSymmetryBreaking(t *testing.T) {
 		for name, opts := range optionVariants() {
 			assertOptimal(t, "bijection/"+name, p, mustSolveCompiled(t, p, opts...), wantObj)
 		}
-		resBare := mustSolveCompiled(t, p, gb.WithCuts(false), gb.WithHeuristics(false))
+		resBare := mustSolveCompiled(t, p, gb.WithCombinatorialSearch(false), gb.WithCuts(false), gb.WithHeuristics(false))
 		if resBare.Nodes >= resNoPre.Nodes {
 			t.Fatalf("presolve symmetry breaking nodes=%d, want < %d (no-presolve)", resBare.Nodes, resNoPre.Nodes)
 		}

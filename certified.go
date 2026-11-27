@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/paulourio/goblin/internal/mad"
 )
 
 func setRootCertifiedTrue(cfg *Options) {
@@ -193,6 +195,16 @@ func solveCertified(ctx context.Context, p *CompiledProblem, opt Options, start 
 				}
 			}
 			return finalizeCertifiedSolve(ctx, p, opt, optVIPRTrace(opt), nil, res, start)
+		}
+
+		hasCertFault := ctx != nil && ctx.Value(goblinCertFaultKey{}) != nil
+		if opt.EnableCombinatorialSearch && opt.Backend == BackendGo && opt.viprTrace == nil && !opt.isSubMIP && !opt.hasCutoff && p.exactOrig == nil && !hasCertFault {
+			if combRes, handled := trySolveCombinatorialMADCertified(ctx, p, opt, start, deadline); handled {
+				return combRes, nil
+			}
+			if ctx != nil && ctx.Err() != nil {
+				return Result{}, ctx.Err()
+			}
 		}
 
 		execOpt := opt
@@ -4388,4 +4400,258 @@ func verifyMiniVIPRProblem(p *CompiledProblem, raw []byte) (certVIPRVerified, er
 		return certVIPRVerified{}, ErrCertificationFailed
 	}
 	return verifyMiniVIPRBytes(raw, origInst)
+}
+
+func madDyadicLimbsToRat(limbs []uint64, exp int) *big.Rat {
+	num := new(big.Int)
+	var word big.Int
+	for _, limb := range slices.Backward(limbs) {
+		num.Lsh(num, 64)
+		if limb != 0 {
+			word.SetUint64(limb)
+			num.Or(num, &word)
+		}
+	}
+	if num.Sign() == 0 {
+		return new(big.Rat)
+	}
+	if exp > 0 {
+		num.Lsh(num, uint(exp))
+		return new(big.Rat).SetInt(num)
+	}
+	if exp < 0 {
+		den := new(big.Int).Lsh(big.NewInt(1), uint(-exp))
+		return new(big.Rat).SetFrac(num, den)
+	}
+	return new(big.Rat).SetInt(num)
+}
+
+func ratAbsDiff(a, b *big.Rat) *big.Rat {
+	d := new(big.Rat).Sub(a, b)
+	if d.Sign() < 0 {
+		d.Neg(d)
+	}
+	return d
+}
+
+func evalMADGroupRatCost(yRat []*big.Rat, cand, bnRat, wrRat *big.Rat, rounded bool) *big.Rat {
+	total := new(big.Rat)
+	for _, y := range yRat {
+		total.Add(total, ratAbsDiff(y, cand))
+	}
+	if rounded {
+		pen := ratAbsDiff(cand, bnRat)
+		pen.Mul(pen, wrRat)
+		total.Add(total, pen)
+	}
+	return total
+}
+
+func reconstructExactMADPrimalRat(p *CompiledProblem, det detectedMAD, mRes mad.Result) ([]*big.Rat, bool) {
+	if len(mRes.Assignment) != det.numItems || len(mRes.Levels) != det.numGroups {
+		return nil, false
+	}
+	if det.rounded && len(mRes.Steps) != det.numGroups {
+		return nil, false
+	}
+
+	var stepRat, wrRat *big.Rat
+	if det.rounded {
+		var okS, okW bool
+		stepRat, okS = exactRatFromFloat(det.prob.Step)
+		wrRat, okW = exactRatFromFloat(det.prob.RoundWeight)
+		if !okS || !okW {
+			return nil, false
+		}
+	}
+
+	xRat := make([]*big.Rat, p.numVars)
+	for j := range xRat {
+		xRat[j] = new(big.Rat)
+	}
+	one := big.NewRat(1, 1)
+	for i, g := range mRes.Assignment {
+		if g < 0 || g >= det.numGroups {
+			return nil, false
+		}
+		xRat[det.xCols[g][i]] = new(big.Rat).Set(one)
+	}
+
+	directLevel := det.directStep || (det.rounded && det.prob.RoundWeight >= float64(det.numPeriods))
+	yRat := make([]*big.Rat, det.numPeriods)
+	zeroRat := new(big.Rat)
+
+	for g := range det.numGroups {
+		for t := range det.numPeriods {
+			if det.prob.Baselines != nil {
+				r, ok := exactRatFromFloat(det.prob.Baselines[g][t])
+				if !ok {
+					return nil, false
+				}
+				yRat[t] = r
+			} else {
+				yRat[t] = new(big.Rat)
+			}
+		}
+		for i, ag := range mRes.Assignment {
+			if ag != g {
+				continue
+			}
+			row := det.prob.Items[i]
+			for t := range det.numPeriods {
+				if d := row[t]; d != 0 {
+					r, ok := exactRatFromFloat(d)
+					if !ok {
+						return nil, false
+					}
+					yRat[t].Add(yRat[t], r)
+				}
+			}
+		}
+
+		var nRat, bnRat *big.Rat
+		if det.rounded {
+			nRat = new(big.Rat).SetInt64(mRes.Steps[g])
+			bnRat = new(big.Rat).Mul(stepRat, nRat)
+		}
+
+		var mRat *big.Rat
+		if directLevel {
+			mRat = new(big.Rat).Set(bnRat)
+		} else {
+			bestCand := new(big.Rat).Set(zeroRat)
+			bestCost := evalMADGroupRatCost(yRat, bestCand, bnRat, wrRat, det.rounded)
+			consider := func(cand *big.Rat) {
+				if cand.Sign() < 0 {
+					return
+				}
+				cost := evalMADGroupRatCost(yRat, cand, bnRat, wrRat, det.rounded)
+				if cost.Cmp(bestCost) < 0 {
+					bestCost = cost
+					bestCand = new(big.Rat).Set(cand)
+				}
+			}
+			for _, y := range yRat {
+				consider(y)
+			}
+			if det.rounded {
+				consider(bnRat)
+			}
+			mRat = bestCand
+		}
+
+		if det.directStep {
+			xRat[det.nCols[g]] = nRat
+		} else {
+			xRat[det.mCols[g]] = mRat
+			if det.rounded {
+				xRat[det.nCols[g]] = nRat
+				xRat[det.rCols[g]] = ratAbsDiff(mRat, bnRat)
+			}
+		}
+		for t := range det.numPeriods {
+			xRat[det.zCols[g][t]] = ratAbsDiff(yRat[t], mRat)
+		}
+	}
+
+	return xRat, true
+}
+
+func trySolveCombinatorialMADCertified(
+	ctx context.Context,
+	p *CompiledProblem,
+	opt Options,
+	start, deadline time.Time,
+) (Result, bool) {
+	det, ok := detectMADStructure(p)
+	if !ok {
+		return Result{}, false
+	}
+
+	madOpts := []mad.Option{mad.WithCertified(true)}
+	if !deadline.IsZero() {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return Result{}, false
+		}
+		madOpts = append(madOpts, mad.WithTimeLimit(rem))
+	}
+
+	mRes, err := mad.Solve(ctx, det.prob, madOpts...)
+	if err != nil || mRes.Status != mad.StatusOptimal {
+		return Result{}, false
+	}
+
+	ev, err := mad.EvaluateAssignmentDyadic(det.prob, mRes.Assignment)
+	if err != nil {
+		return Result{}, false
+	}
+	evRat := madDyadicLimbsToRat(ev.Limbs, ev.Exp)
+
+	xRat, okRec := reconstructExactMADPrimalRat(p, det, mRes)
+	if !okRec {
+		return Result{}, false
+	}
+	if !verifyExactPrimalRat(p, xRat, true) {
+		return Result{}, false
+	}
+
+	linObjRat := new(big.Rat)
+	term := new(big.Rat)
+	for j, xj := range xRat {
+		c := p.objCoeffs[j]
+		if c == 0 || xj.Sign() == 0 {
+			continue
+		}
+		cRat, okC := exactRatFromFloat(c)
+		if !okC {
+			return Result{}, false
+		}
+		term.Mul(cRat, xj)
+		linObjRat.Add(linObjRat, term)
+	}
+	if linObjRat.Cmp(evRat) != 0 {
+		return Result{}, false
+	}
+
+	totalObjRat := new(big.Rat).Set(linObjRat)
+	if p.objConstant != 0 {
+		constRat, okConst := exactRatFromFloat(p.objConstant)
+		if !okConst {
+			return Result{}, false
+		}
+		totalObjRat.Add(totalObjRat, constRat)
+	}
+
+	vals := make([]float64, p.numVars)
+	for j, xj := range xRat {
+		vals[j] = exactRatToFloat(xj)
+		if math.IsNaN(vals[j]) || math.IsInf(vals[j], 0) {
+			return Result{}, false
+		}
+	}
+	objFloat := exactRatToFloat(totalObjRat)
+	boundFloat := exactRatToOutwardBound(p.sense, totalObjRat)
+	if math.IsNaN(objFloat) || math.IsInf(objFloat, 0) || math.IsNaN(boundFloat) || math.IsInf(boundFloat, 0) {
+		return Result{}, false
+	}
+
+	if w := optCertWitness(opt); w != nil {
+		w.Status = StatusOptimal
+		w.Values = cloneExactRatSlice(xRat)
+		w.Objective = new(big.Rat).Set(totalObjRat)
+		w.BestBound = new(big.Rat).Set(totalObjRat)
+	}
+
+	return Result{
+		modelID:      p.modelID,
+		Backend:      opt.Backend,
+		Status:       StatusOptimal,
+		Values:       vals,
+		Objective:    objFloat,
+		BestBound:    boundFloat,
+		RootLPBound:  boundFloat,
+		RootCutBound: boundFloat,
+		SolveTime:    time.Since(start),
+	}, true
 }

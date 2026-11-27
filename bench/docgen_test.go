@@ -276,36 +276,6 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
 				SIMDGoVersion:     "go1.27.3-X:simd",
 			},
-			"mad_default": {
-				ID:                "mad_default",
-				Label:             "`goblin/mad` default (`mad.Solve`, `StrategyAuto`)",
-				RawBytes:          2400000,
-				StrippedBytes:     1500000,
-				SIMDRawBytes:      2450000,
-				SIMDStrippedBytes: 1530000,
-				GoblinTextBytes:   85000,
-				GitCommit:         "abc",
-				SourceFingerprint: "fp1",
-				UnameRelease:      "6.1",
-				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
-				SIMDGoVersion:     "go1.27.3-X:simd",
-			},
-			"mad_certified": {
-				ID:                "mad_certified",
-				Label:             "`goblin/mad` certified (`+ mad.WithCertified(true)`)",
-				RawBytes:          2460000,
-				StrippedBytes:     1540000,
-				SIMDRawBytes:      2510000,
-				SIMDStrippedBytes: 1570000,
-				GoblinTextBytes:   109000,
-				CertSyms:          6,
-				CertBytes:         18000,
-				GitCommit:         "abc",
-				SourceFingerprint: "fp1",
-				UnameRelease:      "6.1",
-				DefaultGoVersion:  "go1.27.3-X:nodwarf5",
-				SIMDGoVersion:     "go1.27.3-X:simd",
-			},
 			"goblin_default": {
 				ID:                "goblin_default",
 				Label:             "`goblin` default (`Model.Solve`, `DefaultOptions`)",
@@ -401,42 +371,6 @@ func TestTelemetryProvenanceEnforcesBuildSIMDMode(t *testing.T) {
 	if err := ValidateBinarySizeTelemetry(leakJSON); err == nil {
 		t.Fatal("expected error when goblin_certified_vipr links encoding/json symbols")
 	}
-
-	leakMADDefaultCert := validBinMap()
-	md := leakMADDefaultCert["mad_default"]
-	md.CertSyms = 1
-	md.CertBytes = 100
-	leakMADDefaultCert["mad_default"] = md
-	if err := ValidateBinarySizeTelemetry(leakMADDefaultCert); err == nil {
-		t.Fatal("expected error when mad_default leaks cert symbols")
-	}
-
-	leakMADDefaultBig := validBinMap()
-	mdBig := leakMADDefaultBig["mad_default"]
-	mdBig.MathBigSyms = 1
-	mdBig.MathBigBytes = 100
-	leakMADDefaultBig["mad_default"] = mdBig
-	if err := ValidateBinarySizeTelemetry(leakMADDefaultBig); err == nil {
-		t.Fatal("expected error when mad_default leaks math/big symbols")
-	}
-
-	leakMADCertBig := validBinMap()
-	mcBig := leakMADCertBig["mad_certified"]
-	mcBig.MathBigSyms = 1
-	mcBig.MathBigBytes = 100
-	leakMADCertBig["mad_certified"] = mcBig
-	if err := ValidateBinarySizeTelemetry(leakMADCertBig); err == nil {
-		t.Fatal("expected error when mad_certified links math/big symbols")
-	}
-
-	missingMADCert := validBinMap()
-	mcZero := missingMADCert["mad_certified"]
-	mcZero.CertSyms = 0
-	mcZero.CertBytes = 0
-	missingMADCert["mad_certified"] = mcZero
-	if err := ValidateBinarySizeTelemetry(missingMADCert); err == nil {
-		t.Fatal("expected error when mad_certified has zero cert symbols")
-	}
 }
 
 func TestRenderReadmeSummaryBlocks(t *testing.T) {
@@ -483,16 +417,22 @@ func TestRenderReadmeSummaryBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderBlock(README_MAD_SOLVER_SUMMARY_TABLE): %v", err)
 	}
-	if !strings.Contains(madSolverSummary, "| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) |") {
+	if !strings.Contains(madSolverSummary, "| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | DFS Med Sum (ms) |") {
 		t.Fatalf("unexpected README_MAD_SOLVER_SUMMARY_TABLE header:\n%s", madSolverSummary)
+	}
+	if !strings.Contains(madSolverSummary, "skip (>250k)") || !strings.Contains(madSolverSummary, "(7/13)") {
+		t.Fatalf("README_MAD_SOLVER_SUMMARY_TABLE missing DFS cap/coverage cells:\n%s", madSolverSummary)
 	}
 
 	madCombSummary, err := RenderBlock("MAD_COMBINATORIAL_SUMMARY_TABLE", tb)
 	if err != nil {
 		t.Fatalf("RenderBlock(MAD_COMBINATORIAL_SUMMARY_TABLE): %v", err)
 	}
-	if !strings.Contains(madCombSummary, "| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) |") {
+	if !strings.Contains(madCombSummary, "| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | DFS Trial (Med) Sum (ms) |") {
 		t.Fatalf("unexpected MAD_COMBINATORIAL_SUMMARY_TABLE header:\n%s", madCombSummary)
+	}
+	if !strings.Contains(madCombSummary, "skip (>250k)") || !strings.Contains(madCombSummary, "[7/13]") {
+		t.Fatalf("MAD_COMBINATORIAL_SUMMARY_TABLE missing DFS cap/coverage cells:\n%s", madCombSummary)
 	}
 
 	madCombPipe, err := RenderBlock("MAD_COMBINATORIAL_PIPELINE_TABLE", tb)
@@ -713,7 +653,7 @@ def helperWithString : String := "-- theorem notAComment"
 		t.Fatalf("unexpected kernel/lock counts: kernel=(%d+%d=%d) locks=%d",
 			inv.LeanGoblinKernel, inv.LeanAppsKernel, inv.LeanTotalKernel, inv.AxiomLocks)
 	}
-	if len(inv.ProdCertFiles) != 6 || inv.ProdCertLOC != 20349 {
+	if len(inv.ProdCertFiles) != 6 || inv.ProdCertLOC != 20615 {
 		t.Fatalf("unexpected prod cert files=%d loc=%d", len(inv.ProdCertFiles), inv.ProdCertLOC)
 	}
 	if len(inv.FormalTestFiles) != 21 || inv.TotalGoTestFiles != 31 {

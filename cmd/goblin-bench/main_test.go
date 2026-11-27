@@ -70,7 +70,7 @@ func TestBinSizeProfilesAndMADMILPCheck(t *testing.T) {
 	prob := bench.GenerateMADProblem(mc, 0)
 	dt, res, nVars := solveAndCheckMADMILP(
 		context.Background(), mc.ID, 0, prob, 24137.0, "go",
-		gb.WithPureGo(), gb.WithMaxNodes(0), gb.WithTimeLimit(250*time.Millisecond),
+		gb.WithPureGo(), gb.WithCombinatorialSearch(false), gb.WithMaxNodes(0), gb.WithTimeLimit(250*time.Millisecond),
 	)
 	if dt < 0 || nVars <= 0 {
 		t.Fatalf("unexpected dt=%v nVars=%d", dt, nVars)

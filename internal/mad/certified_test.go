@@ -3,6 +3,7 @@ package mad
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"os"
@@ -403,7 +404,7 @@ func TestMADBinaryDeadCodeElimination(t *testing.T) {
 import (
 	"context"
 	"fmt"
-	"github.com/paulourio/goblin/mad"
+	"github.com/paulourio/goblin/internal/mad"
 )
 
 func main() {
@@ -435,7 +436,18 @@ func main() {
 			t.Fatalf("write %s main.go: %v", name, err)
 		}
 
-		buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binPath, mainPath)
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("getwd: %v", err)
+		}
+		virtMain := filepath.Join(wd, "dceprobe_"+name, "main.go")
+		overlayPath := filepath.Join(dir, "overlay.json")
+		overlayJSON := fmt.Sprintf("{\"Replace\":{%q:%q}}\n", virtMain, mainPath)
+		if err := os.WriteFile(overlayPath, []byte(overlayJSON), 0o600); err != nil {
+			t.Fatalf("write %s overlay: %v", name, err)
+		}
+
+		buildCmd := exec.CommandContext(ctx, "go", "build", "-overlay", overlayPath, "-o", binPath, "./dceprobe_"+name)
 		buildCmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			t.Fatalf("go build %s: %v\n%s", name, err, out)

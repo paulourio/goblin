@@ -108,39 +108,10 @@ The [`goblin/assign`](../assign/assign.go) subpackage (and root aliases [`Linear
 
 ---
 
-## 6. Combinatorial MAD Allocation API (`goblin/mad`)
+## 6. Automatic Combinatorial MAD Search (`WithCombinatorialSearch`)
 
-The [`goblin/mad`](../mad/mad.go) subpackage and root integration ([`mad_alias.go`](../mad_alias.go)) solve group-item L1/MAD allocation problems (`MADProblem` / `mad.Problem`) directly by exploiting additive separability across groups, with zero imports of `math/big`, `encoding/json`, or MILP internals inside `mad/`.
+Default `Model.Solve` and `SolveCompiled` on `BackendGo` automatically detect closed separable group-item L1/MAD allocation models via [`mad_detect.go`](../mad_detect.go) and delegate them to the internal [`internal/mad`](../internal/mad/mad.go) engine without changing the algebraic modeling API:
 
-- **Problem specification and transposition**: `MADProblem` specifies `Groups`, optional `Baselines` ($G \times T$), item matrix `Items` ($I \times T$, produced from $T \times I$ matrices via `mad.TransposePeriodWeights`), rounding `Step`, `RoundWeight`, `AllowZeroStep`, and optional bijective `DesignatedItems` (pinned into distinct groups); `mad.ValidateProblem` checks dimensions, finiteness, and scale bounds (`ErrInvalidProblem`).
-- **Entry points and strategies**: [`SolveMAD(ctx context.Context, prob MADProblem, opts ...MADOption)`](../mad_alias.go) (or `mad.Solve`) returns `MADResult` (`Assignment`, `Levels`, `Steps`, `Objective`, `BestBound`, `SolveTime`, `Strategy`, `Status`), canonicalizing zero-weight or zero-step outputs with `0` sentinel `Steps`, while `MADStrategy` selects `MADAuto` (`StrategyAuto`), `MADBruteForce` (`StrategyBruteForce`), `MADDP` (`StrategyDP`), or `MADMILP` (`StrategyMILP`), respecting a-priori caps `MaxDPItems = 14`, `MaxDPCeiling = 20`, `MaxDPWork = 64_000_000`, `MaxDPBytes = 32 << 20`, and `MaxDFSStates = 250_000` (`ErrCombinatorialLimit` when no fallback hook is installed).
-- **Tightened MILP fallback and options**: `BuildMADModel` constructs the tightened algebraic `*Model` with outward step bounds and substitutes $m_g = \text{Step} \cdot n_g$ when `RoundWeight >= T`. Functional options `WithMADStrategy`, `WithMADBackend`, `WithMADTimeLimit`, `WithMADMaxNodes`, `WithMADMaxIter`, `WithMADRelGapTol`, `WithMADAbsGapTol`, `WithMADCertified`, and `WithMADOptions` forward explicit tolerances (`RelGapTolSet`, `AbsGapTolSet`, `MaxNodesSet`, `MaxIterSet`) only when explicitly set, polish MILP solutions through the exact oracle, and retain `GreedyIncumbent` on limit exits without incumbents.
-- **Double-double oracle and fixed-width dyadic certification**: `EvaluateAssignment` uses exact `twoSum`/`twoProd` (`math.FMA`) evaluation and weighted-median step selection. Passing `WithMADCertified(true)` (`mad.WithCertified(true)`) activates exact fixed-width `uint64`-limb dyadic min-plus DP verification (`EvaluateAssignmentDyadic`, zero `math/big` imports), failing closed with `ErrCertificationFailed` on witness rejection or missing certified fallback hooks.
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	gb "github.com/paulourio/goblin"
-)
-
-func main() {
-	prob := gb.MADProblem{
-		Groups: 2,
-		Items: [][]float64{
-			{149, 566, 1479, 128, 1950, 1713},
-			{491, 1179, 1737, 1103, 990, 1847},
-		},
-		Step:        100,
-		RoundWeight: 6,
-	}
-	res, err := gb.SolveMAD(context.Background(), prob, gb.WithMADCertified(true))
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("obj=%.0f assign=%v steps=%v\n", res.Objective, res.Assignment, res.Steps)
-}
-```
+- **Zero-allocation pre-screen and strict closure**: Non-MAD LPs and MILPs reject with zero heap allocations on the first incompatible variable or row count. Accepted models must have 100% variable, bound, row, and objective closure (partition equality rows $\sum_g x_{g,i} = 1$, optional bijective designated-item rows, matching opposite-sign L1 epigraph pairs $z_{g,t} \ge |a_{g,t} + \sum_i d_{i,t} x_{g,i} - m_g|$, and optional roundness penalties $r_g \ge |m_g - B n_g|$ or direct-step substitution $m_g = B n_g$).
+- **Transparent Branch-and-Cut fallback**: Models that exceed combinatorial work or memory caps (`MaxDPItems = 14`, `MaxDPWork = 64_000_000`, `MaxDPBytes = 32 << 20`, `MaxDFSStates = 250_000`), contain binding finite bounds on $m_g$ or $n_g$, use `WithCBC()`, or request an explicit `WithVIPRTrace` proof fall straight through to normal presolve and Branch-and-Cut. Passing `gb.WithCombinatorialSearch(false)` disables combinatorial detection explicitly (used by the 31-family pure Branch-and-Cut benchmark suite and negative-control tests).
+- **Double-double oracle and certified mode**: Uncertified solves run `twoSum`/`twoProd` (`math.FMA`) double-double DFS or subset bitmask DP with zero `math/big` symbols linked into default binaries. Passing `gb.WithCertified(true)` or `gb.WithCertifiedWitness` (without `WithVIPRTrace`) runs exact fixed-width `uint64`-limb dyadic DP (`internal/mad/certified.go`) followed by exact `*big.Rat` primal and objective verification against the original `CompiledProblem`.

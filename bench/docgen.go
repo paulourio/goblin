@@ -174,12 +174,10 @@ type AssignBenchResult struct {
 	MeasuredAt        string    `json:"measured_at,omitempty"`
 }
 
-// CanonicalBinarySizeIDs lists the six required binary-size and linker-DCE profiles in table order.
+// CanonicalBinarySizeIDs lists the four required binary-size and linker-DCE profiles in table order.
 var CanonicalBinarySizeIDs = []string{
 	"assign_default",
 	"assign_certified",
-	"mad_default",
-	"mad_certified",
 	"goblin_default",
 	"goblin_certified_vipr",
 }
@@ -335,18 +333,6 @@ func ValidateBinarySizeTelemetry(binMap map[string]BinarySizeEntry) error {
 			if !isZeroPair(bs.MathBigSyms, bs.MathBigBytes) || !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
 				!isZeroPair(bs.VIPRSyms, bs.VIPRBytes) || !isPosPair(bs.CertSyms, bs.CertBytes) {
 				return fmt.Errorf("assign_certified symbol invariant failed: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want 0/0/0 and cert>0",
-					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
-			}
-		case "mad_default":
-			if !isZeroPair(bs.MathBigSyms, bs.MathBigBytes) || !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
-				!isZeroPair(bs.VIPRSyms, bs.VIPRBytes) || !isZeroPair(bs.CertSyms, bs.CertBytes) {
-				return fmt.Errorf("mad_default linker DCE violation: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want all 0",
-					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
-			}
-		case "mad_certified":
-			if !isZeroPair(bs.MathBigSyms, bs.MathBigBytes) || !isZeroPair(bs.EncodingJSONSyms, bs.EncodingJSONBytes) ||
-				!isZeroPair(bs.VIPRSyms, bs.VIPRBytes) || !isPosPair(bs.CertSyms, bs.CertBytes) {
-				return fmt.Errorf("mad_certified symbol invariant failed: math/big=%d(%dB) json=%d(%dB) vipr=%d(%dB) cert=%d(%dB), want 0/0/0 and cert>0",
 					bs.MathBigSyms, bs.MathBigBytes, bs.EncodingJSONSyms, bs.EncodingJSONBytes, bs.VIPRSyms, bs.VIPRBytes, bs.CertSyms, bs.CertBytes)
 			}
 		case "goblin_default":
@@ -1641,6 +1627,9 @@ type madCombSummaryStats struct {
 	autoMedSum    float64
 	dpSum         float64
 	dpMedSum      float64
+	bfRanFams     int
+	bfSum         float64
+	bfMedSum      float64
 	milpGoSum     float64
 	milpGoMedSum  float64
 	milpGoOpt     int
@@ -1672,6 +1661,13 @@ func summarizeMADCombSubset(madCases []MADCorpusCase, filter func(MADCorpusCase)
 		st.nInst += mr.Trials
 		st.autoMedSum += mr.AutoTimeMS
 		st.dpMedSum += mr.DPTimeMS
+		if mr.BruteForceRan {
+			st.bfRanFams++
+			st.bfMedSum += mr.BruteForceTimeMS
+			for _, v := range mr.BruteForceTrialsMS {
+				st.bfSum += v
+			}
+		}
 		st.milpGoMedSum += mr.MILPGo.TimeMS
 		st.milpGoOpt += mr.MILPGo.OptimalCount
 		for _, v := range mr.AutoTrialsMS {
@@ -1721,18 +1717,39 @@ func madCombSubsetSpecs() []subsetSpec[MADCorpusCase] {
 	}
 }
 
+func formatMADDFSMedCell(st madCombSummaryStats) string {
+	if st.bfRanFams == 0 {
+		return "skip (>250k)"
+	}
+	if st.bfRanFams == st.nFams {
+		return formatAssignMS(st.bfMedSum)
+	}
+	return fmt.Sprintf("%s (%d/%d)", formatAssignMS(st.bfMedSum), st.bfRanFams, st.nFams)
+}
+
+func formatMADDFSSumCell(st madCombSummaryStats) string {
+	if st.bfRanFams == 0 {
+		return "skip (>250k)"
+	}
+	if st.bfRanFams == st.nFams {
+		return fmt.Sprintf("%s (%s)", formatAssignMS(st.bfSum), formatAssignMS(st.bfMedSum))
+	}
+	return fmt.Sprintf("%s (%s) [%d/%d]", formatAssignMS(st.bfSum), formatAssignMS(st.bfMedSum), st.bfRanFams, st.nFams)
+}
+
 func renderReadmeMADSolverSummaryTable(b *bytes.Buffer, madCases []MADCorpusCase, tb *TelemetryBundle) {
-	b.WriteString("| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | MILP Go 250 ms Sum (ms) | MILP CBC 250 ms Sum (ms) | Equal-Family `MILP Go / Auto` [95% CI] |\n")
-	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	b.WriteString("| Workload | Families (Trials) | Auto Med Sum (ms) | DP Med Sum (ms) | DFS Med Sum (ms) | MILP Go 250 ms Sum (ms) | MILP CBC 250 ms Sum (ms) | Equal-Family `MILP Go / Auto` [95% CI] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range madCombSubsetSpecs() {
 		st := summarizeMADCombSubset(madCases, grp.filter, tb)
 		cbcCell := "n/a"
 		if st.hasCBC {
 			cbcCell = fmt.Sprintf("%.1f (%d/%d opt)", st.milpCBCMedSum, st.milpCBCOpt, st.nInst)
 		}
-		fmt.Fprintf(b, "| %s | %d (%d) | %s | %s | %.1f (%d/%d opt) | %s | %s |\n",
+		fmt.Fprintf(b, "| %s | %d (%d) | %s | %s | %s | %.1f (%d/%d opt) | %s | %s |\n",
 			grp.label, st.nFams, st.nInst,
 			formatAssignMS(st.autoMedSum), formatAssignMS(st.dpMedSum),
+			formatMADDFSMedCell(st),
 			st.milpGoMedSum, st.milpGoOpt, st.nInst,
 			cbcCell,
 			formatMADRatioCI(st.famGoGM, st.famGoLo, st.famGoHi, st.nFams))
@@ -1740,8 +1757,8 @@ func renderReadmeMADSolverSummaryTable(b *bytes.Buffer, madCases []MADCorpusCase
 }
 
 func renderMADCombinatorialSummaryTable(b *bytes.Buffer, madCases []MADCorpusCase, tb *TelemetryBundle) {
-	b.WriteString("| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | MILP Go Trial (Med) Sum (ms) [Opt] | MILP CBC Trial (Med) Sum (ms) [Opt] | Equal-Family `MILP Go / Auto` [95% CI] | Equal-Family `MILP CBC / Auto` [95% CI] |\n")
-	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	b.WriteString("| Workload Subset | Families (Trials) | Auto Trial (Med) Sum (ms) | DP Trial (Med) Sum (ms) | DFS Trial (Med) Sum (ms) | MILP Go Trial (Med) Sum (ms) [Opt] | MILP CBC Trial (Med) Sum (ms) [Opt] | Equal-Family `MILP Go / Auto` [95% CI] | Equal-Family `MILP CBC / Auto` [95% CI] |\n")
+	b.WriteString("| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for _, grp := range madCombSubsetSpecs() {
 		st := summarizeMADCombSubset(madCases, grp.filter, tb)
 		cbcSumCell := "n/a"
@@ -1750,10 +1767,11 @@ func renderMADCombinatorialSummaryTable(b *bytes.Buffer, madCases []MADCorpusCas
 			cbcSumCell = fmt.Sprintf("%.1f (%.1f) [%d/%d]", st.milpCBCSum, st.milpCBCMedSum, st.milpCBCOpt, st.nInst)
 			cbcRatioCell = formatMADRatioCI(st.famCBCGM, st.famCBCLo, st.famCBCHi, st.nFams)
 		}
-		fmt.Fprintf(b, "| %s | %d (%d) | %s (%s) | %s (%s) | %.1f (%.1f) [%d/%d] | %s | %s | %s |\n",
+		fmt.Fprintf(b, "| %s | %d (%d) | %s (%s) | %s (%s) | %s | %.1f (%.1f) [%d/%d] | %s | %s | %s |\n",
 			grp.label, st.nFams, st.nInst,
 			formatAssignMS(st.autoSum), formatAssignMS(st.autoMedSum),
 			formatAssignMS(st.dpSum), formatAssignMS(st.dpMedSum),
+			formatMADDFSSumCell(st),
 			st.milpGoSum, st.milpGoMedSum, st.milpGoOpt, st.nInst,
 			cbcSumCell,
 			formatMADRatioCI(st.famGoGM, st.famGoLo, st.famGoHi, st.nFams),
@@ -2162,8 +2180,6 @@ func renderBinarySizeTable(b *bytes.Buffer, tb *TelemetryBundle) error {
 	baseID := map[string]string{
 		"assign_default":        "assign_default",
 		"assign_certified":      "assign_default",
-		"mad_default":           "mad_default",
-		"mad_certified":         "mad_default",
 		"goblin_default":        "goblin_default",
 		"goblin_certified_vipr": "goblin_default",
 	}
@@ -2369,14 +2385,14 @@ The 22-family synthetic Linear Sum Assignment corpus (` + "`testdata/assign_corp
 
 ## 7. Production Binary Footprint and Linker Dead-Code Elimination
 
-Standalone ` + "`CGO_ENABLED=0`" + ` binaries compiled across the six canonical ` + "`goblin/assign`" + `, ` + "`goblin/mad`" + `, and ` + "`goblin`" + ` build profiles (` + "`bench/results/goblin_binary_size.json`" + `), verifying that unreferenced ` + "`WithCertified`" + `, ` + "`WithVIPRTrace`" + `, ` + "`encoding/json`" + `, and (in ` + "`goblin/assign`" + ` and both ` + "`goblin/mad`" + ` profiles) ` + "`math/big`" + ` symbols are eliminated by the Go linker:
+Standalone ` + "`CGO_ENABLED=0`" + ` binaries compiled across the four canonical ` + "`goblin/assign`" + ` and ` + "`goblin`" + ` build profiles (` + "`bench/results/goblin_binary_size.json`" + `), verifying that unreferenced ` + "`WithCertified`" + `, ` + "`WithVIPRTrace`" + `, ` + "`encoding/json`" + `, and (in ` + "`goblin/assign`" + `) ` + "`math/big`" + ` symbols are eliminated by the Go linker:
 
 <!-- BEGIN GENERATED:BINARY_SIZE_TABLE -->
 <!-- END GENERATED:BINARY_SIZE_TABLE -->
 
-## 8. Combinatorial Group-Item Allocation (` + "`goblin/mad`" + ` vs. Algebraic MILP)
+## 8. Combinatorial Group-Item Allocation (Automatic ` + "`Model.Solve`" + ` Dispatch vs. Pure Branch-and-Cut)
 
-The 13-family combinatorial MAD corpus (` + "`testdata/mad_corpus/manifest.json`" + `; 131 randomized trials across the ` + "`pmad_base_g10_i2`" + ` base instance with exact Trial-0 optimum ` + "`24137`" + `, 8 PMAD families across $G \in \{6, 10, 20\}$, $I \in \{4..12\}$, and $\lambda \in \{0.25, 1.0\}$, plus 4 random-weight controls) evaluates ` + "`gb.SolveMAD`" + ` (` + "`StrategyAuto`" + `, ` + "`StrategyDP`" + `, and ` + "`StrategyBruteForce`" + ` when DFS states are at most ` + "`250,000`" + `) against 250 ms-capped ` + "`BuildMADModel`" + ` ` + "`Model.Solve`" + ` (` + "`BackendGo`" + ` and ` + "`BackendCBC`" + `) with ` + "`1e-9`" + ` combinatorial parity and ` + "`[BestBound, Incumbent]`" + ` containment.
+The 13-family combinatorial MAD corpus (` + "`testdata/mad_corpus/manifest.json`" + `; 131 randomized trials across the ` + "`pmad_base_g10_i2`" + ` base instance with exact Trial-0 optimum ` + "`24137`" + `, 8 PMAD families across $G \in \{6, 10, 20\}$, $I \in \{4..12\}$, and $\lambda \in \{0.25, 1.0\}$, plus 4 random-weight controls) evaluates default ` + "`Model.Solve`" + ` (automatic algebraic MAD detection routed to ` + "`internal/mad`" + `, alongside internal ` + "`StrategyDP`" + ` and ` + "`StrategyBruteForce`" + ` breakdowns when DFS states are at most ` + "`250,000`" + `) against 250 ms-capped pure Branch-and-Cut (` + "`WithCombinatorialSearch(false)`" + ` on ` + "`BackendGo`" + `, and ` + "`BackendCBC`" + `) with ` + "`1e-9`" + ` combinatorial parity and ` + "`[BestBound, Incumbent]`" + ` containment.
 
 ### 8.1 Aggregate Combinatorial MAD Summary
 
@@ -2845,7 +2861,7 @@ func collectGoFormalInventory(root string, inv *FormalInventory) error {
 		"vipr_trace.go",
 		"certified.go",
 		filepath.Join("assign", "certified.go"),
-		filepath.Join("mad", "certified.go"),
+		filepath.Join("internal", "mad", "certified.go"),
 	}
 	for _, rel := range prodRelPaths {
 		data, err := os.ReadFile(filepath.Join(root, rel))
@@ -3184,14 +3200,14 @@ func renderFormalBlock(blockName string, inv *FormalInventory) (string, error) {
 			byRel[f.RelPath] = f.LOC
 		}
 		fmt.Fprintf(&b,
-			"On the Go side, `%d` production files ([`exact_polish.go`](../exact_polish.go) at `%s` LOC, [`vipr_json.go`](../vipr_json.go) at `%s` LOC, [`vipr_trace.go`](../vipr_trace.go) at `%s` LOC, [`certified.go`](../certified.go) at `%s` LOC, [`assign/certified.go`](../assign/certified.go) at `%s` LOC, and [`mad/certified.go`](../mad/certified.go) at `%s` LOC; `%s` LOC combined) implement exact `*big.Rat` basis polishing, LP/MILP unboundedness extraction, zero-reflection Mini-VIPR JSON codecs, presolve-enveloped and orbital-symmetry `WithVIPRTrace` proof recording, and opt-in fail-closed `WithCertified` / `assign.WithCertified` / `mad.WithCertified` runtime verification in pure standard-library Go (never linking or invoking Lean CLI binaries at runtime) with zero hot-path overhead when disabled, while `%d` formal, certified, and VIPR test files (`%s` LOC total: `%d` `formal*` test files at `%s` LOC plus `%d` certified, VIPR, exact-polish, and TCB test files at `%s` LOC) house negative controls, subprocess pools, linker dead-code-elimination checks, and live observer bridges.",
+			"On the Go side, `%d` production files ([`exact_polish.go`](../exact_polish.go) at `%s` LOC, [`vipr_json.go`](../vipr_json.go) at `%s` LOC, [`vipr_trace.go`](../vipr_trace.go) at `%s` LOC, [`certified.go`](../certified.go) at `%s` LOC, [`assign/certified.go`](../assign/certified.go) at `%s` LOC, and [`internal/mad/certified.go`](../internal/mad/certified.go) at `%s` LOC; `%s` LOC combined) implement exact `*big.Rat` basis polishing, LP/MILP unboundedness extraction, zero-reflection Mini-VIPR JSON codecs, presolve-enveloped and orbital-symmetry `WithVIPRTrace` proof recording, and opt-in fail-closed `WithCertified` / `assign.WithCertified` runtime verification in pure standard-library Go (never linking or invoking Lean CLI binaries at runtime) with zero hot-path overhead when disabled, while `%d` formal, certified, and VIPR test files (`%s` LOC total: `%d` `formal*` test files at `%s` LOC plus `%d` certified, VIPR, exact-polish, and TCB test files at `%s` LOC) house negative controls, subprocess pools, linker dead-code-elimination checks, and live observer bridges.",
 			len(inv.ProdCertFiles),
 			formatCommaInt(byRel["exact_polish.go"]),
 			formatCommaInt(byRel["vipr_json.go"]),
 			formatCommaInt(byRel["vipr_trace.go"]),
 			formatCommaInt(byRel["certified.go"]),
 			formatCommaInt(byRel["assign/certified.go"]),
-			formatCommaInt(byRel["mad/certified.go"]),
+			formatCommaInt(byRel["internal/mad/certified.go"]),
 			formatCommaInt(inv.ProdCertLOC),
 			inv.TotalGoTestFiles,
 			formatCommaInt(inv.TotalGoTestLOC),

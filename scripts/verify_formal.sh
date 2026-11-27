@@ -429,10 +429,10 @@ BIN_DIR="${REPO_ROOT}/formal/.lake/build/bin"
 )
 
 log_step "3/5 Running Go formal differential and certified tests (default build)..."
-GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool|Certified|AssignCertified|MiniVIPR)' . ./assign ./mad
+GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool|Certified|AssignCertified|MiniVIPR)' . ./assign ./internal/mad
 
 log_step "4/5 Running Go formal differential and certified tests (GOEXPERIMENT=simd)..."
-GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool|Certified|AssignCertified|MiniVIPR)' . ./assign ./mad
+GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -v -run '^Test(Formal|VIPR|OraclePool|Certified|AssignCertified|MiniVIPR)' . ./assign ./internal/mad
 
 log_step "5/5 Running Go formal fuzz seed corpora across all packages (GOEXPERIMENT=simd)..."
 GOEXPERIMENT=simd GOBLIN_FORMAL=1 go test -count=1 -run '^Fuzz' ./...

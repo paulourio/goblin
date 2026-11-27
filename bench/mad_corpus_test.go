@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	gb "github.com/paulourio/goblin"
-	"github.com/paulourio/goblin/mad"
+	"github.com/paulourio/goblin/internal/mad"
 )
 
 func TestMADCorpusSpecsAndTrial0Base(t *testing.T) {
@@ -65,12 +65,19 @@ func TestMADCorpusSpecsAndTrial0Base(t *testing.T) {
 		t.Fatalf("mad_comb_rand_g2_i4 solve failed: %v", err)
 	}
 	milpModel := BuildMADRandom("t1_mad_rand_g2_i4", 2, 4, 6, 7000)
-	milpRes, err := milpModel.Solve(context.Background(), gb.WithPureGo())
+	milpRes, err := milpModel.Solve(context.Background(), gb.WithPureGo(), gb.WithCombinatorialSearch(false))
 	if err != nil {
-		t.Fatalf("BuildMADRandom solve failed: %v", err)
+		t.Fatalf("BuildMADRandom MILP solve failed: %v", err)
 	}
 	if math.Abs(randRes.Objective-milpRes.Objective) > 1e-6 {
-		t.Fatalf("mad_comb_rand_g2_i4 obj=%v vs BuildMADRandom obj=%v", randRes.Objective, milpRes.Objective)
+		t.Fatalf("mad_comb_rand_g2_i4 obj=%v vs BuildMADRandom MILP obj=%v", randRes.Objective, milpRes.Objective)
+	}
+	combRes, err := milpModel.Solve(context.Background(), gb.WithPureGo())
+	if err != nil {
+		t.Fatalf("BuildMADRandom default solve failed: %v", err)
+	}
+	if math.Abs(combRes.Objective-milpRes.Objective) > 1e-6 {
+		t.Fatalf("BuildMADRandom default obj=%v vs MILP obj=%v", combRes.Objective, milpRes.Objective)
 	}
 
 	tmpDir := filepath.Join(t.TempDir(), "mad_corpus")

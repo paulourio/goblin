@@ -9,7 +9,8 @@ import (
 	"testing"
 
 	gb "github.com/paulourio/goblin"
-	"github.com/paulourio/goblin/mad"
+	"github.com/paulourio/goblin/bench"
+	"github.com/paulourio/goblin/internal/mad"
 )
 
 func buildCombFuzzMADProblem(
@@ -384,7 +385,7 @@ func madFuzzBigRatEvalAssignment(t *testing.T, prob mad.Problem, assign []int) *
 	return total
 }
 
-func verifyMADFuzzDyadicExact(t *testing.T, tag string, prob mad.Problem, certRes gb.MADResult) {
+func verifyMADFuzzDyadicExact(t *testing.T, tag string, prob mad.Problem, certRes mad.Result) {
 	t.Helper()
 	ev, err := mad.EvaluateAssignmentDyadic(prob, certRes.Assignment)
 	if err != nil {
@@ -411,13 +412,13 @@ func verifyMADFuzzParity(
 	t *testing.T,
 	tag string,
 	prob mad.Problem,
-	ref, got gb.MADResult,
+	ref, got mad.Result,
 	gotErr error,
 	exactBitMatch bool,
 ) {
 	t.Helper()
 	if gotErr != nil {
-		t.Fatalf("[%s] SolveMAD failed: %v", tag, gotErr)
+		t.Fatalf("[%s] mad.Solve failed: %v", tag, gotErr)
 	}
 	if math.IsNaN(got.Objective) || math.IsInf(got.Objective, 0) {
 		t.Fatalf("[%s] non-finite Objective %v", tag, got.Objective)
@@ -430,8 +431,8 @@ func verifyMADFuzzParity(
 		t.Fatalf("[%s] BestBound %.17g > Objective %.17g", tag, got.BestBound, got.Objective)
 	}
 	if exactBitMatch {
-		if got.Status != gb.MADStatusOptimal {
-			t.Fatalf("[%s] Status = %v, want %v", tag, got.Status, gb.MADStatusOptimal)
+		if got.Status != mad.StatusOptimal {
+			t.Fatalf("[%s] Status = %v, want %v", tag, got.Status, mad.StatusOptimal)
 		}
 		u := math.Abs(math.Nextafter(ref.Objective, math.Inf(1)) - ref.Objective)
 		if u == 0 {
@@ -441,12 +442,12 @@ func verifyMADFuzzParity(
 			t.Fatalf("[%s] Objective %.17g != certified %.17g (diff=%g > 4 ulp=%g)",
 				tag, got.Objective, ref.Objective, math.Abs(got.Objective-ref.Objective), 4*u)
 		}
-	} else if got.Status == gb.MADStatusOptimal {
+	} else if got.Status == mad.StatusOptimal {
 		if math.Abs(got.Objective-ref.Objective) > tol {
 			t.Fatalf("[%s] Objective %.17g != certified %.17g (diff=%g, tol=%g)",
 				tag, got.Objective, ref.Objective, math.Abs(got.Objective-ref.Objective), tol)
 		}
-	} else if got.Status == gb.MADStatusNodeLimit || got.Status == gb.MADStatusTimeLimit {
+	} else if got.Status == mad.StatusNodeLimit || got.Status == mad.StatusTimeLimit {
 		if got.BestBound > ref.Objective+tol {
 			t.Fatalf("[%s] limit BestBound %.17g > certified %.17g", tag, got.BestBound, ref.Objective)
 		}
@@ -489,8 +490,45 @@ func verifyMADFuzzParity(
 	}
 }
 
-// FuzzMADCombinatorialVsMILP differentially fuzzes gb.SolveMAD across MADBruteForce,
-// MADDP, WithMADCertified(true), and MADMILP (BackendGo and BackendCBC when available).
+func verifyMADFuzzModelResult(
+	t *testing.T,
+	tag string,
+	p *gb.CompiledProblem,
+	ref mad.Result,
+	res gb.Result,
+	err error,
+) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("[%s] SolveCompiled failed: %v", tag, err)
+	}
+	tol := 1e-6 * max(1.0, math.Abs(ref.Objective))
+	switch res.Status {
+	case gb.StatusOptimal:
+		if len(res.Values) != p.NumVars() {
+			t.Fatalf("[%s] Optimal len(Values)=%d, want %d", tag, len(res.Values), p.NumVars())
+		}
+		bV, rV, iV := p.MaxViolation(res.Values, true)
+		if bV > 1e-6 || rV > 1e-5 || iV > 1e-6 {
+			t.Fatalf("[%s] primal violation bV=%.2e rV=%.2e iV=%.2e", tag, bV, rV, iV)
+		}
+		if math.Abs(res.Objective-ref.Objective) > tol {
+			t.Fatalf("[%s] Objective %.17g != certified %.17g (tol=%g)", tag, res.Objective, ref.Objective, tol)
+		}
+		if res.BestBound > res.Objective+tol {
+			t.Fatalf("[%s] BestBound %.17g > Objective %.17g", tag, res.BestBound, res.Objective)
+		}
+	case gb.StatusNodeLimit, gb.StatusTimeLimit, gb.StatusIterationLimit:
+		if !math.IsInf(res.BestBound, 0) && res.BestBound > ref.Objective+tol {
+			t.Fatalf("[%s] limit BestBound %.17g > certified %.17g", tag, res.BestBound, ref.Objective)
+		}
+	default:
+		t.Fatalf("[%s] unexpected Status = %v", tag, res.Status)
+	}
+}
+
+// FuzzMADCombinatorialVsMILP differentially fuzzes internal/mad and automatic algebraic
+// Model.Solve combinatorial detection against pure Branch-and-Cut (BackendGo and BackendCBC).
 func FuzzMADCombinatorialVsMILP(f *testing.F) {
 	f.Add(uint64(1), uint8(0), uint8(9), uint8(2), uint8(5), uint8(0))
 	f.Add(uint64(2), uint8(1), uint8(2), uint8(4), uint8(2), uint8(0x03))
@@ -510,55 +548,62 @@ func FuzzMADCombinatorialVsMILP(f *testing.F) {
 		prob, tag := buildCombFuzzMADProblem(seed, mode, gByte, iByte, tByte, flags, raceEnabled && testing.Short())
 		ctx := t.Context()
 
-		certRes, certErr := gb.SolveMAD(ctx, prob, gb.WithMADCertified(true))
+		certRes, certErr := mad.Solve(ctx, prob, mad.WithCertified(true))
 		if certErr != nil {
-			t.Fatalf("[%s/cert] SolveMAD failed: %v", tag, certErr)
+			t.Fatalf("[%s/cert] mad.Solve failed: %v", tag, certErr)
 		}
 		verifyMADFuzzParity(t, tag+"/cert", prob, certRes, certRes, nil, true)
 		verifyMADFuzzDyadicExact(t, tag+"/dyadic", prob, certRes)
 
-		dpRes, dpErr := gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADDP))
+		dpRes, dpErr := mad.Solve(ctx, prob, mad.WithStrategy(mad.StrategyDP))
 		verifyMADFuzzParity(t, tag+"/dp", prob, certRes, dpRes, dpErr, true)
 
-		bfRes, bfErr := gb.SolveMAD(ctx, prob, gb.WithMADStrategy(gb.MADBruteForce))
+		bfRes, bfErr := mad.Solve(ctx, prob, mad.WithStrategy(mad.StrategyBruteForce))
 		verifyMADFuzzParity(t, tag+"/bf", prob, certRes, bfRes, bfErr, true)
 
-		milpGoRes, milpGoErr := gb.SolveMAD(ctx, prob,
-			gb.WithMADStrategy(gb.MADMILP),
-			gb.WithMADBackend(gb.BackendGo),
-			gb.WithMADRelGapTol(0),
-			gb.WithMADAbsGapTol(0),
+		m, buildErr := bench.BuildMADModel(prob)
+		if buildErr != nil {
+			t.Fatalf("[%s] BuildMADModel failed: %v", tag, buildErr)
+		}
+		p, compErr := m.CompileChecked()
+		if compErr != nil {
+			t.Fatalf("[%s] CompileChecked failed: %v", tag, compErr)
+		}
+
+		// Default Model.Solve must detect MAD structure and match certified optimum.
+		autoRes, autoErr := gb.SolveCompiled(ctx, p)
+		verifyMADFuzzModelResult(t, tag+"/model_auto", p, certRes, autoRes, autoErr)
+		if autoRes.Status != gb.StatusOptimal {
+			t.Fatalf("[%s/model_auto] status=%v, want Optimal", tag, autoRes.Status)
+		}
+
+		// Certified Model.Solve (without explicit VIPR trace) must certify exact rational witness.
+		var cw gb.CertifiedWitness
+		modelCertRes, modelCertErr := gb.SolveCompiled(ctx, p, gb.WithCertifiedWitness(&cw))
+		verifyMADFuzzModelResult(t, tag+"/model_cert", p, certRes, modelCertRes, modelCertErr)
+		if modelCertRes.Status != gb.StatusOptimal || cw.Objective == nil {
+			t.Fatalf("[%s/model_cert] status=%v cw.Objective=%v", tag, modelCertRes.Status, cw.Objective)
+		}
+
+		// Pure Branch-and-Cut with combinatorial search disabled.
+		milpGoRes, milpGoErr := gb.SolveCompiled(ctx, p,
+			gb.WithPureGo(),
+			gb.WithCombinatorialSearch(false),
+			gb.WithRelGapTol(0),
+			gb.WithAbsGapTol(0),
 		)
-		verifyMADFuzzParity(t, tag+"/milp_go", prob, certRes, milpGoRes, milpGoErr, false)
+		verifyMADFuzzModelResult(t, tag+"/milp_go", p, certRes, milpGoRes, milpGoErr)
 
 		if gb.CBCAvailable() {
-			milpCBCRes, milpCBCErr := gb.SolveMAD(ctx, prob,
-				gb.WithMADStrategy(gb.MADMILP),
-				gb.WithMADBackend(gb.BackendCBC),
-				gb.WithMADRelGapTol(0),
-				gb.WithMADAbsGapTol(0),
+			milpCBCRes, milpCBCErr := gb.SolveCompiled(ctx, p,
+				gb.WithCBC(),
+				gb.WithRelGapTol(0),
+				gb.WithAbsGapTol(0),
 			)
-			verifyMADFuzzParity(t, tag+"/milp_cbc", prob, certRes, milpCBCRes, milpCBCErr, false)
+			verifyMADFuzzModelResult(t, tag+"/milp_cbc", p, certRes, milpCBCRes, milpCBCErr)
 		}
 
 		if formalFuzzEnabled() {
-			milpCertRes, milpCertErr := gb.SolveMAD(ctx, prob,
-				gb.WithMADStrategy(gb.MADMILP),
-				gb.WithMADBackend(gb.BackendGo),
-				gb.WithMADCertified(true),
-				gb.WithMADRelGapTol(1e-9),
-				gb.WithMADAbsGapTol(1e-9),
-			)
-			verifyMADFuzzParity(t, tag+"/milp_cert", prob, certRes, milpCertRes, milpCertErr, false)
-
-			m, _, buildErr := gb.BuildMADModel(prob)
-			if buildErr != nil {
-				t.Fatalf("[%s] BuildMADModel failed: %v", tag, buildErr)
-			}
-			p, compErr := m.CompileChecked()
-			if compErr != nil {
-				t.Fatalf("[%s] CompileChecked failed: %v", tag, compErr)
-			}
 			verifyFormalRootLP(t, tag+"/rootLP", p)
 		}
 	})
