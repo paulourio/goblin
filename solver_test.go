@@ -361,8 +361,12 @@ func TestTimeLimitEnforcement(t *testing.T) {
 		if res.Status != gb.StatusTimeLimit && res.Status != gb.StatusOptimal {
 			t.Fatalf("[%s] expected TimeLimit or Optimal, got %v", c.ID, res.Status)
 		}
-		if elapsed > 50*time.Millisecond {
-			t.Fatalf("[%s] TimeLimit=5ms overshot wall-clock budget: elapsed=%v", c.ID, elapsed)
+		maxElapsed := 50 * time.Millisecond
+		if raceEnabled {
+			maxElapsed = 150 * time.Millisecond
+		}
+		if elapsed > maxElapsed {
+			t.Fatalf("[%s] TimeLimit=5ms overshot wall-clock budget: elapsed=%v (want <= %v)", c.ID, elapsed, maxElapsed)
 		}
 	}
 
@@ -370,7 +374,11 @@ func TestTimeLimitEnforcement(t *testing.T) {
 	// returns (res, nil) with StatusTimeLimit and preserves the best incumbent and bound.
 	mSym := bench.BuildMADRandom("mad_rand_g4_i12_tl", 4, 12, 6, 7003)
 	pSym := mSym.Compile()
-	resSym, err := gb.SolveCompiled(t.Context(), pSym, gb.WithTimeLimit(15*time.Millisecond))
+	symLimit := 15 * time.Millisecond
+	if raceEnabled {
+		symLimit = 75 * time.Millisecond
+	}
+	resSym, err := gb.SolveCompiled(t.Context(), pSym, gb.WithTimeLimit(symLimit))
 	if err != nil {
 		t.Fatalf("unexpected error on WithTimeLimit: %v", err)
 	}
@@ -444,6 +452,11 @@ func TestContextCancellation(t *testing.T) {
 				t.Fatalf("[%s] uncanceled SolveCompiled on LP: got err=%v status=%v, want Optimal", b.name, err, res.Status)
 			}
 
+			cancelBudget := 100 * time.Millisecond
+			if raceEnabled {
+				cancelBudget = 250 * time.Millisecond
+			}
+
 			// 4. Asynchronous cancellation mid-solve halts promptly with context.Canceled and discards partial results.
 			asyncCtx, cancelAsync := context.WithCancel(context.Background())
 			go func() {
@@ -459,8 +472,8 @@ func TestContextCancellation(t *testing.T) {
 			if resAsync.Status != gb.StatusNotSolved || len(resAsync.Values) != 0 || resAsync.Objective != 0 {
 				t.Fatalf("[%s] async cancel did not discard partial result: %+v", b.name, resAsync)
 			}
-			if elapsed > 100*time.Millisecond {
-				t.Fatalf("[%s] async cancel took %v (want <= 100ms)", b.name, elapsed)
+			if elapsed > cancelBudget {
+				t.Fatalf("[%s] async cancel took %v (want <= %v)", b.name, elapsed, cancelBudget)
 			}
 
 			// 5. Context deadline via context.WithTimeout halts promptly with context.DeadlineExceeded and discards partial results.
@@ -475,8 +488,8 @@ func TestContextCancellation(t *testing.T) {
 			if resTimeout.Status != gb.StatusNotSolved || len(resTimeout.Values) != 0 || resTimeout.Objective != 0 {
 				t.Fatalf("[%s] timeout context did not discard partial result: %+v", b.name, resTimeout)
 			}
-			if elapsedTimeout > 100*time.Millisecond {
-				t.Fatalf("[%s] timeout context took %v (want <= 100ms)", b.name, elapsedTimeout)
+			if elapsedTimeout > cancelBudget {
+				t.Fatalf("[%s] timeout context took %v (want <= %v)", b.name, elapsedTimeout, cancelBudget)
 			}
 
 			// 6. Coexistence: WithTimeLimit shorter than ctx timeout returns (res, nil) with StatusTimeLimit.

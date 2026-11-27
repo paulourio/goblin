@@ -1360,6 +1360,9 @@ func FuzzMutatePublicBenchmarks(f *testing.F) {
 		}
 
 		timeLimit := 150 * time.Millisecond
+		if raceEnabled {
+			timeLimit = 450 * time.Millisecond
+		}
 		maxNodes := 80
 		if p.NumVars() > 150 {
 			maxNodes = 30
